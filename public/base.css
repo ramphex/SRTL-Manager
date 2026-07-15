@@ -1,0 +1,19 @@
+:root {
+  background: #f7f8fb;
+  color: #17202a;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  background: #090f16;
+  color: #e7eef7;
+  color-scheme: dark;
+}
+
+body {
+  background: inherit;
+  color: inherit;
+  margin: 0;
+  min-height: 100vh;
+  min-width: 320px;
+}

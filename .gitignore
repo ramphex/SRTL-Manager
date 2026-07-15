@@ -1,0 +1,13 @@
+node_modules/
+dist/
+data/
+.env*
+!.env.example
+.srtl_copy_sources.nul
+verification_logs/
+coverage/
+.cache/
+test-results/
+playwright-report/
+*.log
+.DS_Store

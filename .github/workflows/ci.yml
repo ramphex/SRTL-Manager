@@ -1,0 +1,144 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [beta, main]
+  push:
+    branches: [beta, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pull-request-policy:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require beta-first changes
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [[ "$BASE_REF" == "beta" ]] || [[ "$BASE_REF" == "main" && "$HEAD_REF" == "beta" ]]; then
+            exit 0
+          fi
+          echo "Pull requests must target beta. Only beta may be promoted to main."
+          exit 1
+
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: srtl_test
+          POSTGRES_PASSWORD: srtl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U srtl_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      SRTL_TEST_DATABASE_URL: postgres://srtl_test:srtl_test@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run check
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Start production server for browser smoke tests
+        env:
+          SRTL_DATABASE_URL: postgres://srtl_test:srtl_test@127.0.0.1:5432/postgres
+        run: |
+          mkdir -p /tmp/srtl-ci/{data,symlinks/library,local/library,remote}
+          npm run start:migrate
+          SRTL_DATA_DIR=/tmp/srtl-ci/data \
+          SYMLINK_DIR=/tmp/srtl-ci/symlinks \
+          SRTL_LOCATION_1_PATH=/tmp/srtl-ci/local \
+          SRTL_LOCATION_2_PATH=/tmp/srtl-ci/remote \
+          SRTL_HOST=127.0.0.1 \
+          SRTL_PORT=3010 \
+          npm run start:api > /tmp/srtl-api.log 2>&1 &
+          echo $! > /tmp/srtl-api.pid
+          for _ in {1..30}; do
+            curl -fsS http://127.0.0.1:3010/api/health && exit 0
+            sleep 1
+          done
+          cat /tmp/srtl-api.log
+          exit 1
+      - name: Complete first-run setup for browser smoke tests
+        env:
+          SRTL_DATABASE_URL: postgres://srtl_test:srtl_test@127.0.0.1:5432/postgres
+        run: |
+          curl -fsS \
+            --cookie-jar /tmp/srtl-cookies.txt \
+            --header 'Content-Type: application/json' \
+            --data '{"username":"ci-admin","password":"ci-browser-password","confirmPassword":"ci-browser-password"}' \
+            http://127.0.0.1:3010/api/auth/setup >/dev/null
+          SRTL_DATA_DIR=/tmp/srtl-ci/data \
+          SYMLINK_DIR=/tmp/srtl-ci/symlinks \
+          SRTL_LOCATION_1_PATH=/tmp/srtl-ci/local \
+          SRTL_LOCATION_2_PATH=/tmp/srtl-ci/remote \
+          SRTL_WORKER_ID=ci-worker \
+          npm run start:worker > /tmp/srtl-worker.log 2>&1 &
+          echo $! > /tmp/srtl-worker.pid
+          curl -fsS \
+            --cookie /tmp/srtl-cookies.txt \
+            --header 'Content-Type: application/json' \
+            --data '{"storageLocations":{"locations":[{"key":"location_1","displayName":"Primary storage"},{"key":"location_2","displayName":"Archive storage"}]},"sections":{"sections":["library"],"sectionTitles":{"library":"Library"},"sectionTypes":{"library":"other"}},"policyMode":"leave_unassigned"}' \
+            http://127.0.0.1:3010/api/onboarding/start >/dev/null
+          for _ in {1..30}; do
+            state="$(curl -fsS --cookie /tmp/srtl-cookies.txt http://127.0.0.1:3010/api/onboarding)"
+            if grep -q '"required":false' <<<"$state"; then
+              session_cookie_name="$(awk '$6 ~ /^srtl_session(_[0-9]+)?$/ { print $6; exit }' /tmp/srtl-cookies.txt)"
+              session_token="$(awk '$6 ~ /^srtl_session(_[0-9]+)?$/ { print $7; exit }' /tmp/srtl-cookies.txt)"
+              test -n "$session_cookie_name"
+              test -n "$session_token"
+              printf 'SRTL_E2E_SESSION_COOKIE_NAME=%s\n' "$session_cookie_name" >> "$GITHUB_ENV"
+              printf 'SRTL_E2E_SESSION_TOKEN=%s\n' "$session_token" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/srtl-worker.log
+          exit 1
+      - name: Run browser smoke tests
+        run: npm run test:e2e
+        env:
+          SRTL_E2E_BASE_URL: http://127.0.0.1:3010
+      - name: Stop production server
+        if: always()
+        run: |
+          test ! -f /tmp/srtl-worker.pid || kill "$(cat /tmp/srtl-worker.pid)" || true
+          test ! -f /tmp/srtl-api.pid || kill "$(cat /tmp/srtl-api.pid)" || true
+      - name: Validate container definition
+        run: docker build --check .
+      - name: Build container
+        run: docker build -t srtl-manager:ci .
+      - name: Scan container
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: srtl-manager:ci
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Show server logs after failure
+        if: failure()
+        run: |
+          test ! -f /tmp/srtl-api.log || tail -200 /tmp/srtl-api.log
+          test ! -f /tmp/srtl-worker.log || tail -200 /tmp/srtl-worker.log

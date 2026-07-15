@@ -1,0 +1,113 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${SRTL_POSTGRES_DB:?Set SRTL_POSTGRES_DB in .env}
+      POSTGRES_USER: ${SRTL_POSTGRES_USER:?Set SRTL_POSTGRES_USER in .env}
+      POSTGRES_PASSWORD: ${SRTL_POSTGRES_PASSWORD:?Set SRTL_POSTGRES_PASSWORD in .env}
+    volumes:
+      - ./data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${SRTL_POSTGRES_USER} -d ${SRTL_POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    security_opt:
+      - no-new-privileges:true
+
+  # Applies database schema updates once, then exits before the API starts.
+  migrate:
+    image: ${SRTL_IMAGE:?Set SRTL_IMAGE in .env}
+    command: ["node", "dist/server/migrate.js"]
+    restart: "no"
+    user: "${SRTL_UID:?Set SRTL_UID in .env}:${SRTL_GID:?Set SRTL_GID in .env}"
+    read_only: true
+    env_file:
+      - .env
+    environment:
+      SRTL_POSTGRES_HOST: postgres
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    image: ${SRTL_IMAGE:?Set SRTL_IMAGE in .env}
+    command: ["node", "dist/server/index.js"]
+    restart: unless-stopped
+    user: "${SRTL_UID:?Set SRTL_UID in .env}:${SRTL_GID:?Set SRTL_GID in .env}"
+    read_only: true
+    env_file:
+      - .env
+    environment:
+      SRTL_POSTGRES_HOST: postgres
+    ports:
+      - "${SRTL_BIND_HOST:?Set SRTL_BIND_HOST in .env}:${SRTL_WEB_PORT:?Set SRTL_WEB_PORT in .env}:3010"
+    volumes:
+      - type: bind
+        source: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
+        target: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
+        read_only: true
+      - type: bind
+        source: ${SRTL_LOCATION_1_PATH:?Set SRTL_LOCATION_1_PATH in .env}
+        target: ${SRTL_LOCATION_1_PATH:?Set SRTL_LOCATION_1_PATH in .env}
+        read_only: true
+      - type: bind
+        source: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
+        target: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
+        read_only: true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    image: ${SRTL_IMAGE:?Set SRTL_IMAGE in .env}
+    command: ["node", "dist/server/worker.js"]
+    restart: unless-stopped
+    user: "${SRTL_UID:?Set SRTL_UID in .env}:${SRTL_GID:?Set SRTL_GID in .env}"
+    read_only: true
+    env_file:
+      - .env
+    environment:
+      SRTL_POSTGRES_HOST: postgres
+    volumes:
+      - type: bind
+        source: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
+        target: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
+      - type: bind
+        source: ${SRTL_LOCATION_1_PATH:?Set SRTL_LOCATION_1_PATH in .env}
+        target: ${SRTL_LOCATION_1_PATH:?Set SRTL_LOCATION_1_PATH in .env}
+      - type: bind
+        source: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
+        target: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+      api:
+        condition: service_healthy
