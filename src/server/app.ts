@@ -170,10 +170,10 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
       cacheControl: false,
       maxAge: 0,
       immutable: false,
-      setHeaders(response, filePath) {
+      setHeaders(reply, filePath) {
         const relativePath = path.relative(config.webRoot, filePath);
         const isHashedAsset = relativePath.startsWith(`assets${path.sep}`);
-        response.setHeader("Cache-Control", isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache");
+        reply.header("Cache-Control", isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache");
       }
     });
     app.setNotFoundHandler(async (request, reply) => {
