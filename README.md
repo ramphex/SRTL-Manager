@@ -96,7 +96,7 @@ Keep `.env`, `.env.backup.*`, and database dump files private. Dumps contain acc
 
 ## Development
 
-Requires Node.js 22 and Postgres 17. The simplest local setup uses Docker and an available port `5432`:
+Requires Node.js 24 and Postgres 17. The simplest local setup uses Docker and an available port `5432`:
 
 ```bash
 docker run --name srtl-manager-dev-postgres --rm -d -p 5432:5432 -e POSTGRES_DB=srtl_manager -e POSTGRES_USER=srtl -e POSTGRES_PASSWORD=srtl postgres:17-alpine
