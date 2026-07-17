@@ -42,7 +42,7 @@
     "@fastify/rate-limit": "^11.1.0",
     "@fastify/static": "^9.3.0",
     "@fastify/swagger": "^9.8.1",
-    "@fastify/swagger-ui": "^5.2.3",
+    "@fastify/swagger-ui": "^6.1.0",
     "@tanstack/react-query": "^5.90.12",
     "@tanstack/react-router": "^1.170.18",
     "clsx": "^2.1.1",
