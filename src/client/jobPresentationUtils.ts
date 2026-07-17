@@ -25,6 +25,39 @@ export type CopyProgressView = {
   direction: CopyOptions["direction"] | null;
 };
 
+export type CopyFailedItemSummary = {
+  key: string;
+  title: string;
+  fileName: string | null;
+  reason: string;
+};
+
+function copyFailureReason(message: string): string {
+  const normalized = message.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  if (lower.includes("moov atom not found")) return "Media validation failed: moov atom not found";
+  if (lower.includes("invalid data found when processing input")) return "Media validation failed: invalid media data";
+  if (lower.startsWith("ffmpeg fast validation failed")) return "Fast media validation failed";
+  if (lower.startsWith("ffmpeg deep validation failed")) return "Deep media validation failed";
+  return normalized.length > 160 ? `${normalized.slice(0, 157)}...` : normalized;
+}
+
+export function copyFailedItemSummaries(events: JobEventRecord[]): CopyFailedItemSummary[] {
+  const failures = new Map<string, CopyFailedItemSummary>();
+  for (const event of events) {
+    if (event.level !== "error") continue;
+    const data = recordFromUnknown(event.data);
+    const title = typeof data?.itemName === "string" ? data.itemName.trim() : "";
+    if (!title) continue;
+    const linkPath = typeof data?.linkPath === "string" ? data.linkPath : null;
+    const sourcePath = typeof data?.sourcePath === "string" ? data.sourcePath : null;
+    const fileName = basenameFromPath(sourcePath) ?? basenameFromPath(linkPath);
+    const key = linkPath?.trim() || sourcePath?.trim() || `${title}:${fileName ?? ""}`;
+    failures.set(key, { key, title, fileName, reason: copyFailureReason(event.message) });
+  }
+  return [...failures.values()].sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: "base" }) || (left.fileName ?? "").localeCompare(right.fileName ?? "", undefined, { sensitivity: "base" }));
+}
+
 export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {
   const progress = recordFromUnknown(job?.progress);
   const options = recordFromUnknown(progress?.options);

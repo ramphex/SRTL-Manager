@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
@@ -11,7 +11,7 @@ import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOpt
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCurrentItem, copyEventChips, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -244,7 +244,14 @@ export function CopyDialog({
         {needsLocalConflictResolution && prompt.conflicts ? (
           <CopyConflictResolution conflicts={prompt.conflicts} onKeepBoth={() => setLocalConflictStrategy("keep_both")} onReplace={() => setLocalConflictStrategy("replace")} />
         ) : (
-          <CopyProgressPanel job={currentJob} pendingJobId={jobId} isStarting={startCopy.isPending} />
+          <CopyProgressPanel
+            job={currentJob}
+            pendingJobId={jobId}
+            isStarting={startCopy.isPending}
+            failedEvents={events.events}
+            failedEventsLoading={events.isLoading || events.isFetchingNextPage}
+            failedEventsError={events.error?.message}
+          />
         )}
 
         <div className="audit-dialog-events">
@@ -594,7 +601,23 @@ function ScopeToggle({
   );
 }
 
-export function CopyProgressPanel({ job, pendingJobId, isStarting = false, compact = false }: { job: JobRecord | null; pendingJobId?: number | null; isStarting?: boolean; compact?: boolean }) {
+export function CopyProgressPanel({
+  job,
+  pendingJobId,
+  isStarting = false,
+  compact = false,
+  failedEvents,
+  failedEventsLoading = false,
+  failedEventsError
+}: {
+  job: JobRecord | null;
+  pendingJobId?: number | null;
+  isStarting?: boolean;
+  compact?: boolean;
+  failedEvents?: JobEventRecord[];
+  failedEventsLoading?: boolean;
+  failedEventsError?: string | null;
+}) {
   const progress = copyProgressFromJob(job);
   const completed = copyCompletedCount(progress);
   const symlinked = copySymlinkedCount(progress);
@@ -661,10 +684,16 @@ export function CopyProgressPanel({ job, pendingJobId, isStarting = false, compa
           <strong>{formatNumber(progress.conflicts)}</strong>
           Conflicts
         </span>
-        <span className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
-          <strong>{formatNumber(progress.failed)}</strong>
-          Failed
-        </span>
+        <div className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
+          {progress.failed > 1 && failedEvents ? (
+            <CopyFailedItemsTooltip count={progress.failed} events={failedEvents} loading={failedEventsLoading} error={failedEventsError} />
+          ) : (
+            <>
+              <strong>{formatNumber(progress.failed)}</strong>
+              Failed
+            </>
+          )}
+        </div>
         <span>
           <strong>{copyTransferSpeedLabel(progress)}</strong>
           {transferSpeedSecondary ? <small>{transferSpeedSecondary}</small> : null}
@@ -682,6 +711,95 @@ export function CopyProgressPanel({ job, pendingJobId, isStarting = false, compa
           <strong>{progress.sizeBytes == null ? "-" : formatBytes(progress.sizeBytes)}</strong>
           Current size
         </span>
+      </div>
+    </div>
+  );
+}
+
+function CopyFailedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
+  const tooltipId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const items = useMemo(() => copyFailedItemSummaries(events), [events]);
+  const unidentified = Math.max(0, count - items.length);
+  const open = hovered || pinned;
+
+  useEffect(() => {
+    if (!pinned) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setPinned(false);
+        setHovered(false);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPinned(false);
+        setHovered(false);
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [pinned]);
+
+  function close() {
+    setPinned(false);
+    setHovered(false);
+  }
+
+  function togglePinned() {
+    if (pinned) {
+      close();
+    } else {
+      setPinned(true);
+    }
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      className={`copy-failed-items-tooltip${open ? " is-open" : ""}`}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => !pinned && setHovered(false)}
+      onBlur={(event) => !event.currentTarget.contains(event.relatedTarget) && !pinned && setHovered(false)}
+    >
+      <button type="button" aria-label={`View ${formatNumber(count)} failed items`} aria-controls={tooltipId} aria-expanded={open} onClick={togglePinned} onFocus={() => setHovered(true)}>
+        <strong>{formatNumber(count)}</strong>
+        <span>Failed</span>
+        <small>
+          <ListChecks size={12} />
+          View failed items
+        </small>
+      </button>
+      <div id={tooltipId} className="copy-failed-items-tooltip-panel" role="region" aria-label="Failed item details" aria-hidden={!open}>
+        <div className="copy-failed-items-tooltip-heading">
+          <span>
+            <TriangleAlert size={14} />
+            <strong>Failed items</strong>
+          </span>
+          <button type="button" className="copy-failed-items-tooltip-close" aria-label="Close failed item details" onClick={close}>
+            <X size={14} />
+          </button>
+        </div>
+        {items.length > 0 ? (
+          <ul className="copy-failed-items-tooltip-list">
+            {items.map((item) => (
+              <li key={item.key}>
+                <strong>{item.title}</strong>
+                {item.fileName ? <span>{item.fileName}</span> : null}
+                <small>{item.reason}</small>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {loading ? <p>Loading failed item details...</p> : null}
+        {error ? <p className="copy-failed-items-tooltip-error">Failed item details could not be loaded.</p> : null}
+        {!loading && !error && unidentified > 0 ? <p>{formatNumber(unidentified)} failed item{unidentified === 1 ? " was" : "s were"} not identified by an item-level event.</p> : null}
       </div>
     </div>
   );
