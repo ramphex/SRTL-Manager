@@ -670,3 +670,84 @@ test("job progress shows the complete event timeline and opens the selected full
   const summaryCardTops = await summaryCards.evaluateAll((cards) => cards.map((card) => Math.round(card.getBoundingClientRect().top)));
   expect(new Set(summaryCardTops).size).toBe(1);
 });
+
+test("copy progress opens a persistent, scrollable failed item summary", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const jobId = 999999;
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
+  const titles = ["Zulu Title (2026)", "Bravo Title (2026)", "Hotel Title (2026)", "Alpha Title (2026)", "Foxtrot Title (2026)", "Delta Title (2026)"];
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "partially_failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: new Date().toISOString(),
+    progress: {
+      options: { direction: "to_local", itemName: "Failure summary test" },
+      stage: "partially_failed",
+      message: "Copy job partially failed",
+      total: 7,
+      current: 7,
+      copied: 1,
+      repointed: 0,
+      conflicts: 0,
+      failed: titles.length
+    }
+  };
+  const events = titles.map((title, index) => ({
+    id: 8000 + index,
+    jobId,
+    timestamp,
+    level: "error",
+    message: index === 0 ? "ffmpeg fast validation failed: moov atom not found" : "ffmpeg fast validation failed: Invalid data found when processing input",
+    data: {
+      itemName: title,
+      linkPath: `/links/${title}/file-${index}.mkv`,
+      sourcePath: `/remote/${title}/file-${index}.mkv`
+    }
+  }));
+
+  await page.route(`**/api/jobs/${jobId}/events/page*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events, total: events.length, hasOlder: false }) });
+  });
+  await page.route(`**/api/jobs/${jobId}`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+  });
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  const trigger = dialog.getByRole("button", { name: `View ${titles.length} failed items`, exact: true });
+  const tooltip = dialog.getByRole("region", { name: "Failed item details", exact: true });
+  await expect(trigger).toContainText("View failed items");
+  await trigger.hover();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip.locator("li > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+  await expect(tooltip).toContainText("Media validation failed: moov atom not found");
+  await expect(tooltip).toContainText("Media validation failed: invalid media data");
+  expect(await tooltip.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await tooltip.hover();
+  await page.mouse.wheel(0, 160);
+  await expect(tooltip).toBeVisible();
+
+  await trigger.click();
+  await dialog.getByText("Overall job", { exact: true }).hover();
+  await expect(tooltip).toBeVisible();
+
+  const tooltipBox = await tooltip.boundingBox();
+  const viewport = page.viewportSize();
+  expect(tooltipBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(tooltipBox!.x).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.y).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.x + tooltipBox!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(tooltipBox!.y + tooltipBox!.height).toBeLessThanOrEqual(viewport!.height);
+
+  await tooltip.getByRole("button", { name: "Close failed item details", exact: true }).click();
+  await expect(tooltip).toBeHidden();
+});
