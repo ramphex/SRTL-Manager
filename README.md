@@ -65,6 +65,8 @@ Open `http://<server-ip>:5179` unless a different port was selected. The browser
 
 The default configuration follows the current stable `latest` image. Pin `SRTL_IMAGE` to a numbered image tag when repeatable deployments are more important than automatically following stable updates.
 
+> **Beta builds:** When a beta image is available, set `SRTL_IMAGE=ghcr.io/ramphex/srtl-manager:beta` in `.env`. Beta builds contain newer work that has not yet been promoted to a stable release.
+
 ## Deployment Model
 
 `.env` is the single source of truth for deployment-owned paths, credentials, host binding, and ports. Persistent database files stay in `./data` beside `docker-compose.yml`; that path does not need configuration. Numbered storage-location variables keep deployment identity separate from friendly names managed in Settings > Library. Friendly names, section names, display order, policies, and user preferences live in Postgres.
@@ -141,5 +143,3 @@ SRTL Manager is available under the [MIT License](LICENSE). Contributions are ac
 - Event-driven targeted refresh hooks.
 - Additional numbered storage locations and per-location assignment policies.
 - Controlled multi-worker execution after single-worker recovery semantics are fully proven.
-
-> **Beta builds:** When a beta image is available, set `SRTL_IMAGE=ghcr.io/ramphex/srtl-manager:beta` in `.env`. Beta builds contain newer work that has not yet been promoted to a stable release.
