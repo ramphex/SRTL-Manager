@@ -707,7 +707,15 @@ async function rollbackMigrationItems(db: Db, migrationId: number, linkRoot: str
     if (!item.targetChanged) continue;
     try {
       const currentTarget = await symlinkTarget(item.currentLinkPath);
-      if (path.resolve(currentTarget) === path.resolve(item.targetPathAfter)) await replaceSymlink(linkRoot, item.currentLinkPath, item.targetPathBefore);
+      if (path.resolve(currentTarget) !== path.resolve(item.targetPathAfter)) {
+        const message = `Rollback stopped because the symlink target changed again. Expected ${item.targetPathAfter}, found ${currentTarget}. Manual review is required.`;
+        await db
+          .update(schema.pathMigrationItems)
+          .set({ validationStatus: "blocked", rolledBackAt: null, message })
+          .where(eq(schema.pathMigrationItems.id, item.id));
+        throw new Error(message);
+      }
+      await replaceSymlink(linkRoot, item.currentLinkPath, item.targetPathBefore);
       await db
         .update(schema.pathMigrationItems)
         .set({ validationStatus: "rolled_back", rolledBackAt: nowIso(), message: "Repointing was rolled back after migration stopped." })

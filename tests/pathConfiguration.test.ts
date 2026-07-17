@@ -406,6 +406,58 @@ describe("managed path configuration", () => {
     expect(failedState.migration?.errorMessage).toContain("Mapped target changed after analysis");
   });
 
+  it("blocks rollback when an applied symlink changes again during recovery", async () => {
+    const firstApp = await openApp();
+    const cookie = await createAdminSession(firstApp);
+    const firstFixture = await insertIndexedSymlink(firstApp, "Externally Changed Title", "first.bin");
+    const secondFixture = await insertIndexedSymlink(firstApp, "Later Failure Title", "second.bin");
+    await fs.symlink(oldSymlinkDir, newSymlinkDir, "dir");
+    await fs.symlink(oldLocalDir, newLocalDir, "dir");
+    const secondApp = await restartWithPaths(newSymlinkDir, newLocalDir);
+    const state = (await secondApp.app.inject({ method: "GET", url: "/api/system/path-migration", headers: { cookie } })).json<PathConfigurationState>();
+    await secondApp.app.inject({ method: "POST", url: "/api/system/path-migration/plan", headers: { cookie }, payload: { migrationId: state.migration?.id } });
+    await fs.writeFile(secondFixture.targetPath, "changed after migration analysis");
+    await secondApp.app.inject({
+      method: "POST",
+      url: "/api/system/path-migration/apply",
+      headers: { cookie },
+      payload: { migrationId: state.migration?.id, confirmSameStorage: true }
+    });
+
+    const migrationId = state.migration?.id ?? 0;
+    const firstNewLinkPath = rebaseFixturePath(firstFixture.linkPath, oldSymlinkDir, newSymlinkDir);
+    const externalTarget = path.join(tmpDir, "external-target.bin");
+    await fs.writeFile(externalTarget, "external target");
+    let cancellationChecks = 0;
+
+    await expect(
+      runPathMigration(secondApp.database.db, migrationId, {
+        signal: new AbortController().signal,
+        event: async () => undefined,
+        setProgress: async () => undefined,
+        isCancelled: async () => {
+          cancellationChecks += 1;
+          if (cancellationChecks === 2) {
+            await fs.rm(firstNewLinkPath);
+            await fs.symlink(externalTarget, firstNewLinkPath);
+          }
+          return false;
+        }
+      })
+    ).rejects.toThrow("Rollback also failed for 1 symlink(s)");
+
+    expect(path.resolve(await fs.readlink(firstNewLinkPath))).toBe(path.resolve(externalTarget));
+    const blockedItem = await first(
+      secondApp.database.db.select().from(schema.pathMigrationItems).where(eq(schema.pathMigrationItems.mediaLinkId, firstFixture.linkId)).limit(1)
+    );
+    expect(blockedItem).toMatchObject({ validationStatus: "blocked", rolledBackAt: null });
+    expect(blockedItem?.message).toContain("Manual review is required");
+    const failedState = (await secondApp.app.inject({ method: "GET", url: "/api/system/path-migration", headers: { cookie } })).json<PathConfigurationState>();
+    expect(failedState).toMatchObject({ blocking: true, status: "failed" });
+    expect(failedState.migration?.summary.blockedLinks).toBe(1);
+    expect(failedState.migration?.errorMessage).toContain("Rollback also failed for 1 symlink(s)");
+  });
+
   it("rolls back and does not resurrect a migration when environment paths are restored while it runs", async () => {
     const firstApp = await openApp();
     const cookie = await createAdminSession(firstApp);

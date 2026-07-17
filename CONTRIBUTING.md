@@ -16,8 +16,20 @@ Prereleases use the upcoming stable version plus an ordered suffix, such as `0.1
 
 Do not include credentials, local `.env` files, library paths, database dumps, logs, or inventory data in a pull request.
 
+Do not report suspected vulnerabilities in an issue or pull request. Follow [SECURITY.md](SECURITY.md) and use the repository's private vulnerability reporting form.
+
 ## Development
 
-Use Node.js 22 and Postgres 17. Install dependencies with `npm ci`, then run `npm run dev`. The development UI and API default to ports `5178` and `3009`.
+Use Node.js 22 and Postgres 17. To run a disposable database that matches the development defaults, use Docker and an available port `5432`:
+
+```bash
+docker run --name srtl-manager-dev-postgres --rm -d -p 5432:5432 -e POSTGRES_DB=srtl_manager -e POSTGRES_USER=srtl -e POSTGRES_PASSWORD=srtl postgres:17-alpine
+```
+
+Install dependencies with `npm ci`, then run `npm run dev`. The development UI and API default to ports `5178` and `3009`. Stop the database with `docker stop srtl-manager-dev-postgres` when finished. An existing Postgres instance can be used through a local `.env` instead.
 
 New filesystem mutations require server-side containment checks, durable recovery behavior, cancellation handling, and failure-path tests.
+
+## License And Conduct
+
+By submitting a contribution, you agree that it is licensed under the repository's [MIT License](LICENSE). Participation is also subject to the [Code of Conduct](CODE_OF_CONDUCT.md).

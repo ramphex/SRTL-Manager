@@ -6,7 +6,7 @@ Only the newest stable and beta releases receive security fixes while the projec
 
 ## Reporting
 
-Do not open a public issue for a suspected vulnerability. Use GitHub private vulnerability reporting for this repository and include the affected version, reproduction steps, impact, and any proposed mitigation.
+Do not open a public issue for a suspected vulnerability. Use [GitHub private vulnerability reporting](https://github.com/ramphex/SRTL-Manager/security/advisories/new) for this repository and include the affected version, reproduction steps, impact, and any proposed mitigation.
 
 Never include real credentials, access tokens, mounted paths, file names, logs, or database contents in a report unless they have been fully redacted.
 

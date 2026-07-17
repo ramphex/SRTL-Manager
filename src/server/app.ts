@@ -3,6 +3,7 @@ import path from "node:path";
 import fastify, { FastifyInstance } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
+import compress from "@fastify/compress";
 import helmet from "@fastify/helmet";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
@@ -85,6 +86,11 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     }
   });
   await app.register(rateLimit, { global: false });
+  await app.register(compress, {
+    encodings: ["br", "gzip"],
+    globalDecompression: false,
+    threshold: 1024
+  });
   if (config.allowedOrigins.length > 0) {
     await app.register(cors, { origin: config.allowedOrigins, credentials: true });
   }
@@ -161,9 +167,14 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     await app.register(fastifyStatic, {
       root: config.webRoot,
       prefix: "/",
-      cacheControl: true,
-      maxAge: process.env.NODE_ENV === "production" ? "1h" : 0,
-      immutable: false
+      cacheControl: false,
+      maxAge: 0,
+      immutable: false,
+      setHeaders(response, filePath) {
+        const relativePath = path.relative(config.webRoot, filePath);
+        const isHashedAsset = relativePath.startsWith(`assets${path.sep}`);
+        response.setHeader("Cache-Control", isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache");
+      }
     });
     app.setNotFoundHandler(async (request, reply) => {
       if (request.url.startsWith("/api/") || request.url.startsWith("/documentation")) {

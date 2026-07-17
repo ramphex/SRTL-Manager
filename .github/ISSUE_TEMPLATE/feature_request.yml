@@ -1,0 +1,30 @@
+name: Feature request
+description: Suggest a focused improvement to SRTL Manager.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: Describe the workflow and safety requirements rather than only the proposed interface.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow or limitation should this address?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the user-visible behavior and expected outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and recovery
+      description: Explain failure handling, cancellation, recovery, or compatibility concerns where applicable.
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

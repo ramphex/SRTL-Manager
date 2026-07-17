@@ -20,6 +20,17 @@ jobs:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           ref: ${{ github.event.release.tag_name }}
+      - name: Require the current main commit
+        run: |
+          git fetch --no-tags --depth=1 origin main
+          release_commit="$(git rev-parse 'HEAD^{commit}')"
+          main_commit="$(git rev-parse 'FETCH_HEAD^{commit}')"
+          if [[ "$release_commit" != "$main_commit" ]]; then
+            echo "Stable releases must point to the current main commit."
+            echo "Release: $release_commit"
+            echo "Main:    $main_commit"
+            exit 1
+          fi
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: 22
@@ -58,7 +69,6 @@ jobs:
           images: ghcr.io/${{ github.repository_owner }}/srtl-manager
           tags: |
             type=raw,value=${{ steps.version.outputs.value }}
-            type=raw,value=latest
       - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
@@ -70,3 +80,16 @@ jobs:
           cache-to: type=gha,mode=max
           provenance: mode=max
           sbom: true
+      - name: Scan the published release image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/srtl-manager:${{ steps.version.outputs.value }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Promote the verified image to latest
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/srtl-manager
+          VERSION: ${{ steps.version.outputs.value }}
+        run: docker buildx imagetools create --tag "$IMAGE_REF:latest" "$IMAGE_REF:$VERSION"

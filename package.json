@@ -1,7 +1,19 @@
 {
   "name": "srtl-manager",
-  "version": "0.1.0",
+  "version": "0.1.1-beta.1",
   "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/ramphex/SRTL-Manager#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ramphex/SRTL-Manager.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ramphex/SRTL-Manager/issues"
+  },
+  "engines": {
+    "node": ">=22 <23"
+  },
   "type": "module",
   "scripts": {
     "dev": "concurrently -k -n api,web,worker -c cyan,green,magenta \"SRTL_HOST=127.0.0.1 SRTL_PORT=3009 SRTL_WEB_PORT=5178 tsx watch src/server/index.ts\" \"SRTL_API_TARGET=http://127.0.0.1:3009 SRTL_WEB_PORT=5178 vite --host 0.0.0.0 --strictPort\" \"SRTL_WORKER_ID=dev-worker tsx watch src/server/worker.ts\"",
@@ -23,6 +35,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@fastify/compress": "^8.3.1",
     "@fastify/cookie": "^11.0.2",
     "@fastify/cors": "^11.1.0",
     "@fastify/helmet": "^13.1.0",

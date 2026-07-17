@@ -4,6 +4,17 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Documented a reproducible contributor database, secure backup permissions, MIT contribution terms, and structured issue reporting.
+- Prepared `0.1.1-beta.1` with Brotli/gzip responses, immutable hashed assets, and on-demand loading for library, job, history, logs, integration, and settings views.
+
+### Security
+
+- Made path-migration rollback fail closed when a symlink changes during recovery.
+- Required stable releases to match `main`, scan the published versioned image before promoting `latest`, upload CodeQL results, and use a pinned runtime base image.
+- Refused empty or published-placeholder database passwords before application startup.
+
 ## [0.1.0] - 2026-07-14
 
 ### Added

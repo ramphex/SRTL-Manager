@@ -1,0 +1,63 @@
+name: Bug report
+description: Report reproducible behavior that is not working as expected.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: Do not include credentials, private paths, file names, logs, or inventory data unless they are fully redacted. Security vulnerabilities must use private vulnerability reporting.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Briefly describe the problem and its impact.
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Include the application version or container tag.
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include platform, architecture, deployment method, and browser where relevant. Redact host names and addresses.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest repeatable sequence that demonstrates the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Redacted diagnostics
+      description: Add relevant job events, logs, or screenshots only after removing private data.
+      render: shell
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Safety check
+      options:
+        - label: I removed credentials, private paths, file names, inventory data, and other identifying information.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
