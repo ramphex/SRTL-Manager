@@ -20,7 +20,7 @@ Do not report suspected vulnerabilities in an issue or pull request. Follow [SEC
 
 ## Development
 
-Use Node.js 22 and Postgres 17. To run a disposable database that matches the development defaults, use Docker and an available port `5432`:
+Use Node.js 24 and Postgres 17. To run a disposable database that matches the development defaults, use Docker and an available port `5432`:
 
 ```bash
 docker run --name srtl-manager-dev-postgres --rm -d -p 5432:5432 -e POSTGRES_DB=srtl_manager -e POSTGRES_USER=srtl -e POSTGRES_PASSWORD=srtl postgres:17-alpine
