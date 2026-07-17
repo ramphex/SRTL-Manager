@@ -7,18 +7,30 @@ updates:
     schedule:
       interval: weekly
     groups:
-      npm-dependencies:
+      npm-non-major:
+        applies-to: version-updates
         patterns:
           - "*"
+        update-types:
+          - minor
+          - patch
 
   - package-ecosystem: docker
     directory: /
     target-branch: beta
     schedule:
       interval: weekly
+    ignore:
+      - dependency-name: node
+        update-types:
+          - version-update:semver-major
 
   - package-ecosystem: github-actions
     directory: /
     target-branch: beta
     schedule:
       interval: weekly
+    groups:
+      codeql:
+        patterns:
+          - "github/codeql-action/*"
