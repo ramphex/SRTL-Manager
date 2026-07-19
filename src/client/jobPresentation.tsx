@@ -685,7 +685,7 @@ export function CopyProgressPanel({
           Conflicts
         </span>
         <div className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
-          {progress.failed > 1 && failedEvents ? (
+          {progress.failed > 0 && failedEvents ? (
             <CopyFailedItemsTooltip count={progress.failed} events={failedEvents} loading={failedEventsLoading} error={failedEventsError} />
           ) : (
             <>
@@ -724,6 +724,7 @@ function CopyFailedItemsTooltip({ count, events, loading, error }: { count: numb
   const items = useMemo(() => copyFailedItemSummaries(events), [events]);
   const unidentified = Math.max(0, count - items.length);
   const open = hovered || pinned;
+  const failedItemLabel = `failed item${count === 1 ? "" : "s"}`;
 
   useEffect(() => {
     if (!pinned) return;
@@ -768,19 +769,19 @@ function CopyFailedItemsTooltip({ count, events, loading, error }: { count: numb
       onMouseLeave={() => !pinned && setHovered(false)}
       onBlur={(event) => !event.currentTarget.contains(event.relatedTarget) && !pinned && setHovered(false)}
     >
-      <button type="button" aria-label={`View ${formatNumber(count)} failed items`} aria-controls={tooltipId} aria-expanded={open} onClick={togglePinned} onFocus={() => setHovered(true)}>
+      <button type="button" aria-label={`View ${formatNumber(count)} ${failedItemLabel}`} aria-controls={tooltipId} aria-expanded={open} onClick={togglePinned} onFocus={() => setHovered(true)}>
         <strong>{formatNumber(count)}</strong>
         <span>Failed</span>
         <small>
           <ListChecks size={12} />
-          View failed items
+          View {failedItemLabel}
         </small>
       </button>
       <div id={tooltipId} className="copy-failed-items-tooltip-panel" role="region" aria-label="Failed item details" aria-hidden={!open}>
         <div className="copy-failed-items-tooltip-heading">
           <span>
             <TriangleAlert size={14} />
-            <strong>Failed items</strong>
+            <strong>{count === 1 ? "Failed item" : "Failed items"}</strong>
           </span>
           <button type="button" className="copy-failed-items-tooltip-close" aria-label="Close failed item details" onClick={close}>
             <X size={14} />

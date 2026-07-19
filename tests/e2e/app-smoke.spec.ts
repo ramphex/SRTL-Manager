@@ -751,3 +751,67 @@ test("copy progress opens a persistent, scrollable failed item summary", async (
   await tooltip.getByRole("button", { name: "Close failed item details", exact: true }).click();
   await expect(tooltip).toBeHidden();
 });
+
+test("copy progress exposes details for a single failed item", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const jobId = 999998;
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
+  const title = "Single Failure Title (2026)";
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "partially_failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: new Date().toISOString(),
+    progress: {
+      options: { direction: "to_local", itemName: title },
+      stage: "partially_failed",
+      message: "Copy job partially failed",
+      total: 30,
+      current: 30,
+      copied: 29,
+      repointed: 0,
+      conflicts: 0,
+      failed: 1
+    }
+  };
+  const events = [
+    {
+      id: 9000,
+      jobId,
+      timestamp,
+      level: "error",
+      message: "ffmpeg fast validation failed: moov atom not found",
+      data: {
+        itemName: title,
+        linkPath: `/links/${title}/failed-file.mkv`,
+        sourcePath: `/remote/${title}/failed-file.mkv`
+      }
+    }
+  ];
+
+  await page.route(`**/api/jobs/${jobId}/events/page*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events, total: 1, hasOlder: false }) });
+  });
+  await page.route(`**/api/jobs/${jobId}`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+  });
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  const trigger = dialog.getByRole("button", { name: "View 1 failed item", exact: true });
+  await expect(trigger).toContainText("View failed item");
+  await trigger.click();
+
+  const details = dialog.getByRole("region", { name: "Failed item details", exact: true });
+  await expect(details).toBeVisible();
+  await expect(details).toContainText(title);
+  await expect(details).toContainText("failed-file.mkv");
+  await expect(details).toContainText("Media validation failed: moov atom not found");
+});
