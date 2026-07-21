@@ -2255,7 +2255,7 @@ export class JobWorker {
           await commitCopyOperation(this.db, operation.id, link, result);
           activeUpdate = { ...(activeUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, activeUpdate);
-          await ctx.event("info", advancedSettings.copy.profile === "off" ? "Copy installed without verification" : "Verified copy installed", result);
+          await ctx.event("info", advancedSettings.copy.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.push({ linkId: link.id, destinationPath: result.destinationPath, candidates: localConflict.candidates });
           }
@@ -2264,7 +2264,7 @@ export class JobWorker {
           await commitCopyOperation(this.db, operation.id, link, result);
           activeUpdate = { ...(activeUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, activeUpdate);
-          await ctx.event("info", "Symlink repointed to existing verified file", result);
+          await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.push({ linkId: link.id, destinationPath: result.destinationPath, candidates: localConflict.candidates });
           }

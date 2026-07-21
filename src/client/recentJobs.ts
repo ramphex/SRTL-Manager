@@ -20,6 +20,14 @@ export function isActiveDashboardJob(job: JobRecord): boolean {
   return job.status === "queued" || job.status === "running";
 }
 
+export function inventoryJobRefreshKey(jobs: JobRecord[]): string {
+  return jobs
+    .filter((job) => (job.type === "scan" || job.type === "copy") && Boolean(job.finishedAt))
+    .map((job) => `${job.id}:${job.status}:${job.finishedAt}`)
+    .sort()
+    .join("|");
+}
+
 export function visibleDashboardJobs(jobs: JobRecord[], completedWindowMinutes: number, now: Date = new Date()): JobRecord[] {
   const normalizedWindowMinutes = normalizeRecentJobsCompletedWindowMinutes(completedWindowMinutes);
   const cutoffMs = now.getTime() - normalizedWindowMinutes * 60 * 1000;

@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
+import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogData, jobProgressChips } from "./logDisplay";
@@ -11,7 +11,7 @@ import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOpt
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -248,9 +248,9 @@ export function CopyDialog({
             job={currentJob}
             pendingJobId={jobId}
             isStarting={startCopy.isPending}
-            failedEvents={events.events}
-            failedEventsLoading={events.isLoading || events.isFetchingNextPage}
-            failedEventsError={events.error?.message}
+            copyEvents={events.events}
+            copyEventsLoading={events.isLoading || events.isFetchingNextPage}
+            copyEventsError={events.error?.message}
           />
         )}
 
@@ -606,17 +606,17 @@ export function CopyProgressPanel({
   pendingJobId,
   isStarting = false,
   compact = false,
-  failedEvents,
-  failedEventsLoading = false,
-  failedEventsError
+  copyEvents,
+  copyEventsLoading = false,
+  copyEventsError
 }: {
   job: JobRecord | null;
   pendingJobId?: number | null;
   isStarting?: boolean;
   compact?: boolean;
-  failedEvents?: JobEventRecord[];
-  failedEventsLoading?: boolean;
-  failedEventsError?: string | null;
+  copyEvents?: JobEventRecord[];
+  copyEventsLoading?: boolean;
+  copyEventsError?: string | null;
 }) {
   const progress = copyProgressFromJob(job);
   const completed = copyCompletedCount(progress);
@@ -672,10 +672,16 @@ export function CopyProgressPanel({
           <strong>{formatNumber(progress.copied)}</strong>
           Copied
         </span>
-        <span>
-          <strong>{formatNumber(symlinked)}</strong>
-          Symlinked
-        </span>
+        <div className={symlinked > 0 ? "copy-progress-stat-good" : undefined}>
+          {symlinked > 0 && copyEvents ? (
+            <CopyCompletedItemsTooltip count={symlinked} events={copyEvents} loading={copyEventsLoading} error={copyEventsError} />
+          ) : (
+            <>
+              <strong>{formatNumber(symlinked)}</strong>
+              Symlinked
+            </>
+          )}
+        </div>
         <span>
           <strong>{formatNumber(progress.repointed)}</strong>
           Matched existing
@@ -685,8 +691,8 @@ export function CopyProgressPanel({
           Conflicts
         </span>
         <div className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
-          {progress.failed > 0 && failedEvents ? (
-            <CopyFailedItemsTooltip count={progress.failed} events={failedEvents} loading={failedEventsLoading} error={failedEventsError} />
+          {progress.failed > 0 && copyEvents ? (
+            <CopyFailedItemsTooltip count={progress.failed} events={copyEvents} loading={copyEventsLoading} error={copyEventsError} />
           ) : (
             <>
               <strong>{formatNumber(progress.failed)}</strong>
@@ -716,15 +722,53 @@ export function CopyProgressPanel({
   );
 }
 
+type CopyItemDetail = {
+  key: string;
+  title: string;
+  fileName: string | null;
+  detail: string;
+};
+
+function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
+  const items = useMemo(
+    () => copyCompletedItemSummaries(events).map((item) => ({ ...item, detail: item.outcome })),
+    [events]
+  );
+  return <CopyItemDetailsTooltip count={count} kind="completed" items={items} loading={loading} error={error} />;
+}
+
 function CopyFailedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
+  const items = useMemo(
+    () => copyFailedItemSummaries(events).map((item) => ({ ...item, detail: item.reason })),
+    [events]
+  );
+  return <CopyItemDetailsTooltip count={count} kind="failed" items={items} loading={loading} error={error} />;
+}
+
+function CopyItemDetailsTooltip({
+  count,
+  kind,
+  items,
+  loading,
+  error
+}: {
+  count: number;
+  kind: "completed" | "failed";
+  items: CopyItemDetail[];
+  loading: boolean;
+  error?: string | null;
+}) {
   const tooltipId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
   const [hovered, setHovered] = useState(false);
   const [pinned, setPinned] = useState(false);
-  const items = useMemo(() => copyFailedItemSummaries(events), [events]);
   const unidentified = Math.max(0, count - items.length);
   const open = hovered || pinned;
-  const failedItemLabel = `failed item${count === 1 ? "" : "s"}`;
+  const kindLabel = kind === "failed" ? "Failed" : "Completed";
+  const itemLabel = `${kind === "failed" ? "failed" : "completed"} item${count === 1 ? "" : "s"}`;
+  const unidentifiedLabel = `${kind === "failed" ? "failed" : "completed"} item${unidentified === 1 ? "" : "s"}`;
+  const heading = `${kindLabel} item${count === 1 ? "" : "s"}`;
+  const Icon = kind === "failed" ? TriangleAlert : CheckCircle2;
 
   useEffect(() => {
     if (!pinned) return;
@@ -764,43 +808,43 @@ function CopyFailedItemsTooltip({ count, events, loading, error }: { count: numb
   return (
     <div
       ref={rootRef}
-      className={`copy-failed-items-tooltip${open ? " is-open" : ""}`}
+      className={`copy-item-details-tooltip copy-item-details-${kind}${open ? " is-open" : ""}`}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => !pinned && setHovered(false)}
       onBlur={(event) => !event.currentTarget.contains(event.relatedTarget) && !pinned && setHovered(false)}
     >
-      <button type="button" aria-label={`View ${formatNumber(count)} ${failedItemLabel}`} aria-controls={tooltipId} aria-expanded={open} onClick={togglePinned} onFocus={() => setHovered(true)}>
+      <button type="button" aria-label={`View ${formatNumber(count)} ${itemLabel}`} aria-controls={tooltipId} aria-expanded={open} onClick={togglePinned} onFocus={() => setHovered(true)}>
         <strong>{formatNumber(count)}</strong>
-        <span>Failed</span>
+        <span>{kind === "failed" ? "Failed" : "Symlinked"}</span>
         <small>
           <ListChecks size={12} />
-          View {failedItemLabel}
+          View {itemLabel}
         </small>
       </button>
-      <div id={tooltipId} className="copy-failed-items-tooltip-panel" role="region" aria-label="Failed item details" aria-hidden={!open}>
-        <div className="copy-failed-items-tooltip-heading">
+      <div id={tooltipId} className="copy-item-details-tooltip-panel" role="region" aria-label={`${kindLabel} item details`} aria-hidden={!open}>
+        <div className="copy-item-details-tooltip-heading">
           <span>
-            <TriangleAlert size={14} />
-            <strong>{count === 1 ? "Failed item" : "Failed items"}</strong>
+            <Icon size={14} />
+            <strong>{heading}</strong>
           </span>
-          <button type="button" className="copy-failed-items-tooltip-close" aria-label="Close failed item details" onClick={close}>
+          <button type="button" className="copy-item-details-tooltip-close" aria-label={`Close ${kind === "failed" ? "failed" : "completed"} item details`} onClick={close}>
             <X size={14} />
           </button>
         </div>
         {items.length > 0 ? (
-          <ul className="copy-failed-items-tooltip-list">
+          <ul className="copy-item-details-tooltip-list">
             {items.map((item) => (
               <li key={item.key}>
                 <strong>{item.title}</strong>
                 {item.fileName ? <span>{item.fileName}</span> : null}
-                <small>{item.reason}</small>
+                <small>{item.detail}</small>
               </li>
             ))}
           </ul>
         ) : null}
-        {loading ? <p>Loading failed item details...</p> : null}
-        {error ? <p className="copy-failed-items-tooltip-error">Failed item details could not be loaded.</p> : null}
-        {!loading && !error && unidentified > 0 ? <p>{formatNumber(unidentified)} failed item{unidentified === 1 ? " was" : "s were"} not identified by an item-level event.</p> : null}
+        {loading ? <p>Loading {itemLabel} details...</p> : null}
+        {error ? <p className="copy-item-details-tooltip-error">{kindLabel} item details could not be loaded.</p> : null}
+        {!loading && !error && unidentified > 0 ? <p>{formatNumber(unidentified)} {unidentifiedLabel}{unidentified === 1 ? " was" : " were"} not identified by an item-level event.</p> : null}
       </div>
     </div>
   );

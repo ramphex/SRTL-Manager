@@ -1,10 +1,11 @@
-import { useEffect, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Blocks, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
+import { inventoryJobRefreshKey } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
 import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
@@ -573,7 +574,51 @@ function AuthenticatedApp() {
     );
   }
   if (onboarding.data?.required) return <OnboardingGate state={onboarding.data} />;
-  return <RouterProvider router={router} />;
+  return (
+    <>
+      <InventoryJobDataRefresher />
+      <RouterProvider router={router} />
+    </>
+  );
+}
+
+function InventoryJobDataRefresher() {
+  const queryClient = useQueryClient();
+  const previousRefreshKey = useRef<string | null>(null);
+  const jobs = useQuery({
+    queryKey: ["jobs", "inventory-refresh"],
+    queryFn: () => api.jobs({ completedWithinMinutes: 15 }),
+    refetchInterval: 3000
+  });
+  const refreshKey = inventoryJobRefreshKey(jobs.data ?? []);
+
+  useEffect(() => {
+    if (!jobs.isSuccess) return;
+    if (previousRefreshKey.current === null) {
+      previousRefreshKey.current = refreshKey;
+      return;
+    }
+    if (previousRefreshKey.current === refreshKey) return;
+    previousRefreshKey.current = refreshKey;
+
+    for (const queryKey of [
+      ["scans"],
+      ["inventory-scan-timestamps"],
+      ["dashboard-remote-work-links"],
+      ["media-links"],
+      ["media-links-page"],
+      ["media-link-tree"],
+      ["storage-files"],
+      ["storage-file-tree"],
+      ["storage-policies"],
+      ["sections"],
+      ["inventory-summary"]
+    ]) {
+      void queryClient.invalidateQueries({ queryKey });
+    }
+  }, [jobs.isSuccess, queryClient, refreshKey]);
+
+  return null;
 }
 
 function OnboardingGate({ state }: { state: OnboardingState }) {

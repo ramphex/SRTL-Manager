@@ -32,6 +32,13 @@ export type CopyFailedItemSummary = {
   reason: string;
 };
 
+export type CopyCompletedItemSummary = {
+  key: string;
+  title: string;
+  fileName: string | null;
+  outcome: "Copied and symlinked" | "Matched existing and symlinked";
+};
+
 function copyFailureReason(message: string): string {
   const normalized = message.replace(/\s+/g, " ").trim();
   const lower = normalized.toLowerCase();
@@ -56,6 +63,62 @@ export function copyFailedItemSummaries(events: JobEventRecord[]): CopyFailedIte
     failures.set(key, { key, title, fileName, reason: copyFailureReason(event.message) });
   }
   return [...failures.values()].sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: "base" }) || (left.fileName ?? "").localeCompare(right.fileName ?? "", undefined, { sensitivity: "base" }));
+}
+
+const successfulCopyMessages = new Map<
+  string,
+  CopyCompletedItemSummary["outcome"]
+>([
+  ["Verified copy installed", "Copied and symlinked"],
+  ["Copy installed without verification", "Copied and symlinked"],
+  ["Symlink repointed to existing verified file", "Matched existing and symlinked"]
+]);
+
+function copyEventKeys(data: Record<string, unknown> | null): string[] {
+  if (!data) return [];
+  return [data.linkPath, data.sourcePath, data.destinationPath]
+    .filter((value): value is string => typeof value === "string" && Boolean(value.trim()))
+    .map((value) => value.trim());
+}
+
+export function copyCompletedItemSummaries(events: JobEventRecord[]): CopyCompletedItemSummary[] {
+  const titlesByPath = new Map<string, string>();
+  for (const event of events) {
+    const data = recordFromUnknown(event.data);
+    const title = typeof data?.itemName === "string"
+      ? data.itemName.trim()
+      : typeof data?.currentTitle === "string"
+        ? data.currentTitle.trim()
+        : "";
+    if (!title) continue;
+    for (const key of copyEventKeys(data)) titlesByPath.set(key, title);
+  }
+
+  const completed = new Map<string, CopyCompletedItemSummary>();
+  for (const event of events) {
+    const outcome = successfulCopyMessages.get(event.message);
+    if (!outcome) continue;
+    const data = recordFromUnknown(event.data);
+    const keys = copyEventKeys(data);
+    const filePath = typeof data?.destinationPath === "string"
+      ? data.destinationPath
+      : typeof data?.sourcePath === "string"
+        ? data.sourcePath
+        : typeof data?.linkPath === "string"
+          ? data.linkPath
+          : null;
+    const fileName = basenameFromPath(filePath);
+    const directTitle = typeof data?.itemName === "string"
+      ? data.itemName.trim()
+      : typeof data?.currentTitle === "string"
+        ? data.currentTitle.trim()
+        : "";
+    const title = directTitle || keys.map((key) => titlesByPath.get(key)).find(Boolean) || fileName || "Completed item";
+    const key = keys[0] ?? `${title}:${fileName ?? ""}`;
+    completed.set(key, { key, title, fileName, outcome });
+  }
+
+  return [...completed.values()].sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: "base" }) || (left.fileName ?? "").localeCompare(right.fileName ?? "", undefined, { sensitivity: "base" }));
 }
 
 export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {

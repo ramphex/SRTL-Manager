@@ -1798,7 +1798,12 @@ describe("api app", () => {
     await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("copy without content verification");
     await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
     await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(
-      expect.arrayContaining([expect.objectContaining({ message: "Copy installed without verification" })])
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "Copy installed without verification",
+          data: expect.objectContaining({ itemName: "No Verify Movie" })
+        })
+      ])
     );
   });
 

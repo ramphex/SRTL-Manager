@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { copyFailedItemSummaries } from "../src/client/jobPresentationUtils";
+import { copyCompletedItemSummaries, copyFailedItemSummaries } from "../src/client/jobPresentationUtils";
 import type { JobEventRecord } from "../src/shared/types";
 
 function event(id: number, message: string, data: unknown, level: JobEventRecord["level"] = "error"): JobEventRecord {
@@ -61,5 +61,55 @@ describe("copy failure summaries", () => {
 
     expect(summaries[0]?.reason).toHaveLength(160);
     expect(summaries[0]?.reason.endsWith("...")).toBe(true);
+  });
+});
+
+describe("copy completion summaries", () => {
+  it("collects copied and matched items, correlates progress titles, deduplicates, and sorts", () => {
+    const summaries = copyCompletedItemSummaries([
+      event(1, "Promoting verified copy and repointing symlink", {
+        currentTitle: "Zulu Title (2020)",
+        linkPath: "/links/Zulu Title (2020)/zulu.mkv",
+        sourcePath: "/remote/zulu.mkv"
+      }, "info"),
+      event(2, "Verified copy installed", {
+        linkPath: "/links/Zulu Title (2020)/zulu.mkv",
+        sourcePath: "/remote/zulu.mkv",
+        destinationPath: "/local/Zulu Title (2020)/zulu.mkv"
+      }, "info"),
+      event(3, "Symlink repointed to existing verified file", {
+        itemName: "Alpha Title (1995)",
+        linkPath: "/links/Alpha Title (1995)/alpha.mkv",
+        destinationPath: "/local/Alpha Title (1995)/alpha.mkv"
+      }, "info"),
+      event(4, "Verified copy installed", {
+        itemName: "Zulu Title (2020)",
+        linkPath: "/links/Zulu Title (2020)/zulu.mkv",
+        destinationPath: "/local/Zulu Title (2020)/zulu.mkv"
+      }, "info"),
+      event(5, "Copy skipped", {
+        itemName: "Skipped Title",
+        linkPath: "/links/Skipped Title/skipped.mkv"
+      }, "info"),
+      event(6, "ffmpeg fast validation failed", {
+        itemName: "Failed Title",
+        linkPath: "/links/Failed Title/failed.mkv"
+      })
+    ]);
+
+    expect(summaries).toEqual([
+      {
+        key: "/links/Alpha Title (1995)/alpha.mkv",
+        title: "Alpha Title (1995)",
+        fileName: "alpha.mkv",
+        outcome: "Matched existing and symlinked"
+      },
+      {
+        key: "/links/Zulu Title (2020)/zulu.mkv",
+        title: "Zulu Title (2020)",
+        fileName: "zulu.mkv",
+        outcome: "Copied and symlinked"
+      }
+    ]);
   });
 });

@@ -4293,7 +4293,7 @@ button.danger-button:hover:not(:disabled) {
 
 .audit-progress-stats > span > strong,
 .audit-progress-stats > div > strong,
-.copy-failed-items-tooltip > button > strong {
+.copy-item-details-tooltip > button > strong {
   color: var(--text-strong);
   font-size: 17px;
   line-height: 1;
@@ -4305,13 +4305,18 @@ button.danger-button:hover:not(:disabled) {
 
 .copy-progress-stats > span > strong,
 .copy-progress-stats > div > strong,
-.copy-failed-items-tooltip > button > strong {
+.copy-item-details-tooltip > button > strong {
   font-size: clamp(16px, 1.2vw, 17px);
 }
 
 .copy-progress-stat-bad > strong,
-.copy-progress-stat-bad .copy-failed-items-tooltip > button > strong {
+.copy-progress-stat-bad .copy-item-details-tooltip > button > strong {
   color: var(--bad);
+}
+
+.copy-progress-stat-good > strong,
+.copy-progress-stat-good .copy-item-details-tooltip > button > strong {
+  color: var(--good);
 }
 
 .copy-progress-stats > span > small {
@@ -4322,13 +4327,13 @@ button.danger-button:hover:not(:disabled) {
   text-transform: none;
 }
 
-.copy-failed-items-tooltip {
+.copy-item-details-tooltip {
   display: grid;
   min-width: 0;
   position: relative;
 }
 
-.copy-failed-items-tooltip.is-open::before {
+.copy-item-details-tooltip.is-open::before {
   bottom: 100%;
   content: "";
   height: 9px;
@@ -4337,7 +4342,7 @@ button.danger-button:hover:not(:disabled) {
   width: min(400px, calc(100vw - 56px));
 }
 
-.copy-failed-items-tooltip > button {
+.copy-item-details-tooltip > button {
   appearance: none;
   background: transparent;
   border: 0;
@@ -4353,13 +4358,13 @@ button.danger-button:hover:not(:disabled) {
   width: 100%;
 }
 
-.copy-failed-items-tooltip > button > span {
+.copy-item-details-tooltip > button > span {
   color: var(--muted);
   font-size: 11px;
   font-weight: 800;
 }
 
-.copy-failed-items-tooltip > button > small {
+.copy-item-details-tooltip > button > small {
   align-items: center;
   color: var(--bad);
   display: flex;
@@ -4371,13 +4376,21 @@ button.danger-button:hover:not(:disabled) {
   text-transform: none;
 }
 
-.copy-failed-items-tooltip > button:focus-visible {
+.copy-item-details-completed > button > small {
+  color: var(--good);
+}
+
+.copy-item-details-tooltip > button:focus-visible {
   border-radius: 3px;
   outline: 1px solid var(--bad);
   outline-offset: 3px;
 }
 
-.copy-failed-items-tooltip-panel {
+.copy-item-details-completed > button:focus-visible {
+  outline-color: var(--good);
+}
+
+.copy-item-details-tooltip-panel {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -4401,32 +4414,36 @@ button.danger-button:hover:not(:disabled) {
   z-index: 40;
 }
 
-.copy-failed-items-tooltip.is-open .copy-failed-items-tooltip-panel {
+.copy-item-details-tooltip.is-open .copy-item-details-tooltip-panel {
   opacity: 1;
   pointer-events: auto;
   visibility: visible;
 }
 
-.copy-failed-items-tooltip-heading {
+.copy-item-details-tooltip-heading {
   align-items: center;
   display: flex;
   justify-content: space-between;
 }
 
-.copy-failed-items-tooltip-heading > span {
+.copy-item-details-tooltip-heading > span {
   align-items: center;
   color: var(--bad);
   display: flex;
   gap: 6px;
 }
 
-.copy-failed-items-tooltip-heading strong {
+.copy-item-details-completed .copy-item-details-tooltip-heading > span {
+  color: var(--good);
+}
+
+.copy-item-details-tooltip-heading strong {
   color: var(--text-strong);
   font-size: 12px;
   line-height: 1.2;
 }
 
-.copy-failed-items-tooltip-close {
+.copy-item-details-tooltip-close {
   align-items: center;
   background: transparent;
   border: 1px solid var(--border-soft);
@@ -4439,13 +4456,13 @@ button.danger-button:hover:not(:disabled) {
   width: 26px;
 }
 
-.copy-failed-items-tooltip-close:hover,
-.copy-failed-items-tooltip-close:focus-visible {
+.copy-item-details-tooltip-close:hover,
+.copy-item-details-tooltip-close:focus-visible {
   background: var(--secondary-hover);
   color: var(--text-strong);
 }
 
-.copy-failed-items-tooltip-list {
+.copy-item-details-tooltip-list {
   display: grid;
   gap: 7px;
   list-style: none;
@@ -4453,29 +4470,29 @@ button.danger-button:hover:not(:disabled) {
   padding: 0;
 }
 
-.copy-failed-items-tooltip-list li {
+.copy-item-details-tooltip-list li {
   border-top: 1px solid var(--border-soft);
   display: grid;
   gap: 3px;
   padding-top: 7px;
 }
 
-.copy-failed-items-tooltip-list strong,
-.copy-failed-items-tooltip-list span,
-.copy-failed-items-tooltip-list small {
+.copy-item-details-tooltip-list strong,
+.copy-item-details-tooltip-list span,
+.copy-item-details-tooltip-list small {
   overflow-wrap: anywhere;
   white-space: normal;
 }
 
-.copy-failed-items-tooltip-list strong {
+.copy-item-details-tooltip-list strong {
   color: var(--text-strong);
   font-size: 12px;
   line-height: 1.25;
 }
 
-.copy-failed-items-tooltip-list span,
-.copy-failed-items-tooltip-list small,
-.copy-failed-items-tooltip-panel p {
+.copy-item-details-tooltip-list span,
+.copy-item-details-tooltip-list small,
+.copy-item-details-tooltip-panel p {
   color: var(--muted);
   font-size: 11px;
   font-weight: 650;
@@ -4483,7 +4500,7 @@ button.danger-button:hover:not(:disabled) {
   margin: 0;
 }
 
-.copy-failed-items-tooltip-panel .copy-failed-items-tooltip-error {
+.copy-item-details-tooltip-panel .copy-item-details-tooltip-error {
   color: var(--bad);
 }
 
