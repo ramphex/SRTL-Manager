@@ -74,5 +74,10 @@
     "typescript-eslint": "^8.64.0",
     "vite": "^8.1.5",
     "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "concurrently": {
+      "shell-quote": "1.10.0"
+    }
   }
 }
