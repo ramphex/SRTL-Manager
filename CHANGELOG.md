@@ -4,11 +4,19 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-25
+
+### Added
+
+- Added persistent, scrollable summaries for completed and failed copy items, including single-file failures.
+- Added complete job event timelines and automatic inventory refreshes after background work finishes.
+- Added contributor database guidance, structured issue forms, and clearer beta setup documentation.
+
 ### Changed
 
-- Documented a reproducible contributor database, secure backup permissions, MIT contribution terms, and structured issue reporting.
-- Prepared `0.1.1-beta.1` with Brotli/gzip responses, immutable hashed assets, and on-demand loading for library, job, history, logs, integration, and settings views.
-- Prepared `0.1.1-beta.2` with current non-major npm dependencies, Lucide v1, and pinned GitHub Actions updates.
+- Reduced client startup work with Brotli/gzip responses, immutable hashed assets, and on-demand loading for library, job, history, logs, integration, and settings views.
+- Updated the runtime to Node.js 24 LTS and refreshed supported application dependencies, Lucide icons, and pinned GitHub Actions.
+- Improved copy-result presentation and kept open inventory work lists synchronized with completed scans and copies.
 
 ### Security
 

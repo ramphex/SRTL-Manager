@@ -791,9 +791,9 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.1-beta.2",
-      currentChannel: "beta",
-      currentChannelLabel: "Beta",
+      currentVersion: "0.1.1",
+      currentChannel: "stable",
+      currentChannelLabel: "Stable",
       latestVersion: null,
       updateAvailable: false,
       status: "unavailable",
@@ -858,23 +858,23 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.1-beta.2",
-      currentChannel: "beta",
-      currentChannelLabel: "Beta",
-      latestVersion: "0.2.0-beta.1",
+      currentVersion: "0.1.1",
+      currentChannel: "stable",
+      currentChannelLabel: "Stable",
+      latestVersion: "0.1.1",
       updateAvailable: true,
       status: "update_available",
-      releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.2.0-beta.1",
-      message: "Stable v0.1.1 available; Beta v0.2.0-beta.1 available",
+      releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.1.1",
+      message: "Beta v0.2.0-beta.1 available",
       checkedAt: expect.any(String),
       stable: {
         channel: "stable",
         latestVersion: "0.1.1",
-        updateAvailable: true,
-        status: "update_available",
+        updateAvailable: false,
+        status: "up_to_date",
         releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.1.1",
         releaseNotes: "Stable release notes",
-        message: "Stable v0.1.1 available"
+        message: "Stable is up to date"
       },
       beta: {
         channel: "beta",
