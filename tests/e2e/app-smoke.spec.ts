@@ -49,6 +49,118 @@ test("loads the authenticated dashboard when a development session is provided",
   await expect(page.getByText("Library Summary", { exact: true })).toBeVisible();
 });
 
+test("refreshes an open work list when an inventory job finishes", async ({ page }) => {
+  test.setTimeout(15_000);
+  let inventoryJobPolls = 0;
+  let workListRequests = 0;
+  const timestamp = "2026-07-19T12:00:00.000Z";
+  const emptyInventory = {
+    totalLinks: 2,
+    remoteLinks: 2,
+    localLinks: 0,
+    brokenLinks: 0,
+    otherLinks: 0,
+    nonMediaLinks: 0,
+    actionableRemoteLinks: 2,
+    actionableLocalLinks: 0,
+    assignedRemoteLinks: 0,
+    unassignedRemoteLinks: 0,
+    unassignedLocalLinks: 0,
+    localFiles: 0,
+    remoteFiles: 0,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: 0,
+    unassignedLocalFiles: 0,
+    localOrphanFiles: 0,
+    remoteOrphanFiles: 0,
+    missingLinks: 0,
+    missingLocalFiles: 0,
+    missingRemoteFiles: 0
+  };
+  const mediaRows = [
+    {
+      id: 1,
+      section: "shows",
+      itemName: "Older Result",
+      relativePath: "Older Result/Season 01/Older Result - S01E01.mkv",
+      linkPath: "/mnt/links/shows/Older Result/Season 01/Older Result - S01E01.mkv",
+      targetPath: "/mnt/remote/Older Result - S01E01.mkv",
+      kind: "remote",
+      targetExists: true,
+      isMedia: true,
+      storagePolicy: "location_1",
+      resolvedStorageFileId: null,
+      sizeBytes: 100,
+      firstSeenAt: timestamp,
+      lastSeenAt: timestamp,
+      lastChangedAt: timestamp,
+      missingSince: null,
+      updatedAt: timestamp
+    },
+    {
+      id: 2,
+      section: "shows",
+      itemName: "New Result",
+      relativePath: "New Result/Season 01/New Result - S01E01.mkv",
+      linkPath: "/mnt/links/shows/New Result/Season 01/New Result - S01E01.mkv",
+      targetPath: "/mnt/remote/New Result - S01E01.mkv",
+      kind: "remote",
+      targetExists: true,
+      isMedia: true,
+      storagePolicy: "location_1",
+      resolvedStorageFileId: null,
+      sizeBytes: 100,
+      firstSeenAt: timestamp,
+      lastSeenAt: timestamp,
+      lastChangedAt: timestamp,
+      missingSince: null,
+      updatedAt: timestamp
+    }
+  ];
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    let body: unknown;
+
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
+    else if (url.pathname === "/api/system/version") {
+      const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
+      body = { currentVersion: "0.1.1", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+    }
+    else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
+    else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
+    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] };
+    else if (url.pathname === "/api/settings/audit") body = { sections: ["shows"], targets: ["local", "remote"] };
+    else if (url.pathname === "/api/sections") body = [{ section: "shows", title: "Shows", type: "shows", totalLinks: 2, itemCount: 2, seasonCount: 2, episodeCount: 2, remoteLinks: 2, localLinks: 0, brokenLinks: 0, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 2, actionableLocalLinks: 0, assignedRemoteLinks: 0, unassignedRemoteLinks: 0, unassignedLocalLinks: 0 }];
+    else if (url.pathname === "/api/inventory/summary") body = emptyInventory;
+    else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: { shows: timestamp }, localSections: { shows: null }, remoteRoot: null };
+    else if (url.pathname === "/api/media-links/page") {
+      workListRequests += 1;
+      const rows = workListRequests === 1 ? [mediaRows[1]] : mediaRows;
+      body = { rows, total: 2, limit: 250, offset: 0, hasMore: rows.length < 2 };
+    } else if (url.pathname === "/api/jobs" && url.searchParams.get("completedWithinMinutes") === "15") {
+      inventoryJobPolls += 1;
+      const completed = inventoryJobPolls > 1;
+      body = [{ id: 900, type: "scan", status: completed ? "completed" : "running", createdAt: timestamp, startedAt: timestamp, finishedAt: completed ? timestamp : null, progress: {} }];
+    } else if (url.pathname === "/api/jobs") body = [];
+    else body = {};
+
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: "Shows: 2 episodes need copy to Local", exact: true }).click();
+  await expect(page.getByText("New Result", { exact: true })).toBeVisible();
+  await expect(page.getByText("Older Result", { exact: true })).toBeVisible({ timeout: 8_000 });
+  expect(workListRequests).toBeGreaterThanOrEqual(2);
+});
+
 test("renders every authenticated route without page errors or global overflow", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   test.setTimeout(90_000);
@@ -669,4 +781,270 @@ test("job progress shows the complete event timeline and opens the selected full
   await expect(summaryCards).toHaveCount(5);
   const summaryCardTops = await summaryCards.evaluateAll((cards) => cards.map((card) => Math.round(card.getBoundingClientRect().top)));
   expect(new Set(summaryCardTops).size).toBe(1);
+});
+
+test("copy progress opens a persistent, scrollable failed item summary", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const jobId = 999999;
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
+  const titles = ["Zulu Title (2026)", "Bravo Title (2026)", "Hotel Title (2026)", "Alpha Title (2026)", "Foxtrot Title (2026)", "Delta Title (2026)"];
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "partially_failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: new Date().toISOString(),
+    progress: {
+      options: { direction: "to_local", itemName: "Failure summary test" },
+      stage: "partially_failed",
+      message: "Copy job partially failed",
+      total: 7,
+      current: 7,
+      copied: 1,
+      repointed: 0,
+      conflicts: 0,
+      failed: titles.length
+    }
+  };
+  const events = titles.map((title, index) => ({
+    id: 8000 + index,
+    jobId,
+    timestamp,
+    level: "error",
+    message: index === 0 ? "ffmpeg fast validation failed: moov atom not found" : "ffmpeg fast validation failed: Invalid data found when processing input",
+    data: {
+      itemName: title,
+      linkPath: `/links/${title}/file-${index}.mkv`,
+      sourcePath: `/remote/${title}/file-${index}.mkv`
+    }
+  }));
+
+  await page.route(`**/api/jobs/${jobId}/events/page*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events, total: events.length, hasOlder: false }) });
+  });
+  await page.route(`**/api/jobs/${jobId}`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+  });
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  const trigger = dialog.getByRole("button", { name: `View ${titles.length} failed items`, exact: true });
+  const tooltip = dialog.getByRole("region", { name: "Failed item details", exact: true });
+  await expect(trigger).toContainText("View failed items");
+  await trigger.hover();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip.locator("li > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+  await expect(tooltip).toContainText("Media validation failed: moov atom not found");
+  await expect(tooltip).toContainText("Media validation failed: invalid media data");
+  expect(await tooltip.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await tooltip.hover();
+  await page.mouse.wheel(0, 160);
+  await expect(tooltip).toBeVisible();
+
+  await trigger.click();
+  await dialog.getByText("Overall job", { exact: true }).hover();
+  await expect(tooltip).toBeVisible();
+
+  const tooltipBox = await tooltip.boundingBox();
+  const viewport = page.viewportSize();
+  expect(tooltipBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(tooltipBox!.x).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.y).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.x + tooltipBox!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(tooltipBox!.y + tooltipBox!.height).toBeLessThanOrEqual(viewport!.height);
+
+  await tooltip.getByRole("button", { name: "Close failed item details", exact: true }).click();
+  await expect(tooltip).toBeHidden();
+});
+
+test("copy progress exposes details for a single failed item", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const jobId = 999998;
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
+  const title = "Single Failure Title (2026)";
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "partially_failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: new Date().toISOString(),
+    progress: {
+      options: { direction: "to_local", itemName: title },
+      stage: "partially_failed",
+      message: "Copy job partially failed",
+      total: 30,
+      current: 30,
+      copied: 29,
+      repointed: 0,
+      conflicts: 0,
+      failed: 1
+    }
+  };
+  const events = [
+    {
+      id: 9000,
+      jobId,
+      timestamp,
+      level: "error",
+      message: "ffmpeg fast validation failed: moov atom not found",
+      data: {
+        itemName: title,
+        linkPath: `/links/${title}/failed-file.mkv`,
+        sourcePath: `/remote/${title}/failed-file.mkv`
+      }
+    }
+  ];
+
+  await page.route(`**/api/jobs/${jobId}/events/page*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events, total: 1, hasOlder: false }) });
+  });
+  await page.route(`**/api/jobs/${jobId}`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+  });
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  const trigger = dialog.getByRole("button", { name: "View 1 failed item", exact: true });
+  await expect(trigger).toContainText("View failed item");
+  await trigger.click();
+
+  const details = dialog.getByRole("region", { name: "Failed item details", exact: true });
+  await expect(details).toBeVisible();
+  await expect(details).toContainText(title);
+  await expect(details).toContainText("failed-file.mkv");
+  await expect(details).toContainText("Media validation failed: moov atom not found");
+});
+
+test("copy progress opens a persistent, scrollable completed item summary", async ({ page }) => {
+  test.setTimeout(15_000);
+  const jobId = 999997;
+  const timestamp = new Date().toISOString();
+  const titles = ["Zulu Title (2026)", "Bravo Title (2026)", "Hotel Title (2026)", "Alpha Title (2026)", "Foxtrot Title (2026)", "Delta Title (2026)"];
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "partially_failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    progress: {
+      options: { direction: "to_local", itemName: "Completion summary test" },
+      stage: "partially_failed",
+      message: "Copy job partially failed",
+      total: titles.length + 1,
+      current: titles.length + 1,
+      copied: titles.length - 1,
+      repointed: 1,
+      conflicts: 0,
+      failed: 1
+    }
+  };
+  const events = [...titles.flatMap((title, index) => {
+    const linkPath = `/links/${title}/file-${index}.mkv`;
+    const destinationPath = `/local/${title}/file-${index}.mkv`;
+    const completion = {
+      id: 9100 + index * 2 + 1,
+      jobId,
+      timestamp,
+      level: "info",
+      message: index === 1 ? "Symlink repointed to existing verified file" : "Verified copy installed",
+      data: {
+        ...(index === 0 ? {} : { itemName: title }),
+        linkPath,
+        sourcePath: `/remote/${title}/file-${index}.mkv`,
+        destinationPath
+      }
+    };
+    if (index !== 0) return [completion];
+    return [
+      {
+        id: 9100,
+        jobId,
+        timestamp,
+        level: "info",
+        message: "Promoting verified copy and repointing symlink",
+        data: { currentTitle: title, linkPath, destinationPath }
+      },
+      completion
+    ];
+  }), {
+    id: 9300,
+    jobId,
+    timestamp,
+    level: "error",
+    message: "ffmpeg fast validation failed: moov atom not found",
+    data: {
+      itemName: "Failed Title (2026)",
+      linkPath: "/links/Failed Title (2026)/failed.mkv",
+      sourcePath: "/remote/Failed Title (2026)/failed.mkv"
+    }
+  }];
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    let body: unknown;
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
+    else if (url.pathname === "/api/system/version") {
+      const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
+      body = { currentVersion: "0.1.1", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+    } else if (url.pathname === `/api/jobs/${jobId}/events/page`) body = { events, total: events.length, hasOlder: false };
+    else if (url.pathname === `/api/jobs/${jobId}`) body = job;
+    else if (url.pathname === "/api/jobs") body = [job];
+    else if (url.pathname === "/api/settings/sections") body = { sections: [], sectionTitles: {}, sectionTypes: {} };
+    else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
+    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: false, scanLocal: false, scanRemote: false, symlinkSections: [], localSections: [] };
+    else if (url.pathname === "/api/settings/audit") body = { sections: [], targets: ["local", "remote"] };
+    else if (url.pathname === "/api/sections") body = [];
+    else if (url.pathname === "/api/inventory/summary") body = {};
+    else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: {}, localSections: {}, remoteRoot: null };
+    else body = {};
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+
+  const dialog = page.getByRole("dialog");
+  const trigger = dialog.getByRole("button", { name: `View ${titles.length} completed items`, exact: true });
+  const details = dialog.getByRole("region", { name: "Completed item details", exact: true });
+  await expect(trigger).toContainText("View completed items");
+  await trigger.hover();
+  await expect(details).toBeVisible();
+  await expect(details.locator("li > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+  await expect(details).toContainText("Copied and symlinked");
+  await expect(details).toContainText("Matched existing and symlinked");
+  expect(await details.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
+  await details.hover();
+  await page.mouse.wheel(0, 160);
+  await expect(details).toBeVisible();
+
+  await trigger.click();
+  await dialog.getByText("Overall job", { exact: true }).hover();
+  await expect(details).toBeVisible();
+  await details.getByRole("button", { name: "Close completed item details", exact: true }).click();
+  await expect(details).toBeHidden();
+
+  const failedTrigger = dialog.getByRole("button", { name: "View 1 failed item", exact: true });
+  const failedDetails = dialog.getByRole("region", { name: "Failed item details", exact: true });
+  await failedTrigger.hover();
+  await expect(failedDetails).toBeVisible();
+  await expect(failedDetails).toContainText("Failed Title (2026)");
+  await expect(failedDetails).toContainText("Media validation failed: moov atom not found");
 });

@@ -61,6 +61,23 @@ describe("config", () => {
     expect(decodeURIComponent(databaseUrl.password)).toBe("p@ss/word");
   });
 
+  it("rejects the published database password placeholder in production", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPassword = process.env.SRTL_POSTGRES_PASSWORD;
+    try {
+      process.env.NODE_ENV = "production";
+      delete process.env.SRTL_POSTGRES_PASSWORD;
+      await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_POSTGRES_PASSWORD=replace-with-your-password\n");
+
+      expect(() => loadConfig({ rootDir: tmpDir })).toThrow("still uses the .env.example placeholder");
+    } finally {
+      if (previousNodeEnv == null) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+      if (previousPassword == null) delete process.env.SRTL_POSTGRES_PASSWORD;
+      else process.env.SRTL_POSTGRES_PASSWORD = previousPassword;
+    }
+  });
+
   it("rejects invalid ports, database URLs, and cross-origin configuration", async () => {
     await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_PORT=70000\n");
     expect(() => loadConfig({ rootDir: tmpDir })).toThrow("Invalid port setting");

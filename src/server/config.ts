@@ -32,6 +32,7 @@ export interface JobConcurrencySettings {
 // effective worker count hard-capped at 1 while scan/copy/audit behavior is
 // hardened.
 const currentWorkerCountHardLimit = 1;
+const exampleDatabasePassword = "replace-with-your-password";
 
 function booleanSetting(value: string | undefined, fallback: boolean): boolean {
   if (value == null || value.trim() === "") return fallback;
@@ -89,6 +90,9 @@ export function resolveDatabaseUrl(envFile: ReturnType<typeof readEnvFile> = {})
   const user = requiredDatabaseSetting(process.env.SRTL_POSTGRES_USER ?? envFile.SRTL_POSTGRES_USER, "SRTL_POSTGRES_USER", "srtl");
   const password = process.env.SRTL_POSTGRES_PASSWORD ?? envFile.SRTL_POSTGRES_PASSWORD ?? (process.env.NODE_ENV === "production" ? "" : "srtl");
   if (!password) throw new Error("SRTL_POSTGRES_PASSWORD must not be empty");
+  if (process.env.NODE_ENV === "production" && password.trim().toLowerCase() === exampleDatabasePassword) {
+    throw new Error("SRTL_POSTGRES_PASSWORD still uses the .env.example placeholder");
+  }
 
   const url = new URL("postgresql://localhost");
   url.hostname = host;

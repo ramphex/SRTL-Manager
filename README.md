@@ -48,7 +48,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 
 - `SYMLINK_DIR`: the existing absolute path containing the managed symlinks.
 - `SRTL_LOCATION_1_PATH` and `SRTL_LOCATION_2_PATH`: existing absolute storage paths. Their friendly names are set during onboarding and can be changed later in Settings > Library.
-- `SRTL_POSTGRES_PASSWORD`: your database password. It is entered only once.
+- `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy.
 
@@ -65,11 +65,15 @@ Open `http://<server-ip>:5179` unless a different port was selected. The browser
 
 The default configuration follows the current stable `latest` image. Pin `SRTL_IMAGE` to a numbered image tag when repeatable deployments are more important than automatically following stable updates.
 
+> **Beta builds:** When a beta image is available, set `SRTL_IMAGE=ghcr.io/ramphex/srtl-manager:beta` in `.env`. Beta builds contain newer work that has not yet been promoted to a stable release.
+
 ## Deployment Model
 
 `.env` is the single source of truth for deployment-owned paths, credentials, host binding, and ports. Persistent database files stay in `./data` beside `docker-compose.yml`; that path does not need configuration. Numbered storage-location variables keep deployment identity separate from friendly names managed in Settings > Library. Friendly names, section names, display order, policies, and user preferences live in Postgres.
 
 The API receives read-only root mounts. The worker alone receives writable roots for copy and path-migration jobs. Postgres is reachable only inside the Compose network.
+
+The API checks the public GitHub Releases endpoint for stable and beta version information at startup and when version status is refreshed. This request does not include credentials, paths, or inventory data.
 
 When a configured root changes, restart the stack. The UI enters maintenance mode until it validates and applies a path migration or the prior value is restored. This rebases managed paths; it does not move stored content.
 
@@ -78,7 +82,7 @@ When a configured root changes, restart the stack. The UI enters maintenance mod
 Create a database backup before upgrades or path changes:
 
 ```bash
-docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > srtl-manager-backup.sql
+(umask 077 && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > srtl-manager-backup.sql)
 ```
 
 Restore into an empty database while app services are stopped:
@@ -90,11 +94,17 @@ docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' 
 docker compose start api worker
 ```
 
-Keep `.env` and any `.env.backup.*` files private; they contain database credentials.
+Keep `.env`, `.env.backup.*`, and database dump files private. Dumps contain account hashes, paths, inventory records, and job history.
 
 ## Development
 
-Requires Node.js 22 and Postgres 17.
+Requires Node.js 24 and Postgres 17. The simplest local setup uses Docker and an available port `5432`:
+
+```bash
+docker run --name srtl-manager-dev-postgres --rm -d -p 5432:5432 -e POSTGRES_DB=srtl_manager -e POSTGRES_USER=srtl -e POSTGRES_PASSWORD=srtl postgres:17-alpine
+```
+
+Then install dependencies and start the API, web interface, and worker:
 
 ```bash
 npm ci
@@ -109,6 +119,8 @@ npm run build
 npm run test:e2e
 ```
 
+Stop the disposable database with `docker stop srtl-manager-dev-postgres`. To use an existing Postgres instance instead, provide the `SRTL_POSTGRES_*` settings or `SRTL_DATABASE_URL` in a local `.env`.
+
 ## Releases And Contributions
 
 - Pull requests target `beta`.
@@ -120,6 +132,10 @@ npm run test:e2e
 
 See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CHANGELOG.md](CHANGELOG.md).
 
+## License
+
+SRTL Manager is available under the [MIT License](LICENSE). Contributions are accepted under the same license.
+
 ## Roadmap
 
 - External metadata and automation adapters.
@@ -127,5 +143,3 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CHANGEL
 - Event-driven targeted refresh hooks.
 - Additional numbered storage locations and per-location assignment policies.
 - Controlled multi-worker execution after single-worker recovery semantics are fully proven.
-
-> **Beta builds:** When a beta image is available, set `SRTL_IMAGE=ghcr.io/ramphex/srtl-manager:beta` in `.env`. Beta builds contain newer work that has not yet been promoted to a stable release.

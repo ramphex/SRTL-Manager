@@ -4,6 +4,27 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-25
+
+### Added
+
+- Added persistent, scrollable summaries for completed and failed copy items, including single-file failures.
+- Added complete job event timelines and automatic inventory refreshes after background work finishes.
+- Added contributor database guidance, structured issue forms, and clearer beta setup documentation.
+
+### Changed
+
+- Reduced client startup work with Brotli/gzip responses, immutable hashed assets, and on-demand loading for library, job, history, logs, integration, and settings views.
+- Updated the runtime to Node.js 24 LTS and refreshed supported application dependencies, Lucide icons, and pinned GitHub Actions.
+- Improved copy-result presentation and kept open inventory work lists synchronized with completed scans and copies.
+
+### Security
+
+- Patched newly disclosed dependency vulnerabilities and kept unsupported TypeScript 7 upgrades out of automated update proposals until the lint toolchain supports them.
+- Made path-migration rollback fail closed when a symlink changes during recovery.
+- Required stable releases to match `main`, scan the published versioned image before promoting `latest`, upload CodeQL results, and use a pinned runtime base image.
+- Refused empty or published-placeholder database passwords before application startup.
+
 ## [0.1.0] - 2026-07-14
 
 ### Added

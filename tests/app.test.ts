@@ -339,6 +339,46 @@ describe("api app", () => {
     await fs.rm(tmpDir, { recursive: true, force: true });
   });
 
+  it("compresses static assets and only caches fingerprinted bundles immutably", async () => {
+    const webRoot = path.join(tmpDir, "web");
+    const assetsRoot = path.join(webRoot, "assets");
+    await fs.mkdir(assetsRoot, { recursive: true });
+    await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
+    await fs.writeFile(path.join(webRoot, "theme-init.js"), "document.documentElement.dataset.theme = 'dark';");
+    await fs.writeFile(path.join(assetsRoot, "index-a1b2c3.js"), `const payload = ${JSON.stringify("compressible payload ".repeat(300))};`);
+
+    await ctx.app.close();
+    ctx = await createApp({
+      rootDir: tmpDir,
+      dataDir: path.join(tmpDir, "data"),
+      databaseUrl: testDatabase.databaseUrl,
+      webRoot
+    });
+
+    const asset = await ctx.app.inject({
+      method: "GET",
+      url: "/assets/index-a1b2c3.js",
+      headers: { "accept-encoding": "gzip" }
+    });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers["content-encoding"]).toBe("gzip");
+    expect(asset.headers.vary).toContain("accept-encoding");
+    expect(asset.headers["cache-control"]).toBe("public, max-age=31536000, immutable");
+
+    const entryScript = await ctx.app.inject({ method: "GET", url: "/theme-init.js" });
+    expect(entryScript.statusCode).toBe(200);
+    expect(entryScript.headers["cache-control"]).toBe("no-cache");
+
+    const index = await ctx.app.inject({ method: "GET", url: "/" });
+    expect(index.statusCode).toBe(200);
+    expect(index.headers["cache-control"]).toBe("no-cache");
+
+    const clientRoute = await ctx.app.inject({ method: "GET", url: "/library" });
+    expect(clientRoute.statusCode).toBe(200);
+    expect(clientRoute.headers["cache-control"]).toBe("no-cache");
+    expect(clientRoute.body).toContain("<div id=\"root\"></div>");
+  });
+
   it("requires setup and protects API routes", async () => {
     const me = await ctx.app.inject({ method: "GET", url: "/api/auth/me" });
     expect(me.json()).toMatchObject({ authenticated: false, setupRequired: true });
@@ -751,7 +791,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.0",
+      currentVersion: "0.1.1",
       currentChannel: "stable",
       currentChannelLabel: "Stable",
       latestVersion: null,
@@ -818,23 +858,23 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.0",
+      currentVersion: "0.1.1",
       currentChannel: "stable",
       currentChannelLabel: "Stable",
       latestVersion: "0.1.1",
       updateAvailable: true,
       status: "update_available",
       releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.1.1",
-      message: "Stable v0.1.1 available; Beta v0.2.0-beta.1 available",
+      message: "Beta v0.2.0-beta.1 available",
       checkedAt: expect.any(String),
       stable: {
         channel: "stable",
         latestVersion: "0.1.1",
-        updateAvailable: true,
-        status: "update_available",
+        updateAvailable: false,
+        status: "up_to_date",
         releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.1.1",
         releaseNotes: "Stable release notes",
-        message: "Stable v0.1.1 available"
+        message: "Stable is up to date"
       },
       beta: {
         channel: "beta",
@@ -1758,7 +1798,12 @@ describe("api app", () => {
     await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("copy without content verification");
     await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
     await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(
-      expect.arrayContaining([expect.objectContaining({ message: "Copy installed without verification" })])
+      expect.arrayContaining([
+        expect.objectContaining({
+          message: "Copy installed without verification",
+          data: expect.objectContaining({ itemName: "No Verify Movie" })
+        })
+      ])
     );
   });
 
