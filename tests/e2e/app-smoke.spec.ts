@@ -931,7 +931,7 @@ test("copy progress exposes details for a single failed item", async ({ page }) 
 test("copy progress opens a persistent, scrollable completed item summary", async ({ page }) => {
   test.setTimeout(15_000);
   const jobId = 999997;
-  const timestamp = "2026-07-21T12:00:00.000Z";
+  const timestamp = new Date().toISOString();
   const titles = ["Zulu Title (2026)", "Bravo Title (2026)", "Hotel Title (2026)", "Alpha Title (2026)", "Foxtrot Title (2026)", "Delta Title (2026)"];
   const job = {
     id: jobId,
