@@ -8,9 +8,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Documented a reproducible contributor database, secure backup permissions, MIT contribution terms, and structured issue reporting.
 - Prepared `0.1.1-beta.1` with Brotli/gzip responses, immutable hashed assets, and on-demand loading for library, job, history, logs, integration, and settings views.
+- Prepared `0.1.1-beta.2` with current non-major npm dependencies, Lucide v1, and pinned GitHub Actions updates.
 
 ### Security
 
+- Patched newly disclosed dependency vulnerabilities and kept unsupported TypeScript 7 upgrades out of automated update proposals until the lint toolchain supports them.
 - Made path-migration rollback fail closed when a symlink changes during recovery.
 - Required stable releases to match `main`, scan the published versioned image before promoting `latest`, upload CodeQL results, and use a pinned runtime base image.
 - Refused empty or published-placeholder database passwords before application startup.
