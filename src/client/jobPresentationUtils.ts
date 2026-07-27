@@ -520,6 +520,22 @@ export function selectedLinkTitleSummaries(linkIds: number[], linkRowsById: Map<
   return summaries;
 }
 
+export function singleSelectedLinkTitle(linkIds: number[], linkRowsById: Map<number, MediaLinkRow> | undefined): string | null {
+  if (!linkRowsById || linkIds.length === 0) return null;
+  let selectedTitle: { key: string; label: string } | null = null;
+
+  for (const id of linkIds) {
+    const link = linkRowsById.get(id);
+    const label = link?.itemName.trim();
+    if (!link || !label) return null;
+    const key = `${link.section}\0${label}`;
+    if (selectedTitle && selectedTitle.key !== key) return null;
+    selectedTitle = { key, label };
+  }
+
+  return selectedTitle?.label ?? null;
+}
+
 export function copyPromptFromJob(
   job: JobRecord,
   availableSections: Array<{ section: string; title?: string | null }>,

@@ -805,6 +805,98 @@ test("recent jobs identifies a targeted scan by title instead of only its parent
   await expect(row.locator(".job-scope-cell > small")).toContainText("Movies 4K");
 });
 
+test("recent copy jobs show a single title directly and retain the title list for multi-title jobs", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const timestamp = new Date().toISOString();
+  const singleMovieTitle = "Single Copy Title (2026)";
+  const singleSeriesTitle = "Single Series Title (2026)";
+  const jobs = [
+    {
+      id: 999991,
+      type: "copy",
+      status: "completed",
+      createdAt: timestamp,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      progress: { options: { direction: "to_local", linkIds: [9101] }, stage: "completed", total: 1, current: 1, copied: 1 }
+    },
+    {
+      id: 999992,
+      type: "copy",
+      status: "completed",
+      createdAt: timestamp,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      progress: { options: { direction: "to_local", linkIds: [9201, 9202] }, stage: "completed", total: 2, current: 2, copied: 2 }
+    },
+    {
+      id: 999993,
+      type: "copy",
+      status: "completed",
+      createdAt: timestamp,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      progress: { options: { direction: "to_local", linkIds: [9301, 9302] }, stage: "completed", total: 2, current: 2, copied: 2 }
+    }
+  ];
+  const link = (id: number, section: string, itemName: string) => ({
+    id,
+    section,
+    itemName,
+    relativePath: `${itemName}/item-${id}.mkv`,
+    linkPath: `/links/${itemName}/item-${id}.mkv`,
+    targetPath: `/remote/${itemName}/item-${id}.mkv`,
+    kind: "remote",
+    targetExists: true,
+    isMedia: true,
+    storagePolicy: "location_1",
+    resolvedStorageFileId: null,
+    sizeBytes: 1,
+    firstSeenAt: timestamp,
+    lastSeenAt: timestamp,
+    lastChangedAt: timestamp,
+    missingSince: null,
+    updatedAt: timestamp
+  });
+  const links = [
+    link(9101, "movies", singleMovieTitle),
+    link(9201, "shows", singleSeriesTitle),
+    link(9202, "shows", singleSeriesTitle),
+    link(9301, "movies", "Alpha Multi Title (2026)"),
+    link(9302, "movies", "Zulu Multi Title (2026)")
+  ];
+
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(jobs) });
+  });
+  await page.route("**/api/media-links/by-ids", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(links) });
+  });
+  await page.route("**/api/settings/storage-locations", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/remote" }] })
+    });
+  });
+
+  await page.goto(baseUrl!);
+  const singleMovieRow = page.locator("tbody tr").filter({ hasText: "#999991" });
+  const singleSeriesRow = page.locator("tbody tr").filter({ hasText: "#999992" });
+  const multiTitleRow = page.locator("tbody tr").filter({ hasText: "#999993" });
+
+  await expect(singleMovieRow.locator(".job-scope-cell > small")).toHaveText(singleMovieTitle);
+  await expect(singleMovieRow.getByLabel("View selected titles")).toHaveCount(0);
+  await expect(singleSeriesRow.locator(".job-scope-cell > small")).toHaveText(singleSeriesTitle);
+  await expect(singleSeriesRow.getByLabel("View selected titles")).toHaveCount(0);
+
+  await expect(multiTitleRow.locator(".job-scope-detail-line > span:first-child")).toHaveText("2 selected links");
+  const multiTitleTrigger = multiTitleRow.getByLabel("View selected titles");
+  await expect(multiTitleTrigger).toHaveCount(1);
+  await multiTitleTrigger.hover();
+  await expect(multiTitleTrigger.locator("li")).toHaveText(["Alpha Multi Title (2026)", "Zulu Multi Title (2026)"]);
+});
+
 test("job progress shows the complete event timeline and opens the selected full log", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   const jobId = 999998;

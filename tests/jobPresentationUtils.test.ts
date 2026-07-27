@@ -1,10 +1,58 @@
 import { describe, expect, it } from "vitest";
-import { copyCompletedItemSummaries, copyFailedItemSummaries } from "../src/client/jobPresentationUtils";
-import type { JobEventRecord } from "../src/shared/types";
+import { copyCompletedItemSummaries, copyFailedItemSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
+import type { JobEventRecord, MediaLinkRow } from "../src/shared/types";
 
 function event(id: number, message: string, data: unknown, level: JobEventRecord["level"] = "error"): JobEventRecord {
   return { id, jobId: 42, timestamp: "2026-07-17T12:00:00.000Z", level, message, data };
 }
+
+function mediaLink(id: number, section: string, itemName: string): MediaLinkRow {
+  const timestamp = "2026-07-17T12:00:00.000Z";
+  return {
+    id,
+    section,
+    itemName,
+    relativePath: `${itemName}/item-${id}.mkv`,
+    linkPath: `/links/${itemName}/item-${id}.mkv`,
+    targetPath: `/remote/${itemName}/item-${id}.mkv`,
+    kind: "remote",
+    targetExists: true,
+    isMedia: true,
+    storagePolicy: "location_1",
+    resolvedStorageFileId: null,
+    sizeBytes: null,
+    firstSeenAt: timestamp,
+    lastSeenAt: timestamp,
+    lastChangedAt: timestamp,
+    missingSince: null,
+    updatedAt: timestamp
+  };
+}
+
+describe("selected link title display", () => {
+  it("returns a title when every selected link resolves to the same section and title", () => {
+    const rows = new Map([
+      [1, mediaLink(1, "shows", "Single Series (2026)")],
+      [2, mediaLink(2, "shows", "Single Series (2026)")]
+    ]);
+
+    expect(singleSelectedLinkTitle([1], rows)).toBe("Single Series (2026)");
+    expect(singleSelectedLinkTitle([1, 2], rows)).toBe("Single Series (2026)");
+  });
+
+  it("falls back when titles differ, sections differ, or inventory rows are incomplete", () => {
+    const rows = new Map([
+      [1, mediaLink(1, "movies", "Shared Title (2026)")],
+      [2, mediaLink(2, "movies", "Another Title (2026)")],
+      [3, mediaLink(3, "movies4k", "Shared Title (2026)")]
+    ]);
+
+    expect(singleSelectedLinkTitle([1, 2], rows)).toBeNull();
+    expect(singleSelectedLinkTitle([1, 3], rows)).toBeNull();
+    expect(singleSelectedLinkTitle([1, 4], rows)).toBeNull();
+    expect(singleSelectedLinkTitle([], rows)).toBeNull();
+  });
+});
 
 describe("copy failure summaries", () => {
   it("collects identifiable item failures, deduplicates retries, and sorts titles", () => {
