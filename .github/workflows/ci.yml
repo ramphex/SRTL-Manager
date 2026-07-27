@@ -6,6 +6,12 @@ on:
   push:
     branches: [beta, main]
   workflow_dispatch:
+    inputs:
+      publish_beta:
+        description: Publish the current beta prerelease container
+        required: false
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -142,3 +148,67 @@ jobs:
         run: |
           test ! -f /tmp/srtl-api.log || tail -200 /tmp/srtl-api.log
           test ! -f /tmp/srtl-worker.log || tail -200 /tmp/srtl-worker.log
+
+  publish-beta:
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_beta == true
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: version
+        name: Validate beta publication
+        run: |
+          if [[ "$GITHUB_REF_NAME" != "beta" ]]; then
+            echo "Beta images may only be published from the beta branch."
+            exit 1
+          fi
+          version="$(node -p 'require("./package.json").version')"
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-beta\.[1-9][0-9]*$ ]]; then
+            echo "Beta versions must use the form 0.1.2-beta.1."
+            exit 1
+          fi
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+      - name: Validate container definition
+        run: docker build --check .
+      - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
+      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: metadata
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/srtl-manager
+          tags: |
+            type=raw,value=${{ steps.version.outputs.value }}
+      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+      - name: Scan the published beta image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ghcr.io/${{ github.repository_owner }}/srtl-manager:${{ steps.version.outputs.value }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH
+      - name: Promote the verified image to beta
+        env:
+          IMAGE_REF: ghcr.io/${{ github.repository_owner }}/srtl-manager
+          VERSION: ${{ steps.version.outputs.value }}
+        run: docker buildx imagetools create --tag "$IMAGE_REF:beta" "$IMAGE_REF:$VERSION"

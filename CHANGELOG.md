@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.2-beta.1] - 2026-07-27
+
+### Changed
+
+- Replaced layout-shifting dashboard action messages with responsive overlay notifications.
+- Displayed a copy job's title directly when all selected links belong to one title, while retaining the title list for multi-title jobs.
+
 ## [0.1.1] - 2026-07-25
 
 ### Added
