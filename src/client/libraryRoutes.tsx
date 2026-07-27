@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
+import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
 import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/sourceTitleRisk";
 import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets } from "./jobScopeLocks";
@@ -32,6 +32,35 @@ function titleRescanOptions(titleScopes: ScanTitleScope[]): ScanOptions {
 
 function titleScopeIsPending(scopes: ScanTitleScope[] | undefined, section: string, itemName: string): boolean {
   return Boolean(scopes?.some((scope) => scope.section === section && scope.itemName === itemName));
+}
+
+function ActionToast({ message, tone }: { message: string | null; tone: "success" | "error" }) {
+  const [visibleMessage, setVisibleMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setVisibleMessage(message);
+    if (!message) return;
+
+    const timeout = window.setTimeout(() => setVisibleMessage(null), tone === "error" ? 10_000 : 6_000);
+    return () => window.clearTimeout(timeout);
+  }, [message, tone]);
+
+  if (!visibleMessage || typeof document === "undefined") return null;
+  const Icon = tone === "error" ? TriangleAlert : CheckCircle2;
+
+  return createPortal(
+    <div className={`action-toast action-toast-${tone}`} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"} aria-atomic="true">
+      <Icon className="action-toast-icon" size={20} />
+      <div className="action-toast-content">
+        <strong>{tone === "error" ? "Action failed" : "Task queued"}</strong>
+        <span>{visibleMessage}</span>
+      </div>
+      <button type="button" className="action-toast-dismiss" aria-label="Dismiss notification" onClick={() => setVisibleMessage(null)}>
+        <X size={16} />
+      </button>
+    </div>,
+    document.body
+  );
 }
 
 export function DashboardPage() {
@@ -197,6 +226,7 @@ export function DashboardPage() {
     : startScan.data
       ? `Inventory scan job #${startScan.data.jobId} queued.`
       : null;
+  const actionToastMessage = actionError?.message ?? actionMessage;
 
   useEffect(() => {
     if (scanSettings.data) setScanOptions(stripLegacyScanSections(scanSettings.data));
@@ -419,8 +449,7 @@ export function DashboardPage() {
           </button>
         </section>
       </div>
-      {actionError ? <p className="action-message action-error">{actionError.message}</p> : null}
-      {!actionError && actionMessage ? <p className="action-message">{actionMessage}</p> : null}
+      <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
       <div className="dashboard-summary">
         <section className="summary-group summary-group-attention" aria-labelledby="attention-summary-title">
           <div className="summary-group-title">

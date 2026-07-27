@@ -49,6 +49,95 @@ test("loads the authenticated dashboard when a development session is provided",
   await expect(page.getByText("Library Summary", { exact: true })).toBeVisible();
 });
 
+test("dashboard task notifications overlay without shifting content", async ({ page }) => {
+  const timestamp = "2026-07-26T12:00:00.000Z";
+  const inventory = {
+    totalLinks: 1,
+    remoteLinks: 1,
+    localLinks: 0,
+    brokenLinks: 0,
+    otherLinks: 0,
+    nonMediaLinks: 0,
+    actionableRemoteLinks: 1,
+    actionableLocalLinks: 0,
+    assignedRemoteLinks: 0,
+    unassignedRemoteLinks: 0,
+    unassignedLocalLinks: 0,
+    localFiles: 0,
+    remoteFiles: 0,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: 0,
+    unassignedLocalFiles: 0,
+    localOrphanFiles: 0,
+    remoteOrphanFiles: 0,
+    missingLinks: 0,
+    missingLocalFiles: 0,
+    missingRemoteFiles: 0
+  };
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    let body: unknown;
+
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
+    else if (url.pathname === "/api/system/version") {
+      const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
+      body = { currentVersion: "0.1.2-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+    } else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
+    else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
+    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] };
+    else if (url.pathname === "/api/settings/audit") body = { sections: ["shows"], targets: ["local", "remote"] };
+    else if (url.pathname === "/api/sections") body = [{ section: "shows", title: "Shows", type: "shows", totalLinks: 1, itemCount: 1, seasonCount: 1, episodeCount: 1, remoteLinks: 1, localLinks: 0, brokenLinks: 0, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 1, actionableLocalLinks: 0, assignedRemoteLinks: 0, unassignedRemoteLinks: 0, unassignedLocalLinks: 0 }];
+    else if (url.pathname === "/api/inventory/summary") body = inventory;
+    else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: { shows: timestamp }, localSections: { shows: null }, remoteRoot: null };
+    else if (url.pathname === "/api/scans" && route.request().method() === "POST") body = { jobId: 321 };
+    else if (url.pathname === "/api/jobs") body = [];
+    else body = {};
+
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto(baseUrl!);
+  const summary = page.locator(".dashboard-summary");
+  const runScan = page.getByRole("button", { name: "Run Inventory Scan", exact: true });
+  await expect(summary).toBeVisible();
+  await expect(runScan).toBeEnabled();
+  const before = await summary.boundingBox();
+
+  await runScan.click();
+  const toast = page.locator(".action-toast");
+  await expect(toast).toContainText("Inventory scan job #321 queued.");
+  await expect(toast).toHaveCSS("position", "fixed");
+  const after = await summary.boundingBox();
+  const toastBox = await toast.boundingBox();
+
+  expect(before).not.toBeNull();
+  expect(after).not.toBeNull();
+  expect(toastBox).not.toBeNull();
+  expect(after!.y).toBe(before!.y);
+  expect(toastBox!.x + toastBox!.width).toBeGreaterThan(1200);
+  expect(toastBox!.y + toastBox!.height).toBeGreaterThan(700);
+
+  await page.getByRole("button", { name: "Dismiss notification" }).click();
+  await expect(toast).not.toBeVisible();
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await runScan.click();
+  await expect(toast).toBeVisible();
+  const mobileToastBox = await toast.boundingBox();
+  expect(mobileToastBox).not.toBeNull();
+  expect(mobileToastBox!.x).toBeGreaterThanOrEqual(11);
+  expect(mobileToastBox!.x + mobileToastBox!.width).toBeLessThanOrEqual(379);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("refreshes an open work list when an inventory job finishes", async ({ page }) => {
   test.setTimeout(15_000);
   let inventoryJobPolls = 0;
