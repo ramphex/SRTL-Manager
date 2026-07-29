@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.2-beta.2] - 2026-07-29
+
+### Changed
+
+- Made targeted title rescans validate readable symlink targets, reconcile their exact storage files, and report persistent read failures.
+- Retried transient source and transfer I/O failures before failing a copy.
+- Matched administrator usernames case-insensitively for login and account conflicts while preserving display capitalization.
+
 ## [0.1.2-beta.1] - 2026-07-27
 
 ### Changed
