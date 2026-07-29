@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { defaultCopyJobBehaviorSettings } from "../../shared/advancedSettings";
 import type { AuditMode, CopyDirection, CopyJobBehaviorSettings, CopyLocalConflictStrategy, MediaLinkRow, PathsSettings, StorageRootType } from "../../shared/types";
 import { isMediaFile, isPathInside } from "./media";
-import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside } from "./filesystemSafety";
+import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, assertReadableRegularFile } from "./filesystemSafety";
 import { appendBoundedOutput, commandTimeoutMs, terminateChildProcess } from "./processSafety";
 
 const copyDirectoryMode = 0o755;
@@ -471,6 +471,54 @@ function isMissingPathError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
 }
 
+const retryableTransferErrorCodes = new Set(["EAGAIN", "EBUSY", "EIO", "ENETDOWN", "ENETRESET", "ENETUNREACH", "ENOTCONN", "EREMOTEIO", "ESTALE", "ETIMEDOUT"]);
+
+function transferErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  if ("cause" in error) return transferErrorCode(error.cause);
+  return null;
+}
+
+function isRetryableTransferError(error: unknown): boolean {
+  const code = transferErrorCode(error);
+  if (code && retryableTransferErrorCodes.has(code)) return true;
+  return error instanceof Error && /timed out|temporarily unavailable/i.test(error.message);
+}
+
+async function waitForSourceRetry(signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timeout = setTimeout(finish, 500);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function assertExistingSourcePathInside(root: string, sourcePath: string, signal?: AbortSignal): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    throwIfAborted(signal);
+    try {
+      await assertExistingPathInside(root, sourcePath, "Source path");
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 3 || !isRetryableTransferError(error)) throw error;
+      await waitForSourceRetry(signal);
+    }
+  }
+  throw lastError;
+}
+
 async function createDestinationParent(destinationRoot: string, destinationPath: string): Promise<void> {
   const destinationDirectory = path.dirname(destinationPath);
   const missingDirectories: string[] = [];
@@ -703,12 +751,17 @@ export async function copyMediaLink(
   const sourcePath = path.resolve(link.targetPath);
   await reportCopyProgress(reportProgress, { stage: "preparing", message: "Checking source, destination, and symlink state", sourcePath, linkPath: link.linkPath });
   assertInside(sourceRoot, sourcePath, "Source path");
-  await assertExistingPathInside(sourceRoot, sourcePath, "Source path");
+  await assertExistingSourcePathInside(sourceRoot, sourcePath, signal);
   await assertPathParentInside(paths.symlinkDir, link.linkPath, "Symlink path");
   ensureMediaCandidate(sourcePath, link.relativePath, link.linkPath);
   await validateLinkStillPointsTo(link, sourcePath);
 
-  const sourceStatBefore = await statRegularFile(sourcePath, "Source file");
+  const sourceStatBefore = await assertReadableRegularFile(sourcePath, "Source file", {
+    attempts: 3,
+    retryDelayMs: 500,
+    signal,
+    onRetry: () => reportCopyProgress(reportProgress, { stage: "preparing", message: "Source is temporarily unreadable; retrying preflight", sourcePath, linkPath: link.linkPath })
+  });
   const destinationPath = copyDestinationPath(link, paths, destinationRootType);
   assertInside(destinationRoot, destinationPath, "Destination path");
   await assertDestinationPathInside(destinationRoot, destinationPath, "Destination path");
@@ -783,21 +836,39 @@ export async function copyMediaLink(
       bytesPerSecond: 0,
       remainingSeconds: null
     });
-    await runner.copyFile(
-      sourcePath,
-      tempPath,
-      (progress) =>
-        reportCopyProgress(reportProgress, {
-          stage: "copying",
-          message: transferMessage,
+    for (let transferAttempt = 1; transferAttempt <= 2; transferAttempt += 1) {
+      try {
+        await runner.copyFile(
+          sourcePath,
+          tempPath,
+          (progress) =>
+            reportCopyProgress(reportProgress, {
+              stage: "copying",
+              message: transferMessage,
+              sourcePath,
+              destinationPath,
+              linkPath: link.linkPath,
+              sizeBytes: sourceStatBefore.size,
+              ...progress
+            }),
+          signal
+        );
+        break;
+      } catch (error) {
+        if (transferAttempt === 2 || !isRetryableTransferError(error) || signal?.aborted) throw error;
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        await reportCopyProgress(reportProgress, {
+          stage: "preparing",
+          message: "Transfer hit a temporary I/O error; retrying once",
           sourcePath,
           destinationPath,
           linkPath: link.linkPath,
-          sizeBytes: sourceStatBefore.size,
-          ...progress
-        }),
-      signal
-    );
+          sizeBytes: sourceStatBefore.size
+        });
+        await waitForSourceRetry(signal);
+        await assertReadableRegularFile(sourcePath, "Source file", { attempts: 3, retryDelayMs: 500, signal });
+      }
+    }
     throwIfAborted(signal);
     await fs.chmod(tempPath, copyFileMode);
     const tempStat = await statRegularFile(tempPath, "Temporary copy");
@@ -807,7 +878,7 @@ export async function copyMediaLink(
     await verifyCopiedFile(runner, sourcePath, tempPath, reportProgress, baseProgress, behavior, signal);
     await reportOperation?.({ stage: "verified", tempPath, sizeBytes: tempStat.size });
     throwIfAborted(signal);
-    const sourceStatAfter = await statRegularFile(sourcePath, "Source file");
+    const sourceStatAfter = await assertReadableRegularFile(sourcePath, "Source file", { attempts: 3, retryDelayMs: 500, signal });
     if (sourceStatAfter.size !== sourceStatBefore.size || sourceStatAfter.mtimeMs !== sourceStatBefore.mtimeMs) {
       throw new Error("Source file changed during copy; destination was not promoted");
     }

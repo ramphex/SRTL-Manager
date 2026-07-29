@@ -88,6 +88,70 @@ describe("copy runner", () => {
     }
   });
 
+  it("retries one transient source read failure before installing the copy", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-retry-"));
+    try {
+      const symlinkDir = path.join(directory, "symlinks");
+      const localDir = path.join(directory, "local");
+      const remoteDir = path.join(directory, "remote");
+      const relativePath = path.join("Retry Title", "retry.mkv");
+      const sourcePath = path.join(remoteDir, "items", relativePath);
+      const linkPath = path.join(symlinkDir, "items", relativePath);
+      const destinationPath = path.join(localDir, "items", relativePath);
+      await Promise.all([
+        fs.mkdir(path.dirname(sourcePath), { recursive: true }),
+        fs.mkdir(path.dirname(linkPath), { recursive: true }),
+        fs.mkdir(path.join(localDir, "items"), { recursive: true })
+      ]);
+      await fs.writeFile(sourcePath, "retry source");
+      await fs.symlink(sourcePath, linkPath);
+      const timestamp = new Date().toISOString();
+      let copyAttempts = 0;
+      const runner = {
+        ...defaultCopyRunner,
+        async copyFile(source: string, destination: string, reportProgress: Parameters<typeof defaultCopyRunner.copyFile>[2], signal: AbortSignal | undefined) {
+          copyAttempts += 1;
+          if (copyAttempts === 1) throw Object.assign(new Error("temporary remote read failure"), { code: "EIO" });
+          return defaultCopyRunner.copyFile(source, destination, reportProgress, signal);
+        }
+      };
+
+      const result = await copyMediaLink(
+        {
+          id: 1,
+          section: "items",
+          itemName: "Retry Title",
+          relativePath,
+          linkPath,
+          targetPath: sourcePath,
+          kind: "remote",
+          targetExists: true,
+          isMedia: true,
+          storagePolicy: "location_1",
+          resolvedStorageFileId: null,
+          sizeBytes: 12,
+          firstSeenAt: timestamp,
+          lastSeenAt: timestamp,
+          lastChangedAt: timestamp,
+          missingSince: null,
+          updatedAt: timestamp
+        },
+        { symlinkDir, localDir, remoteDir },
+        "to_local",
+        runner,
+        undefined,
+        { profile: "off", byteCompare: false, mediaValidation: "off" }
+      );
+
+      expect(copyAttempts).toBe(2);
+      expect(result).toMatchObject({ status: "copied", destinationPath });
+      await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe("retry source");
+      await expect(fs.readlink(linkPath)).resolves.toBe(destinationPath);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates readable destination directories and files under a restrictive process umask", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-modes-"));
     const previousUmask = process.umask();

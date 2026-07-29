@@ -568,6 +568,32 @@ describe("api app", () => {
     expect(sections.json()).toEqual({ sections: ["movies", "shows"], sectionTitles: {}, sectionTypes: { movies: "movies", shows: "shows" } });
   });
 
+  it("matches usernames case-insensitively while preserving their display capitalization", async () => {
+    const setup = await ctx.app.inject({
+      method: "POST",
+      url: "/api/auth/setup",
+      payload: { username: "MixedCaseAdmin", password: "password123", confirmPassword: "password123" }
+    });
+    expect(setup.statusCode).toBe(200);
+
+    const login = await ctx.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "mixedcaseadmin", password: "password123" }
+    });
+    expect(login.statusCode).toBe(200);
+
+    const me = await ctx.app.inject({
+      method: "GET",
+      url: "/api/auth/me",
+      headers: { cookie: String(login.headers["set-cookie"]) }
+    });
+    expect(me.json()).toMatchObject({
+      authenticated: true,
+      user: { username: "MixedCaseAdmin" }
+    });
+  });
+
   it("saves friendly storage location names without exposing path mutation", async () => {
     const denied = await ctx.app.inject({ method: "GET", url: "/api/settings/storage-locations" });
     expect(denied.statusCode).toBe(401);

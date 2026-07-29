@@ -36,8 +36,18 @@ export async function createAdmin(db: Db, username: string, password: string): P
   });
 }
 
+export async function findAdminByUsername(db: Db, username: string): Promise<typeof schema.adminUsers.$inferSelect | undefined> {
+  return first(
+    db
+      .select()
+      .from(schema.adminUsers)
+      .where(sql`lower(${schema.adminUsers.username}) = lower(${username.trim()})`)
+      .limit(1)
+  );
+}
+
 export async function login(db: Db, username: string, password: string): Promise<string | null> {
-  const user = await first(db.select().from(schema.adminUsers).where(eq(schema.adminUsers.username, username)).limit(1));
+  const user = await findAdminByUsername(db, username);
   if (!user) return null;
   if (!(await verifyPassword(password, user.passwordHash))) return null;
   const token = crypto.randomBytes(32).toString("base64url");

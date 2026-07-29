@@ -4,6 +4,19 @@ import { isPathInside } from "./media";
 
 const defaultFilesystemTimeoutMs = 15_000;
 
+export interface ReadableFileSnapshot {
+  size: number;
+  mtimeMs: number;
+}
+
+export interface ReadableFileOptions {
+  attempts?: number;
+  retryDelayMs?: number;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  onRetry?: (attempt: number, error: unknown) => Promise<void> | void;
+}
+
 function configuredTimeoutMs(): number {
   const parsed = Number(process.env.SRTL_FILESYSTEM_TIMEOUT_MS);
   if (!Number.isFinite(parsed) || parsed < 1_000) return defaultFilesystemTimeoutMs;
@@ -20,6 +33,66 @@ export async function withFilesystemTimeout<T>(operation: Promise<T>, descriptio
   } finally {
     if (timeout) clearTimeout(timeout);
   }
+}
+
+function abortError(): Error {
+  return new Error("Job terminated");
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function waitForRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) throw abortError();
+  if (delayMs <= 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timeout = setTimeout(finish, delayMs);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+export async function assertReadableRegularFile(filePath: string, label: string, options: ReadableFileOptions = {}): Promise<ReadableFileSnapshot> {
+  const attempts = Math.max(1, Math.min(Math.trunc(options.attempts ?? 1), 5));
+  const retryDelayMs = Math.max(0, Math.min(Math.trunc(options.retryDelayMs ?? 250), 5_000));
+  let lastError: unknown = new Error(`${label} could not be read`);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (options.signal?.aborted) throw abortError();
+    let fileHandle: Awaited<ReturnType<typeof fs.open>> | null = null;
+    try {
+      const stat = await withFilesystemTimeout(fs.stat(filePath), `${label} metadata check`, options.timeoutMs);
+      if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
+      fileHandle = await withFilesystemTimeout(fs.open(filePath, "r"), `${label} read check`, options.timeoutMs);
+      if (stat.size > 0) {
+        const buffer = Buffer.allocUnsafe(1);
+        const read = await withFilesystemTimeout(fileHandle.read(buffer, 0, 1, 0), `${label} first-byte read`, options.timeoutMs);
+        if (read.bytesRead !== 1) throw new Error(`${label} returned no data during its read check`);
+      }
+      return { size: stat.size, mtimeMs: stat.mtimeMs };
+    } catch (error) {
+      lastError = error;
+    } finally {
+      if (fileHandle) await fileHandle.close().catch(() => undefined);
+    }
+
+    if (attempt < attempts) {
+      await options.onRetry?.(attempt, lastError);
+      await waitForRetry(retryDelayMs, options.signal);
+    }
+  }
+
+  const attemptsLabel = attempts === 1 ? "read check" : `${attempts} read attempts`;
+  throw new Error(`${label} is missing or unreadable after ${attemptsLabel}: ${errorMessage(lastError)}`, { cause: lastError });
 }
 
 async function realPath(filePath: string, label: string): Promise<string> {

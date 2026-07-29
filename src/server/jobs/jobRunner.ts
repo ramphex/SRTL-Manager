@@ -1898,6 +1898,16 @@ export class JobWorker {
       for (const issue of result.storageScanIssues) {
         await ctx.event("warn", "Remote storage directory remained unreadable after retry", issue);
       }
+      for (const link of result.links) {
+        if (!link.targetReadError) continue;
+        await ctx.event("warn", "Symlink target remained unreadable after retry", {
+          section: link.section,
+          itemName: link.itemName,
+          linkPath: link.linkPath,
+          targetPath: link.targetPath,
+          message: link.targetReadError
+        });
+      }
       if (await ctx.isCancelled()) {
         await this.db.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job cancelled" }).where(eq(schema.scanRuns.id, scanRun.id));
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan cancelled before inventory results were written", result.inventory));
@@ -2220,7 +2230,7 @@ export class JobWorker {
           async (update) => {
             activeUpdate = update;
             await setCopyProgress(update.stage, update.message, link, activeUpdate);
-            if (update.stage === "copying" || update.stage === "preparing") return;
+            if (update.stage === "copying" || (update.stage === "preparing" && !/retry/i.test(update.message))) return;
             const progressEventKey = `${update.stage}:${update.message}`;
             if (progressEventKey === lastProgressEventKey) return;
             lastProgressEventKey = progressEventKey;

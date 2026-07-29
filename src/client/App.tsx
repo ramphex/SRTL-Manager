@@ -5,7 +5,7 @@ import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Blocks, CheckCircl
 import { api } from "./api";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
-import { inventoryJobRefreshKey } from "./recentJobs";
+import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
 import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
@@ -588,7 +588,7 @@ function InventoryJobDataRefresher() {
   const jobs = useQuery({
     queryKey: ["jobs", "inventory-refresh"],
     queryFn: () => api.jobs({ completedWithinMinutes: 15 }),
-    refetchInterval: 3000
+    refetchInterval: (query) => (query.state.data?.some((job) => (job.type === "scan" || job.type === "copy") && isActiveDashboardJob(job)) ? 500 : 3000)
   });
   const refreshKey = inventoryJobRefreshKey(jobs.data ?? []);
 

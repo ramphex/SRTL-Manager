@@ -9,7 +9,7 @@ import { inferSectionContentType } from "../../shared/sections";
 import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
 import { isMediaFile, isPathInside, safeRelativePath } from "./media";
-import { withFilesystemTimeout } from "./filesystemSafety";
+import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -46,6 +46,8 @@ export interface ClassifiedLink {
   storagePolicy: StoragePolicyKind;
   resolvedStorageFileId?: number | null;
   sizeBytes: number | null;
+  targetMtimeMs: number | null;
+  targetReadError: string | null;
 }
 
 export interface ClassifiedStorageFile {
@@ -73,6 +75,7 @@ export interface ScanResult {
   options: ScanOptions;
   links: ClassifiedLink[];
   storageFiles: ClassifiedStorageFile[];
+  reconciledStorageFiles: ClassifiedStorageFile[];
   storageScanIssues: StorageScanIssue[];
   summaries: SectionSummary[];
   inventory: InventorySummary;
@@ -106,7 +109,8 @@ export async function classifySymlink(
   sectionRoot: string,
   paths: PathsSettings,
   section: string,
-  storagePolicies: StoragePolicyLookup
+  storagePolicies: StoragePolicyLookup,
+  verifyTargetReadability = false
 ): Promise<ClassifiedLink> {
   const rawTargetPath = await withFilesystemTimeout(fs.readlink(linkPath), `Symlink target read for ${linkPath}`);
   const targetPath = path.isAbsolute(rawTargetPath) ? rawTargetPath : path.resolve(path.dirname(linkPath), rawTargetPath);
@@ -116,17 +120,28 @@ export async function classifySymlink(
   const targetRootType: StorageRootType | "other" = isPathInside(paths.remoteDir, targetPath) ? "remote" : isPathInside(paths.localDir, targetPath) ? "local" : "other";
   let targetExists = false;
   let sizeBytes: number | null = null;
+  let targetMtimeMs: number | null = null;
+  let targetReadError: string | null = null;
 
-  const attempts = targetRootType === "remote" ? 2 : 1;
+  const attempts = targetRootType === "remote" ? (verifyTargetReadability ? 3 : 2) : 1;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const stat = await withFilesystemTimeout(fs.stat(targetPath), `Target check for ${targetPath}`);
+      if (verifyTargetReadability && media && targetRootType !== "other") {
+        const snapshot = await assertReadableRegularFile(targetPath, `Symlink target ${targetPath}`, { attempts: 1, timeoutMs: 5_000 });
+        sizeBytes = snapshot.size;
+        targetMtimeMs = Math.trunc(snapshot.mtimeMs);
+      } else {
+        const stat = await withFilesystemTimeout(fs.stat(targetPath), `Target check for ${targetPath}`);
+        sizeBytes = stat.isFile() ? stat.size : null;
+        targetMtimeMs = Math.trunc(stat.mtimeMs);
+      }
       targetExists = true;
-      sizeBytes = stat.isFile() ? stat.size : null;
+      targetReadError = null;
       break;
-    } catch {
+    } catch (error) {
       targetExists = false;
-      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 100));
+      targetReadError = verifyTargetReadability ? describeError(error) : null;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, verifyTargetReadability ? 350 : 100));
     }
   }
 
@@ -154,7 +169,9 @@ export async function classifySymlink(
     targetExists,
     isMedia: media,
     storagePolicy,
-    sizeBytes
+    sizeBytes,
+    targetMtimeMs,
+    targetReadError
   };
 }
 
@@ -458,7 +475,7 @@ export async function scanLibrary(
         if (checkingUpdate) await checkingUpdate;
         for (const linkPath of symlinks) {
           await throwIfScanCancelled(isCancelled);
-          links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies));
+          links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection)));
           checkedLinks += 1;
           if (!shouldReportSymlinkActivity()) continue;
           const progressUpdate = reportSymlinkActivity(
@@ -488,8 +505,11 @@ export async function scanLibrary(
   }
 
   const classifiedStorageFiles = applyStorageFilePolicies(storageFiles, settings, storagePolicies);
+  const reconciledStorageFiles = titleScopesBySection
+    ? uniqueStorageFiles(links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null))
+    : [];
   const summaries = summarizeLinks(links, scopedSettings.sections, scopedSettings.sectionTitles, scopedSettings.sectionTypes);
-  return { options, links, storageFiles: classifiedStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
+  return { options, links, storageFiles: classifiedStorageFiles, reconciledStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
 }
 
 export function summarizeLinks(
@@ -587,6 +607,23 @@ function applyStorageFilePolicies(files: ClassifiedStorageFile[], settings: Sect
   });
 }
 
+function storageFileFromTargetedLink(link: ClassifiedLink, paths: PathsSettings): ClassifiedStorageFile | null {
+  if (!link.targetExists || !link.isMedia || link.sizeBytes === null || link.targetMtimeMs === null) return null;
+  if (link.kind !== "local" && link.kind !== "remote") return null;
+  const rootPath = link.kind === "local" ? paths.localDir : paths.remoteDir;
+  return {
+    rootType: link.kind,
+    rootPath,
+    section: link.section,
+    itemName: link.itemName,
+    relativePath: safeRelativePath(rootPath, link.targetPath),
+    filePath: link.targetPath,
+    storagePolicy: link.storagePolicy,
+    sizeBytes: link.sizeBytes,
+    mtimeMs: link.targetMtimeMs
+  };
+}
+
 export function summarizeInventory(links: ClassifiedLink[], storageFiles: ClassifiedStorageFile[]): InventorySummary {
   const linkedTargets = new Set(links.filter((link) => link.targetExists && link.isMedia).map((link) => link.targetPath));
   const localFiles = storageFiles.filter((file) => file.rootType === "local");
@@ -670,6 +707,7 @@ async function throwIfPersistenceCancelled(isCancelled?: ScanCancellationCheck):
 export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
+  const filesToReconcile = uniqueStorageFiles([...result.storageFiles, ...result.reconciledStorageFiles]);
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
@@ -684,7 +722,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   if (result.options.scanLocal) scannedStorageRootTypes.add("local");
   if (result.options.scanRemote) scannedStorageRootTypes.add("remote");
 
-  for (const file of result.storageFiles) {
+  for (const file of filesToReconcile) {
     await throwIfPersistenceCancelled(isCancelled);
     const existing = await first(db.select().from(schema.storageFiles).where(eq(schema.storageFiles.filePath, file.filePath)).limit(1));
     const firstSeenAt = existing?.firstSeenAt ?? timestamp;
@@ -725,7 +763,25 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       const existing = await first(db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.linkPath, link.linkPath)).limit(1));
       const firstSeenAt = existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp;
       const lastChangedAt = linkChanged(existing, link, resolvedStorageFileId) ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp;
-      const values = { ...link, resolvedStorageFileId, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp };
+      const values = {
+        section: link.section,
+        itemName: link.itemName,
+        relativePath: link.relativePath,
+        linkPath: link.linkPath,
+        targetPath: link.targetPath,
+        kind: link.kind,
+        targetExists: link.targetExists,
+        isMedia: link.isMedia,
+        storagePolicy: link.storagePolicy,
+        sizeBytes: link.sizeBytes,
+        resolvedStorageFileId,
+        firstSeenAt,
+        lastSeenAt: timestamp,
+        lastChangedAt,
+        missingSince: null,
+        lastSeenJobId: jobId,
+        updatedAt: timestamp
+      };
       await db
         .insert(schema.mediaLinks)
         .values(values)
@@ -776,7 +832,9 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       isMedia: link.isMedia,
       storagePolicy: normalizeStoragePolicy(link.storagePolicy),
       resolvedStorageFileId: link.resolvedStorageFileId,
-      sizeBytes: link.sizeBytes
+      sizeBytes: link.sizeBytes,
+      targetMtimeMs: null,
+      targetReadError: null
     })),
     []
   );
@@ -1652,7 +1710,9 @@ export async function listSectionSummaries(db: Db): Promise<SectionSummary[]> {
     targetExists: row.targetExists,
     isMedia: row.isMedia,
     storagePolicy: row.storagePolicy,
-    sizeBytes: row.sizeBytes
+    sizeBytes: row.sizeBytes,
+    targetMtimeMs: null,
+    targetReadError: null
   }));
   return summarizeLinks(links, sections, sectionTitles, sectionTypes);
 }
