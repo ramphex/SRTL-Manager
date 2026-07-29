@@ -235,7 +235,7 @@ test("refreshes an open work list when an inventory job finishes", async ({ page
       body = { rows, total: 2, limit: 250, offset: 0, hasMore: rows.length < 2 };
     } else if (url.pathname === "/api/jobs" && url.searchParams.get("completedWithinMinutes") === "15") {
       inventoryJobPolls += 1;
-      const completed = inventoryJobPolls > 1;
+      const completed = workListRequests > 0 && inventoryJobPolls > 1;
       body = [{ id: 900, type: "scan", status: completed ? "completed" : "running", createdAt: timestamp, startedAt: timestamp, finishedAt: completed ? timestamp : null, progress: {} }];
     } else if (url.pathname === "/api/jobs") body = [];
     else body = {};
