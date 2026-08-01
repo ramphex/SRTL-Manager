@@ -115,6 +115,22 @@ async function nearestExistingAncestor(candidate: string, root: string): Promise
   throw new Error(`No existing parent for ${candidate} is inside configured root`);
 }
 
+export async function canonicalPathForClaim(
+  root: string,
+  candidate: string,
+  label: string,
+  preserveLeaf = false
+): Promise<string> {
+  if (!isPathInside(root, candidate)) throw new Error(`${label} is outside configured root`);
+  const rootRealPath = await realPath(root, "Configured root");
+  const claimBase = preserveLeaf ? path.dirname(candidate) : candidate;
+  const existingAncestor = await nearestExistingAncestor(claimBase, root);
+  const ancestorRealPath = await realPath(existingAncestor, `${label} claim path`);
+  const canonicalPath = path.resolve(ancestorRealPath, path.relative(existingAncestor, path.resolve(candidate)));
+  if (!isPathInside(rootRealPath, canonicalPath)) throw new Error(`${label} resolves outside configured root`);
+  return canonicalPath;
+}
+
 export async function assertExistingPathInside(root: string, candidate: string, label: string): Promise<string> {
   if (!isPathInside(root, candidate)) throw new Error(`${label} is outside configured root`);
   const [rootRealPath, candidateRealPath] = await Promise.all([realPath(root, "Configured root"), realPath(candidate, label)]);

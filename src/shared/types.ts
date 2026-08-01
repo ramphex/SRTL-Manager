@@ -57,11 +57,19 @@ export type ManagedPathRoot = "symlink" | "local" | "remote";
 
 export type PathRootIdentityMatch = "same" | "different" | "unknown";
 
+export interface PathMountIdentity {
+  mountPoint: string;
+  root: string;
+  filesystemType: string;
+  source: string;
+}
+
 export interface PathRootIdentity {
   available: boolean;
   realPath: string | null;
   device: string | null;
   inode: string | null;
+  mount: PathMountIdentity | null;
   error: string | null;
 }
 
@@ -76,7 +84,7 @@ export interface PathRootChange {
   detectedIdentity: PathRootIdentity | null;
 }
 
-export type PathMigrationStatus = "pending" | "planning" | "planned" | "queued" | "running" | "failed" | "completed" | "cancelled";
+export type PathMigrationStatus = "pending" | "planning" | "planned" | "queued" | "running" | "rollback_pending" | "failed" | "completed" | "cancelled";
 
 export interface PathMigrationIssue {
   id: number;

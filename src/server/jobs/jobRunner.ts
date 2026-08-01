@@ -1,19 +1,34 @@
-import { and, asc, count, desc, eq, gt, gte, inArray, lt, ne } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, ne, sql } from "drizzle-orm";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { JobConcurrencySettings } from "../config";
-import { first, getJsonSetting, getSectionSettings, nowIso, type Db } from "../db/database";
+import { dbGet, first, getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { auditMediaLink, defaultAuditRunner, type AuditCommandRunner } from "../lib/auditor";
-import { copyMediaLink, defaultCopyRunner, type CopyCommandRunner, type CopyMediaResult, type CopyOperationUpdate, type CopyProgressUpdate } from "../lib/copier";
-import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
+import {
+  copyFileIdentitiesMatch,
+  copyMediaLink,
+  CopyReconciliationRequiredError,
+  defaultCopyRunner,
+  parseCopyFileIdentity,
+  readCopyFileIdentity,
+  type CopyFileIdentity,
+  type CopyCommandRunner,
+  type CopyMediaResult,
+  type CopyOperationUpdate,
+  type CopyProgressUpdate
+} from "../lib/copier";
+import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
-import { assertPathMigrationReady, isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
+import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
 import { completeOnboardingScan } from "../lib/onboarding";
 import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, scanLibrary, type ScanActivity } from "../lib/scanner";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
+import { CopyTransferLimiter } from "./copyLimiter";
+import { runKeyedPool } from "./copyPool";
+import { schedulerLockKey } from "./scheduling";
 import type {
   AuditMode,
   AuditOptions,
@@ -46,6 +61,13 @@ class WorkerShutdownError extends Error {
   }
 }
 
+export class LeaseLostError extends Error {
+  constructor(jobId: number, options?: ErrorOptions) {
+    super(`Worker lease lost for job #${jobId}`, options);
+    this.name = "LeaseLostError";
+  }
+}
+
 class PartialJobFailureError extends Error {
   constructor(message: string) {
     super(message);
@@ -58,8 +80,31 @@ const defaultJobConcurrency: JobConcurrencySettings = {
   maxRunningJobs: 1,
   maxRunningScans: 1,
   maxRunningAudits: 1,
-  maxRunningCopies: 1
+  maxRunningCopies: 1,
+  copyFileConcurrency: 1,
+  maxActiveCopyFiles: 1
 };
+
+type ResourceClaimAccess = "shared" | "exclusive";
+
+interface ResourceClaim {
+  resourceType: string;
+  resourceKey: string;
+  access: ResourceClaimAccess;
+}
+
+interface PreparedJob {
+  progress: unknown;
+  exclusive: boolean;
+  claims: ResourceClaim[];
+}
+
+type LeasedJob = JobRecord & { leaseVersion: number; exclusive: boolean };
+
+interface ClaimedJob {
+  job: LeasedJob;
+  reclaimed: boolean;
+}
 
 export interface JobContext {
   jobId: number;
@@ -67,6 +112,11 @@ export interface JobContext {
   event(level: JobEventRecord["level"], message: string, data?: unknown): Promise<void>;
   setProgress(progress: unknown): Promise<void>;
   isCancelled(): Promise<boolean>;
+  assertLease(): Promise<void>;
+  withLease<T>(action: () => Promise<T>): Promise<T>;
+  withLeaseDb<T>(action: (db: DbExecutor) => Promise<T>): Promise<T>;
+  finishCompleted(action: (db: DbExecutor) => Promise<void>): Promise<boolean>;
+  finishCompletedIsolated(action: (db: DbExecutor) => Promise<void>): Promise<boolean>;
 }
 
 export interface JobListOptions {
@@ -85,6 +135,8 @@ export interface JobWorkerOptions {
   copyRunner?: CopyCommandRunner;
   auditRunner?: AuditCommandRunner;
   concurrency?: JobConcurrencySettings;
+  copyTransferLimiter?: CopyTransferLimiter;
+  dispatchConcurrency?: number;
 }
 
 function normalizeSelectedSections(selectedSections: string[] | undefined, configuredSections: string[], label: string): string[] {
@@ -230,7 +282,7 @@ async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): P
   if (typeof input !== "string" && input.linkIds && linkIds?.length !== input.linkIds.length) throw new Error("Audit link IDs must be positive integers");
   const itemName = typeof input === "string" ? undefined : input.itemName?.trim();
   const relativePathPrefix = typeof input === "string" ? undefined : normalizeRelativePrefix(input.relativePathPrefix);
-  const hasScopedAudit = Boolean(linkIds?.length || section || itemName || relativePathPrefix);
+  const hasScopedAudit = Boolean(linkIds !== undefined || section || itemName || relativePathPrefix);
   const hasRequestedTargets = Array.isArray(requestedOptions.targets);
   const targets = normalizeAuditTargets(requestedOptions.targets);
   const selectedSections = requestedOptions.sections
@@ -245,7 +297,7 @@ async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): P
     ...(selectedSections ? { sections: selectedSections } : {}),
     ...(!hasScopedAudit ? { targets } : hasRequestedTargets ? { targets } : {}),
     ...(section ? { section } : {}),
-    ...(linkIds && linkIds.length > 0 ? { linkIds } : {}),
+    ...(linkIds !== undefined ? { linkIds } : {}),
     ...(itemName ? { itemName } : {}),
     ...(relativePathPrefix ? { relativePathPrefix } : {}),
     ...(requestedOptions.byteCompare === false ? { byteCompare: false } : {})
@@ -331,7 +383,7 @@ function relativePathMatchesPrefix(relativePath: string, prefix: string): boolea
 }
 
 function hasScopedAuditOptions(options: AuditOptions): boolean {
-  return Boolean(options.linkIds?.length || options.section || options.itemName || options.relativePathPrefix);
+  return Boolean(options.linkIds !== undefined || options.section || options.itemName || options.relativePathPrefix);
 }
 
 function filterScanLinks(links: MediaLinkRow[], options: ScanOptions): MediaLinkRow[] {
@@ -348,7 +400,7 @@ function filterScanLinks(links: MediaLinkRow[], options: ScanOptions): MediaLink
 }
 
 function filterAuditLinks(links: MediaLinkRow[], options: AuditOptions): MediaLinkRow[] {
-  const requestedIds = options.linkIds?.length ? new Set(options.linkIds) : null;
+  const requestedIds = options.linkIds === undefined ? null : new Set(options.linkIds);
   const requestedTargetSet = options.targets ? new Set(normalizeAuditTargets(options.targets)) : null;
   if (hasScopedAuditOptions(options)) {
     return links.filter((link) => {
@@ -374,7 +426,7 @@ function filterAuditLinks(links: MediaLinkRow[], options: AuditOptions): MediaLi
 }
 
 function filterCopyLinks(links: MediaLinkRow[], options: CopyOptions): MediaLinkRow[] {
-  const requestedIds = options.linkIds?.length ? new Set(options.linkIds) : null;
+  const requestedIds = options.linkIds === undefined ? null : new Set(options.linkIds);
   const sourceKind = options.direction === "to_local" ? "remote" : "local";
   const storagePolicy = options.direction === "to_local" ? "location_1" : "location_2";
   return links.filter((link) => {
@@ -396,7 +448,7 @@ function copyStoragePolicy(direction: CopyOptions["direction"]): StoragePolicyKi
 }
 
 function filterCopySelectedLinks(links: MediaLinkRow[], options: CopyOptions): MediaLinkRow[] {
-  const requestedIds = options.linkIds?.length ? new Set(options.linkIds) : null;
+  const requestedIds = options.linkIds === undefined ? null : new Set(options.linkIds);
   const sourceKind = options.direction === "to_local" ? "remote" : "local";
   const destinationKind = copyDestinationKind(options.direction);
   const storagePolicy = copyStoragePolicy(options.direction);
@@ -410,32 +462,365 @@ function filterCopySelectedLinks(links: MediaLinkRow[], options: CopyOptions): M
   });
 }
 
-function activeJobLinks(job: JobRecord, links: MediaLinkRow[]): MediaLinkRow[] {
-  if (job.type === "scan") return filterScanLinks(links, jobProgressOptions<ScanOptions>(job) ?? defaultScanOptions);
-  if (job.type === "copy") return filterCopyLinks(links, readCopyOptions(job));
-  if (job.type === "audit") return filterAuditLinks(links, readAuditOptions(job));
-  return [];
+function orderedCopySelection(links: MediaLinkRow[], options: CopyOptions): MediaLinkRow[] {
+  const selected = filterCopySelectedLinks(links, options);
+  const requestedOrder = options.linkIds?.length ? new Map(options.linkIds.map((id, index) => [id, index])) : null;
+  return requestedOrder
+    ? [...selected].sort((firstLink, secondLink) => (requestedOrder.get(firstLink.id) ?? 0) - (requestedOrder.get(secondLink.id) ?? 0))
+    : selected;
 }
 
-function overlappingLinkCount(first: MediaLinkRow[], second: MediaLinkRow[]): number {
-  const secondIds = new Set(second.map((link) => link.id));
-  return first.filter((link) => secondIds.has(link.id)).length;
+function copyAdmissionFingerprint(link: MediaLinkRow): string {
+  return JSON.stringify([
+    link.id,
+    link.section,
+    link.itemName,
+    link.relativePath,
+    path.resolve(link.linkPath),
+    path.resolve(link.targetPath),
+    link.kind,
+    link.targetExists,
+    link.isMedia,
+    link.storagePolicy,
+    link.resolvedStorageFileId,
+    link.sizeBytes,
+    link.missingSince
+  ]);
 }
 
-async function assertNoActiveJobOverlap(db: Db, links: MediaLinkRow[], requestedLinks: MediaLinkRow[]): Promise<void> {
-  if (requestedLinks.length === 0) return;
-  const activeJobs = (await db.select().from(schema.jobs))
-    .map(toJobRecord)
-    .filter((job) => (job.type === "scan" || job.type === "copy" || job.type === "audit") && (job.status === "queued" || job.status === "running"));
+function resourceClaimKey(claim: Pick<ResourceClaim, "resourceType" | "resourceKey">): string {
+  return `${claim.resourceType}\0${claim.resourceKey}`;
+}
 
-  for (const job of activeJobs) {
-    const overlapCount = overlappingLinkCount(requestedLinks, activeJobLinks(job, links));
-    if (overlapCount > 0) {
-      throw new Error(
-        `Job #${job.id} is already ${job.status} for ${overlapCount} matching media item${overlapCount === 1 ? "" : "s"}. Wait for it to finish or terminate it before queuing another action.`
+function normalizeResourceClaims(claims: ResourceClaim[]): ResourceClaim[] {
+  const normalized = new Map<string, ResourceClaim>();
+  for (const claim of claims) {
+    const key = resourceClaimKey(claim);
+    const current = normalized.get(key);
+    if (!current || claim.access === "exclusive") normalized.set(key, claim);
+  }
+  return [...normalized.values()];
+}
+
+async function managedPathResourceClaims(
+  root: string | null,
+  candidate: string,
+  label: string,
+  access: ResourceClaimAccess,
+  preserveLeaf = false
+): Promise<ResourceClaim[]> {
+  const lexicalPath = path.resolve(candidate);
+  if (!root) return [{ resourceType: "path", resourceKey: lexicalPath, access }];
+  const canonicalPath = await canonicalPathForClaim(root, lexicalPath, label, preserveLeaf);
+  return [...new Set([lexicalPath, canonicalPath])].map((resourceKey) => ({ resourceType: "path", resourceKey, access }));
+}
+
+function managedRootForTarget(paths: PathsSettings, targetPath: string): string | null {
+  if (isPathInside(paths.localDir, targetPath)) return paths.localDir;
+  if (isPathInside(paths.remoteDir, targetPath)) return paths.remoteDir;
+  return null;
+}
+
+async function mediaLinkResourceClaims(link: MediaLinkRow, paths: PathsSettings, access: ResourceClaimAccess): Promise<ResourceClaim[]> {
+  const [linkPathClaims, targetPathClaims] = await Promise.all([
+    managedPathResourceClaims(paths.symlinkDir, link.linkPath, "Library symlink claim", access, true),
+    managedPathResourceClaims(managedRootForTarget(paths, link.targetPath), link.targetPath, "Media target claim", access)
+  ]);
+  return [
+    { resourceType: "media", resourceKey: String(link.id), access },
+    ...linkPathClaims,
+    ...targetPathClaims,
+    { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]), access }
+  ];
+}
+
+async function batchedMediaLinkResourceClaims(
+  links: MediaLinkRow[],
+  paths: PathsSettings,
+  access: ResourceClaimAccess
+): Promise<ResourceClaim[]> {
+  const claims: ResourceClaim[] = [];
+  for (let offset = 0; offset < links.length; offset += 16) {
+    const batch = await Promise.all(links.slice(offset, offset + 16).map((link) => mediaLinkResourceClaims(link, paths, access)));
+    claims.push(...batch.flat());
+  }
+  return claims;
+}
+
+async function titleScanResourceClaims(options: ScanOptions, links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
+  const claims: ResourceClaim[] = [];
+  for (const scope of options.titleScopes ?? []) {
+    claims.push({ resourceType: "title", resourceKey: JSON.stringify([scope.section, scope.itemName]), access: "exclusive" });
+  }
+  claims.push(...(await batchedMediaLinkResourceClaims(links, paths, "exclusive")));
+  return normalizeResourceClaims(claims);
+}
+
+async function auditResourceClaims(links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
+  return normalizeResourceClaims(await batchedMediaLinkResourceClaims(links, paths, "shared"));
+}
+
+type CopyPathBindingRole = "link" | "source" | "destination";
+
+interface CopyPathBinding {
+  linkId: number;
+  role: CopyPathBindingRole;
+  lexicalPath: string;
+  canonicalPath: string;
+}
+
+interface CopySelectedDestination {
+  linkId: number;
+  lexicalPath: string;
+  canonicalPath: string;
+}
+
+interface CopySelectedDestinationIndex {
+  entries: CopySelectedDestination[];
+  lexicalOwners: Map<string, Set<number>>;
+  canonicalOwners: Map<string, Set<number>>;
+}
+
+function addCopyDestinationOwner(owners: Map<string, Set<number>>, filePath: string, linkId: number): void {
+  const existing = owners.get(filePath);
+  if (existing) existing.add(linkId);
+  else owners.set(filePath, new Set([linkId]));
+}
+
+function indexCopySelectedDestinations(entries: CopySelectedDestination[]): CopySelectedDestinationIndex {
+  const lexicalOwners = new Map<string, Set<number>>();
+  const canonicalOwners = new Map<string, Set<number>>();
+  for (const entry of entries) {
+    addCopyDestinationOwner(lexicalOwners, entry.lexicalPath, entry.linkId);
+    addCopyDestinationOwner(canonicalOwners, entry.canonicalPath, entry.linkId);
+  }
+  return { entries, lexicalOwners, canonicalOwners };
+}
+
+async function copySelectedDestinationForLink(
+  link: MediaLinkRow,
+  paths: PathsSettings,
+  direction: CopyOptions["direction"]
+): Promise<CopySelectedDestination> {
+  const destinationRoot = storageRootForDirection(paths, direction);
+  const lexicalPath = path.resolve(copyDestinationPathForLink(link, paths, direction));
+  const canonicalPath = await canonicalPathForClaim(destinationRoot, lexicalPath, "Copy destination claim");
+  return { linkId: link.id, lexicalPath, canonicalPath };
+}
+
+async function copySelectedDestinationsForLinks(
+  links: MediaLinkRow[],
+  paths: PathsSettings,
+  direction: CopyOptions["direction"]
+): Promise<CopySelectedDestinationIndex> {
+  const entries: CopySelectedDestination[] = [];
+  for (let offset = 0; offset < links.length; offset += 16) {
+    entries.push(...(await Promise.all(links.slice(offset, offset + 16).map((link) => copySelectedDestinationForLink(link, paths, direction)))));
+  }
+  return indexCopySelectedDestinations(entries);
+}
+
+async function isOtherSelectedCopyDestination(
+  paths: PathsSettings,
+  filePath: string,
+  currentLinkId: number,
+  selectedDestinations: CopySelectedDestinationIndex
+): Promise<boolean> {
+  if (selectedDestinations.entries.length === 0) return false;
+  const lexicalPath = path.resolve(filePath);
+  const canonicalPath = await canonicalPathForClaim(paths.localDir, lexicalPath, "Local replacement candidate");
+  const owners = new Set([
+    ...(selectedDestinations.lexicalOwners.get(lexicalPath) ?? []),
+    ...(selectedDestinations.canonicalOwners.get(canonicalPath) ?? [])
+  ]);
+  return owners.size > 0 && !owners.has(currentLinkId);
+}
+
+function copyPathBindingMapKey(linkId: number, role: CopyPathBindingRole): string {
+  return `${linkId}\0${role}`;
+}
+
+function copyPathBindingResourceKey(binding: CopyPathBinding): string {
+  return JSON.stringify([binding.linkId, binding.role, binding.lexicalPath, binding.canonicalPath]);
+}
+
+function parseCopyPathBindingResourceKey(value: string): CopyPathBinding | null {
+  const parsed = parseJson(value);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.length !== 4 ||
+    !Number.isSafeInteger(parsed[0]) ||
+    Number(parsed[0]) < 1 ||
+    !["link", "source", "destination"].includes(String(parsed[1])) ||
+    typeof parsed[2] !== "string" ||
+    typeof parsed[3] !== "string"
+  ) {
+    return null;
+  }
+  return {
+    linkId: Number(parsed[0]),
+    role: parsed[1] as CopyPathBindingRole,
+    lexicalPath: path.resolve(parsed[2]),
+    canonicalPath: path.resolve(parsed[3])
+  };
+}
+
+async function copyPathBindingsForLink(
+  link: MediaLinkRow,
+  paths: PathsSettings,
+  direction: CopyOptions["direction"]
+): Promise<CopyPathBinding[]> {
+  const sourceRoot = direction === "to_local" ? paths.remoteDir : paths.localDir;
+  const linkPath = path.resolve(link.linkPath);
+  const sourcePath = path.resolve(link.targetPath);
+  const [canonicalLinkPath, canonicalSourcePath, destination] = await Promise.all([
+    canonicalPathForClaim(paths.symlinkDir, linkPath, "Library symlink claim", true),
+    canonicalPathForClaim(sourceRoot, sourcePath, "Media target claim"),
+    copySelectedDestinationForLink(link, paths, direction)
+  ]);
+  return [
+    { linkId: link.id, role: "link", lexicalPath: linkPath, canonicalPath: canonicalLinkPath },
+    { linkId: link.id, role: "source", lexicalPath: sourcePath, canonicalPath: canonicalSourcePath },
+    { linkId: link.id, role: "destination", lexicalPath: destination.lexicalPath, canonicalPath: destination.canonicalPath }
+  ];
+}
+
+async function copyResourceClaims(links: MediaLinkRow[], paths: PathsSettings, direction: CopyOptions["direction"]): Promise<ResourceClaim[]> {
+  const claims = await batchedMediaLinkResourceClaims(links, paths, "exclusive");
+  const eligibleLinkIds = new Set(
+    filterCopyLinks(links, { direction, linkIds: links.map((link) => link.id) }).map((link) => link.id)
+  );
+  for (let offset = 0; offset < links.length; offset += 16) {
+    const batch = links.slice(offset, offset + 16);
+    const [destinationClaims, pathBindings] = await Promise.all([
+      Promise.all(
+        batch.map((link) =>
+          managedPathResourceClaims(
+            storageRootForDirection(paths, direction),
+            copyDestinationPathForLink(link, paths, direction),
+            "Copy destination claim",
+            "exclusive"
+          )
+        )
+      ),
+      Promise.all(batch.filter((link) => eligibleLinkIds.has(link.id)).map((link) => copyPathBindingsForLink(link, paths, direction)))
+    ]);
+    claims.push(...destinationClaims.flat());
+    claims.push(
+      ...pathBindings.flat().map((binding) => ({
+        resourceType: "copy_path_binding",
+        resourceKey: copyPathBindingResourceKey(binding),
+        access: "exclusive" as const
+      }))
+    );
+  }
+  return normalizeResourceClaims(claims);
+}
+
+interface CopyCleanupIdentity {
+  device: string;
+  inode: string;
+  size: string;
+  modifiedNs: string;
+  changedNs: string;
+}
+
+async function copyCleanupIdentity(filePath: string): Promise<CopyCleanupIdentity | null> {
+  const stat = await fs.stat(filePath, { bigint: true }).catch(() => null);
+  if (!stat?.isFile()) return null;
+  return {
+    device: stat.dev.toString(),
+    inode: stat.ino.toString(),
+    size: stat.size.toString(),
+    modifiedNs: stat.mtimeNs.toString(),
+    changedNs: stat.ctimeNs.toString()
+  };
+}
+
+function sameCopyCleanupIdentity(first: CopyCleanupIdentity | null | undefined, second: CopyCleanupIdentity | null | undefined): boolean {
+  return Boolean(
+    first &&
+      second &&
+      first.device === second.device &&
+      first.inode === second.inode &&
+      first.size === second.size &&
+      first.modifiedNs === second.modifiedNs &&
+      first.changedNs === second.changedNs
+  );
+}
+
+function copyCleanupMarkerKey(linkId: number, filePath: string, identity: CopyCleanupIdentity): string {
+  return JSON.stringify([linkId, path.resolve(filePath), identity]);
+}
+
+function isCopyCleanupIdentity(value: unknown): value is CopyCleanupIdentity {
+  if (!isRecord(value)) return false;
+  return ["device", "inode", "size", "modifiedNs", "changedNs"].every(
+    (key) => typeof value[key] === "string" && /^\d+$/.test(value[key])
+  );
+}
+
+function parseCopyCleanupMarker(value: string): { linkId: number; filePath: string; identity: CopyCleanupIdentity | null } | null {
+  const parsed = parseJson(value);
+  if (!Array.isArray(parsed) || (parsed.length !== 2 && parsed.length !== 3) || !Number.isSafeInteger(parsed[0]) || Number(parsed[0]) < 1 || typeof parsed[1] !== "string") {
+    return null;
+  }
+  const identity = isCopyCleanupIdentity(parsed[2]) ? parsed[2] : null;
+  return { linkId: Number(parsed[0]), filePath: path.resolve(parsed[1]), identity };
+}
+
+async function copyReplacementResourceClaims(
+  db: Db,
+  links: MediaLinkRow[],
+  paths: PathsSettings,
+  options: CopyOptions
+): Promise<ResourceClaim[]> {
+  const selectedDestinations = await copySelectedDestinationsForLinks(links, paths, options.direction);
+  const destinations = new Map<string, number>();
+  const libraryLinks = new Map<string, number>();
+  for (const destination of selectedDestinations.entries) {
+    const existingLinkId = destinations.get(destination.canonicalPath);
+    if (existingLinkId != null && existingLinkId !== destination.linkId) {
+      throw new Error(`Selected media #${existingLinkId} and #${destination.linkId} resolve to the same copy destination: ${destination.lexicalPath}`);
+    }
+    destinations.set(destination.canonicalPath, destination.linkId);
+  }
+  for (const link of links) {
+    const canonicalLinkPath = await canonicalPathForClaim(paths.symlinkDir, link.linkPath, "Library symlink claim", true);
+    const existingLibraryLinkId = libraryLinks.get(canonicalLinkPath);
+    if (existingLibraryLinkId != null && existingLibraryLinkId !== link.id) {
+      throw new Error(`Selected media #${existingLibraryLinkId} and #${link.id} resolve to the same library symlink: ${link.linkPath}`);
+    }
+    libraryLinks.set(canonicalLinkPath, link.id);
+  }
+  if (options.direction !== "to_local" || options.localConflictStrategy !== "replace") return [];
+
+  const claims: ResourceClaim[] = [];
+  const cleanupOwners = new Map<string, number>();
+  const eligibleLinks = filterCopyLinks(links, { ...options, linkIds: links.map((link) => link.id) });
+  for (const link of eligibleLinks) {
+    const conflict = await copyLocalConflictForLink(db, link, paths, selectedDestinations);
+    for (const candidate of conflict?.candidates ?? []) {
+      const candidatePath = path.resolve(candidate.filePath);
+      const canonicalCandidatePath = await canonicalPathForClaim(paths.localDir, candidatePath, "Local replacement claim");
+      const destinationOwner = destinations.get(canonicalCandidatePath);
+      if (destinationOwner != null && destinationOwner !== link.id) {
+        throw new Error(`Replacement cleanup for media #${link.id} overlaps selected destination for media #${destinationOwner}: ${candidatePath}`);
+      }
+      const cleanupOwner = cleanupOwners.get(canonicalCandidatePath);
+      if (cleanupOwner != null && cleanupOwner !== link.id) {
+        throw new Error(`Replacement cleanup for media #${link.id} overlaps cleanup for media #${cleanupOwner}: ${candidatePath}`);
+      }
+      cleanupOwners.set(canonicalCandidatePath, link.id);
+      const identity = await copyCleanupIdentity(candidatePath);
+      if (!identity) continue;
+      claims.push(
+        ...(await managedPathResourceClaims(paths.localDir, candidatePath, "Local replacement claim", "exclusive")),
+        { resourceType: "copy_cleanup", resourceKey: copyCleanupMarkerKey(link.id, candidatePath, identity), access: "exclusive" }
       );
     }
   }
+  return normalizeResourceClaims(claims);
 }
 
 function storageRootForDirection(paths: PathsSettings, direction: CopyOptions["direction"]): string {
@@ -556,7 +941,12 @@ function addUniqueLocalCandidate(candidates: Map<string, CopyLocalConflictCandid
   if (!existing || existing.source === "filesystem") candidates.set(key, candidate);
 }
 
-async function localConflictCandidatesForLink(db: Db, link: MediaLinkRow, paths: PathsSettings): Promise<CopyLocalConflictCandidate[]> {
+async function localConflictCandidatesForLink(
+  db: Db,
+  link: MediaLinkRow,
+  paths: PathsSettings,
+  selectedDestinations: CopySelectedDestinationIndex
+): Promise<CopyLocalConflictCandidate[]> {
   const destinationPath = copyDestinationPathForLink(link, paths, "to_local");
   const candidates = new Map<string, CopyLocalConflictCandidate>();
   const scope = localConflictSearchScope(link);
@@ -588,11 +978,22 @@ async function localConflictCandidatesForLink(db: Db, link: MediaLinkRow, paths:
     }
   }
 
-  return [...candidates.values()].sort((first, second) => first.relativePath.localeCompare(second.relativePath, undefined, { numeric: true, sensitivity: "base" }));
+  const filteredCandidates: CopyLocalConflictCandidate[] = [];
+  for (const candidate of candidates.values()) {
+    if (!(await isOtherSelectedCopyDestination(paths, candidate.filePath, link.id, selectedDestinations))) {
+      filteredCandidates.push(candidate);
+    }
+  }
+  return filteredCandidates.sort((first, second) => first.relativePath.localeCompare(second.relativePath, undefined, { numeric: true, sensitivity: "base" }));
 }
 
-async function copyLocalConflictForLink(db: Db, link: MediaLinkRow, paths: PathsSettings): Promise<CopyLocalConflict | null> {
-  const candidates = await localConflictCandidatesForLink(db, link, paths);
+async function copyLocalConflictForLink(
+  db: Db,
+  link: MediaLinkRow,
+  paths: PathsSettings,
+  selectedDestinations: CopySelectedDestinationIndex
+): Promise<CopyLocalConflict | null> {
+  const candidates = await localConflictCandidatesForLink(db, link, paths, selectedDestinations);
   if (candidates.length === 0) return null;
   return {
     linkId: link.id,
@@ -607,10 +1008,12 @@ async function copyLocalConflictForLink(db: Db, link: MediaLinkRow, paths: Paths
 
 async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyOptions): Promise<CopyConflictPreview> {
   if (options.direction !== "to_local") return { conflicts: [], totalConflicts: 0, totalCandidates: 0 };
-  const links = filterCopyLinks(await listMediaLinks(db), options);
+  const selectedLinks = orderedCopySelection(await listMediaLinks(db), options);
+  const links = filterCopyLinks(selectedLinks, { ...options, linkIds: selectedLinks.map((link) => link.id) });
+  const selectedDestinations = await copySelectedDestinationsForLinks(selectedLinks, paths, options.direction);
   const conflicts: CopyLocalConflict[] = [];
   for (const link of links) {
-    const conflict = await copyLocalConflictForLink(db, link, paths);
+    const conflict = await copyLocalConflictForLink(db, link, paths, selectedDestinations);
     if (conflict) conflicts.push(conflict);
   }
   return {
@@ -620,16 +1023,30 @@ async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyO
   };
 }
 
-async function removeLocalConflictCandidates(db: Db, paths: PathsSettings, candidates: CopyLocalConflictCandidate[], preservedPath: string): Promise<string[]> {
+async function removeLocalConflictCandidates(
+  db: DbExecutor,
+  paths: PathsSettings,
+  candidates: CopyLocalConflictCandidate[],
+  preservedPath: string,
+  expectedIdentities: Map<string, CopyCleanupIdentity>,
+  currentLinkId: number,
+  selectedDestinations: CopySelectedDestinationIndex
+): Promise<string[]> {
   const timestamp = nowIso();
   const removed: string[] = [];
   const preserved = path.resolve(preservedPath);
   for (const candidate of candidates) {
     const candidatePath = path.resolve(candidate.filePath);
     if (candidatePath === preserved) continue;
+    if (await isOtherSelectedCopyDestination(paths, candidatePath, currentLinkId, selectedDestinations)) continue;
     await assertExistingPathInside(paths.localDir, candidatePath, "Local replacement candidate");
     const stat = await fs.stat(candidatePath).catch(() => null);
     if (!stat?.isFile()) continue;
+    const expectedIdentity = expectedIdentities.get(candidatePath);
+    const actualIdentity = await copyCleanupIdentity(candidatePath);
+    if (!sameCopyCleanupIdentity(expectedIdentity, actualIdentity) || stat.size !== candidate.sizeBytes) {
+      throw new Error(`Local replacement candidate changed after copy admission: ${candidatePath}`);
+    }
     await fs.rm(candidatePath, { force: true });
     await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.filePath, candidatePath));
     removed.push(candidatePath);
@@ -641,13 +1058,23 @@ type CopySourceRow = typeof schema.copySources.$inferSelect;
 type CopyOperationRow = typeof schema.copyOperations.$inferSelect;
 
 async function prepareCopyOperation(
-  db: Db,
+  db: DbExecutor,
   jobId: number,
   link: MediaLinkRow,
   destinationPath: string,
   previousCopySource: CopySourceRow | null,
   localConflictStrategy: CopyLocalConflictStrategy | undefined
 ): Promise<CopyOperationRow> {
+  const existing = await first(
+    db
+      .select({ id: schema.copyOperations.id, stage: schema.copyOperations.stage, errorMessage: schema.copyOperations.errorMessage })
+      .from(schema.copyOperations)
+      .where(and(eq(schema.copyOperations.jobId, jobId), eq(schema.copyOperations.mediaLinkId, link.id)))
+      .limit(1)
+  );
+  if (existing?.stage === "reconciliation_required") {
+    throw new Error(`Copy operation #${existing.id} requires manual reconciliation: ${existing.errorMessage ?? "filesystem state is uncertain"}`);
+  }
   const timestamp = nowIso();
   const row = await first(
     db
@@ -663,6 +1090,9 @@ async function prepareCopyOperation(
         previousCopySource: previousCopySource ? JSON.stringify(previousCopySource) : null,
         tempPath: null,
         displacedPath: null,
+        tempIdentity: null,
+        destinationIdentity: null,
+        displacedIdentity: null,
         stage: "planned",
         resultStatus: null,
         localConflictStrategy: localConflictStrategy ?? null,
@@ -683,6 +1113,9 @@ async function prepareCopyOperation(
           previousCopySource: previousCopySource ? JSON.stringify(previousCopySource) : null,
           tempPath: null,
           displacedPath: null,
+          tempIdentity: null,
+          destinationIdentity: null,
+          displacedIdentity: null,
           stage: "planned",
           resultStatus: null,
           localConflictStrategy: localConflictStrategy ?? null,
@@ -698,65 +1131,47 @@ async function prepareCopyOperation(
   return row;
 }
 
-async function updateCopyOperation(db: Db, operationId: number, update: CopyOperationUpdate): Promise<void> {
-  await db
-    .update(schema.copyOperations)
-    .set({
-      stage: update.stage,
-      ...(update.tempPath !== undefined ? { tempPath: update.tempPath } : {}),
-      ...(update.displacedPath !== undefined ? { displacedPath: update.displacedPath } : {}),
-      ...(update.sizeBytes !== undefined ? { sizeBytes: update.sizeBytes } : {}),
-      ...(update.resultStatus !== undefined ? { resultStatus: update.resultStatus } : {}),
-      updatedAt: nowIso()
-    })
-    .where(eq(schema.copyOperations.id, operationId));
-}
-
-async function commitCopyOperation(db: Db, operationId: number, link: MediaLinkRow, result: CopyMediaResult): Promise<void> {
-  const timestamp = nowIso();
-  await db.transaction(async (transaction) => {
-    await transaction
-      .insert(schema.copySources)
-      .values({ destinationPath: result.destinationPath, sourcePath: result.sourcePath, linkPath: result.linkPath, recordedAt: timestamp })
-      .onConflictDoUpdate({
-        target: schema.copySources.destinationPath,
-        set: { sourcePath: result.sourcePath, linkPath: result.linkPath, recordedAt: timestamp }
-      });
-    await transaction
-      .update(schema.mediaLinks)
-      .set({
-        targetPath: result.destinationPath,
-        kind: result.destinationRootType,
-        targetExists: true,
-        sizeBytes: result.sizeBytes,
-        updatedAt: timestamp
-      })
-      .where(eq(schema.mediaLinks.id, link.id));
-    await transaction
+async function updateCopyOperation(db: DbExecutor, operationId: number, update: CopyOperationUpdate): Promise<void> {
+  const row = await first(
+    db
       .update(schema.copyOperations)
       .set({
-        stage: "committed",
-        resultStatus: result.status,
-        sizeBytes: result.sizeBytes,
-        tempPath: null,
-        errorMessage: null,
-        updatedAt: timestamp,
-        completedAt: timestamp
+        stage: update.stage,
+        ...(update.tempPath !== undefined ? { tempPath: update.tempPath } : {}),
+        ...(update.displacedPath !== undefined ? { displacedPath: update.displacedPath } : {}),
+        ...(update.tempIdentity !== undefined ? { tempIdentity: update.tempIdentity } : {}),
+        ...(update.destinationIdentity !== undefined ? { destinationIdentity: update.destinationIdentity } : {}),
+        ...(update.displacedIdentity !== undefined ? { displacedIdentity: update.displacedIdentity } : {}),
+        ...(update.sizeBytes !== undefined ? { sizeBytes: update.sizeBytes } : {}),
+        ...(update.resultStatus !== undefined ? { resultStatus: update.resultStatus } : {}),
+        updatedAt: nowIso()
       })
-      .where(eq(schema.copyOperations.id, operationId));
-  });
+      .where(eq(schema.copyOperations.id, operationId))
+      .returning({ id: schema.copyOperations.id })
+  );
+  if (!row) throw new Error(`Copy operation #${operationId} disappeared before its journal could be updated`);
 }
 
-async function failCopyOperation(db: Db, operationId: number, message: string): Promise<void> {
-  await db
-    .update(schema.copyOperations)
-    .set({ stage: "failed", errorMessage: message, updatedAt: nowIso(), completedAt: nowIso() })
-    .where(eq(schema.copyOperations.id, operationId));
-}
-
-async function completeCopyOperationWithoutMutation(db: Db, operationId: number, result: CopyMediaResult): Promise<void> {
+async function commitCopyOperation(db: DbExecutor, operationId: number, link: MediaLinkRow, result: CopyMediaResult): Promise<void> {
   const timestamp = nowIso();
   await db
+    .insert(schema.copySources)
+    .values({ destinationPath: result.destinationPath, sourcePath: result.sourcePath, linkPath: result.linkPath, recordedAt: timestamp })
+    .onConflictDoUpdate({
+      target: schema.copySources.destinationPath,
+      set: { sourcePath: result.sourcePath, linkPath: result.linkPath, recordedAt: timestamp }
+    });
+  await db
+    .update(schema.mediaLinks)
+    .set({
+      targetPath: result.destinationPath,
+      kind: result.destinationRootType,
+      targetExists: true,
+      sizeBytes: result.sizeBytes,
+      updatedAt: timestamp
+    })
+    .where(eq(schema.mediaLinks.id, link.id));
+  const operation = await first(db
     .update(schema.copyOperations)
     .set({
       stage: "committed",
@@ -767,13 +1182,54 @@ async function completeCopyOperationWithoutMutation(db: Db, operationId: number,
       updatedAt: timestamp,
       completedAt: timestamp
     })
-    .where(eq(schema.copyOperations.id, operationId));
+    .where(eq(schema.copyOperations.id, operationId))
+    .returning({ id: schema.copyOperations.id }));
+  if (!operation) throw new Error(`Copy operation #${operationId} disappeared before commit`);
+}
+
+async function failCopyOperation(db: DbExecutor, operationId: number, message: string): Promise<void> {
+  const row = await first(db
+    .update(schema.copyOperations)
+    .set({ stage: "failed", errorMessage: message, updatedAt: nowIso(), completedAt: nowIso() })
+    .where(eq(schema.copyOperations.id, operationId))
+    .returning({ id: schema.copyOperations.id }));
+  if (!row) throw new Error(`Copy operation #${operationId} disappeared before failure could be recorded`);
+}
+
+async function requireCopyOperationReconciliation(db: DbExecutor, operationId: number, message: string): Promise<void> {
+  const row = await first(db
+    .update(schema.copyOperations)
+    .set({ stage: "reconciliation_required", errorMessage: message, updatedAt: nowIso(), completedAt: null })
+    .where(eq(schema.copyOperations.id, operationId))
+    .returning({ id: schema.copyOperations.id }));
+  if (!row) throw new Error(`Copy operation #${operationId} disappeared before reconciliation could be recorded`);
+}
+
+async function completeCopyOperationWithoutMutation(db: DbExecutor, operationId: number, result: CopyMediaResult): Promise<void> {
+  const timestamp = nowIso();
+  const row = await first(db
+    .update(schema.copyOperations)
+    .set({
+      stage: "committed",
+      resultStatus: result.status,
+      sizeBytes: result.sizeBytes,
+      tempPath: null,
+      errorMessage: null,
+      updatedAt: timestamp,
+      completedAt: timestamp
+    })
+    .where(eq(schema.copyOperations.id, operationId))
+    .returning({ id: schema.copyOperations.id }));
+  if (!row) throw new Error(`Copy operation #${operationId} disappeared before completion could be recorded`);
 }
 
 interface CopyRollbackEntry {
   link: MediaLinkRow;
   result: CopyMediaResult;
   previousCopySource: CopySourceRow | null;
+  displacedPath: string | null;
+  destinationIdentity: string | null;
+  displacedIdentity: string | null;
 }
 
 async function currentSymlinkTarget(linkPath: string): Promise<string | null> {
@@ -893,7 +1349,7 @@ async function replaceSymlinkTarget(linkRoot: string, linkPath: string, targetPa
   }
 }
 
-async function restoreCopySource(db: Db, entry: CopyRollbackEntry): Promise<void> {
+async function restoreCopySource(db: DbExecutor, entry: CopyRollbackEntry): Promise<void> {
   if (entry.previousCopySource) {
     await db
       .insert(schema.copySources)
@@ -916,12 +1372,45 @@ async function restoreCopySource(db: Db, entry: CopyRollbackEntry): Promise<void
   await db.delete(schema.copySources).where(eq(schema.copySources.destinationPath, entry.result.destinationPath));
 }
 
-async function rollbackCopiedMediaLink(db: Db, entry: CopyRollbackEntry, paths: PathsSettings): Promise<{ rolledBack: boolean; warning?: string }> {
+function requiredJournalIdentity(rawIdentity: string | null, label: string): CopyFileIdentity {
+  if (!rawIdentity) throw new Error(`${label} has no durable file identity; refusing automatic filesystem recovery`);
+  try {
+    return parseCopyFileIdentity(rawIdentity);
+  } catch (error) {
+    throw new Error(`${label} has an invalid durable file identity`, { cause: error });
+  }
+}
+
+async function currentJournalFileIdentity(filePath: string, label: string): Promise<CopyFileIdentity | null> {
+  const stat = await fs.lstat(filePath).catch((error: unknown) => {
+    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stat) return null;
+  if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
+  const identity = await readCopyFileIdentity(filePath);
+  if (!identity) throw new Error(`${label} disappeared while its identity was being checked`);
+  return identity;
+}
+
+function assertJournalIdentity(actual: CopyFileIdentity, rawExpected: string | null, label: string): void {
+  const expected = requiredJournalIdentity(rawExpected, label);
+  if (!copyFileIdentitiesMatch(actual, expected)) throw new Error(`${label} changed after its file identity was journaled`);
+}
+
+async function rollbackCopiedMediaLink(
+  db: Db,
+  entry: CopyRollbackEntry,
+  paths: PathsSettings,
+  ctx: Pick<JobContext, "withLease" | "withLeaseDb">
+): Promise<{ rolledBack: boolean; warning?: string }> {
   const currentTarget = await currentSymlinkTarget(entry.link.linkPath);
-  if (currentTarget !== path.resolve(entry.result.destinationPath)) {
+  const resolvedDestination = path.resolve(entry.result.destinationPath);
+  const resolvedOriginal = path.resolve(entry.link.targetPath);
+  if (currentTarget !== resolvedDestination && currentTarget !== resolvedOriginal) {
     return {
       rolledBack: false,
-      warning: `Skipped rollback for ${entry.link.linkPath}; symlink no longer points to the job destination`
+      warning: `Skipped rollback for ${entry.link.linkPath}; symlink no longer points to the job destination or original source`
     };
   }
 
@@ -929,27 +1418,64 @@ async function rollbackCopiedMediaLink(db: Db, entry: CopyRollbackEntry, paths: 
   if (!originalRoot) return { rolledBack: false, warning: `Skipped rollback for ${entry.link.linkPath}; original target root is unknown` };
   await assertExistingPathInside(originalRoot, entry.link.targetPath, "Original copy source");
   await assertDestinationPathInside(entry.result.destinationRootType === "local" ? paths.localDir : paths.remoteDir, entry.result.destinationPath, "Copy destination");
-  await replaceSymlinkTarget(paths.symlinkDir, entry.link.linkPath, entry.link.targetPath);
-  await db
-    .update(schema.mediaLinks)
-    .set({
-      targetPath: entry.link.targetPath,
-      kind: entry.link.kind,
-      targetExists: entry.link.targetExists,
-      resolvedStorageFileId: entry.link.resolvedStorageFileId,
-      sizeBytes: entry.link.sizeBytes,
-      updatedAt: nowIso()
-    })
-    .where(eq(schema.mediaLinks.id, entry.link.id));
-  await restoreCopySource(db, entry);
+  if (currentTarget === resolvedDestination) {
+    await ctx.withLease(async () => {
+      const lockedTarget = await currentSymlinkTarget(entry.link.linkPath);
+      if (lockedTarget !== resolvedDestination) throw new Error("Symlink changed while copy rollback was waiting for its lease");
+      await replaceSymlinkTarget(paths.symlinkDir, entry.link.linkPath, entry.link.targetPath);
+    });
+  }
+  await ctx.withLeaseDb(async (leaseDb) => {
+    await leaseDb
+      .update(schema.mediaLinks)
+      .set({
+        targetPath: entry.link.targetPath,
+        kind: entry.link.kind,
+        targetExists: entry.link.targetExists,
+        resolvedStorageFileId: entry.link.resolvedStorageFileId,
+        sizeBytes: entry.link.sizeBytes,
+        updatedAt: nowIso()
+      })
+      .where(eq(schema.mediaLinks.id, entry.link.id));
+    await restoreCopySource(leaseDb, entry);
+  });
 
   if (entry.result.status === "copied") {
     try {
-      const stat = await fs.stat(entry.result.destinationPath);
-      if (stat.isFile() && stat.size === entry.result.sizeBytes) {
-        await assertExistingPathInside(entry.result.destinationRootType === "local" ? paths.localDir : paths.remoteDir, entry.result.destinationPath, "Copy destination");
-        await fs.rm(entry.result.destinationPath, { force: true });
-      } else {
+      const restored = await ctx.withLease(async () => {
+        const destinationIdentity = await currentJournalFileIdentity(entry.result.destinationPath, "Copy destination");
+        const displacedIdentity = entry.displacedPath
+          ? await currentJournalFileIdentity(entry.displacedPath, "Displaced copy destination")
+          : null;
+
+        if (
+          currentTarget === resolvedOriginal &&
+          entry.displacedPath &&
+          destinationIdentity &&
+          !displacedIdentity &&
+          copyFileIdentitiesMatch(destinationIdentity, requiredJournalIdentity(entry.displacedIdentity, "Displaced copy destination"))
+        ) {
+          return true;
+        }
+        if (currentTarget === resolvedOriginal && !entry.displacedPath && !destinationIdentity) return true;
+
+        if (destinationIdentity) {
+          assertJournalIdentity(destinationIdentity, entry.destinationIdentity, "Copy destination");
+          await assertExistingPathInside(entry.result.destinationRootType === "local" ? paths.localDir : paths.remoteDir, entry.result.destinationPath, "Copy destination");
+          await fs.rm(entry.result.destinationPath, { force: true });
+        }
+        if (entry.displacedPath) {
+          if (!displacedIdentity) throw new Error("Journaled displaced destination is missing");
+          assertJournalIdentity(displacedIdentity, entry.displacedIdentity, "Displaced copy destination");
+          const occupiedDestination = await currentJournalFileIdentity(entry.result.destinationPath, "Copy destination restore path");
+          if (occupiedDestination) throw new Error("Copy destination became occupied before displaced-file restoration");
+          await assertExistingPathInside(entry.result.destinationRootType === "local" ? paths.localDir : paths.remoteDir, entry.displacedPath, "Displaced copy destination");
+          await assertDestinationPathInside(entry.result.destinationRootType === "local" ? paths.localDir : paths.remoteDir, entry.result.destinationPath, "Copy destination restore path");
+          await fs.rename(entry.displacedPath, entry.result.destinationPath);
+        }
+        return true;
+      });
+      if (!restored) {
         return {
           rolledBack: true,
           warning: `Restored symlink for ${entry.link.linkPath}, but left ${entry.result.destinationPath} because it changed after copy`
@@ -963,28 +1489,31 @@ async function rollbackCopiedMediaLink(db: Db, entry: CopyRollbackEntry, paths: 
   return { rolledBack: true };
 }
 
-async function removeJournalFile(root: string, filePath: string | null, expectedSize: number | null, label: string): Promise<void> {
+async function removeJournalFile(root: string, filePath: string | null, expectedIdentity: string | null, label: string): Promise<void> {
   if (!filePath) return;
-  try {
-    await assertExistingPathInside(root, filePath, label);
-    const stat = await fs.stat(filePath);
-    if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
-    if (expectedSize != null && stat.size !== expectedSize) throw new Error(`${label} changed size after it was journaled`);
-    await fs.rm(filePath, { force: true });
-  } catch (error) {
-    if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return;
-    throw error;
-  }
+  await assertDestinationPathInside(root, filePath, label);
+  const actualIdentity = await currentJournalFileIdentity(filePath, label);
+  if (!actualIdentity) return;
+  assertJournalIdentity(actualIdentity, expectedIdentity, label);
+  await assertExistingPathInside(root, filePath, label);
+  await fs.rm(filePath, { force: true });
 }
 
 async function reconcileCopyOperationsForJob(
   db: Db,
   jobId: number,
   paths: PathsSettings,
-  event: JobContext["event"]
+  ctx: JobContext
 ): Promise<void> {
-  const terminalStages = new Set(["committed", "rolled_back", "failed", "reconciliation_required"]);
-  const operations = (await db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, jobId))).filter(
+  const allOperations = await db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, jobId));
+  const blockedOperation = allOperations.find((operation) => operation.stage === "reconciliation_required");
+  if (blockedOperation) {
+    throw new Error(
+      `Copy operation #${blockedOperation.id} requires manual reconciliation: ${blockedOperation.errorMessage ?? "filesystem state is uncertain"}`
+    );
+  }
+  const terminalStages = new Set(["committed", "rolled_back", "failed"]);
+  const operations = allOperations.filter(
     (operation) => !terminalStages.has(operation.stage)
   );
 
@@ -997,18 +1526,21 @@ async function reconcileCopyOperationsForJob(
       const resolvedOriginal = path.resolve(operation.originalTargetPath);
 
       if (currentTarget === resolvedDestination) {
-        await assertExistingPathInside(destinationRoot, operation.destinationPath, "Recovered copy destination");
-        const stat = await fs.stat(operation.destinationPath);
-        if (!stat.isFile()) throw new Error("Recovered copy destination is not a regular file");
-        if (operation.sizeBytes != null && stat.size !== operation.sizeBytes) throw new Error("Recovered copy destination changed size");
         const link = copyOperationLink(operation);
-        const result = copyOperationResult(operation, paths, stat.size);
-        await commitCopyOperation(db, operation.id, link, result);
-        await removeJournalFile(destinationRoot, operation.tempPath, operation.sizeBytes, "Temporary copy");
-        if (operation.displacedPath && operation.localConflictStrategy === "replace") {
-          await removeJournalFile(destinationRoot, operation.displacedPath, null, "Displaced destination");
-        }
-        await event("warn", "Recovered copy operation after worker interruption", {
+        await ctx.withLeaseDb(async (leaseDb) => {
+          if ((await currentSymlinkTarget(operation.linkPath)) !== resolvedDestination) {
+            throw new Error("Recovered symlink changed while copy recovery was waiting for its lease");
+          }
+          await assertExistingPathInside(destinationRoot, operation.destinationPath, "Recovered copy destination");
+          const destinationIdentity = await currentJournalFileIdentity(operation.destinationPath, "Recovered copy destination");
+          if (!destinationIdentity) throw new Error("Recovered copy destination is missing");
+          assertJournalIdentity(destinationIdentity, operation.destinationIdentity, "Recovered copy destination");
+          const stat = await fs.stat(operation.destinationPath);
+          const result = copyOperationResult(operation, paths, stat.size);
+          await removeJournalFile(destinationRoot, operation.tempPath, operation.tempIdentity, "Temporary copy");
+          await commitCopyOperation(leaseDb, operation.id, link, result);
+        });
+        await ctx.event("warn", "Recovered copy operation after worker interruption", {
           operationId: operation.id,
           linkPath: operation.linkPath,
           destinationPath: operation.destinationPath,
@@ -1018,26 +1550,53 @@ async function reconcileCopyOperationsForJob(
       }
 
       if (currentTarget === resolvedOriginal) {
-        await removeJournalFile(destinationRoot, operation.tempPath, operation.sizeBytes, "Temporary copy");
-        if (operation.stage === "promoted" || operation.stage === "repointed") {
-          await removeJournalFile(destinationRoot, operation.destinationPath, operation.sizeBytes, "Uncommitted promoted copy");
-        }
-        if (operation.displacedPath) {
-          const destinationExistsNow = await fs.stat(operation.destinationPath).then(() => true).catch((error: unknown) => {
-            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") return false;
-            throw error;
-          });
-          if (destinationExistsNow) throw new Error("Cannot restore displaced destination because its original path is occupied");
-          await assertExistingPathInside(destinationRoot, operation.displacedPath, "Displaced destination");
-          await assertDestinationPathInside(destinationRoot, operation.destinationPath, "Destination restore path");
-          await fs.rename(operation.displacedPath, operation.destinationPath);
-        }
+        await ctx.withLease(async () => {
+          if ((await currentSymlinkTarget(operation.linkPath)) !== resolvedOriginal) {
+            throw new Error("Recovered symlink changed while copy rollback was waiting for its lease");
+          }
+          const tempIdentity = operation.tempPath
+            ? await currentJournalFileIdentity(operation.tempPath, "Temporary copy")
+            : null;
+          if ((operation.stage === "promoted" || operation.stage === "repointed") && operation.resultStatus !== "repointed" && !tempIdentity) {
+            await removeJournalFile(destinationRoot, operation.destinationPath, operation.destinationIdentity, "Uncommitted promoted copy");
+          }
+          await removeJournalFile(destinationRoot, operation.tempPath, operation.tempIdentity, "Temporary copy");
+          if (operation.displacedPath) {
+            const destinationIdentity = await currentJournalFileIdentity(operation.destinationPath, "Destination restore path");
+            const displacedIdentity = await currentJournalFileIdentity(operation.displacedPath, "Displaced destination");
+            if (destinationIdentity && displacedIdentity) {
+              throw new Error("Cannot restore displaced destination because its original path is occupied");
+            }
+            if (!destinationIdentity && displacedIdentity) {
+              assertJournalIdentity(displacedIdentity, operation.displacedIdentity, "Displaced destination");
+              await assertExistingPathInside(destinationRoot, operation.displacedPath, "Displaced destination");
+              await assertDestinationPathInside(destinationRoot, operation.destinationPath, "Destination restore path");
+              await fs.rename(operation.displacedPath, operation.destinationPath);
+            } else if (destinationIdentity && operation.displacedIdentity) {
+              assertJournalIdentity(destinationIdentity, operation.displacedIdentity, "Restored displaced destination");
+            } else if (!destinationIdentity) {
+              throw new Error("Journaled displaced destination is missing from both paths");
+            }
+          }
+        });
         const timestamp = nowIso();
-        await db
-          .update(schema.copyOperations)
-          .set({ stage: "rolled_back", tempPath: null, displacedPath: null, errorMessage: null, updatedAt: timestamp, completedAt: timestamp })
-          .where(eq(schema.copyOperations.id, operation.id));
-        await event("warn", "Rolled back incomplete copy operation after worker interruption", {
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb
+            .update(schema.copyOperations)
+            .set({
+              stage: "rolled_back",
+              tempPath: null,
+              displacedPath: null,
+              tempIdentity: null,
+              destinationIdentity: null,
+              displacedIdentity: null,
+              errorMessage: null,
+              updatedAt: timestamp,
+              completedAt: timestamp
+            })
+            .where(eq(schema.copyOperations.id, operation.id));
+        });
+        await ctx.event("warn", "Rolled back incomplete copy operation after worker interruption", {
           operationId: operation.id,
           linkPath: operation.linkPath,
           resolution: "rolled_back"
@@ -1047,12 +1606,15 @@ async function reconcileCopyOperationsForJob(
 
       throw new Error("Symlink no longer points to either the original target or the journaled destination");
     } catch (error: unknown) {
+      if (error instanceof LeaseLostError || (error instanceof Error && error.name === "LeaseLostError")) throw error;
       const message = errorMessage(error);
-      await db
-        .update(schema.copyOperations)
-        .set({ stage: "reconciliation_required", errorMessage: message, updatedAt: nowIso() })
-        .where(eq(schema.copyOperations.id, operation.id));
-      await event("error", "Copy operation requires manual reconciliation", {
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.copyOperations)
+          .set({ stage: "reconciliation_required", errorMessage: message, updatedAt: nowIso() })
+          .where(eq(schema.copyOperations.id, operation.id));
+      });
+      await ctx.event("error", "Copy operation requires manual reconciliation", {
         operationId: operation.id,
         linkPath: operation.linkPath,
         destinationPath: operation.destinationPath,
@@ -1067,19 +1629,21 @@ async function rollbackDurableCopyOperations(
   db: Db,
   jobId: number,
   paths: PathsSettings,
-  event: JobContext["event"]
+  ctx: JobContext
 ): Promise<{ rolledBack: number; warnings: string[] }> {
-  await reconcileCopyOperationsForJob(db, jobId, paths, event);
+  await reconcileCopyOperationsForJob(db, jobId, paths, ctx);
   const operations = (await db.select().from(schema.copyOperations).where(and(eq(schema.copyOperations.jobId, jobId), eq(schema.copyOperations.stage, "committed")))).reverse();
   let rolledBack = 0;
   const warnings: string[] = [];
 
   for (const operation of operations) {
     if (operation.resultStatus !== "copied" && operation.resultStatus !== "repointed") {
-      await db
-        .update(schema.copyOperations)
-        .set({ stage: "rolled_back", updatedAt: nowIso(), completedAt: nowIso() })
-        .where(eq(schema.copyOperations.id, operation.id));
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.copyOperations)
+          .set({ stage: "rolled_back", updatedAt: nowIso(), completedAt: nowIso() })
+          .where(eq(schema.copyOperations.id, operation.id));
+      });
       continue;
     }
     try {
@@ -1087,24 +1651,37 @@ async function rollbackDurableCopyOperations(
       const result = copyOperationResult(operation, paths, operation.sizeBytes ?? link.sizeBytes ?? 0);
       const rollback = await rollbackCopiedMediaLink(
         db,
-        { link, result, previousCopySource: copyOperationPreviousSource(operation) },
-        paths
+        {
+          link,
+          result,
+          previousCopySource: copyOperationPreviousSource(operation),
+          displacedPath: operation.displacedPath,
+          destinationIdentity: operation.destinationIdentity,
+          displacedIdentity: operation.displacedIdentity
+        },
+        paths,
+        ctx
       );
       if (rollback.rolledBack) {
         rolledBack += 1;
-        await db
-          .update(schema.copyOperations)
-          .set({ stage: "rolled_back", errorMessage: null, updatedAt: nowIso(), completedAt: nowIso() })
-          .where(eq(schema.copyOperations.id, operation.id));
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb
+            .update(schema.copyOperations)
+            .set({ stage: "rolled_back", errorMessage: null, updatedAt: nowIso(), completedAt: nowIso() })
+            .where(eq(schema.copyOperations.id, operation.id));
+        });
       }
       if (rollback.warning) warnings.push(rollback.warning);
     } catch (error: unknown) {
+      if (error instanceof LeaseLostError || (error instanceof Error && error.name === "LeaseLostError")) throw error;
       const warning = `Rollback failed for ${operation.linkPath}: ${errorMessage(error)}`;
       warnings.push(warning);
-      await db
-        .update(schema.copyOperations)
-        .set({ stage: "reconciliation_required", errorMessage: warning, updatedAt: nowIso() })
-        .where(eq(schema.copyOperations.id, operation.id));
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.copyOperations)
+          .set({ stage: "reconciliation_required", errorMessage: warning, updatedAt: nowIso() })
+          .where(eq(schema.copyOperations.id, operation.id));
+      });
     }
   }
   return { rolledBack, warnings };
@@ -1245,7 +1822,7 @@ async function readCopyResumeState(db: Db, jobId: number, selectedLinks: MediaLi
   return { copied, repointed, skipped, alreadyCompleted, startedTotal };
 }
 
-function toJobRecord(row: JobRow): JobRecord {
+function toJobRecord(row: JobRow): LeasedJob {
   const progress = parseJson(row.progress);
   const normalizedProgress = normalizeJobProgress(row.type, row.status, progress);
   const status = normalizeJobStatus(row.type, row.status, progress);
@@ -1253,7 +1830,9 @@ function toJobRecord(row: JobRow): JobRecord {
     ...row,
     type: row.type as JobRecord["type"],
     status,
-    progress: normalizedProgress
+    progress: normalizedProgress,
+    leaseVersion: row.leaseVersion,
+    exclusive: row.exclusive
   };
 }
 
@@ -1289,39 +1868,122 @@ function isStaleRunningJob(job: Pick<JobRecord, "createdAt" | "startedAt" | "hea
   return Number.isFinite(referenceAt) && Date.now() - referenceAt >= staleAfterMs;
 }
 
-async function addEvent(db: Db, jobId: number, level: JobEventRecord["level"], message: string, data: unknown = {}): Promise<void> {
-  await db.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level, message, data: JSON.stringify(data) });
-}
-
-async function setProgress(db: Db, jobId: number, progress: unknown): Promise<void> {
-  await db.update(schema.jobs).set({ progress: JSON.stringify(progress) }).where(eq(schema.jobs.id, jobId));
-}
-
 export class JobRunner {
   constructor(private readonly db: Db) {}
 
   async createJob(type: JobRecord["type"], progress: unknown = {}): Promise<number> {
+    return this.enqueueJob(type, progress, true, []);
+  }
+
+  private async enqueueJob(type: JobRecord["type"], progress: unknown, exclusive: boolean, requestedClaims: ResourceClaim[]): Promise<number> {
+    return this.enqueuePreparedJob(type, async () => ({ progress, exclusive, claims: requestedClaims }));
+  }
+
+  private async enqueuePreparedJob(type: JobRecord["type"], prepare: (db: DbExecutor) => Promise<PreparedJob>): Promise<number> {
     if (type !== "path_migration" && (await isPathConfigurationBlocked(this.db))) {
       throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
     }
-    const row = await first(this.db
-      .insert(schema.jobs)
-      .values({
-        type,
-        status: "queued",
-        createdAt: nowIso(),
-        startedAt: null,
-        finishedAt: null,
-        lockedBy: null,
-        lockedAt: null,
-        heartbeatAt: null,
-        cancelRequestedAt: null,
-        progress: JSON.stringify(progress)
-      })
-      .returning({ id: schema.jobs.id }));
-    if (!row) throw new Error("Job was not queued");
-    await addEvent(this.db, row.id, "info", "Job queued", { type });
-    return row.id;
+    return this.db.transaction(async (transaction) => {
+      await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+      if (type !== "path_migration" && (await isPathConfigurationBlocked(transaction))) {
+        throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
+      }
+      const prepared = await prepare(transaction);
+      const claims = normalizeResourceClaims(prepared.claims);
+
+      if (!prepared.exclusive && claims.length > 0) {
+        const conflict = await dbGet<{ jobId: number; status: string; overlapCount: number }>(transaction, sql`
+          WITH requested_claims AS (
+            SELECT "resourceType" AS resource_type, "resourceKey" AS resource_key, access
+            FROM jsonb_to_recordset(${JSON.stringify(claims)}::jsonb)
+              AS requested("resourceType" text, "resourceKey" text, access text)
+          ), blocking_claims AS (
+            SELECT active.job_id, active.resource_type, active.resource_key, active.access, jobs.status
+            FROM job_resource_claims AS active
+            JOIN jobs ON jobs.id = active.job_id
+            WHERE jobs.status IN ('queued', 'running')
+            UNION
+            SELECT active.job_id, active.resource_type, active.resource_key, active.access, 'reconciliation_required'::text AS status
+            FROM job_resource_claims AS active
+            JOIN copy_operations AS operation ON operation.job_id = active.job_id
+            WHERE operation.stage = 'reconciliation_required'
+              AND active.resource_type <> 'title'
+            UNION
+            SELECT operation.job_id, 'media'::text, operation.media_link_id::text, 'exclusive'::text, 'reconciliation_required'::text AS status
+            FROM copy_operations AS operation
+            WHERE operation.stage = 'reconciliation_required'
+            UNION
+            SELECT operation.job_id, 'path'::text, paths.resource_key, 'exclusive'::text, 'reconciliation_required'::text AS status
+            FROM copy_operations AS operation
+            CROSS JOIN LATERAL unnest(ARRAY[
+              operation.link_path,
+              operation.source_path,
+              operation.destination_path,
+              operation.temp_path,
+              operation.displaced_path
+            ]) AS paths(resource_key)
+            WHERE operation.stage = 'reconciliation_required'
+              AND paths.resource_key IS NOT NULL
+          )
+          SELECT active.job_id AS "jobId",
+                 active.status,
+                 greatest(1, count(*) FILTER (WHERE requested.resource_type = 'media'))::integer AS "overlapCount"
+          FROM requested_claims AS requested
+          JOIN blocking_claims AS active
+            ON active.resource_type = requested.resource_type
+           AND active.resource_key = requested.resource_key
+           AND (active.access = 'exclusive' OR requested.access = 'exclusive')
+          GROUP BY active.job_id, active.status
+          ORDER BY active.job_id
+          LIMIT 1
+        `);
+        if (conflict) {
+          if (conflict.status === "reconciliation_required") {
+            throw new Error(
+              `Copy data from job #${conflict.jobId} requires manual reconciliation before another action can touch the same media item or managed path.`
+            );
+          }
+          throw new Error(
+            `Job #${conflict.jobId} is already ${conflict.status} for ${conflict.overlapCount} matching media item${conflict.overlapCount === 1 ? "" : "s"}. Wait for it to finish or terminate it before queuing another action.`
+          );
+        }
+      }
+
+      const timestamp = nowIso();
+      const row = await first(
+        transaction
+          .insert(schema.jobs)
+          .values({
+            type,
+            status: "queued",
+            createdAt: timestamp,
+            startedAt: null,
+            finishedAt: null,
+            lockedBy: null,
+            lockedAt: null,
+            heartbeatAt: null,
+            leaseVersion: 0,
+            exclusive: prepared.exclusive,
+            cancelRequestedAt: null,
+            progress: JSON.stringify(prepared.progress)
+          })
+          .returning({ id: schema.jobs.id })
+      );
+      if (!row) throw new Error("Job was not queued");
+      for (let offset = 0; offset < claims.length; offset += 500) {
+        await transaction.insert(schema.jobResourceClaims).values(
+          claims.slice(offset, offset + 500).map((claim) => ({
+            jobId: row.id,
+            resourceType: claim.resourceType,
+            resourceKey: claim.resourceKey,
+            access: claim.access,
+            createdAt: timestamp
+          }))
+        );
+      }
+      await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp, level: "info", message: "Job queued", data: JSON.stringify({ type }) });
+      return row.id;
+    });
   }
 
   async listJobs(options: JobListOptions = {}): Promise<JobRecord[]> {
@@ -1393,29 +2055,43 @@ export class JobRunner {
   }
 
   async terminate(jobId: number): Promise<boolean> {
-    const job = await this.getJob(jobId);
-    if (!job) return false;
-    const timestamp = nowIso();
-    if (job.status === "queued") {
-      await this.db
-        .update(schema.jobs)
-        .set({ status: "cancelled", finishedAt: timestamp, cancelRequestedAt: timestamp })
-        .where(eq(schema.jobs.id, jobId));
-      if (job.type === "path_migration" && isRecord(job.progress) && Number.isInteger(job.progress.migrationId)) {
-        await this.db
-          .update(schema.pathMigrations)
-          .set({ status: "failed", finishedAt: timestamp, errorMessage: "Path migration was terminated before it started. Analyze the path change again or restore the previous environment paths." })
-          .where(and(eq(schema.pathMigrations.id, Number(job.progress.migrationId)), eq(schema.pathMigrations.status, "queued")));
+    return this.db.transaction(async (transaction) => {
+      const row = await first(transaction.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).for("update").limit(1));
+      if (!row) return false;
+      const job = toJobRecord(row);
+      const timestamp = nowIso();
+      if (job.status === "queued") {
+        const terminated = await first(
+          transaction
+            .update(schema.jobs)
+            .set({ status: "cancelled", finishedAt: timestamp, cancelRequestedAt: timestamp })
+            .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "queued")))
+            .returning({ id: schema.jobs.id })
+        );
+        if (!terminated) return false;
+        if (job.type === "path_migration" && isRecord(job.progress) && Number.isInteger(job.progress.migrationId)) {
+          await transaction
+            .update(schema.pathMigrations)
+            .set({ status: "failed", finishedAt: timestamp, errorMessage: "Path migration was terminated before it started. Analyze the path change again or restore the previous environment paths." })
+            .where(and(eq(schema.pathMigrations.id, Number(job.progress.migrationId)), eq(schema.pathMigrations.status, "queued")));
+        }
+        await transaction.insert(schema.jobEvents).values({ jobId, timestamp, level: "warn", message: "Queued job terminated", data: "{}" });
+        return true;
       }
-      await addEvent(this.db, jobId, "warn", "Queued job terminated");
-      return true;
-    }
-    if (job.status === "running") {
-      await this.db.update(schema.jobs).set({ cancelRequestedAt: timestamp }).where(eq(schema.jobs.id, jobId));
-      await addEvent(this.db, jobId, "warn", "Termination requested");
-      return true;
-    }
-    return false;
+      if (job.status === "running") {
+        const requested = await first(
+          transaction
+            .update(schema.jobs)
+            .set({ cancelRequestedAt: timestamp })
+            .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "running")))
+            .returning({ id: schema.jobs.id })
+        );
+        if (!requested) return false;
+        await transaction.insert(schema.jobEvents).values({ jobId, timestamp, level: "warn", message: "Termination requested", data: "{}" });
+        return true;
+      }
+      return false;
+    });
   }
 
   async cancel(jobId: number): Promise<boolean> {
@@ -1424,17 +2100,25 @@ export class JobRunner {
 
   async startScan(options: ScanOptions = defaultScanOptions): Promise<number> {
     const normalizedOptions = await normalizeScanOptions(this.db, options);
-    const links = await listMediaLinks(this.db, undefined, "current");
-    const scanLinks = filterScanLinks(links, normalizedOptions);
-    if (normalizedOptions.titleScopes?.length) {
+    const targeted = Boolean(normalizedOptions.titleScopes?.length);
+    if (!targeted) return this.enqueueJob("scan", { options: normalizedOptions }, true, []);
+    return this.enqueuePreparedJob("scan", async (transaction) => {
+      const scanLinks = filterScanLinks(await listMediaLinks(transaction, undefined, "current"), normalizedOptions);
+      const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+      if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
       const availableScopes = new Set(scanLinks.map((link) => `${link.section}\0${link.itemName}`));
-      const unavailableScopes = normalizedOptions.titleScopes.filter((scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`));
+      const unavailableScopes = (normalizedOptions.titleScopes ?? []).filter(
+        (scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`)
+      );
       if (unavailableScopes.length > 0) {
         throw new Error(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
       }
-    }
-    await assertNoActiveJobOverlap(this.db, links, scanLinks);
-    return this.createJob("scan", { options: normalizedOptions });
+      return {
+        progress: { options: normalizedOptions },
+        exclusive: false,
+        claims: await titleScanResourceClaims(normalizedOptions, scanLinks, paths)
+      };
+    });
   }
 
   async startAudit(input: AuditMode | AuditOptions): Promise<number> {
@@ -1445,20 +2129,50 @@ export class JobRunner {
       ...normalizedOptions,
       ...(requestedOptions.byteCompare === undefined && !advancedSettings.audit.byteCompareWhenSourceKnown ? { byteCompare: false } : {})
     };
-    const links = await listMediaLinks(this.db, undefined, "current");
-    await assertNoActiveJobOverlap(this.db, links, filterAuditLinks(links, optionsWithDefaults));
-    return this.createJob("audit", { options: optionsWithDefaults });
+    const scoped = hasScopedAuditOptions(optionsWithDefaults);
+    if (!scoped) return this.enqueueJob("audit", { options: optionsWithDefaults }, true, []);
+    return this.enqueuePreparedJob("audit", async (transaction) => {
+      const auditLinks = filterAuditLinks(await listMediaLinks(transaction, undefined, "current"), optionsWithDefaults);
+      const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+      if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+      const frozenOptions = { ...optionsWithDefaults, linkIds: auditLinks.map((link) => link.id) };
+      return {
+        progress: { options: frozenOptions },
+        exclusive: false,
+        claims: await auditResourceClaims(auditLinks, paths)
+      };
+    });
   }
 
   async startCopy(input: CopyOptions): Promise<number> {
     const normalizedOptions = await normalizeCopyOptions(this.db, input);
     const links = await listMediaLinks(this.db, undefined, "current");
-    const copyLinks = filterCopyLinks(links, normalizedOptions);
-    await assertNoActiveJobOverlap(this.db, links, copyLinks);
-    const requestedOrder = normalizedOptions.linkIds?.length ? new Map(normalizedOptions.linkIds.map((id, index) => [id, index])) : null;
-    const orderedCopyLinks = requestedOrder ? [...copyLinks].sort((firstLink, secondLink) => (requestedOrder.get(firstLink.id) ?? 0) - (requestedOrder.get(secondLink.id) ?? 0)) : copyLinks;
-    const optionsWithResolvedLinks = orderedCopyLinks.length > 0 ? { ...normalizedOptions, linkIds: orderedCopyLinks.map((link) => link.id) } : normalizedOptions;
-    return this.createJob("copy", { options: optionsWithResolvedLinks });
+    const orderedSelectedLinks = orderedCopySelection(links, normalizedOptions);
+    const optionsWithResolvedLinks = { ...normalizedOptions, linkIds: orderedSelectedLinks.map((link) => link.id) };
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (!paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+    const replacementClaims = await copyReplacementResourceClaims(this.db, orderedSelectedLinks, paths, optionsWithResolvedLinks);
+    const expectedSelection = orderedSelectedLinks.map(copyAdmissionFingerprint);
+    return this.enqueuePreparedJob("copy", async (transaction) => {
+      const currentSelection = orderedCopySelection(
+        await listMediaLinks(transaction, undefined, "current"),
+        normalizedOptions
+      );
+      const currentPaths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+      if (
+        JSON.stringify(currentSelection.map(copyAdmissionFingerprint)) !== JSON.stringify(expectedSelection) ||
+        currentPaths.symlinkDir !== paths.symlinkDir ||
+        currentPaths.localDir !== paths.localDir ||
+        currentPaths.remoteDir !== paths.remoteDir
+      ) {
+        throw new Error("Copy selection changed while the job was being prepared. Review the current inventory and queue it again.");
+      }
+      return {
+        progress: { options: optionsWithResolvedLinks },
+        exclusive: false,
+        claims: [...(await copyResourceClaims(orderedSelectedLinks, paths, normalizedOptions.direction)), ...replacementClaims]
+      };
+    });
   }
 
   async previewCopyConflicts(input: CopyOptions): Promise<CopyConflictPreview> {
@@ -1472,20 +2186,32 @@ export class JobRunner {
   }
 
   async startPathMigration(migrationId: number): Promise<number> {
-    await assertPathMigrationReady(this.db, migrationId);
     const jobId = await this.db.transaction(async (transaction) => {
+      await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+      const readyMigration = await first(transaction.select().from(schema.pathMigrations).where(eq(schema.pathMigrations.id, migrationId)).for("update").limit(1));
+      if (!readyMigration || readyMigration.status !== "planned") throw new Error("Analyze the path change before starting migration");
+      const blocked = await first(
+        transaction
+          .select({ value: count() })
+          .from(schema.pathMigrationItems)
+          .where(and(eq(schema.pathMigrationItems.migrationId, migrationId), eq(schema.pathMigrationItems.validationStatus, "blocked")))
+      );
+      if (Number(blocked?.value ?? 0) > 0) throw new Error("Resolve every blocked symlink before starting migration");
+      const timestamp = nowIso();
       const row = await first(
         transaction
           .insert(schema.jobs)
           .values({
             type: "path_migration",
             status: "queued",
-            createdAt: nowIso(),
+            createdAt: timestamp,
             startedAt: null,
             finishedAt: null,
             lockedBy: null,
             lockedAt: null,
             heartbeatAt: null,
+            leaseVersion: 0,
+            exclusive: true,
             cancelRequestedAt: null,
             progress: JSON.stringify({ migrationId, stage: "queued", current: 0, total: 0, message: "Path migration queued" })
           })
@@ -1500,7 +2226,7 @@ export class JobRunner {
           .returning({ id: schema.pathMigrations.id })
       );
       if (!migration) throw new Error("Path migration is no longer ready to start");
-      await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp: nowIso(), level: "info", message: "Job queued", data: JSON.stringify({ type: "path_migration", migrationId }) });
+      await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp, level: "info", message: "Job queued", data: JSON.stringify({ type: "path_migration", migrationId }) });
       return row.id;
     });
     return jobId;
@@ -1508,64 +2234,110 @@ export class JobRunner {
 }
 
 export class JobWorker {
-  private readonly queue: JobRunner;
   private readonly workerId: string;
   private readonly pollIntervalMs: number;
   private readonly heartbeatIntervalMs: number;
   private readonly reclaimStaleAfterMs: number;
   private readonly reclaimOwnInterruptedAfterMs: number;
+  private readonly dispatchConcurrency: number;
   private readonly logger: Pick<Console, "info" | "warn" | "error">;
   private readonly copyRunner: CopyCommandRunner;
   private readonly auditRunner: AuditCommandRunner;
   private readonly concurrency: JobConcurrencySettings;
+  private readonly copyTransferLimiter: CopyTransferLimiter;
   private readonly activeAbortControllers = new Map<number, AbortController>();
-  private stopped = true;
+  private readonly activeRuns = new Set<Promise<void>>();
+  private stopRequested = false;
+  private loopRunning = false;
   private sleepTimer: NodeJS.Timeout | null = null;
   private resolveSleep: (() => void) | null = null;
 
   constructor(private readonly db: Db, options: JobWorkerOptions = {}) {
-    this.queue = new JobRunner(db);
     this.workerId = options.workerId ?? `worker-${process.pid}`;
     this.pollIntervalMs = options.pollIntervalMs ?? 2000;
     this.heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
     this.reclaimStaleAfterMs = options.reclaimStaleAfterMs ?? 15 * 60_000;
     this.reclaimOwnInterruptedAfterMs = options.reclaimOwnInterruptedAfterMs ?? Math.max(30_000, this.heartbeatIntervalMs * 2);
+    this.dispatchConcurrency = options.dispatchConcurrency ?? 1;
+    if (!Number.isSafeInteger(this.dispatchConcurrency) || this.dispatchConcurrency < 1) throw new Error("Worker dispatch concurrency must be a positive safe integer");
     this.logger = options.logger ?? console;
     this.copyRunner = options.copyRunner ?? defaultCopyRunner;
     this.auditRunner = options.auditRunner ?? defaultAuditRunner;
     this.concurrency = options.concurrency ?? defaultJobConcurrency;
+    this.copyTransferLimiter = options.copyTransferLimiter ?? new CopyTransferLimiter(this.concurrency.maxActiveCopyFiles);
   }
 
   async start(): Promise<void> {
-    if (!this.stopped) return;
-    this.stopped = false;
+    if (this.loopRunning) return;
+    this.loopRunning = true;
+    this.stopRequested = false;
     this.logger.info(
       `SRTL worker ${this.workerId} started with limits: jobs=${this.concurrency.maxRunningJobs}, scans=${this.concurrency.maxRunningScans}, audits=${this.concurrency.maxRunningAudits}, copies=${this.concurrency.maxRunningCopies}`
     );
-    while (!this.stopped) {
-      const ranJob = await this.runOnce();
-      if (!ranJob) await this.sleep(this.pollIntervalMs);
+    try {
+      while (!this.stopRequested) {
+        let claimedAny = false;
+        while (!this.stopRequested && this.activeRuns.size < this.dispatchConcurrency) {
+          if (await isPathConfigurationBlocked(this.db)) await this.requeueInterruptedJobsForPathMigration();
+          const claimed = await this.claimNextJob();
+          if (this.stopRequested) {
+            if (claimed) await this.requeueInterruptedJob(claimed.job);
+            break;
+          }
+          if (!claimed) break;
+          claimedAny = true;
+          const run = this.runClaimedJob(claimed.job)
+            .catch((error: unknown) => {
+              this.logger.error(`SRTL worker ${this.workerId} dispatcher failed job #${claimed.job.id}: ${errorMessage(error)}`);
+            })
+            .finally(() => {
+              this.activeRuns.delete(run);
+              this.wake();
+            });
+          this.activeRuns.add(run);
+        }
+        if (!this.stopRequested && (!claimedAny || this.activeRuns.size >= this.dispatchConcurrency)) {
+          await this.sleep(this.pollIntervalMs);
+        }
+      }
+    } finally {
+      this.stopRequested = true;
+      for (const abortController of this.activeAbortControllers.values()) {
+        if (!abortController.signal.aborted) abortController.abort(new WorkerShutdownError());
+      }
+      await Promise.allSettled([...this.activeRuns]);
+      this.loopRunning = false;
+      this.logger.info(`SRTL worker ${this.workerId} stopped`);
     }
-    this.logger.info(`SRTL worker ${this.workerId} stopped`);
   }
 
   stop(): void {
-    this.stopped = true;
+    this.stopRequested = true;
     for (const abortController of this.activeAbortControllers.values()) {
       if (!abortController.signal.aborted) abortController.abort(new WorkerShutdownError());
     }
+    this.wake();
+  }
+
+  async runOnce(): Promise<boolean> {
+    if (this.stopRequested) return false;
+    if (await isPathConfigurationBlocked(this.db)) await this.requeueInterruptedJobsForPathMigration();
+    if (this.stopRequested) return false;
+    const claimed = await this.claimNextJob();
+    if (!claimed) return false;
+    if (this.stopRequested) {
+      await this.requeueInterruptedJob(claimed.job);
+      return false;
+    }
+    await this.runClaimedJob(claimed.job);
+    return true;
+  }
+
+  private wake(): void {
     if (this.sleepTimer) clearTimeout(this.sleepTimer);
     this.sleepTimer = null;
     this.resolveSleep?.();
     this.resolveSleep = null;
-  }
-
-  async runOnce(): Promise<boolean> {
-    if (await isPathConfigurationBlocked(this.db)) await this.requeueInterruptedJobsForPathMigration();
-    const job = await this.claimNextJob();
-    if (!job) return false;
-    await this.runClaimedJob(job);
-    return true;
   }
 
   private sleep(ms: number): Promise<void> {
@@ -1579,110 +2351,187 @@ export class JobWorker {
     });
   }
 
-  private async claimNextJob(): Promise<JobRecord | null> {
-    const pathConfigurationBlocked = await isPathConfigurationBlocked(this.db);
-    const allowedType = pathConfigurationBlocked ? "path_migration" : undefined;
-    return (await this.claimInterruptedOwnJob(allowedType)) ?? (await this.claimStaleRunningJob(allowedType)) ?? (await this.claimQueuedJob(allowedType));
+  private isReclaimableWithHeartbeat(
+    job: LeasedJob,
+    ownerHeartbeat: typeof schema.workerHeartbeats.$inferSelect | undefined
+  ): boolean {
+    if (job.lockedBy === this.workerId) {
+      if (this.activeAbortControllers.has(job.id)) return false;
+      return isStaleRunningJob(job, this.reclaimOwnInterruptedAfterMs);
+    }
+    if (!ownerHeartbeat) return isStaleRunningJob(job, this.reclaimStaleAfterMs);
+    if (ownerHeartbeat.status !== "running") return true;
+    const ownerHeartbeatAt = Date.parse(ownerHeartbeat.heartbeatAt);
+    const processHeartbeatStale =
+      !Number.isFinite(ownerHeartbeatAt) || Date.now() - ownerHeartbeatAt >= this.reclaimOwnInterruptedAfterMs;
+    return processHeartbeatStale && isStaleRunningJob(job, this.reclaimOwnInterruptedAfterMs);
   }
 
-  private async claimQueuedJob(allowedType?: JobRecord["type"]): Promise<JobRecord | null> {
-    const queuedRows = await this.db
-      .select()
-      .from(schema.jobs)
-      .where(eq(schema.jobs.status, "queued"))
-      .orderBy(asc(schema.jobs.id));
-    let row: JobRow | undefined;
-    for (const queuedJob of queuedRows) {
-      if (allowedType && queuedJob.type !== allowedType) continue;
-      if (await this.canStartJobType(queuedJob.type as JobRecord["type"])) {
-        row = queuedJob;
-        break;
+  private async claimNextJob(): Promise<ClaimedJob | null> {
+    return this.db.transaction(async (transaction) => {
+      await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+      const pathConfigurationBlocked = await isPathConfigurationBlocked(transaction);
+      const recoveryCopyJobIds = pathConfigurationBlocked
+        ? new Set(
+            (
+              await transaction.execute<{ jobId: number }>(sql`
+                select distinct jobs.id as "jobId"
+                from jobs
+                join copy_operations on copy_operations.job_id = jobs.id
+                where jobs.type = 'copy'
+                  and jobs.status in ('queued', 'running')
+                  and copy_operations.stage not in ('rolled_back', 'failed')
+              `)
+            ).rows.map((row) => row.jobId)
+          )
+        : new Set<number>();
+      const allowedWhilePathsBlocked = (job: Pick<JobRow, "id" | "type">): boolean =>
+        job.type === "path_migration" || (job.type === "copy" && recoveryCopyJobIds.has(job.id));
+      const initialRunningRows = await transaction.select().from(schema.jobs).where(eq(schema.jobs.status, "running")).orderBy(asc(schema.jobs.id));
+      const initialRunningJobs = initialRunningRows.map(toJobRecord);
+      const ownerIds = [...new Set(initialRunningJobs.map((job) => job.lockedBy).filter((ownerId): ownerId is string => Boolean(ownerId)))];
+      const ownerHeartbeats = ownerIds.length > 0
+        ? await transaction.select().from(schema.workerHeartbeats).where(inArray(schema.workerHeartbeats.workerId, ownerIds))
+        : [];
+      const ownerHeartbeatById = new Map(ownerHeartbeats.map((heartbeat) => [heartbeat.workerId, heartbeat]));
+      const isReclaimable = (job: LeasedJob): boolean =>
+        this.isReclaimableWithHeartbeat(job, job.lockedBy ? ownerHeartbeatById.get(job.lockedBy) : undefined);
+      const eligibleRunning = pathConfigurationBlocked ? initialRunningJobs.filter(allowedWhilePathsBlocked) : initialRunningJobs;
+      const staleCandidates = eligibleRunning.filter(isReclaimable);
+      const fencedJobIds = new Set<number>();
+      for (const staleCandidate of staleCandidates) {
+        const lockedStaleRow = await first(
+          transaction
+            .select()
+            .from(schema.jobs)
+            .where(
+              and(
+                eq(schema.jobs.id, staleCandidate.id),
+                eq(schema.jobs.status, "running"),
+                eq(schema.jobs.leaseVersion, staleCandidate.leaseVersion)
+              )
+            )
+            .for("update", { skipLocked: true })
+            .limit(1)
+        );
+        if (!lockedStaleRow) continue;
+        const stale = toJobRecord(lockedStaleRow);
+        const lockedOwnerHeartbeat = stale.lockedBy && stale.lockedBy !== this.workerId
+          ? await first(
+              transaction
+                .select()
+                .from(schema.workerHeartbeats)
+                .where(eq(schema.workerHeartbeats.workerId, stale.lockedBy))
+                .for("update")
+                .limit(1)
+            )
+          : undefined;
+        if (!this.isReclaimableWithHeartbeat(stale, lockedOwnerHeartbeat)) continue;
+        const interruptedOwn = stale.lockedBy === this.workerId;
+        const timestamp = nowIso();
+        const ownerFilter = stale.lockedBy == null ? isNull(schema.jobs.lockedBy) : eq(schema.jobs.lockedBy, stale.lockedBy);
+        const fencedRow = await first(
+          transaction
+            .update(schema.jobs)
+            .set({
+              status: "queued",
+              lockedBy: null,
+              lockedAt: null,
+              heartbeatAt: null,
+              leaseVersion: sql`${schema.jobs.leaseVersion} + 1`
+            })
+            .where(
+              and(
+                eq(schema.jobs.id, stale.id),
+                eq(schema.jobs.status, "running"),
+                ownerFilter,
+                eq(schema.jobs.leaseVersion, stale.leaseVersion)
+              )
+            )
+            .returning()
+        );
+        if (!fencedRow) continue;
+        fencedJobIds.add(stale.id);
+        const message = interruptedOwn ? "Interrupted job lease fenced and requeued" : "Stale running job lease fenced and requeued";
+        await transaction.insert(schema.jobEvents).values({
+          jobId: stale.id,
+          timestamp,
+          level: "warn",
+          message,
+          data: JSON.stringify({ workerId: this.workerId, leaseVersion: fencedRow.leaseVersion })
+        });
+        await transaction
+          .update(schema.scanRuns)
+          .set({ status: "failed", finishedAt: timestamp, errorMessage: message })
+          .where(and(eq(schema.scanRuns.jobId, stale.id), eq(schema.scanRuns.status, "running")));
+        await transaction
+          .update(schema.auditRuns)
+          .set({ status: "failed", finishedAt: timestamp })
+          .where(and(eq(schema.auditRuns.jobId, stale.id), eq(schema.auditRuns.status, "running")));
       }
-    }
-    if (!row) return null;
-    const timestamp = nowIso();
-    const claimedRow = await first(this.db
-      .update(schema.jobs)
-      .set({ status: "running", startedAt: row.startedAt ?? timestamp, lockedBy: this.workerId, lockedAt: timestamp, heartbeatAt: timestamp })
-      .where(and(eq(schema.jobs.id, row.id), eq(schema.jobs.status, "queued")))
-      .returning());
-    if (!claimedRow) return null;
-    const claimed = await this.queue.getJob(row.id);
-    return claimed?.status === "running" && claimed.lockedBy === this.workerId ? claimed : null;
-  }
 
-  private async claimStaleRunningJob(allowedType?: JobRecord["type"]): Promise<JobRecord | null> {
-    const runningRows = await this.db
-      .select()
-      .from(schema.jobs)
-      .where(eq(schema.jobs.status, "running"))
-      .orderBy(asc(schema.jobs.id));
-    let staleJob: JobRecord | null = null;
-    for (const job of runningRows.map(toJobRecord)) {
-      if (allowedType && job.type !== allowedType) continue;
-      if (isStaleRunningJob(job, this.reclaimStaleAfterMs) && (await this.canStartJobType(job.type, job.id))) {
-        staleJob = job;
-        break;
+      const runningRows = await transaction.select().from(schema.jobs).where(eq(schema.jobs.status, "running")).orderBy(asc(schema.jobs.id));
+      const runningJobs = runningRows.map(toJobRecord);
+      const queuedRows = await transaction.select().from(schema.jobs).where(eq(schema.jobs.status, "queued")).orderBy(asc(schema.jobs.id)).for("update");
+      const eligibleQueued = pathConfigurationBlocked ? queuedRows.filter(allowedWhilePathsBlocked) : queuedRows;
+      const firstExclusive = eligibleQueued.find((job) => job.exclusive && this.limitForType(job.type as JobRecord["type"]) > 0);
+      const candidates = firstExclusive ? eligibleQueued.filter((job) => job.id <= firstExclusive.id) : eligibleQueued;
+      if (runningJobs.some((job) => job.exclusive)) return null;
+
+      let candidate: JobRow | undefined;
+      for (const queuedJob of candidates) {
+        const jobType = queuedJob.type as JobRecord["type"];
+        const typeLimit = this.limitForType(jobType);
+        if (typeLimit < 1) continue;
+        if (runningJobs.length >= this.concurrency.maxRunningJobs) continue;
+        if (runningJobs.filter((job) => job.type === jobType).length >= typeLimit) continue;
+        if (queuedJob.exclusive) {
+          if (runningJobs.length === 0) candidate = queuedJob;
+          break;
+        }
+        if (!(await this.hasClaimConflict(transaction, queuedJob.id, runningJobs.map((job) => job.id)))) {
+          candidate = queuedJob;
+          break;
+        }
       }
-    }
-    if (!staleJob) return null;
-
-    const timestamp = nowIso();
-    const claimedRow = await first(this.db
-      .update(schema.jobs)
-      .set({ lockedBy: this.workerId, lockedAt: timestamp, heartbeatAt: timestamp })
-      .where(and(eq(schema.jobs.id, staleJob.id), eq(schema.jobs.status, "running")))
-      .returning());
-    if (!claimedRow) return null;
-    const claimed = await this.queue.getJob(staleJob.id);
-    if (claimed?.status === "running" && claimed.lockedBy === this.workerId) {
-      await this.markExistingRunsStale(claimed.id);
-      await addEvent(this.db, claimed.id, "warn", "Stale running job reclaimed by worker", { workerId: this.workerId });
-      return claimed;
-    }
-    return null;
+      if (!candidate) return null;
+      const timestamp = nowIso();
+      const claimedRow = await first(
+        transaction
+          .update(schema.jobs)
+          .set({
+            status: "running",
+            startedAt: candidate.startedAt ?? timestamp,
+            lockedBy: this.workerId,
+            lockedAt: timestamp,
+            heartbeatAt: timestamp,
+            leaseVersion: sql`${schema.jobs.leaseVersion} + 1`
+          })
+          .where(and(eq(schema.jobs.id, candidate.id), eq(schema.jobs.status, "queued"), eq(schema.jobs.leaseVersion, candidate.leaseVersion)))
+          .returning()
+      );
+      return claimedRow ? { job: toJobRecord(claimedRow), reclaimed: fencedJobIds.has(claimedRow.id) } : null;
+    });
   }
 
-  private async claimInterruptedOwnJob(allowedType?: JobRecord["type"]): Promise<JobRecord | null> {
-    const runningRows = await this.db
-      .select()
-      .from(schema.jobs)
-      .where(eq(schema.jobs.status, "running"))
-      .orderBy(asc(schema.jobs.id));
-    let interruptedJob: JobRecord | null = null;
-    for (const job of runningRows.map(toJobRecord)) {
-      if (allowedType && job.type !== allowedType) continue;
-      if (job.lockedBy === this.workerId && isStaleRunningJob(job, this.reclaimOwnInterruptedAfterMs) && (await this.canStartJobType(job.type, job.id))) {
-        interruptedJob = job;
-        break;
-      }
-    }
-    if (!interruptedJob) return null;
-
-    const timestamp = nowIso();
-    const claimedRow = await first(this.db
-      .update(schema.jobs)
-      .set({ lockedBy: this.workerId, lockedAt: timestamp, heartbeatAt: timestamp })
-      .where(and(eq(schema.jobs.id, interruptedJob.id), eq(schema.jobs.status, "running")))
-      .returning());
-    if (!claimedRow) return null;
-    const claimed = await this.queue.getJob(interruptedJob.id);
-    if (claimed?.status === "running" && claimed.lockedBy === this.workerId) {
-      await this.markExistingRunsStale(claimed.id);
-      await addEvent(this.db, claimed.id, "warn", "Interrupted job reclaimed by replacement worker", { workerId: this.workerId });
-      return claimed;
-    }
-    return null;
-  }
-
-  private async activeRunningJobs(excludedJobId?: number): Promise<JobRecord[]> {
-    return (await this.db
-      .select()
-      .from(schema.jobs)
-      .where(eq(schema.jobs.status, "running"))
-    )
-      .map(toJobRecord)
-      .filter((job) => job.id !== excludedJobId && !isStaleRunningJob(job, this.reclaimStaleAfterMs));
+  private async hasClaimConflict(db: DbExecutor, candidateJobId: number, runningJobIds: number[]): Promise<boolean> {
+    if (runningJobIds.length === 0) return false;
+    const conflict = await dbGet<{ value: number }>(db, sql`
+      WITH running_job_ids AS (
+        SELECT value::integer AS job_id
+        FROM jsonb_array_elements_text(${JSON.stringify(runningJobIds)}::jsonb)
+      )
+      SELECT 1 AS value
+      FROM job_resource_claims AS candidate
+      JOIN job_resource_claims AS active
+        ON active.resource_type = candidate.resource_type
+       AND active.resource_key = candidate.resource_key
+       AND (active.access = 'exclusive' OR candidate.access = 'exclusive')
+      JOIN running_job_ids ON running_job_ids.job_id = active.job_id
+      WHERE candidate.job_id = ${candidateJobId}
+      LIMIT 1
+    `);
+    return Boolean(conflict);
   }
 
   private limitForType(type: JobRecord["type"]): number {
@@ -1692,33 +2541,105 @@ export class JobWorker {
     return this.concurrency.maxRunningJobs;
   }
 
-  private async canStartJobType(type: JobRecord["type"], excludedJobId?: number): Promise<boolean> {
-    const activeJobs = await this.activeRunningJobs(excludedJobId);
-    if (activeJobs.length >= this.concurrency.maxRunningJobs) return false;
-    return activeJobs.filter((job) => job.type === type).length < this.limitForType(type);
-  }
-
   private async requeueInterruptedJobsForPathMigration(): Promise<void> {
-    const rows = await this.db
-      .select()
-      .from(schema.jobs)
-      .where(and(eq(schema.jobs.status, "running"), ne(schema.jobs.type, "path_migration")));
-    for (const job of rows.map(toJobRecord)) {
-      if (!isStaleRunningJob(job, this.reclaimOwnInterruptedAfterMs)) continue;
-      await this.requeueInterruptedJob(job.id, "Managed storage paths changed; interrupted job paused and requeued");
-    }
+    await this.db.transaction(async (transaction) => {
+      await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+      const rows = await transaction
+        .select()
+        .from(schema.jobs)
+        .where(and(eq(schema.jobs.status, "running"), ne(schema.jobs.type, "path_migration")))
+        .orderBy(asc(schema.jobs.id));
+      const jobs = rows.map(toJobRecord);
+      const ownerIds = [...new Set(jobs.map((job) => job.lockedBy).filter((ownerId): ownerId is string => Boolean(ownerId)))];
+      const ownerHeartbeats = ownerIds.length > 0
+        ? await transaction.select().from(schema.workerHeartbeats).where(inArray(schema.workerHeartbeats.workerId, ownerIds))
+        : [];
+      const ownerHeartbeatById = new Map(ownerHeartbeats.map((heartbeat) => [heartbeat.workerId, heartbeat]));
+      const timestamp = nowIso();
+      for (const job of jobs) {
+        if (!this.isReclaimableWithHeartbeat(job, job.lockedBy ? ownerHeartbeatById.get(job.lockedBy) : undefined)) continue;
+        const lockedRow = await first(
+          transaction
+            .select()
+            .from(schema.jobs)
+            .where(and(eq(schema.jobs.id, job.id), eq(schema.jobs.status, "running"), eq(schema.jobs.leaseVersion, job.leaseVersion)))
+            .for("update", { skipLocked: true })
+            .limit(1)
+        );
+        if (!lockedRow) continue;
+        const lockedJob = toJobRecord(lockedRow);
+        const lockedOwnerHeartbeat = lockedJob.lockedBy && lockedJob.lockedBy !== this.workerId
+          ? await first(
+              transaction
+                .select()
+                .from(schema.workerHeartbeats)
+                .where(eq(schema.workerHeartbeats.workerId, lockedJob.lockedBy))
+                .for("update")
+                .limit(1)
+            )
+          : undefined;
+        if (!this.isReclaimableWithHeartbeat(lockedJob, lockedOwnerHeartbeat)) continue;
+        const requeued = await first(
+          transaction
+            .update(schema.jobs)
+            .set({
+              status: "queued",
+              lockedBy: null,
+              lockedAt: null,
+              heartbeatAt: null,
+              leaseVersion: sql`${schema.jobs.leaseVersion} + 1`
+            })
+            .where(and(eq(schema.jobs.id, job.id), eq(schema.jobs.status, "running"), eq(schema.jobs.leaseVersion, job.leaseVersion)))
+            .returning({ id: schema.jobs.id })
+        );
+        if (requeued) {
+          await transaction.insert(schema.jobEvents).values({
+            jobId: job.id,
+            timestamp,
+            level: "warn",
+            message: "Managed storage paths changed; interrupted job paused and requeued",
+            data: JSON.stringify({ workerId: this.workerId })
+          });
+        }
+      }
+    });
   }
 
-  private async runClaimedJob(job: JobRecord): Promise<void> {
+  private async runClaimedJob(job: LeasedJob): Promise<void> {
     const abortController = new AbortController();
     this.activeAbortControllers.set(job.id, abortController);
+    let leaseLost = false;
+    const loseLease = (cause: unknown) => {
+      leaseLost = true;
+      const reason = cause instanceof LeaseLostError ? cause : new LeaseLostError(job.id, { cause });
+      if (!abortController.signal.aborted) abortController.abort(reason);
+      return reason;
+    };
+    let heartbeatInFlight = false;
     const heartbeat = setInterval(() => {
-      void this.heartbeat(job.id).catch((error: unknown) => {
-        this.logger.warn(`SRTL worker ${this.workerId} heartbeat failed for job #${job.id}: ${errorMessage(error)}`);
-      });
+      if (heartbeatInFlight) return;
+      heartbeatInFlight = true;
+      void this.heartbeat(job)
+        .catch((error: unknown) => {
+          const leaseError = loseLease(error);
+          this.logger.warn(`SRTL worker ${this.workerId} heartbeat failed for job #${job.id}: ${leaseError.message}`);
+        })
+        .finally(() => {
+          heartbeatInFlight = false;
+        });
     }, this.heartbeatIntervalMs);
+    let heartbeatStopped = false;
+    const stopHeartbeat = () => {
+      if (heartbeatStopped) return;
+      clearInterval(heartbeat);
+      heartbeatStopped = true;
+    };
     let pathMigrationPauseRequested = false;
+    let completedByHandler = false;
+    let cancellationWatchInFlight = false;
     const cancellationWatcher = setInterval(() => {
+      if (cancellationWatchInFlight) return;
+      cancellationWatchInFlight = true;
       void Promise.all([this.isCancellationRequested(job.id), job.type === "path_migration" ? Promise.resolve(false) : isPathConfigurationBlocked(this.db)])
         .then(([cancelled, pathConfigurationBlocked]) => {
           if (pathConfigurationBlocked) pathMigrationPauseRequested = true;
@@ -1726,6 +2647,9 @@ export class JobWorker {
         })
         .catch((error: unknown) => {
           this.logger.warn(`SRTL worker ${this.workerId} cancellation watch failed for job #${job.id}: ${errorMessage(error)}`);
+        })
+        .finally(() => {
+          cancellationWatchInFlight = false;
         });
     }, 500);
     const isCancelled = async () => {
@@ -1735,50 +2659,122 @@ export class JobWorker {
       if ((cancelled || pathConfigurationBlocked) && !abortController.signal.aborted) abortController.abort();
       return cancelled || pathConfigurationBlocked;
     };
+    const assertLease = async () => {
+      try {
+        await this.assertLease(job);
+      } catch (error: unknown) {
+        throw loseLease(error);
+      }
+    };
+    const withLeaseDb = async <T>(action: (db: DbExecutor) => Promise<T>): Promise<T> => {
+      let actionFailed = false;
+      let actionError: unknown;
+      try {
+        return await this.withLease(job, async (transaction) => {
+          try {
+            return await action(transaction);
+          } catch (error: unknown) {
+            actionFailed = true;
+            actionError = error;
+            throw error;
+          }
+        });
+      } catch (error: unknown) {
+        if (actionFailed) throw actionError;
+        throw loseLease(error);
+      }
+    };
+    const withLease = <T>(action: () => Promise<T>): Promise<T> => withLeaseDb(() => action());
+    const finishCompleted = async (action: (db: DbExecutor) => Promise<void>): Promise<boolean> => {
+      const completed = await this.finishCompletedJob(job, action);
+      if (completed) completedByHandler = true;
+      return completed;
+    };
+    const finishCompletedIsolated = async (action: (db: DbExecutor) => Promise<void>): Promise<boolean> => {
+      const completed = await this.finishCompletedJob(job, action, false);
+      if (completed) completedByHandler = true;
+      return completed;
+    };
     const ctx: JobContext = {
       jobId: job.id,
       signal: abortController.signal,
-      event: (level, message, data) => addEvent(this.db, job.id, level, message, data),
-      setProgress: (progress) => setProgress(this.db, job.id, progress),
-      isCancelled
+      event: async (level, message, data) => {
+        try {
+          await this.addLeasedEvent(job, level, message, data);
+        } catch (error: unknown) {
+          throw loseLease(error);
+        }
+      },
+      setProgress: async (progress) => {
+        try {
+          await this.setLeasedProgress(job, progress);
+        } catch (error: unknown) {
+          throw loseLease(error);
+        }
+      },
+      isCancelled,
+      assertLease,
+      withLease,
+      withLeaseDb,
+      finishCompleted,
+      finishCompletedIsolated
     };
 
-    await addEvent(this.db, job.id, "info", "Worker started job", { workerId: this.workerId });
     try {
+      await ctx.event("info", "Worker started job", { workerId: this.workerId, leaseVersion: job.leaseVersion });
       await this.runHandler(job, ctx);
+      if (completedByHandler) return;
       if (job.type !== "path_migration" && (pathMigrationPauseRequested || (await isPathConfigurationBlocked(this.db)))) {
-        await this.requeueInterruptedJob(job.id, "Managed storage paths changed; job paused and requeued");
+        stopHeartbeat();
+        if (job.type === "copy") await this.settlePathInterruptedCopy(job);
+        else await this.requeueInterruptedJob(job, "Managed storage paths changed; job paused and requeued");
         return;
       }
       const status: JobStatus = (await this.isCancellationRequested(job.id)) ? "cancelled" : "completed";
-      await this.finishJob(job.id, status);
-      if (status === "completed" && job.type === "scan") await completeOnboardingScan(this.db, job.id);
-      await addEvent(this.db, job.id, status === "cancelled" ? "warn" : "info", status === "cancelled" ? "Job cancelled" : "Job completed");
+      if (status === "completed" && job.type === "scan") {
+        await assertLease();
+        await completeOnboardingScan(this.db, job.id);
+      }
+      stopHeartbeat();
+      await this.finishJob(job, status, status === "cancelled" ? "warn" : "info", status === "cancelled" ? "Job cancelled" : "Job completed");
     } catch (error: unknown) {
+      if (leaseLost || error instanceof LeaseLostError) {
+        this.logger.warn(`SRTL worker ${this.workerId} stopped job #${job.id} after losing its lease`);
+        return;
+      }
       if (pathMigrationPauseRequested) {
-        await this.requeueInterruptedJob(job.id, "Managed storage paths changed; job paused and requeued");
+        stopHeartbeat();
+        if (job.type === "copy") await this.settlePathInterruptedCopy(job, errorMessage(error));
+        else await this.requeueInterruptedJob(job, "Managed storage paths changed; job paused and requeued");
         return;
       }
       if (await this.shouldRequeueInterruptedJob(job.id, abortController)) {
-        await this.requeueInterruptedJob(job.id);
+        stopHeartbeat();
+        await this.requeueInterruptedJob(job);
+        return;
+      }
+      if (error instanceof CopyReconciliationRequiredError) {
+        stopHeartbeat();
+        await this.finishJob(job, "failed", "error", error.message);
+        this.logger.error(`SRTL worker ${this.workerId} stopped copy job #${job.id} for manual reconciliation: ${error.message}`);
         return;
       }
       if (await this.isCancellationRequested(job.id)) {
-        await this.finishJob(job.id, "cancelled");
-        await addEvent(this.db, job.id, "warn", "Job cancelled");
+        stopHeartbeat();
+        await this.finishJob(job, "cancelled", "warn", "Job cancelled");
         return;
       }
       if (error instanceof PartialJobFailureError) {
-        await this.finishJob(job.id, "partially_failed");
-        await addEvent(this.db, job.id, "warn", error.message);
+        stopHeartbeat();
+        await this.finishJob(job, "partially_failed", "warn", error.message);
         this.logger.warn(`SRTL worker ${this.workerId} partially failed job #${job.id}: ${error.message}`);
         return;
       }
-      await this.finishJob(job.id, "failed");
-      await addEvent(this.db, job.id, "error", errorMessage(error));
+      stopHeartbeat();
+      await this.finishJob(job, "failed", "error", errorMessage(error));
       this.logger.error(`SRTL worker ${this.workerId} failed job #${job.id}: ${errorMessage(error)}`);
     } finally {
-      clearInterval(heartbeat);
+      stopHeartbeat();
       clearInterval(cancellationWatcher);
       this.activeAbortControllers.delete(job.id);
     }
@@ -1808,47 +2804,237 @@ export class JobWorker {
     throw new Error(`No worker handler is registered for ${job.type} jobs`);
   }
 
-  private async heartbeat(jobId: number): Promise<void> {
-    await this.db.update(schema.jobs).set({ heartbeatAt: nowIso() }).where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "running")));
+  private async assertLease(job: LeasedJob): Promise<void> {
+    const row = await first(
+      this.db
+        .select({ id: schema.jobs.id })
+        .from(schema.jobs)
+        .where(
+          and(
+            eq(schema.jobs.id, job.id),
+            eq(schema.jobs.status, "running"),
+            eq(schema.jobs.lockedBy, this.workerId),
+            eq(schema.jobs.leaseVersion, job.leaseVersion)
+          )
+        )
+        .limit(1)
+    );
+    if (!row) throw new LeaseLostError(job.id);
+  }
+
+  private async withLease<T>(job: LeasedJob, action: (db: DbExecutor) => Promise<T>): Promise<T> {
+    return this.db.transaction(async (transaction) => {
+      const row = await first(
+        transaction
+          .select({ id: schema.jobs.id })
+          .from(schema.jobs)
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion)
+            )
+          )
+          .for("update")
+          .limit(1)
+      );
+      if (!row) throw new LeaseLostError(job.id);
+      return action(transaction);
+    });
+  }
+
+  private async heartbeat(job: LeasedJob): Promise<void> {
+    const row = await first(
+      this.db
+        .update(schema.jobs)
+        .set({ heartbeatAt: nowIso() })
+        .where(
+          and(
+            eq(schema.jobs.id, job.id),
+            eq(schema.jobs.status, "running"),
+            eq(schema.jobs.lockedBy, this.workerId),
+            eq(schema.jobs.leaseVersion, job.leaseVersion)
+          )
+        )
+        .returning({ id: schema.jobs.id })
+    );
+    if (!row) throw new LeaseLostError(job.id);
+  }
+
+  private async setLeasedProgress(job: LeasedJob, progress: unknown): Promise<void> {
+    const row = await first(
+      this.db
+        .update(schema.jobs)
+        .set({ progress: JSON.stringify(progress) })
+        .where(
+          and(
+            eq(schema.jobs.id, job.id),
+            eq(schema.jobs.status, "running"),
+            eq(schema.jobs.lockedBy, this.workerId),
+            eq(schema.jobs.leaseVersion, job.leaseVersion)
+          )
+        )
+        .returning({ id: schema.jobs.id })
+    );
+    if (!row) throw new LeaseLostError(job.id);
+  }
+
+  private async addLeasedEvent(job: LeasedJob, level: JobEventRecord["level"], message: string, data: unknown = {}): Promise<void> {
+    const inserted = await this.db.transaction(async (transaction) => {
+      const lease = await first(
+        transaction
+          .select({ id: schema.jobs.id })
+          .from(schema.jobs)
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion)
+            )
+          )
+          .for("update")
+          .limit(1)
+      );
+      if (!lease) return false;
+      await transaction.insert(schema.jobEvents).values({ jobId: job.id, timestamp: nowIso(), level, message, data: JSON.stringify(data) });
+      return true;
+    });
+    if (!inserted) throw new LeaseLostError(job.id);
   }
 
   private async shouldRequeueInterruptedJob(jobId: number, abortController: AbortController): Promise<boolean> {
-    return this.stopped && abortController.signal.aborted && !(await this.isCancellationRequested(jobId));
+    return this.stopRequested && abortController.signal.aborted && !(await this.isCancellationRequested(jobId));
   }
 
-  private async requeueInterruptedJob(jobId: number, message = "Worker stopped; job requeued for resume"): Promise<void> {
-    const requeued = await first(this.db
-      .update(schema.jobs)
-      .set({ status: "queued", lockedBy: null, lockedAt: null, heartbeatAt: null })
-      .where(and(eq(schema.jobs.id, jobId), eq(schema.jobs.status, "running")))
-      .returning({ id: schema.jobs.id }));
-    if (requeued) await addEvent(this.db, jobId, "warn", message, { workerId: this.workerId });
+  private async settlePathInterruptedCopy(job: LeasedJob, failureMessage?: string): Promise<void> {
+    const operations = await this.db
+      .select({ stage: schema.copyOperations.stage, errorMessage: schema.copyOperations.errorMessage })
+      .from(schema.copyOperations)
+      .where(eq(schema.copyOperations.jobId, job.id));
+    const manual = operations.find((operation) => operation.stage === "reconciliation_required");
+    if (manual) {
+      await this.finishJob(
+        job,
+        "failed",
+        "error",
+        manual.errorMessage ?? failureMessage ?? "Copy recovery requires manual reconciliation before paths can be migrated"
+      );
+      return;
+    }
+    const hasUnreconciledOperations = operations.some(
+      (operation) => operation.stage !== "rolled_back" && operation.stage !== "failed"
+    );
+    if (hasUnreconciledOperations) {
+      await this.requeueInterruptedJob(job, "Managed storage paths changed; copy recovery remains queued");
+      return;
+    }
+    await this.finishJob(job, "cancelled", "warn", "Copy cancelled after managed-path recovery");
   }
 
-  private async markExistingRunsStale(jobId: number): Promise<void> {
-    const timestamp = nowIso();
-    await this.db
-      .update(schema.scanRuns)
-      .set({ status: "failed", finishedAt: timestamp, errorMessage: "Stale job reclaimed by worker" })
-      .where(and(eq(schema.scanRuns.jobId, jobId), eq(schema.scanRuns.status, "running")));
-    await this.db
-      .update(schema.auditRuns)
-      .set({ status: "failed", finishedAt: timestamp })
-      .where(and(eq(schema.auditRuns.jobId, jobId), eq(schema.auditRuns.status, "running")));
+  private async requeueInterruptedJob(job: LeasedJob, message = "Worker stopped; job requeued for resume"): Promise<void> {
+    const requeued = await this.db.transaction(async (transaction) => {
+      const timestamp = nowIso();
+      const row = await first(
+        transaction
+          .update(schema.jobs)
+          .set({ status: "queued", lockedBy: null, lockedAt: null, heartbeatAt: null })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion)
+            )
+          )
+          .returning({ id: schema.jobs.id })
+      );
+      if (!row) return false;
+      await transaction.insert(schema.jobEvents).values({ jobId: job.id, timestamp, level: "warn", message, data: JSON.stringify({ workerId: this.workerId }) });
+      return true;
+    });
+    if (!requeued) throw new LeaseLostError(job.id);
   }
 
-  private async finishJob(jobId: number, status: JobStatus): Promise<void> {
-    await this.db
-      .update(schema.jobs)
-      .set({
-        status,
-        finishedAt: nowIso(),
-        lockedBy: null,
-        lockedAt: null,
-        heartbeatAt: null,
-        cancelRequestedAt: status === "completed" ? null : undefined
-      })
-      .where(eq(schema.jobs.id, jobId));
+  private async finishCompletedJob(
+    job: LeasedJob,
+    action: (db: DbExecutor) => Promise<void>,
+    useSchedulerBarrier = true
+  ): Promise<boolean> {
+    return this.db.transaction(async (transaction) => {
+      if (useSchedulerBarrier) await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+      const lease = await first(
+        transaction
+          .select({ id: schema.jobs.id, cancelRequestedAt: schema.jobs.cancelRequestedAt })
+          .from(schema.jobs)
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion)
+            )
+          )
+          .for("update")
+          .limit(1)
+      );
+      if (!lease) throw new LeaseLostError(job.id);
+      if (job.type !== "path_migration" && (await isPathConfigurationBlocked(transaction))) return false;
+      if (lease.cancelRequestedAt) return false;
+
+      await action(transaction);
+      const timestamp = nowIso();
+      const completed = await first(
+        transaction
+          .update(schema.jobs)
+          .set({ status: "completed", finishedAt: timestamp, lockedBy: null, lockedAt: null, heartbeatAt: null, cancelRequestedAt: null })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion),
+              isNull(schema.jobs.cancelRequestedAt)
+            )
+          )
+          .returning({ id: schema.jobs.id })
+      );
+      if (!completed) return false;
+      await transaction.insert(schema.jobEvents).values({ jobId: job.id, timestamp, level: "info", message: "Job completed", data: "{}" });
+      return true;
+    });
+  }
+
+  private async finishJob(job: LeasedJob, status: JobStatus, level: JobEventRecord["level"], message: string): Promise<void> {
+    const finished = await this.db.transaction(async (transaction) => {
+      const timestamp = nowIso();
+      const row = await first(
+        transaction
+          .update(schema.jobs)
+          .set({
+            status,
+            finishedAt: timestamp,
+            lockedBy: null,
+            lockedAt: null,
+            heartbeatAt: null,
+            cancelRequestedAt: status === "completed" ? null : undefined
+          })
+          .where(
+            and(
+              eq(schema.jobs.id, job.id),
+              eq(schema.jobs.status, "running"),
+              eq(schema.jobs.lockedBy, this.workerId),
+              eq(schema.jobs.leaseVersion, job.leaseVersion)
+            )
+          )
+          .returning({ id: schema.jobs.id })
+      );
+      if (!row) return false;
+      await transaction.insert(schema.jobEvents).values({ jobId: job.id, timestamp, level, message, data: "{}" });
+      return true;
+    });
+    if (!finished) throw new LeaseLostError(job.id);
   }
 
   private async isCancellationRequested(jobId: number): Promise<boolean> {
@@ -1857,10 +3043,14 @@ export class JobWorker {
   }
 
   private async runScanJob(jobId: number, normalizedOptions: ScanOptions, ctx: JobContext): Promise<void> {
-    const scanRun = await first(this.db
-      .insert(schema.scanRuns)
-      .values({ jobId, status: "running", startedAt: nowIso(), finishedAt: null, errorMessage: null, ...emptyScanTotals() })
-      .returning({ id: schema.scanRuns.id }));
+    const scanRun = await ctx.withLeaseDb((leaseDb) =>
+      first(
+        leaseDb
+          .insert(schema.scanRuns)
+          .values({ jobId, status: "running", startedAt: nowIso(), finishedAt: null, errorMessage: null, ...emptyScanTotals() })
+          .returning({ id: schema.scanRuns.id })
+      )
+    );
     if (!scanRun) throw new Error("Scan run was not created");
 
     try {
@@ -1887,7 +3077,7 @@ export class JobWorker {
         configuredSections,
         await getStoragePolicyMap(this.db),
         normalizedOptions,
-        ctx.isCancelled,
+        async () => ctx.signal.aborted || (await ctx.isCancelled()),
         async (activity) => {
           const liveTotals = emptyScanTotals();
           liveTotals.totalLinks = activity.checkedLinks;
@@ -1909,36 +3099,57 @@ export class JobWorker {
         });
       }
       if (await ctx.isCancelled()) {
-        await this.db.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job cancelled" }).where(eq(schema.scanRuns.id, scanRun.id));
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job cancelled" }).where(eq(schema.scanRuns.id, scanRun.id));
+        });
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan cancelled before inventory results were written", result.inventory));
         return;
       }
-      const persistedInventory = await this.db.transaction(async (transaction) => {
-        const inventory = await persistScanResult(transaction, result, jobId, ctx.isCancelled);
-        if (await ctx.isCancelled()) throw new Error("Scan indexing was cancelled");
-        await transaction.update(schema.scanRuns).set({ status: "completed", finishedAt: nowIso(), errorMessage: null, ...inventory }).where(eq(schema.scanRuns.id, scanRun.id));
-        return inventory;
+      let persistedInventory: InventorySummary | null = null;
+      const completionMessage = isTitleRescan
+        ? "Title rescan completed and symlink inventory was reconciled"
+        : "Scan completed and inventory counters were updated";
+      const completionEvent = isTitleRescan
+        ? "Targeted title rescan reconciled symlinks"
+        : "Manual inventory scan indexed library links and storage files";
+      const finalized = await ctx.finishCompleted(async (leaseDb) => {
+        if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Scan indexing was cancelled"));
+        const inventory = await persistScanResult(leaseDb, result, jobId, async () => ctx.signal.aborted);
+        if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Scan indexing was cancelled"));
+        await leaseDb.update(schema.scanRuns).set({ status: "completed", finishedAt: nowIso(), errorMessage: null, ...inventory }).where(eq(schema.scanRuns.id, scanRun.id));
+        await completeOnboardingScan(leaseDb, jobId);
+        await leaseDb
+          .update(schema.jobs)
+          .set({ progress: JSON.stringify(scanProgressPayload(normalizedOptions, "completed", completionMessage, inventory)) })
+          .where(eq(schema.jobs.id, jobId));
+        await leaseDb.insert(schema.jobEvents).values({
+          jobId,
+          timestamp: nowIso(),
+          level: "info",
+          message: completionEvent,
+          data: JSON.stringify({ options: normalizedOptions, ...inventory })
+        });
+        persistedInventory = inventory;
       });
-      await ctx.setProgress(
-        scanProgressPayload(
-          normalizedOptions,
-          "completed",
-          isTitleRescan ? "Title rescan completed and symlink inventory was reconciled" : "Scan completed and inventory counters were updated",
-          persistedInventory
-        )
-      );
-      await ctx.event("info", isTitleRescan ? "Targeted title rescan reconciled symlinks" : "Manual inventory scan indexed library links and storage files", {
-        options: normalizedOptions,
-        ...persistedInventory
+      if (finalized && persistedInventory) return;
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job cancelled" }).where(eq(schema.scanRuns.id, scanRun.id));
       });
+      await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan cancelled before inventory results were written", result.inventory));
+      await ctx.event("warn", "Scan cancelled before inventory results were written");
     } catch (error: unknown) {
+      if (error instanceof LeaseLostError || (error instanceof Error && error.name === "LeaseLostError")) throw error;
       if (await ctx.isCancelled()) {
-        await this.db.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job terminated" }).where(eq(schema.scanRuns.id, scanRun.id));
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job terminated" }).where(eq(schema.scanRuns.id, scanRun.id));
+        });
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan terminated before inventory results were written"));
         await ctx.event("warn", "Scan terminated before inventory results were written");
         return;
       }
-      await this.db.update(schema.scanRuns).set({ status: "failed", finishedAt: nowIso(), errorMessage: errorMessage(error) }).where(eq(schema.scanRuns.id, scanRun.id));
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb.update(schema.scanRuns).set({ status: "failed", finishedAt: nowIso(), errorMessage: errorMessage(error) }).where(eq(schema.scanRuns.id, scanRun.id));
+      });
       await ctx.setProgress(scanProgressPayload(normalizedOptions, "failed", errorMessage(error)));
       throw error;
     }
@@ -1947,25 +3158,29 @@ export class JobWorker {
   private async runAuditJob(jobId: number, normalizedOptions: AuditOptions, ctx: JobContext): Promise<void> {
     const links = filterAuditLinks(await listMediaLinks(this.db), normalizedOptions);
     const startedAt = nowIso();
-    const auditRun = await first(this.db
-      .insert(schema.auditRuns)
-      .values({
-        jobId,
-        mode: normalizedOptions.mode,
-        status: "running",
-        startedAt,
-        finishedAt: null,
-        checked: 0,
-        passed: 0,
-        failed: 0,
-        sourceUnknown: 0,
-        sourceMissing: 0,
-        sourceCompareErrors: 0,
-        byteMismatches: 0,
-        targetValidationFailures: 0,
-        errorMessage: null
-      })
-      .returning({ id: schema.auditRuns.id }));
+    const auditRun = await ctx.withLeaseDb((leaseDb) =>
+      first(
+        leaseDb
+          .insert(schema.auditRuns)
+          .values({
+            jobId,
+            mode: normalizedOptions.mode,
+            status: "running",
+            startedAt,
+            finishedAt: null,
+            checked: 0,
+            passed: 0,
+            failed: 0,
+            sourceUnknown: 0,
+            sourceMissing: 0,
+            sourceCompareErrors: 0,
+            byteMismatches: 0,
+            targetValidationFailures: 0,
+            errorMessage: null
+          })
+          .returning({ id: schema.auditRuns.id })
+      )
+    );
     if (!auditRun) throw new Error("Audit run was not created");
     let checked = 0;
     let passed = 0;
@@ -2032,13 +3247,13 @@ export class JobWorker {
         if (result.cmpStatus === "fail") byteMismatches += 1;
         if (result.ffmpegStatus === "fail") targetValidationFailures += 1;
 
-        await this.db.insert(schema.auditResults).values({ ...result, auditRunId: auditRun.id, createdAt: nowIso() });
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb.insert(schema.auditResults).values({ ...result, auditRunId: auditRun.id, createdAt: nowIso() });
+        });
         await ctx.setProgress(auditProgress("auditing", "Recorded audit result", link));
       }
 
-      const status = (await ctx.isCancelled()) ? "cancelled" : "completed";
-      if (status === "cancelled") {
-        await this.db.delete(schema.auditResults).where(eq(schema.auditResults.auditRunId, auditRun.id));
+      const cancelAudit = async () => {
         checked = 0;
         passed = 0;
         failed = 0;
@@ -2047,31 +3262,72 @@ export class JobWorker {
         sourceCompareErrors = 0;
         byteMismatches = 0;
         targetValidationFailures = 0;
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb.delete(schema.auditResults).where(eq(schema.auditResults.auditRunId, auditRun.id));
+          await leaseDb
+            .update(schema.auditRuns)
+            .set({ status: "cancelled", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: null })
+            .where(eq(schema.auditRuns.id, auditRun.id));
+        });
+        await ctx.setProgress(auditProgress("cancelled", "Audit cancelled"));
+        await ctx.event("warn", `${normalizedOptions.mode} audit terminated; partial results discarded`, {
+          checked,
+          passed,
+          failed,
+          sourceUnknown,
+          sourceMissing,
+          sourceCompareErrors,
+          byteMismatches,
+          targetValidationFailures,
+          sections: normalizedOptions.sections,
+          section: normalizedOptions.section,
+          itemName: normalizedOptions.itemName
+        });
+      };
+      if (await ctx.isCancelled()) {
+        await cancelAudit();
+        return;
       }
-      await this.db
-        .update(schema.auditRuns)
-        .set({ status, finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: null })
-        .where(eq(schema.auditRuns.id, auditRun.id));
-      await ctx.setProgress(auditProgress(status, status === "cancelled" ? "Audit cancelled" : "Audit completed"));
-      await ctx.event(status === "cancelled" ? "warn" : "info", status === "cancelled" ? `${normalizedOptions.mode} audit terminated; partial results discarded` : `${normalizedOptions.mode} audit indexed results`, {
-        checked,
-        passed,
-        failed,
-        sourceUnknown,
-        sourceMissing,
-        sourceCompareErrors,
-        byteMismatches,
-        targetValidationFailures,
-        sections: normalizedOptions.sections,
-        section: normalizedOptions.section,
-        itemName: normalizedOptions.itemName
+
+      const completedProgress = auditProgress("completed", "Audit completed");
+      const finalized = await ctx.finishCompleted(async (leaseDb) => {
+        if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Audit was interrupted"));
+        await leaseDb
+          .update(schema.auditRuns)
+          .set({ status: "completed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: null })
+          .where(eq(schema.auditRuns.id, auditRun.id));
+        await leaseDb.update(schema.jobs).set({ progress: JSON.stringify(completedProgress) }).where(eq(schema.jobs.id, jobId));
+        await leaseDb.insert(schema.jobEvents).values({
+          jobId,
+          timestamp: nowIso(),
+          level: "info",
+          message: `${normalizedOptions.mode} audit indexed results`,
+          data: JSON.stringify({
+            checked,
+            passed,
+            failed,
+            sourceUnknown,
+            sourceMissing,
+            sourceCompareErrors,
+            byteMismatches,
+            targetValidationFailures,
+            sections: normalizedOptions.sections,
+            section: normalizedOptions.section,
+            itemName: normalizedOptions.itemName
+          })
+        });
       });
+      if (finalized) return;
+      await cancelAudit();
     } catch (error: unknown) {
+      if (error instanceof LeaseLostError || (error instanceof Error && error.name === "LeaseLostError")) throw error;
       const message = errorMessage(error);
-      await this.db
-        .update(schema.auditRuns)
-        .set({ status: "failed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: message })
-        .where(eq(schema.auditRuns.id, auditRun.id));
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.auditRuns)
+          .set({ status: "failed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: message })
+          .where(eq(schema.auditRuns.id, auditRun.id));
+      });
       await ctx.setProgress(auditProgress("failed", message));
       throw error;
     }
@@ -2080,13 +3336,69 @@ export class JobWorker {
   private async runCopyJob(normalizedOptions: CopyOptions, ctx: JobContext): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+    const durableClaims = await this.db.select().from(schema.jobResourceClaims).where(eq(schema.jobResourceClaims.jobId, ctx.jobId));
+    const claimedPaths = new Set(durableClaims.filter((claim) => claim.resourceType === "path").map((claim) => path.resolve(claim.resourceKey)));
+    const claimedCopyPathBindings = new Map<string, CopyPathBinding>();
+    const cleanupPathsByLink = new Map<number, Map<string, CopyCleanupIdentity>>();
+    for (const claim of durableClaims) {
+      if (claim.resourceType === "copy_path_binding") {
+        const binding = parseCopyPathBindingResourceKey(claim.resourceKey);
+        if (binding) claimedCopyPathBindings.set(copyPathBindingMapKey(binding.linkId, binding.role), binding);
+      }
+      if (claim.resourceType !== "copy_cleanup") continue;
+      const marker = parseCopyCleanupMarker(claim.resourceKey);
+      if (!marker?.identity) continue;
+      const existing = cleanupPathsByLink.get(marker.linkId);
+      if (existing) existing.set(marker.filePath, marker.identity);
+      else cleanupPathsByLink.set(marker.linkId, new Map([[marker.filePath, marker.identity]]));
+    }
+    const copyPathsRemainClaimed = async (link: MediaLinkRow, destinationPath: string): Promise<boolean> => {
+      if (claimedPaths.size === 0 && claimedCopyPathBindings.size === 0) return true;
+      const currentBindings = await copyPathBindingsForLink(link, paths, normalizedOptions.direction);
+      const currentDestination = currentBindings.find((binding) => binding.role === "destination");
+      if (!currentDestination || currentDestination.lexicalPath !== path.resolve(destinationPath)) return false;
+      if (
+        claimedPaths.size > 0 &&
+        currentBindings.some(
+          (binding) => !claimedPaths.has(binding.lexicalPath) || !claimedPaths.has(binding.canonicalPath)
+        )
+      ) {
+        return false;
+      }
+      if (claimedCopyPathBindings.size === 0) return true;
+      return currentBindings.every((binding) => {
+        const expected = claimedCopyPathBindings.get(copyPathBindingMapKey(binding.linkId, binding.role));
+        return expected?.lexicalPath === binding.lexicalPath && expected.canonicalPath === binding.canonicalPath;
+      });
+    };
     const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
-    await reconcileCopyOperationsForJob(this.db, ctx.jobId, paths, ctx.event);
+    await ctx.assertLease();
+    // Path-blocked copy jobs are admitted only to reconcile and roll back their
+    // durable journal. Mark the context cancelled before replaying that journal.
+    await ctx.isCancelled();
+    await reconcileCopyOperationsForJob(this.db, ctx.jobId, paths, ctx);
 
     const allLinks = await listMediaLinks(this.db, undefined, "current");
     const links = filterCopyLinks(allLinks, normalizedOptions);
-    const hasDurableSelection = Boolean(normalizedOptions.linkIds?.length);
+    const hasDurableSelection = normalizedOptions.linkIds !== undefined;
     const selectedLinks = hasDurableSelection ? filterCopySelectedLinks(allLinks, normalizedOptions) : links;
+    const durableSelectedDestinations = [...claimedCopyPathBindings.values()]
+      .filter((binding) => binding.role === "destination")
+      .map((binding) => ({
+        linkId: binding.linkId,
+        lexicalPath: binding.lexicalPath,
+        canonicalPath: binding.canonicalPath
+      }));
+    const durableDestinationLinkIds = new Set(durableSelectedDestinations.map((destination) => destination.linkId));
+    const supplementalSelectedDestinations = await copySelectedDestinationsForLinks(
+      selectedLinks.filter((link) => !durableDestinationLinkIds.has(link.id)),
+      paths,
+      normalizedOptions.direction
+    );
+    const selectedDestinations = indexCopySelectedDestinations([
+      ...durableSelectedDestinations,
+      ...supplementalSelectedDestinations.entries
+    ]);
     const destinationKind = copyDestinationKind(normalizedOptions.direction);
     const resumeState = await readCopyResumeState(this.db, ctx.jobId, selectedLinks, destinationKind, hasDurableSelection);
     const selectedTotal = hasDurableSelection ? (normalizedOptions.linkIds?.length ?? 0) : selectedLinks.length;
@@ -2103,26 +3415,60 @@ export class JobWorker {
     const resumedRepointed = repointed;
     let activeLink: MediaLinkRow | undefined;
     let activeUpdate: Partial<CopyProgressUpdate> | undefined;
-    const replacementCandidateEntries: Array<{ linkId: number; destinationPath: string; candidates: CopyLocalConflictCandidate[] }> = [];
-    const setCopyProgress = (stage: CopyProgressStage, message: string, link?: MediaLinkRow, update?: Partial<CopyProgressUpdate>) =>
-      ctx.setProgress(
-        copyProgressPayload({
-          options: normalizedOptions,
-          current,
-          total,
-          copied,
-          repointed,
-          skipped,
-          conflicts,
-          failed,
-          alreadyCompleted,
-          remaining: Math.max(0, total - current),
-          stage,
-          message,
-          link,
-          update
-        })
+    const replacementCandidateEntries = new Map<
+      number,
+      { linkId: number; destinationPath: string; candidates: CopyLocalConflictCandidate[]; expectedIdentities: Map<string, CopyCleanupIdentity> }
+    >();
+    const committedReplacementOperations = await this.db
+      .select()
+      .from(schema.copyOperations)
+      .where(
+        and(
+          eq(schema.copyOperations.jobId, ctx.jobId),
+          eq(schema.copyOperations.stage, "committed"),
+          eq(schema.copyOperations.localConflictStrategy, "replace")
+        )
       );
+    for (const operation of committedReplacementOperations) {
+      const originalLink = copyOperationLink(operation);
+      const conflict = await copyLocalConflictForLink(this.db, originalLink, paths, selectedDestinations);
+      if (conflict) {
+        const expectedIdentities = cleanupPathsByLink.get(originalLink.id) ?? new Map<string, CopyCleanupIdentity>();
+        const allowedCandidates: CopyLocalConflictCandidate[] = [];
+        for (const candidate of conflict.candidates) {
+          const candidatePath = path.resolve(candidate.filePath);
+          if (sameCopyCleanupIdentity(expectedIdentities.get(candidatePath), await copyCleanupIdentity(candidatePath))) allowedCandidates.push(candidate);
+        }
+        if (allowedCandidates.length === 0) continue;
+        replacementCandidateEntries.set(originalLink.id, {
+          linkId: originalLink.id,
+          destinationPath: operation.destinationPath,
+          candidates: allowedCandidates,
+          expectedIdentities
+        });
+      }
+    }
+    let progressWrite = Promise.resolve();
+    const setCopyProgress = (stage: CopyProgressStage, message: string, link?: MediaLinkRow, update?: Partial<CopyProgressUpdate>) => {
+      const payload = copyProgressPayload({
+        options: normalizedOptions,
+        current,
+        total,
+        copied,
+        repointed,
+        skipped,
+        conflicts,
+        failed,
+        alreadyCompleted,
+        remaining: Math.max(0, total - current),
+        stage,
+        message,
+        link,
+        update
+      });
+      progressWrite = progressWrite.then(() => ctx.setProgress(payload));
+      return progressWrite;
+    };
 
     if (unavailable > 0) {
       await ctx.event("warn", "Selected copy media is no longer available", { total, unavailable });
@@ -2147,18 +3493,35 @@ export class JobWorker {
         await ctx.event("error", "Copy job failed processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
         throw new Error(failureMessage);
       }
-      await setCopyProgress("completed", alreadyCompleted > 0 ? "Copy job finished" : "No matching media found");
-      await ctx.event("info", "Copy job finished processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
-      return;
     }
 
-    for (const link of links) {
-      if (await ctx.isCancelled()) break;
+    const withCopyMutationLease = <T>(link: MediaLinkRow, destinationPath: string, mutation: () => Promise<T>): Promise<T> =>
+      ctx.withLeaseDb(async (leaseDb) => {
+        if (await isPathConfigurationBlocked(leaseDb)) {
+          throw new Error("Managed storage paths changed before copy promotion");
+        }
+        if (!(await copyPathsRemainClaimed(link, destinationPath))) {
+          throw new Error("Media paths changed after copy admission; queue the copy again");
+        }
+        return mutation();
+      });
+    let cancellationReported = false;
+    const processLink = async (link: MediaLinkRow): Promise<void> => {
+      if (await ctx.isCancelled()) return;
       activeLink = link;
-      activeUpdate = undefined;
+      let linkUpdate: Partial<CopyProgressUpdate> | undefined;
+      activeUpdate = linkUpdate;
       let activeOperationId: number | null = null;
+      let filesystemMutationCompleted = false;
       current += 1;
       await setCopyProgress("preparing", "Preparing media copy", link);
+      const destinationPath = copyDestinationPathForLink(link, paths, normalizedOptions.direction);
+      if (!(await copyPathsRemainClaimed(link, destinationPath))) {
+        conflicts += 1;
+        await setCopyProgress("conflict", "Media paths changed after copy admission; queue the copy again", link);
+        await ctx.event("warn", "Media paths changed after copy admission", { linkId: link.id, linkPath: link.linkPath, sourcePath: link.targetPath, destinationPath });
+        return;
+      }
       const sourceTitleRisk = evaluateSourceTitleRisk({ expectedTitle: link.itemName, sourcePath: link.targetPath });
       if (sourceTitleRisk.severity === "block") {
         conflicts += 1;
@@ -2167,7 +3530,8 @@ export class JobWorker {
           linkPath: link.linkPath,
           sizeBytes: link.sizeBytes ?? undefined
         };
-        await setCopyProgress("conflict", "Source title mismatch blocked copy", link, activeUpdate);
+        linkUpdate = activeUpdate;
+        await setCopyProgress("conflict", "Source title mismatch blocked copy", link, linkUpdate);
         await ctx.event("warn", "Source title mismatch blocked copy", {
           direction: normalizedOptions.direction,
           itemName: link.itemName,
@@ -2175,7 +3539,7 @@ export class JobWorker {
           sourcePath: link.targetPath,
           risk: sourceTitleRisk
         });
-        continue;
+        return;
       }
       if (sourceTitleRisk.severity === "warn") {
         await ctx.event("warn", "Source title risk warning", {
@@ -2197,7 +3561,34 @@ export class JobWorker {
 
       try {
         let lastProgressEventKey: string | null = null;
-        const localConflict = normalizedOptions.direction === "to_local" ? await copyLocalConflictForLink(this.db, link, paths) : null;
+        const localConflict =
+          normalizedOptions.direction === "to_local"
+            ? await copyLocalConflictForLink(this.db, link, paths, selectedDestinations)
+            : null;
+        if (localConflict && normalizedOptions.localConflictStrategy === "replace") {
+          const expectedIdentities = cleanupPathsByLink.get(link.id) ?? new Map<string, CopyCleanupIdentity>();
+          const unclaimedCandidates: CopyLocalConflictCandidate[] = [];
+          for (const candidate of localConflict.candidates) {
+            const candidatePath = path.resolve(candidate.filePath);
+            if (!sameCopyCleanupIdentity(expectedIdentities.get(candidatePath), await copyCleanupIdentity(candidatePath))) unclaimedCandidates.push(candidate);
+          }
+          if (unclaimedCandidates.length > 0) {
+            conflicts += 1;
+            activeUpdate = {
+              sourcePath: link.targetPath,
+              destinationPath: localConflict.destinationPath,
+              linkPath: link.linkPath,
+              sizeBytes: link.sizeBytes ?? undefined
+            };
+            linkUpdate = activeUpdate;
+            await setCopyProgress("conflict", "Local replacement candidates changed after copy admission; queue the copy again", link, linkUpdate);
+            await ctx.event("warn", "Local replacement candidates changed after copy admission", {
+              ...localConflict,
+              unclaimedPaths: unclaimedCandidates.map((candidate) => candidate.filePath)
+            });
+            return;
+          }
+        }
         if (localConflict && !normalizedOptions.localConflictStrategy) {
           conflicts += 1;
           activeUpdate = {
@@ -2206,105 +3597,145 @@ export class JobWorker {
             linkPath: link.linkPath,
             sizeBytes: link.sizeBytes ?? undefined
           };
-          await setCopyProgress("conflict", "Existing local file requires copy resolution", link, activeUpdate);
+          linkUpdate = activeUpdate;
+          await setCopyProgress("conflict", "Existing local file requires copy resolution", link, linkUpdate);
           await ctx.event("warn", "Existing local file requires copy resolution", localConflict);
-          continue;
+          return;
         }
-        const destinationPath = copyDestinationPathForLink(link, paths, normalizedOptions.direction);
         const previousCopySource =
           (await first(this.db.select().from(schema.copySources).where(eq(schema.copySources.destinationPath, destinationPath)).limit(1))) ?? null;
-        const operation = await prepareCopyOperation(
-          this.db,
-          ctx.jobId,
-          link,
-          destinationPath,
-          previousCopySource,
-          normalizedOptions.localConflictStrategy
+        const operation = await ctx.withLeaseDb((leaseDb) =>
+          prepareCopyOperation(
+            leaseDb,
+            ctx.jobId,
+            link,
+            destinationPath,
+            previousCopySource,
+            normalizedOptions.localConflictStrategy
+          )
         );
         activeOperationId = operation.id;
-        const result = await copyMediaLink(
-          link,
-          paths,
-          normalizedOptions.direction,
-          this.copyRunner,
-          async (update) => {
-            activeUpdate = update;
-            await setCopyProgress(update.stage, update.message, link, activeUpdate);
-            if (update.stage === "copying" || (update.stage === "preparing" && !/retry/i.test(update.message))) return;
-            const progressEventKey = `${update.stage}:${update.message}`;
-            if (progressEventKey === lastProgressEventKey) return;
-            lastProgressEventKey = progressEventKey;
-            await ctx.event(
-              "info",
-              update.message,
-              copyProgressPayload({
-                options: normalizedOptions,
-                current,
-                total,
-                copied,
-                repointed,
-                skipped,
-                conflicts,
-                failed,
-                alreadyCompleted,
-                remaining: Math.max(0, total - current),
-                stage: update.stage,
-                message: update.message,
-                link,
-                update: activeUpdate
-              })
-            );
-          },
-          advancedSettings.copy,
-          ctx.signal,
-          normalizedOptions.localConflictStrategy,
-          (update) => updateCopyOperation(this.db, operation.id, update)
-        );
+        const releaseTransfer = await this.copyTransferLimiter.acquire(ctx.signal);
+        let result: CopyMediaResult;
+        try {
+          result = await copyMediaLink(
+            link,
+            paths,
+            normalizedOptions.direction,
+            this.copyRunner,
+            async (update) => {
+              linkUpdate = update;
+              activeUpdate = linkUpdate;
+              await setCopyProgress(update.stage, update.message, link, linkUpdate);
+              if (update.stage === "copying" || (update.stage === "preparing" && !/retry/i.test(update.message))) return;
+              const progressEventKey = `${update.stage}:${update.message}`;
+              if (progressEventKey === lastProgressEventKey) return;
+              lastProgressEventKey = progressEventKey;
+              await ctx.event(
+                "info",
+                update.message,
+                copyProgressPayload({
+                  options: normalizedOptions,
+                  current,
+                  total,
+                  copied,
+                  repointed,
+                  skipped,
+                  conflicts,
+                  failed,
+                  alreadyCompleted,
+                  remaining: Math.max(0, total - current),
+                  stage: update.stage,
+                  message: update.message,
+                  link,
+                  update: linkUpdate
+                })
+              );
+            },
+            advancedSettings.copy,
+            ctx.signal,
+            normalizedOptions.localConflictStrategy,
+            (update) => ctx.withLeaseDb((leaseDb) => updateCopyOperation(leaseDb, operation.id, update)),
+            (mutation) => withCopyMutationLease(link, destinationPath, mutation)
+          );
+        } finally {
+          releaseTransfer();
+        }
+        filesystemMutationCompleted = result.status === "copied" || result.status === "repointed";
         if (result.status === "copied") {
+          await ctx.withLeaseDb((leaseDb) => commitCopyOperation(leaseDb, operation.id, link, result));
           copied += 1;
-          await commitCopyOperation(this.db, operation.id, link, result);
-          activeUpdate = { ...(activeUpdate ?? {}), ...result };
-          await setCopyProgress("done", result.message, link, activeUpdate);
+          linkUpdate = { ...(linkUpdate ?? {}), ...result };
+          activeUpdate = linkUpdate;
+          await setCopyProgress("done", result.message, link, linkUpdate);
           await ctx.event("info", advancedSettings.copy.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
-            replacementCandidateEntries.push({ linkId: link.id, destinationPath: result.destinationPath, candidates: localConflict.candidates });
+            replacementCandidateEntries.set(link.id, {
+              linkId: link.id,
+              destinationPath: result.destinationPath,
+              candidates: localConflict.candidates,
+              expectedIdentities: cleanupPathsByLink.get(link.id) ?? new Map<string, CopyCleanupIdentity>()
+            });
           }
         } else if (result.status === "repointed") {
+          await ctx.withLeaseDb((leaseDb) => commitCopyOperation(leaseDb, operation.id, link, result));
           repointed += 1;
-          await commitCopyOperation(this.db, operation.id, link, result);
-          activeUpdate = { ...(activeUpdate ?? {}), ...result };
-          await setCopyProgress("done", result.message, link, activeUpdate);
+          linkUpdate = { ...(linkUpdate ?? {}), ...result };
+          activeUpdate = linkUpdate;
+          await setCopyProgress("done", result.message, link, linkUpdate);
           await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
-            replacementCandidateEntries.push({ linkId: link.id, destinationPath: result.destinationPath, candidates: localConflict.candidates });
+            replacementCandidateEntries.set(link.id, {
+              linkId: link.id,
+              destinationPath: result.destinationPath,
+              candidates: localConflict.candidates,
+              expectedIdentities: cleanupPathsByLink.get(link.id) ?? new Map<string, CopyCleanupIdentity>()
+            });
           }
         } else if (result.status === "conflict") {
           conflicts += 1;
-          await completeCopyOperationWithoutMutation(this.db, operation.id, result);
-          activeUpdate = { ...(activeUpdate ?? {}), ...result };
-          await setCopyProgress("conflict", result.message, link, activeUpdate);
+          await ctx.withLeaseDb((leaseDb) => completeCopyOperationWithoutMutation(leaseDb, operation.id, result));
+          linkUpdate = { ...(linkUpdate ?? {}), ...result };
+          activeUpdate = linkUpdate;
+          await setCopyProgress("conflict", result.message, link, linkUpdate);
           await ctx.event("warn", "Destination conflict; file was not overwritten", result);
         } else {
           skipped += 1;
-          await completeCopyOperationWithoutMutation(this.db, operation.id, result);
-          activeUpdate = { ...(activeUpdate ?? {}), ...result };
-          await setCopyProgress("skipped", result.message, link, activeUpdate);
+          await ctx.withLeaseDb((leaseDb) => completeCopyOperationWithoutMutation(leaseDb, operation.id, result));
+          linkUpdate = { ...(linkUpdate ?? {}), ...result };
+          activeUpdate = linkUpdate;
+          await setCopyProgress("skipped", result.message, link, linkUpdate);
           await ctx.event("info", "Copy skipped", result);
         }
       } catch (error: unknown) {
-        if (await ctx.isCancelled()) {
-          await setCopyProgress("cancelled", "Copy job termination requested", link, activeUpdate);
-          await ctx.event("warn", "Copy job termination requested; active copy was stopped before promotion", {
-            direction: normalizedOptions.direction,
-            itemName: link.itemName,
-            linkPath: link.linkPath,
-            sourcePath: link.targetPath
-          });
-          break;
+        if (error instanceof CopyReconciliationRequiredError || filesystemMutationCompleted) {
+          const reconciliationError =
+            error instanceof CopyReconciliationRequiredError
+              ? error
+              : new CopyReconciliationRequiredError(`Copy operation could not be committed after filesystem promotion: ${errorMessage(error)}`, { cause: error });
+          if (activeOperationId) {
+            await ctx.withLeaseDb((leaseDb) => requireCopyOperationReconciliation(leaseDb, activeOperationId!, reconciliationError.message));
+          }
+          throw reconciliationError;
         }
-        if (ctx.signal.aborted) throw error;
+        if (await ctx.isCancelled()) {
+          if (!cancellationReported) {
+            cancellationReported = true;
+            await setCopyProgress("cancelled", "Copy job termination requested", link, linkUpdate);
+            await ctx.event("warn", "Copy job termination requested; active copies were stopped before promotion", {
+              direction: normalizedOptions.direction,
+              itemName: link.itemName,
+              linkPath: link.linkPath,
+              sourcePath: link.targetPath
+            });
+          }
+          return;
+        }
+        if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : error);
         failed += 1;
-        if (activeOperationId) await failCopyOperation(this.db, activeOperationId, errorMessage(error));
+        if (activeOperationId && !filesystemMutationCompleted) {
+          await ctx.withLeaseDb((leaseDb) => failCopyOperation(leaseDb, activeOperationId!, errorMessage(error)));
+        }
         await setCopyProgress("failed", errorMessage(error), link);
         await ctx.event("error", errorMessage(error), {
           direction: normalizedOptions.direction,
@@ -2313,19 +3744,31 @@ export class JobWorker {
           sourcePath: link.targetPath
         });
       }
-    }
+    };
+
+    await runKeyedPool(
+      links,
+      this.concurrency.copyFileConcurrency,
+      (link) => String(link.id),
+      processLink,
+      () => !ctx.signal.aborted
+    );
 
     const cancelled = await ctx.isCancelled();
-    if (cancelled) {
+    if (!cancelled && ctx.signal.aborted) {
+      throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new WorkerShutdownError());
+    }
+    const rollbackCancelledCopy = async () => {
       await setCopyProgress("cancelled", "Rolling back completed copy changes", activeLink, activeUpdate);
-      const { rolledBack, warnings } = await rollbackDurableCopyOperations(this.db, ctx.jobId, paths, ctx.event);
+      const { rolledBack, warnings } = await rollbackDurableCopyOperations(this.db, ctx.jobId, paths, ctx);
       copied = resumedCopied;
       repointed = resumedRepointed;
       for (const warning of warnings) {
         await ctx.event("warn", warning);
       }
       await ctx.event("warn", "Copy job terminated; completed copy changes rolled back", { rolledBack, warnings });
-    }
+    };
+    if (cancelled) await rollbackCancelledCopy();
     if (!cancelled && failed > 0) {
       const itemLabel = total === 1 ? "media item" : "media items";
       const completed = copied + repointed + skipped + conflicts;
@@ -2344,14 +3787,72 @@ export class JobWorker {
       if (partialFailure) throw new PartialJobFailureError(failureMessage);
       throw new Error(failureMessage);
     }
-    if (!cancelled && replacementCandidateEntries.length > 0) {
-      await setCopyProgress("symlinking", "Removing previous local files", activeLink, activeUpdate);
-      for (const entry of replacementCandidateEntries) {
-        const removed = await removeLocalConflictCandidates(this.db, paths, entry.candidates, entry.destinationPath);
-        if (removed.length > 0) await ctx.event("info", "Replaced previous local files", { linkId: entry.linkId, removed });
+    if (!cancelled) {
+      if (replacementCandidateEntries.size > 0) {
+        await setCopyProgress("symlinking", "Finalizing previous local-file replacements", activeLink, activeUpdate);
       }
+      await setCopyProgress("completed", links.length === 0 && alreadyCompleted === 0 ? "No matching media found" : "Copy job finished", activeLink, activeUpdate);
+      await ctx.event("info", "Copy job finished processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
+      const finalized = await ctx.finishCompletedIsolated(async (leaseDb) => {
+        const finalizationWarnings: string[] = [];
+        for (const entry of replacementCandidateEntries.values()) {
+          try {
+            const removed = await removeLocalConflictCandidates(
+              leaseDb,
+              paths,
+              entry.candidates,
+              entry.destinationPath,
+              entry.expectedIdentities,
+              entry.linkId,
+              selectedDestinations
+            );
+            if (removed.length > 0) {
+              await leaseDb.insert(schema.jobEvents).values({
+                jobId: ctx.jobId,
+                timestamp: nowIso(),
+                level: "info",
+                message: "Replaced previous local files",
+                data: JSON.stringify({ linkId: entry.linkId, removed })
+              });
+            }
+          } catch (error: unknown) {
+            finalizationWarnings.push(`Could not remove every previous local file for media #${entry.linkId}: ${errorMessage(error)}`);
+          }
+        }
+
+        const operationsWithBackups = (
+          await leaseDb
+            .select()
+            .from(schema.copyOperations)
+            .where(and(eq(schema.copyOperations.jobId, ctx.jobId), eq(schema.copyOperations.stage, "committed")))
+        ).filter((operation) => Boolean(operation.displacedPath));
+        for (const operation of operationsWithBackups) {
+          try {
+            if (operation.localConflictStrategy === "replace") {
+              const rootType = copyOperationDestinationRoot(operation, paths);
+              await removeJournalFile(
+                rootType === "local" ? paths.localDir : paths.remoteDir,
+                operation.displacedPath,
+                operation.displacedIdentity,
+                "Displaced destination backup"
+              );
+            }
+            await leaseDb
+              .update(schema.copyOperations)
+              .set({ displacedPath: null, displacedIdentity: null, updatedAt: nowIso() })
+              .where(eq(schema.copyOperations.id, operation.id));
+          } catch (error: unknown) {
+            finalizationWarnings.push(`Could not finalize displaced backup for copy operation #${operation.id}: ${errorMessage(error)}`);
+          }
+        }
+        for (const warning of finalizationWarnings) {
+          await leaseDb.insert(schema.jobEvents).values({ jobId: ctx.jobId, timestamp: nowIso(), level: "warn", message: warning, data: "{}" });
+        }
+      });
+      if (finalized) return;
+      await rollbackCancelledCopy();
     }
-    await setCopyProgress(cancelled ? "cancelled" : "completed", cancelled ? "Copy job terminated" : "Copy job finished", activeLink, activeUpdate);
-    await ctx.event(cancelled ? "warn" : "info", cancelled ? "Copy job terminated" : "Copy job finished processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
+    await setCopyProgress("cancelled", "Copy job terminated", activeLink, activeUpdate);
+    await ctx.event("warn", "Copy job terminated", { total, copied, repointed, skipped, conflicts, failed, unavailable });
   }
 }

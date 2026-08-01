@@ -6,6 +6,7 @@ import type { SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 
 export type Db = NodePgDatabase<typeof schema>;
+export type DbExecutor = Db;
 export { inferSectionContentType } from "../../shared/sections";
 
 export interface DatabaseContext {
@@ -20,13 +21,13 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 4;
+export const currentSchemaVersion = 7;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS path_configurations (id SERIAL PRIMARY KEY, status TEXT NOT NULL, symlink_dir TEXT NOT NULL, local_dir TEXT NOT NULL, remote_dir TEXT NOT NULL, symlink_identity TEXT NOT NULL, local_identity TEXT NOT NULL, remote_identity TEXT NOT NULL, created_at TEXT NOT NULL, applied_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS path_migrations (id SERIAL PRIMARY KEY, source_config_id INTEGER, target_config_id INTEGER NOT NULL, status TEXT NOT NULL, job_id INTEGER, error_message TEXT, created_at TEXT NOT NULL, planned_at TEXT, started_at TEXT, finished_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS path_migration_items (id SERIAL PRIMARY KEY, migration_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, item_name TEXT NOT NULL, current_link_path TEXT NOT NULL, link_path_before TEXT NOT NULL, link_path_after TEXT NOT NULL, target_path_before TEXT NOT NULL, target_path_after TEXT NOT NULL, target_changed BOOLEAN NOT NULL, expected_size_bytes BIGINT, validation_status TEXT NOT NULL, message TEXT NOT NULL, applied_at TEXT, rolled_back_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS path_migration_items (id SERIAL PRIMARY KEY, migration_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, item_name TEXT NOT NULL, current_link_path TEXT NOT NULL, link_path_before TEXT NOT NULL, link_path_after TEXT NOT NULL, target_path_before TEXT NOT NULL, target_path_after TEXT NOT NULL, target_changed BOOLEAN NOT NULL, expected_size_bytes BIGINT, target_identity TEXT, validation_status TEXT NOT NULL, message TEXT NOT NULL, applied_at TEXT, rolled_back_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sections (id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, display_name TEXT, content_type TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -61,7 +62,7 @@ const ddl = [
 ];
 
 const hardeningDdl = [
-  `CREATE TABLE IF NOT EXISTS copy_operations (id SERIAL PRIMARY KEY, job_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, link_path TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, original_target_path TEXT NOT NULL, original_link_state TEXT NOT NULL, previous_copy_source TEXT, temp_path TEXT, displaced_path TEXT, stage TEXT NOT NULL, result_status TEXT, local_conflict_strategy TEXT, size_bytes BIGINT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(job_id, media_link_id))`,
+  `CREATE TABLE IF NOT EXISTS copy_operations (id SERIAL PRIMARY KEY, job_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, link_path TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, original_target_path TEXT NOT NULL, original_link_state TEXT NOT NULL, previous_copy_source TEXT, temp_path TEXT, displaced_path TEXT, temp_identity TEXT, destination_identity TEXT, displaced_identity TEXT, stage TEXT NOT NULL, result_status TEXT, local_conflict_strategy TEXT, size_bytes BIGINT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(job_id, media_link_id))`,
   `CREATE INDEX IF NOT EXISTS copy_operations_job_stage_idx ON copy_operations(job_id, stage, id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS admin_users_singleton_idx ON admin_users ((true))`,
   `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_user_fk') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_user_fk FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE NOT VALID; END IF; END $$`,
@@ -123,7 +124,9 @@ async function initializeDatabase(pool: Pool): Promise<void> {
     if (!applied.has(3)) {
       await client.query("BEGIN");
       try {
-        await client.query(`CREATE TABLE IF NOT EXISTS worker_heartbeats (worker_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, status TEXT NOT NULL)`);
+        await client.query(
+          `CREATE TABLE IF NOT EXISTS worker_heartbeats (worker_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, status TEXT NOT NULL, capacity BIGINT NOT NULL DEFAULT 1)`
+        );
         await client.query(`DROP TABLE IF EXISTS legacy_policy_import_tombstones`);
         await client.query(`DROP TABLE IF EXISTS integration_sync_runs`);
         await client.query(`DROP TABLE IF EXISTS integration_configs`);
@@ -165,6 +168,60 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`ALTER TABLE storage_files ADD CONSTRAINT storage_files_policy_check CHECK (storage_policy IN ('unassigned', 'location_1', 'location_2'))`);
         await client.query(`ALTER TABLE storage_policies ADD CONSTRAINT storage_policies_policy_check CHECK (policy IN ('location_1', 'location_2'))`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (4, 'location_identity_storage_policies', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(5)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_version INTEGER NOT NULL DEFAULT 0`);
+        await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS exclusive BOOLEAN NOT NULL DEFAULT TRUE`);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS job_resource_claims (
+            id SERIAL PRIMARY KEY,
+            job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            resource_type TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            access TEXT NOT NULL DEFAULT 'exclusive',
+            created_at TEXT NOT NULL,
+            CONSTRAINT job_resource_claims_job_resource_idx UNIQUE (job_id, resource_type, resource_key),
+            CONSTRAINT job_resource_claims_access_check CHECK (access IN ('shared', 'exclusive'))
+          )
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS job_resource_claims_lookup_idx ON job_resource_claims(resource_type, resource_key, access)`);
+        await client.query(`ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS capacity BIGINT NOT NULL DEFAULT 1`);
+        await client.query(`CREATE INDEX IF NOT EXISTS worker_heartbeats_status_heartbeat_idx ON worker_heartbeats(status, heartbeat_at)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (5, 'multi_worker_job_claims', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(6)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS temp_identity TEXT`);
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS destination_identity TEXT`);
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS displaced_identity TEXT`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'copy_operation_file_identities', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(7)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE path_migration_items ADD COLUMN IF NOT EXISTS target_identity TEXT`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'path_migration_target_identities', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

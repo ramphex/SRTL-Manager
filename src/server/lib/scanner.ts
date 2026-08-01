@@ -814,7 +814,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     }
   }
 
-  await reconcileResolvedStorageFiles(db, timestamp);
+  await reconcileResolvedStorageFiles(db, timestamp, result.options.titleScopes?.length ? seenLinkPaths : undefined);
   await throwIfPersistenceCancelled(isCancelled);
   await applyPendingOnboardingPolicy(db, jobId);
   await throwIfPersistenceCancelled(isCancelled);
@@ -879,11 +879,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   };
 }
 
-async function reconcileResolvedStorageFiles(db: Db, timestamp: string): Promise<void> {
+async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scopedLinkPaths?: ReadonlySet<string>): Promise<void> {
   const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
   const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
   for (const link of await db.select().from(schema.mediaLinks)) {
-    if (link.missingSince) continue;
+    if (link.missingSince || (scopedLinkPaths && !scopedLinkPaths.has(link.linkPath))) continue;
     const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
     if (link.resolvedStorageFileId !== resolvedStorageFileId) {
       await db.update(schema.mediaLinks).set({ resolvedStorageFileId, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));

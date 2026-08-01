@@ -1,4 +1,5 @@
-import { bigint, boolean, integer, pgTable, serial, text, uniqueIndex } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { bigint, boolean, check, index, integer, pgTable, serial, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const appSettings = pgTable("app_settings", {
   key: text("key").primaryKey(),
@@ -44,6 +45,7 @@ export const pathMigrationItems = pgTable("path_migration_items", {
   targetPathAfter: text("target_path_after").notNull(),
   targetChanged: boolean("target_changed").notNull(),
   expectedSizeBytes: bigint("expected_size_bytes", { mode: "number" }),
+  targetIdentity: text("target_identity"),
   validationStatus: text("validation_status").notNull(),
   message: text("message").notNull(),
   appliedAt: text("applied_at"),
@@ -156,16 +158,42 @@ export const jobs = pgTable("jobs", {
   lockedBy: text("locked_by"),
   lockedAt: text("locked_at"),
   heartbeatAt: text("heartbeat_at"),
+  leaseVersion: integer("lease_version").notNull().default(0),
+  exclusive: boolean("exclusive").notNull().default(true),
   cancelRequestedAt: text("cancel_requested_at"),
   progress: text("progress").notNull()
 });
 
-export const workerHeartbeats = pgTable("worker_heartbeats", {
-  workerId: text("worker_id").primaryKey(),
-  startedAt: text("started_at").notNull(),
-  heartbeatAt: text("heartbeat_at").notNull(),
-  status: text("status").notNull()
-});
+export const jobResourceClaims = pgTable(
+  "job_resource_claims",
+  {
+    id: serial("id").primaryKey(),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    resourceType: text("resource_type").notNull(),
+    resourceKey: text("resource_key").notNull(),
+    access: text("access").notNull().default("exclusive"),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("job_resource_claims_job_resource_idx").on(table.jobId, table.resourceType, table.resourceKey),
+    index("job_resource_claims_lookup_idx").on(table.resourceType, table.resourceKey, table.access),
+    check("job_resource_claims_access_check", sql`${table.access} IN ('shared', 'exclusive')`)
+  ]
+);
+
+export const workerHeartbeats = pgTable(
+  "worker_heartbeats",
+  {
+    workerId: text("worker_id").primaryKey(),
+    startedAt: text("started_at").notNull(),
+    heartbeatAt: text("heartbeat_at").notNull(),
+    status: text("status").notNull(),
+    capacity: bigint("capacity", { mode: "number" }).notNull().default(1)
+  },
+  (table) => [index("worker_heartbeats_status_heartbeat_idx").on(table.status, table.heartbeatAt)]
+);
 
 export const copyOperations = pgTable(
   "copy_operations",
@@ -181,6 +209,9 @@ export const copyOperations = pgTable(
     previousCopySource: text("previous_copy_source"),
     tempPath: text("temp_path"),
     displacedPath: text("displaced_path"),
+    tempIdentity: text("temp_identity"),
+    destinationIdentity: text("destination_identity"),
+    displacedIdentity: text("displaced_identity"),
     stage: text("stage").notNull(),
     resultStatus: text("result_status"),
     localConflictStrategy: text("local_conflict_strategy"),

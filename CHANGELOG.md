@@ -4,6 +4,23 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.2-beta.3] - 2026-07-31
+
+### Changed
+
+- Added configurable in-process worker slots and independent global, per-job-type, and copy-transfer concurrency limits without an arbitrary worker-count ceiling.
+- Kept example deployments at one worker slot by default while honoring any positive `SRTL_WORKER_COUNT` value from `.env`.
+- Allowed non-overlapping copy, audit, and targeted title-rescan work to run concurrently while broad scans and path migrations remain exclusive.
+
+### Fixed
+
+- Made queue admission, worker claims, stale-job recovery, and job updates lease-aware so overlapping or superseded workers cannot mutate the same job.
+- Preserved immutable job resource scopes so later inventory changes cannot remove an active job's overlap protection.
+- Scoped legacy failed-copy reconciliation locks to their exact media records and managed paths so newly scanned items from the same title can still be queued.
+- Allowed filesystem-read-only scans and audits to run while terminal legacy copy records await reconciliation; path migration and exact conflicting mutations remain fenced.
+- Loaded every page of dashboard work lists and made show and season copy actions server-scoped so large sections are never truncated to the first 250 links.
+- Accepted routine FUSE and NFS remounts without a false path migration when the canonical path and stable mount signature are unchanged, while retaining exact identity checks during active mutations.
+
 ## [0.1.2-beta.2] - 2026-07-29
 
 ### Changed

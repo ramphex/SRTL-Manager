@@ -29,21 +29,87 @@ describe("config", () => {
     expect(config.paths).toEqual({ symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" });
   });
 
-  it("keeps worker concurrency hard-capped while the worker count setting is a placeholder", async () => {
+  it("loads an arbitrary worker count and its bounded concurrency safeguards", async () => {
     await fs.writeFile(
       path.join(tmpDir, ".env"),
-      ["SRTL_WORKER_COUNT=4", "SRTL_MAX_RUNNING_JOBS=8", "SRTL_MAX_RUNNING_SCANS=2", "SRTL_MAX_RUNNING_AUDITS=3", "SRTL_MAX_RUNNING_COPIES=5"].join("\n")
+      [
+        "SRTL_WORKER_COUNT=128",
+        "SRTL_MAX_RUNNING_JOBS=64",
+        "SRTL_MAX_RUNNING_SCANS=2",
+        "SRTL_MAX_RUNNING_AUDITS=3",
+        "SRTL_MAX_RUNNING_COPIES=60",
+        "SRTL_COPY_FILE_CONCURRENCY=8",
+        "SRTL_MAX_ACTIVE_COPY_FILES=32"
+      ].join("\n")
     );
 
     const config = loadConfig({ rootDir: tmpDir });
 
     expect(config.jobConcurrency).toEqual({
+      workerCount: 128,
+      maxRunningJobs: 64,
+      maxRunningScans: 2,
+      maxRunningAudits: 3,
+      maxRunningCopies: 60,
+      copyFileConcurrency: 8,
+      maxActiveCopyFiles: 32
+    });
+  });
+
+  it("uses the serial worker default from the checked-in example environment", async () => {
+    const example = await fs.readFile(new URL("../.env.example", import.meta.url), "utf8");
+    const workerCountSetting = example
+      .split(/\r?\n/)
+      .find((line) => line.startsWith("SRTL_WORKER_COUNT="));
+
+    expect(workerCountSetting).toBe("SRTL_WORKER_COUNT=1");
+    await fs.writeFile(path.join(tmpDir, ".env"), `${workerCountSetting}\n`);
+
+    expect(loadConfig({ rootDir: tmpDir }).jobConcurrency).toEqual({
       workerCount: 1,
       maxRunningJobs: 1,
       maxRunningScans: 1,
       maxRunningAudits: 1,
-      maxRunningCopies: 1
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
     });
+  });
+
+  it("derives safe limits from the worker count while keeping each copy job serial by default", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_WORKER_COUNT=4\n");
+
+    expect(loadConfig({ rootDir: tmpDir }).jobConcurrency).toEqual({
+      workerCount: 4,
+      maxRunningJobs: 4,
+      maxRunningScans: 4,
+      maxRunningAudits: 4,
+      maxRunningCopies: 4,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 4
+    });
+  });
+
+  it("allows a job type to be paused with a zero per-type limit", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env"), ["SRTL_WORKER_COUNT=3", "SRTL_MAX_RUNNING_SCANS=0"].join("\n"));
+
+    expect(loadConfig({ rootDir: tmpDir }).jobConcurrency.maxRunningScans).toBe(0);
+  });
+
+  it("rejects malformed and contradictory worker concurrency settings", async () => {
+    const invalidSettings = [
+      ["SRTL_WORKER_COUNT=0", "SRTL_WORKER_COUNT must be a positive safe integer"],
+      ["SRTL_WORKER_COUNT=2.5", "SRTL_WORKER_COUNT must be a positive safe integer"],
+      ["SRTL_WORKER_COUNT=9007199254740992", "SRTL_WORKER_COUNT must be a positive safe integer"],
+      [["SRTL_WORKER_COUNT=2", "SRTL_MAX_RUNNING_JOBS=3"].join("\n"), "SRTL_MAX_RUNNING_JOBS must not exceed SRTL_WORKER_COUNT"],
+      [["SRTL_WORKER_COUNT=4", "SRTL_MAX_RUNNING_JOBS=2", "SRTL_MAX_RUNNING_COPIES=3"].join("\n"), "SRTL_MAX_RUNNING_COPIES must not exceed SRTL_MAX_RUNNING_JOBS"],
+      [["SRTL_COPY_FILE_CONCURRENCY=3", "SRTL_MAX_ACTIVE_COPY_FILES=2"].join("\n"), "SRTL_COPY_FILE_CONCURRENCY must not exceed SRTL_MAX_ACTIVE_COPY_FILES"]
+    ] as const;
+
+    for (const [contents, message] of invalidSettings) {
+      await fs.writeFile(path.join(tmpDir, ".env"), contents);
+      expect(() => loadConfig({ rootDir: tmpDir })).toThrow(message);
+    }
   });
 
   it("constructs the database URL from a single password setting", async () => {

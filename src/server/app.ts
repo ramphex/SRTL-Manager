@@ -16,7 +16,7 @@ import { loadConfig } from "./config";
 import { hasAdmin, requireAuth } from "./auth";
 import { openDatabase, type DatabaseContext } from "./db/database";
 import * as schema from "./db/schema";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { isPathConfigurationBlocked, reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { canAdoptEnvironmentPathsBeforeInitialScan, isOnboardingComplete, reconcileOnboardingState } from "./lib/onboarding";
 import { JobRunner } from "./jobs/jobRunner";
@@ -121,13 +121,30 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
 
   app.get("/api/health", async () => {
     await database.pool.query("select 1");
-    const worker = (await database.db.select().from(schema.workerHeartbeats).orderBy(desc(schema.workerHeartbeats.heartbeatAt)).limit(1))[0] ?? null;
-    const workerAgeMs = worker ? Math.max(0, Date.now() - Date.parse(worker.heartbeatAt)) : null;
+    const workers = await database.db
+      .select()
+      .from(schema.workerHeartbeats)
+      .where(eq(schema.workerHeartbeats.status, "running"))
+      .orderBy(desc(schema.workerHeartbeats.heartbeatAt));
+    const latestWorker = workers[0] ?? null;
+    const now = Date.now();
+    const readyWorkerCount = workers.reduce((capacity, worker) => {
+      const heartbeatAt = Date.parse(worker.heartbeatAt);
+      return Number.isFinite(heartbeatAt) && Math.max(0, now - heartbeatAt) <= 30_000 ? capacity + worker.capacity : capacity;
+    }, 0);
+    const staleWorkerCount = workers.reduce((capacity, worker) => {
+      const heartbeatAt = Date.parse(worker.heartbeatAt);
+      return !Number.isFinite(heartbeatAt) || Math.max(0, now - heartbeatAt) > 30_000 ? capacity + worker.capacity : capacity;
+    }, 0);
+    const expectedWorkerCount = config.jobConcurrency.maxRunningJobs;
     return {
       ok: true,
       database: "ready",
-      worker: worker && worker.status === "running" && workerAgeMs != null && workerAgeMs <= 30_000 ? "ready" : worker ? "stale" : "not_started",
-      workerHeartbeatAt: worker?.heartbeatAt ?? null
+      worker: readyWorkerCount >= expectedWorkerCount ? "ready" : workers.length > 0 ? "stale" : "not_started",
+      workerHeartbeatAt: latestWorker?.heartbeatAt ?? null,
+      expectedWorkerCount,
+      readyWorkerCount,
+      staleWorkerCount
     };
   });
   registerAuthRoutes(app, database.db, {

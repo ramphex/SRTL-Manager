@@ -26,12 +26,10 @@ export interface JobConcurrencySettings {
   maxRunningScans: number;
   maxRunningAudits: number;
   maxRunningCopies: number;
+  copyFileConcurrency: number;
+  maxActiveCopyFiles: number;
 }
 
-// Placeholder until multi-worker setup ships in future updates. Keep the
-// effective worker count hard-capped at 1 while scan/copy/audit behavior is
-// hardened.
-const currentWorkerCountHardLimit = 1;
 const exampleDatabasePassword = "replace-with-your-password";
 
 function booleanSetting(value: string | undefined, fallback: boolean): boolean {
@@ -103,23 +101,73 @@ export function resolveDatabaseUrl(envFile: ReturnType<typeof readEnvFile> = {})
   return databaseUrlSetting(url.toString());
 }
 
-function normalizeWorkerCount(value: number | string | undefined): number {
-  const parsed = typeof value === "number" ? value : Number(value);
-  if (!Number.isInteger(parsed) || parsed < 1) return 1;
-  return Math.min(parsed, currentWorkerCountHardLimit);
+function integerSetting(value: number | string | undefined, fallback: number, name: string, minimum: 0 | 1): number {
+  if (value == null) return fallback;
+  const normalized = typeof value === "string" ? value.trim() : value;
+  if (typeof normalized === "string" && !/^(0|[1-9]\d*)$/.test(normalized)) {
+    throw new Error(`${name} must be a ${minimum === 0 ? "non-negative" : "positive"} safe integer`);
+  }
+  const parsed = typeof normalized === "number" ? normalized : Number(normalized);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum) {
+    throw new Error(`${name} must be a ${minimum === 0 ? "non-negative" : "positive"} safe integer`);
+  }
+  return parsed;
 }
 
 function loadJobConcurrency(envFile: ReturnType<typeof readEnvFile>, overrides: Partial<JobConcurrencySettings> | undefined = {}): JobConcurrencySettings {
-  // Every running-job limit derives from the effective worker count, which is
-  // temporarily capped above.
-  const workerCount = normalizeWorkerCount(overrides.workerCount ?? process.env.SRTL_WORKER_COUNT ?? envFile.SRTL_WORKER_COUNT);
-  return {
+  const workerCount = integerSetting(overrides.workerCount ?? process.env.SRTL_WORKER_COUNT ?? envFile.SRTL_WORKER_COUNT, 1, "SRTL_WORKER_COUNT", 1);
+  const maxRunningJobs = integerSetting(
+    overrides.maxRunningJobs ?? process.env.SRTL_MAX_RUNNING_JOBS ?? envFile.SRTL_MAX_RUNNING_JOBS,
     workerCount,
-    maxRunningJobs: workerCount,
-    maxRunningScans: workerCount,
-    maxRunningAudits: workerCount,
-    maxRunningCopies: workerCount
+    "SRTL_MAX_RUNNING_JOBS",
+    1
+  );
+  const settings: JobConcurrencySettings = {
+    workerCount,
+    maxRunningJobs,
+    maxRunningScans: integerSetting(
+      overrides.maxRunningScans ?? process.env.SRTL_MAX_RUNNING_SCANS ?? envFile.SRTL_MAX_RUNNING_SCANS,
+      maxRunningJobs,
+      "SRTL_MAX_RUNNING_SCANS",
+      0
+    ),
+    maxRunningAudits: integerSetting(
+      overrides.maxRunningAudits ?? process.env.SRTL_MAX_RUNNING_AUDITS ?? envFile.SRTL_MAX_RUNNING_AUDITS,
+      maxRunningJobs,
+      "SRTL_MAX_RUNNING_AUDITS",
+      0
+    ),
+    maxRunningCopies: integerSetting(
+      overrides.maxRunningCopies ?? process.env.SRTL_MAX_RUNNING_COPIES ?? envFile.SRTL_MAX_RUNNING_COPIES,
+      maxRunningJobs,
+      "SRTL_MAX_RUNNING_COPIES",
+      0
+    ),
+    copyFileConcurrency: integerSetting(
+      overrides.copyFileConcurrency ?? process.env.SRTL_COPY_FILE_CONCURRENCY ?? envFile.SRTL_COPY_FILE_CONCURRENCY,
+      1,
+      "SRTL_COPY_FILE_CONCURRENCY",
+      1
+    ),
+    maxActiveCopyFiles: integerSetting(
+      overrides.maxActiveCopyFiles ?? process.env.SRTL_MAX_ACTIVE_COPY_FILES ?? envFile.SRTL_MAX_ACTIVE_COPY_FILES,
+      workerCount,
+      "SRTL_MAX_ACTIVE_COPY_FILES",
+      1
+    )
   };
+  if (settings.maxRunningJobs > settings.workerCount) throw new Error("SRTL_MAX_RUNNING_JOBS must not exceed SRTL_WORKER_COUNT");
+  for (const [name, value] of [
+    ["SRTL_MAX_RUNNING_SCANS", settings.maxRunningScans],
+    ["SRTL_MAX_RUNNING_AUDITS", settings.maxRunningAudits],
+    ["SRTL_MAX_RUNNING_COPIES", settings.maxRunningCopies]
+  ] as const) {
+    if (value > settings.maxRunningJobs) throw new Error(`${name} must not exceed SRTL_MAX_RUNNING_JOBS`);
+  }
+  if (settings.copyFileConcurrency > settings.maxActiveCopyFiles) {
+    throw new Error("SRTL_COPY_FILE_CONCURRENCY must not exceed SRTL_MAX_ACTIVE_COPY_FILES");
+  }
+  return settings;
 }
 
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {

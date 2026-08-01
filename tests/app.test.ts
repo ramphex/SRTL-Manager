@@ -2,13 +2,14 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { createApp, type AppContext } from "../src/server/app";
 import { first, getJsonSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
+import { CopyTransferLimiter } from "../src/server/jobs/copyLimiter";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import type { AuditCommandRunner } from "../src/server/lib/auditor";
-import type { CopyCommandRunner, CopyFileProgressReporter } from "../src/server/lib/copier";
+import { readCopyFileIdentity, serializeCopyFileIdentity, type CopyCommandRunner, type CopyFileProgressReporter } from "../src/server/lib/copier";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { bootstrapLocalStoragePolicies, normalizeTitle } from "../src/server/lib/storagePolicies";
@@ -817,7 +818,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.2",
+      currentVersion: "0.1.2-beta.3",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: null,
@@ -884,7 +885,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.2",
+      currentVersion: "0.1.2-beta.3",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: "0.2.0-beta.1",
@@ -1512,6 +1513,64 @@ describe("api app", () => {
     expect(results[0]?.linkPath).toContain(path.join("Scoped Show", "Season 01", "episode-1.mkv"));
   });
 
+  it("freezes scoped audit media when the job is queued", async () => {
+    const firstFixture = await insertCopySymlink({
+      itemName: "Frozen Audit Show",
+      kind: "remote",
+      storagePolicy: "unassigned",
+      section: "shows",
+      relativePath: path.join("Frozen Audit Show", "Season 01", "episode-1.mkv")
+    });
+    const jobId = await ctx.jobs.startAudit({ mode: "fast", section: "shows", itemName: "Frozen Audit Show" });
+    const secondFixture = await insertCopySymlink({
+      itemName: "Frozen Audit Show",
+      kind: "remote",
+      storagePolicy: "unassigned",
+      section: "shows",
+      relativePath: path.join("Frozen Audit Show", "Season 01", "episode-2.mkv")
+    });
+    const auditedPaths: string[] = [];
+    const auditRunner: AuditCommandRunner = {
+      runFfmpeg: async (_mode, targetPath) => {
+        auditedPaths.push(targetPath);
+        return { status: "pass", output: "" };
+      },
+      runCmp: async () => ({ status: "pass", output: "" })
+    };
+
+    await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ options: expect.objectContaining({ linkIds: [firstFixture.id] }), checked: 1, total: 1 })
+    });
+    expect(auditedPaths).toEqual([firstFixture.sourcePath]);
+    expect(auditedPaths).not.toContain(secondFixture.sourcePath);
+  });
+
+  it("keeps an empty scoped audit empty when matching inventory appears later", async () => {
+    const jobId = await ctx.jobs.startAudit({ mode: "fast", section: "shows", itemName: "Later Audit Show" });
+    await insertCopySymlink({
+      itemName: "Later Audit Show",
+      kind: "remote",
+      storagePolicy: "unassigned",
+      section: "shows",
+      relativePath: path.join("Later Audit Show", "Season 01", "episode-1.mkv")
+    });
+    let auditCalls = 0;
+    const auditRunner: AuditCommandRunner = {
+      runFfmpeg: async () => {
+        auditCalls += 1;
+        return { status: "pass", output: "" };
+      },
+      runCmp: async () => ({ status: "pass", output: "" })
+    };
+
+    await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ options: expect.objectContaining({ linkIds: [] }), checked: 0, total: 0 })
+    });
+    expect(auditCalls).toBe(0);
+  });
+
   it("copies assign-local remote symlinks to local storage with verification", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Copy Local Movie", kind: "remote", storagePolicy: "location_1", content: "copy me local" });
@@ -1616,6 +1675,8 @@ describe("api app", () => {
     await fs.rm(fixture.linkPath);
     await fs.symlink(fixture.destinationPath, fixture.linkPath);
     const sizeBytes = (await fs.stat(fixture.destinationPath)).size;
+    const destinationIdentity = await readCopyFileIdentity(fixture.destinationPath);
+    if (!destinationIdentity) throw new Error("Interrupted copy destination identity was not readable");
     const timestamp = new Date().toISOString();
     await ctx.database.db.insert(schema.copyOperations).values({
       jobId,
@@ -1628,6 +1689,9 @@ describe("api app", () => {
       previousCopySource: null,
       tempPath: null,
       displacedPath: null,
+      tempIdentity: null,
+      destinationIdentity: serializeCopyFileIdentity(destinationIdentity),
+      displacedIdentity: null,
       stage: "repointed",
       resultStatus: "copied",
       localConflictStrategy: null,
@@ -1658,6 +1722,151 @@ describe("api app", () => {
     );
   });
 
+  it("preserves an unowned replacement without locking a newly scanned link from the same title", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Interrupted Identity Copy", kind: "remote", storagePolicy: "location_1", content: "durable copy" });
+    const relatedFixture = await insertCopySymlink({
+      itemName: "Interrupted Identity Copy",
+      kind: "remote",
+      storagePolicy: "location_1",
+      relativePath: path.join("Interrupted Identity Copy", "related.mkv"),
+      content: "related durable copy"
+    });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    const originalLink = await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1));
+    if (!originalLink) throw new Error("Copy fixture was not found");
+
+    await fs.mkdir(path.dirname(fixture.destinationPath), { recursive: true });
+    await fs.copyFile(fixture.sourcePath, fixture.destinationPath);
+    await fs.rm(fixture.linkPath);
+    await fs.symlink(fixture.destinationPath, fixture.linkPath);
+    const journaledIdentity = await readCopyFileIdentity(fixture.destinationPath);
+    if (!journaledIdentity) throw new Error("Interrupted copy destination identity was not readable");
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.insert(schema.copyOperations).values({
+      jobId,
+      mediaLinkId: fixture.id,
+      linkPath: fixture.linkPath,
+      sourcePath: fixture.sourcePath,
+      destinationPath: fixture.destinationPath,
+      originalTargetPath: fixture.sourcePath,
+      originalLinkState: JSON.stringify(originalLink),
+      previousCopySource: null,
+      tempPath: null,
+      displacedPath: null,
+      tempIdentity: null,
+      destinationIdentity: serializeCopyFileIdentity(journaledIdentity),
+      displacedIdentity: null,
+      stage: "repointed",
+      resultStatus: "copied",
+      localConflictStrategy: null,
+      sizeBytes: Buffer.byteLength("durable copy"),
+      errorMessage: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      completedAt: null
+    });
+
+    const replacementPath = `${fixture.destinationPath}.replacement`;
+    await fs.writeFile(replacementPath, "foreign file");
+    await fs.rename(replacementPath, fixture.destinationPath);
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("foreign file");
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, jobId)).limit(1))).resolves.toMatchObject({
+      stage: "reconciliation_required",
+      errorMessage: expect.stringContaining("changed after its file identity was journaled")
+    });
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })).rejects.toThrow(
+      `Copy data from job #${jobId} requires manual reconciliation`
+    );
+    await expect(ctx.jobs.startAudit({ mode: "fast", linkIds: [fixture.id], byteCompare: false })).rejects.toThrow(
+      `Copy data from job #${jobId} requires manual reconciliation`
+    );
+    const relatedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [relatedFixture.id] });
+    await expect(ctx.jobs.getJob(relatedJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(ctx.jobs.terminate(relatedJobId)).resolves.toBe(true);
+    const policyMutation = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Interrupted Identity Copy", policy: "location_2" }
+    });
+    expect(policyMutation.statusCode).toBe(409);
+    expect(policyMutation.json()).toMatchObject({ error: expect.stringContaining(`copy data from job #${jobId} requires manual reconciliation`) });
+    const scanResponse = await ctx.app.inject({
+      method: "POST",
+      url: "/api/scans",
+      headers: { cookie },
+      payload: { scanSymlinks: true, scanLocal: false, scanRemote: false }
+    });
+    expect(scanResponse.statusCode).toBe(200);
+    const scanJobId = Number(scanResponse.json().jobId);
+    await expect(ctx.jobs.getJob(scanJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
+    await expect(ctx.jobs.terminate(scanJobId)).resolves.toBe(true);
+    const auditJobId = await ctx.jobs.startAudit("fast");
+    await expect(ctx.jobs.getJob(auditJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
+    await expect(ctx.jobs.terminate(auditJobId)).resolves.toBe(true);
+  });
+
+  it("requires reconciliation when an already-restored displaced destination has been replaced", async () => {
+    const fixture = await insertCopySymlink({
+      itemName: "Interrupted Displaced Restore",
+      kind: "remote",
+      storagePolicy: "location_1",
+      content: "copy source payload"
+    });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    const originalLink = await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1));
+    if (!originalLink) throw new Error("Displaced-restore copy fixture was not found");
+
+    await fs.mkdir(path.dirname(fixture.destinationPath), { recursive: true });
+    const displacedContents = "original local data";
+    await fs.writeFile(fixture.destinationPath, displacedContents);
+    const displacedIdentity = await readCopyFileIdentity(fixture.destinationPath);
+    if (!displacedIdentity) throw new Error("Displaced destination identity was not readable");
+    const displacedPath = `${fixture.destinationPath}.srtl-displaced`;
+    const replacementPath = `${fixture.destinationPath}.replacement`;
+    const replacementContents = "foreign local data!";
+    expect(Buffer.byteLength(replacementContents)).toBe(Buffer.byteLength(displacedContents));
+    await fs.writeFile(replacementPath, replacementContents);
+    await fs.rename(replacementPath, fixture.destinationPath);
+
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.insert(schema.copyOperations).values({
+      jobId,
+      mediaLinkId: fixture.id,
+      linkPath: fixture.linkPath,
+      sourcePath: fixture.sourcePath,
+      destinationPath: fixture.destinationPath,
+      originalTargetPath: fixture.sourcePath,
+      originalLinkState: JSON.stringify(originalLink),
+      previousCopySource: null,
+      tempPath: null,
+      displacedPath,
+      tempIdentity: null,
+      destinationIdentity: null,
+      displacedIdentity: serializeCopyFileIdentity(displacedIdentity),
+      stage: "destination_displaced",
+      resultStatus: null,
+      localConflictStrategy: "replace",
+      sizeBytes: Buffer.byteLength("copy source payload"),
+      errorMessage: null,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+      completedAt: null
+    });
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe(replacementContents);
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, jobId)).limit(1))).resolves.toMatchObject({
+      stage: "reconciliation_required",
+      errorMessage: expect.stringContaining("Restored displaced destination changed after its file identity was journaled")
+    });
+  });
+
   it("rejects duplicate copy jobs while matching media is already queued", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Duplicate Queue Movie", kind: "remote", storagePolicy: "location_1", content: "copy once" });
@@ -1679,6 +1888,34 @@ describe("api app", () => {
 
     expect(duplicateCopy.statusCode).toBe(400);
     expect(duplicateCopy.json()).toMatchObject({ error: expect.stringContaining("already queued") });
+    expect((await ctx.jobs.listJobs()).filter((job) => job.type === "copy")).toHaveLength(1);
+  });
+
+  it("serializes concurrent duplicate job admission", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Atomic Duplicate Movie", kind: "remote", storagePolicy: "location_1", content: "copy once atomically" });
+
+    const results = await Promise.allSettled([
+      ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] }),
+      ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })
+    ]);
+
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const rejected = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    expect(rejected?.reason).toBeInstanceOf(Error);
+    expect(rejected?.reason).toMatchObject({ message: expect.stringContaining("already queued") });
+    expect((await ctx.jobs.listJobs()).filter((job) => job.type === "copy")).toHaveLength(1);
+    expect(await ctx.database.db.select().from(schema.jobResourceClaims)).not.toHaveLength(0);
+  });
+
+  it("keeps active copy claims immutable when the inventory row changes", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Immutable Claim Movie", kind: "remote", storagePolicy: "location_1", content: "claim snapshot" });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await ctx.database.db
+      .update(schema.mediaLinks)
+      .set({ kind: "local", targetPath: fixture.destinationPath, updatedAt: new Date().toISOString() })
+      .where(eq(schema.mediaLinks.id, fixture.id));
+
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })).rejects.toThrow(`Job #${jobId} is already queued`);
     expect((await ctx.jobs.listJobs()).filter((job) => job.type === "copy")).toHaveLength(1);
   });
 
@@ -1759,6 +1996,22 @@ describe("api app", () => {
     expect(audit.statusCode).toBe(400);
     expect(audit.json()).toMatchObject({ error: expect.stringContaining(`Job #${copyJobId} is already queued`) });
     expect((await ctx.jobs.listJobs()).filter((job) => job.type === "audit")).toHaveLength(0);
+  });
+
+  it("allows overlapping scoped audits to share read-only claims", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Shared Audit Movie", kind: "remote", storagePolicy: "location_1", content: "audit together" });
+
+    const jobIds = await Promise.all([
+      ctx.jobs.startAudit({ mode: "fast", linkIds: [fixture.id] }),
+      ctx.jobs.startAudit({ mode: "deep", linkIds: [fixture.id] })
+    ]);
+
+    expect(jobIds[0]).not.toBe(jobIds[1]);
+    const jobs = await Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)));
+    expect(jobs).toEqual([expect.objectContaining({ status: "queued", exclusive: false }), expect.objectContaining({ status: "queued", exclusive: false })]);
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
+    expect(claims).not.toHaveLength(0);
+    expect(claims.every((claim) => claim.access === "shared")).toBe(true);
   });
 
   it("uses advanced copy verification settings when copying media", async () => {
@@ -2005,10 +2258,11 @@ describe("api app", () => {
       status: "completed",
       progress: expect.objectContaining({
         options: expect.objectContaining({ direction: "to_local", section: "shows", itemName: "Scoped Copy Show", relativePathPrefix: "Scoped Copy Show/Season 01" }),
-        current: 1,
-        total: 1,
+        current: 2,
+        total: 2,
         copied: 1,
-        skipped: 0,
+        skipped: 1,
+        alreadyCompleted: 1,
         conflicts: 0,
         failed: 0
       })
@@ -2032,6 +2286,30 @@ describe("api app", () => {
         expect.objectContaining({ id: unassigned.id, kind: "remote", targetPath: unassigned.sourcePath, storagePolicy: "unassigned" })
       ])
     );
+  });
+
+  it("keeps an empty scoped copy empty when matching inventory appears later", async () => {
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", section: "movies", itemName: "Later Copy Movie" });
+    const laterFixture = await insertCopySymlink({
+      itemName: "Later Copy Movie",
+      kind: "remote",
+      storagePolicy: "location_1",
+      content: "must wait for a newly queued copy"
+    });
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({
+        options: expect.objectContaining({ linkIds: [] }),
+        current: 0,
+        total: 0,
+        copied: 0,
+        failed: 0,
+        message: "No matching media found"
+      })
+    });
+    await expect(fs.stat(laterFixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readlink(laterFixture.linkPath)).resolves.toBe(laterFixture.sourcePath);
   });
 
   it("resumes stale copy jobs without shrinking the original selected total", async () => {
@@ -2105,7 +2383,7 @@ describe("api app", () => {
     const events = await ctx.jobs.listEvents(jobId);
     expect(events).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ message: "Stale running job reclaimed by worker" }),
+        expect.objectContaining({ message: "Stale running job lease fenced and requeued" }),
         expect.objectContaining({
           message: "Copy job resumed",
           data: expect.objectContaining({ total: 3, remaining: 2, copied: 1, alreadyCompleted: 1 })
@@ -2232,6 +2510,111 @@ describe("api app", () => {
     await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
   });
 
+  it("blocks replacement when a claimed local candidate changes before the worker starts", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Changed Candidate Movie", kind: "remote", storagePolicy: "location_1", content: "new candidate version" });
+    const oldRelativePath = path.join("movies", "Changed Candidate Movie", "old-version.mkv");
+    const oldPath = path.join(tmpDir, "local", oldRelativePath);
+    await fs.mkdir(path.dirname(oldPath), { recursive: true });
+    await fs.writeFile(oldPath, "old candidate version");
+    await insertStorageFile("local", oldRelativePath, Buffer.byteLength("old candidate version"));
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id], localConflictStrategy: "replace" });
+    await fs.writeFile(oldPath, "externally changed candidate version");
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 0, conflicts: 1, failed: 0 })
+    });
+    await expect(fs.readFile(oldPath, "utf8")).resolves.toBe("externally changed candidate version");
+    await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "Local replacement candidates changed after copy admission" })])
+    );
+  });
+
+  it("blocks replacement when a new unclaimed local candidate appears after admission", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Late Candidate Movie", kind: "remote", storagePolicy: "location_1", content: "new late candidate version" });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id], localConflictStrategy: "replace" });
+    const latePath = path.join(tmpDir, "local", "movies", "Late Candidate Movie", "late-version.mkv");
+    await fs.mkdir(path.dirname(latePath), { recursive: true });
+    await fs.writeFile(latePath, "late external candidate");
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 0, conflicts: 1, failed: 0 })
+    });
+    await expect(fs.readFile(latePath, "utf8")).resolves.toBe("late external candidate");
+    await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+  });
+
+  it("keeps another selected destination out of replacement cleanup while replacing the current destination", async () => {
+    const first = await insertCopySymlink({
+      itemName: "Shared Replacement Movie",
+      kind: "remote",
+      storagePolicy: "location_1",
+      relativePath: path.join("Shared Replacement Movie", "first.mkv"),
+      content: "first replacement"
+    });
+    const second = await insertCopySymlink({
+      itemName: "Shared Replacement Movie",
+      kind: "remote",
+      storagePolicy: "location_1",
+      relativePath: path.join("Shared Replacement Movie", "second.mkv"),
+      content: "second replacement"
+    });
+    await fs.mkdir(path.dirname(second.destinationPath), { recursive: true });
+    await fs.writeFile(second.destinationPath, "existing second destination");
+
+    await expect(ctx.jobs.previewCopyConflicts({ direction: "to_local", linkIds: [first.id, second.id] })).resolves.toMatchObject({
+      totalConflicts: 1,
+      totalCandidates: 1,
+      conflicts: [
+        expect.objectContaining({
+          linkId: second.id,
+          candidates: [expect.objectContaining({ filePath: second.destinationPath, source: "destination" })]
+        })
+      ]
+    });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [first.id, second.id], localConflictStrategy: "replace" });
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 2, conflicts: 0, failed: 0 })
+    });
+    await expect(fs.readFile(first.destinationPath, "utf8")).resolves.toBe("first replacement");
+    await expect(fs.readFile(second.destinationPath, "utf8")).resolves.toBe("second replacement");
+    await expect(fs.readlink(first.linkPath)).resolves.toBe(first.destinationPath);
+    await expect(fs.readlink(second.linkPath)).resolves.toBe(second.destinationPath);
+  });
+
+  it("keeps replacement cleanup paths exclusive across queued copy jobs", async () => {
+    const cleanupOwner = await insertCopySymlink({
+      itemName: "Cleanup Claim Movie",
+      kind: "remote",
+      storagePolicy: "location_1",
+      relativePath: path.join("Cleanup Claim Movie", "new-version.mkv"),
+      content: "new cleanup owner"
+    });
+    const claimedRelativePath = path.join("Cleanup Claim Movie", "old-version.mkv");
+    const claimedPath = path.join(tmpDir, "local", "movies", claimedRelativePath);
+    await fs.mkdir(path.dirname(claimedPath), { recursive: true });
+    await fs.writeFile(claimedPath, "old claimed cleanup");
+    await insertStorageFile("local", path.join("movies", claimedRelativePath), Buffer.byteLength("old claimed cleanup"));
+    const firstJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [cleanupOwner.id], localConflictStrategy: "replace" });
+    const destinationOwner = await insertCopySymlink({
+      itemName: "Different Destination Owner",
+      kind: "remote",
+      storagePolicy: "location_1",
+      relativePath: claimedRelativePath,
+      sourceRelativePath: path.join("Different Destination Owner", "source.mkv"),
+      content: "different destination owner"
+    });
+
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [destinationOwner.id] })).rejects.toThrow(`Job #${firstJobId} is already queued`);
+    await expect(fs.readFile(claimedPath, "utf8")).resolves.toBe("old claimed cleanup");
+  });
+
   it("keeps existing local files when copy to local is started with keep both resolution", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Keep Both Movie", kind: "remote", storagePolicy: "location_1", content: "new keep both" });
@@ -2297,6 +2680,110 @@ describe("api app", () => {
     const keptFiles = (await fs.readdir(path.dirname(fixture.destinationPath))).filter((file) => file.includes(".srtl-kept-"));
     expect(keptFiles).toHaveLength(1);
     await expect(fs.readFile(path.join(path.dirname(fixture.destinationPath), keptFiles[0]), "utf8")).resolves.toBe("old exact keep both");
+  });
+
+  it("rolls back an exact-path replacement when cancellation wins atomic completion", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Cancelled Exact Replace", kind: "remote", storagePolicy: "location_1", content: "new cancelled replace" });
+    await fs.mkdir(path.dirname(fixture.destinationPath), { recursive: true });
+    await fs.writeFile(fixture.destinationPath, "old cancelled replace");
+    const storageFileId = await insertStorageFile("local", path.join("movies", fixture.relativePath), Buffer.byteLength("old cancelled replace"));
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id], localConflictStrategy: "replace" });
+    if (!Number.isSafeInteger(jobId)) throw new Error("Copy job ID is invalid");
+    await ctx.database.db.execute(sql.raw(`
+      CREATE FUNCTION srtl_test_cancel_copy_before_finish() RETURNS trigger
+      LANGUAGE plpgsql AS $function$
+      BEGIN
+        UPDATE jobs SET cancel_requested_at = clock_timestamp()::text WHERE id = NEW.job_id;
+        RETURN NEW;
+      END;
+      $function$
+    `));
+    await ctx.database.db.execute(sql.raw(`
+      CREATE TRIGGER srtl_test_cancel_copy_before_finish
+      AFTER INSERT ON job_events
+      FOR EACH ROW
+      WHEN (NEW.job_id = ${jobId} AND NEW.message = 'Copy job finished processing media')
+      EXECUTE FUNCTION srtl_test_cancel_copy_before_finish()
+    `));
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "cancelled",
+      finishedAt: expect.any(String),
+      progress: expect.objectContaining({ stage: "cancelled", copied: 0, repointed: 0, message: "Copy job terminated" })
+    });
+
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("old cancelled replace");
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    expect((await fs.readdir(path.dirname(fixture.destinationPath))).filter((file) => file.includes(".srtl-replace-"))).toEqual([]);
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      kind: "remote",
+      targetPath: fixture.sourcePath,
+      targetExists: true
+    });
+    await expect(first(ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, storageFileId)).limit(1))).resolves.toMatchObject({
+      filePath: fixture.destinationPath,
+      missingSince: null
+    });
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, jobId)).limit(1))).resolves.toMatchObject({
+      stage: "rolled_back",
+      localConflictStrategy: "replace"
+    });
+    expect(await ctx.database.db.select().from(schema.copySources).where(eq(schema.copySources.destinationPath, fixture.destinationPath))).toEqual([]);
+    await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ level: "warn", message: "Copy job terminated; completed copy changes rolled back" })])
+    );
+  });
+
+  it("finalizes exact-path conflict backups only after successful completion", async () => {
+    const replaceFixture = await insertCopySymlink({ itemName: "Successful Exact Replace", kind: "remote", storagePolicy: "location_1", content: "new successful replace" });
+    const keepBothFixture = await insertCopySymlink({ itemName: "Successful Exact Keep Both", kind: "remote", storagePolicy: "location_1", content: "new successful keep both" });
+    await Promise.all([
+      fs.mkdir(path.dirname(replaceFixture.destinationPath), { recursive: true }),
+      fs.mkdir(path.dirname(keepBothFixture.destinationPath), { recursive: true })
+    ]);
+    await Promise.all([
+      fs.writeFile(replaceFixture.destinationPath, "old successful replace"),
+      fs.writeFile(keepBothFixture.destinationPath, "old successful keep both")
+    ]);
+    await Promise.all([
+      insertStorageFile("local", path.join("movies", replaceFixture.relativePath), Buffer.byteLength("old successful replace")),
+      insertStorageFile("local", path.join("movies", keepBothFixture.relativePath), Buffer.byteLength("old successful keep both"))
+    ]);
+    const replaceJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [replaceFixture.id], localConflictStrategy: "replace" });
+    await expect(runQueuedJob(replaceJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      finishedAt: expect.any(String),
+      progress: expect.objectContaining({ copied: 1, conflicts: 0, failed: 0 })
+    });
+    const keepBothJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [keepBothFixture.id], localConflictStrategy: "keep_both" });
+    await expect(runQueuedJob(keepBothJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      finishedAt: expect.any(String),
+      progress: expect.objectContaining({ copied: 1, conflicts: 0, failed: 0 })
+    });
+
+    await expect(fs.readFile(replaceFixture.destinationPath, "utf8")).resolves.toBe("new successful replace");
+    await expect(fs.readFile(keepBothFixture.destinationPath, "utf8")).resolves.toBe("new successful keep both");
+    await expect(fs.readlink(replaceFixture.linkPath)).resolves.toBe(replaceFixture.destinationPath);
+    await expect(fs.readlink(keepBothFixture.linkPath)).resolves.toBe(keepBothFixture.destinationPath);
+    expect((await fs.readdir(path.dirname(replaceFixture.destinationPath))).filter((file) => file.includes(".srtl-replace-"))).toEqual([]);
+    const keptFiles = (await fs.readdir(path.dirname(keepBothFixture.destinationPath))).filter((file) => file.includes(".srtl-kept-"));
+    expect(keptFiles).toHaveLength(1);
+    await expect(fs.readFile(path.join(path.dirname(keepBothFixture.destinationPath), keptFiles[0]), "utf8")).resolves.toBe("old successful keep both");
+    const mediaLinks = await ctx.database.db.select().from(schema.mediaLinks).where(inArray(schema.mediaLinks.id, [replaceFixture.id, keepBothFixture.id]));
+    expect(mediaLinks).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: replaceFixture.id, kind: "local", targetPath: replaceFixture.destinationPath, targetExists: true }),
+        expect.objectContaining({ id: keepBothFixture.id, kind: "local", targetPath: keepBothFixture.destinationPath, targetExists: true })
+      ])
+    );
+    const operations = await ctx.database.db.select().from(schema.copyOperations).where(inArray(schema.copyOperations.jobId, [replaceJobId, keepBothJobId]));
+    expect(operations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ jobId: replaceJobId, stage: "committed", localConflictStrategy: "replace", displacedPath: null }),
+        expect.objectContaining({ jobId: keepBothJobId, stage: "committed", localConflictStrategy: "keep_both", displacedPath: null })
+      ])
+    );
   });
 
   it("replaces existing local files only after a verified copy is installed", async () => {
@@ -2497,7 +2984,7 @@ describe("api app", () => {
     expect(await ctx.jobs.listEvents(jobId)).toEqual(expect.arrayContaining([expect.objectContaining({ message: "Worker stopped; job requeued for resume" })]));
   });
 
-  it("requeues an active copy when a managed path change is detected", async () => {
+  it("cancels an active copy after safely rolling it back for a managed path change", async () => {
     const fixture = await insertCopySymlink({ itemName: "Path Change Copy Movie", kind: "remote", storagePolicy: "location_1", content: "path change copy" });
     const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
     let resolveCopyStarted: (() => void) | null = null;
@@ -2535,10 +3022,12 @@ describe("api app", () => {
     });
     await expect(run).resolves.toBe(true);
 
-    expect(await ctx.jobs.getJob(jobId)).toMatchObject({ status: "queued", lockedBy: null, heartbeatAt: null });
+    expect(await ctx.jobs.getJob(jobId)).toMatchObject({ status: "cancelled", lockedBy: null, heartbeatAt: null });
     await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
     await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(await ctx.jobs.listEvents(jobId)).toEqual(expect.arrayContaining([expect.objectContaining({ message: "Managed storage paths changed; job paused and requeued" })]));
+    expect(await ctx.jobs.listEvents(jobId)).toEqual(
+      expect.arrayContaining([expect.objectContaining({ message: "Copy cancelled after managed-path recovery" })])
+    );
   });
 
   it("records failed scans in scan history with the failure message", async () => {
@@ -2616,6 +3105,486 @@ describe("api app", () => {
     expect(await ctx.jobs.getJob(queuedJobId)).toMatchObject({ status: "queued", startedAt: null, lockedBy: null, heartbeatAt: null });
   });
 
+  it("claims unrelated work without waiting on a running job's lease lock", async () => {
+    const activeStartedAt = new Date().toISOString();
+    const activeJobId = await insertRunningJob(activeStartedAt, "audit");
+    await ctx.database.db
+      .update(schema.jobs)
+      .set({ exclusive: false, lockedBy: "lease-holder", lockedAt: activeStartedAt, heartbeatAt: activeStartedAt })
+      .where(eq(schema.jobs.id, activeJobId));
+    const queuedJobId = await ctx.jobs.startAudit({ mode: "fast", itemName: "Unrelated Empty Audit" });
+    const lockClient = await ctx.database.pool.connect();
+    await lockClient.query("BEGIN");
+    await lockClient.query("SELECT id FROM jobs WHERE id = $1 FOR UPDATE", [activeJobId]);
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "skip-locked-claim-worker",
+      pollIntervalMs: 1,
+      heartbeatIntervalMs: 10,
+      logger: silentLogger,
+      concurrency: {
+        workerCount: 2,
+        maxRunningJobs: 2,
+        maxRunningScans: 1,
+        maxRunningAudits: 2,
+        maxRunningCopies: 1,
+        copyFileConcurrency: 1,
+        maxActiveCopyFiles: 1
+      }
+    });
+
+    try {
+      await expect(
+        Promise.race([
+          worker.runOnce(),
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("claim blocked on unrelated lease")), 1_000))
+        ])
+      ).resolves.toBe(true);
+    } finally {
+      await lockClient.query("ROLLBACK");
+      lockClient.release();
+    }
+    expect(await ctx.jobs.getJob(queuedJobId)).toMatchObject({ status: "completed" });
+    expect(await ctx.jobs.getJob(activeJobId)).toMatchObject({ status: "running", lockedBy: "lease-holder" });
+  });
+
+  it("claims disjoint copy jobs concurrently up to the configured limits", async () => {
+    const fixtures = await Promise.all([
+      insertCopySymlink({ itemName: "Parallel Claim One", kind: "remote", storagePolicy: "location_1", content: "parallel one" }),
+      insertCopySymlink({ itemName: "Parallel Claim Two", kind: "remote", storagePolicy: "location_1", content: "parallel two" })
+    ]);
+    const jobIds = await Promise.all(fixtures.map((fixture) => ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })));
+    let releaseCopy: () => void = () => undefined;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        await copyReleased;
+        if (signal?.aborted) throw new Error("copy interrupted");
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 2,
+      maxRunningAudits: 2,
+      maxRunningCopies: 2,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 2
+    };
+    const workers = ["parallel-worker-1", "parallel-worker-2"].map(
+      (workerId) => new JobWorker(ctx.database.db, { workerId, pollIntervalMs: 1, heartbeatIntervalMs: 10, logger: silentLogger, copyRunner: blockingRunner, concurrency })
+    );
+    const runs = workers.map((worker) => worker.runOnce());
+
+    try {
+      let runningIds: number[] = [];
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const jobs = await Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)));
+        runningIds = jobs.filter((job) => job?.status === "running").map((job) => job?.id ?? 0);
+        if (runningIds.length === 2) break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(runningIds.sort((firstId, secondId) => firstId - secondId)).toEqual([...jobIds].sort((firstId, secondId) => firstId - secondId));
+    } finally {
+      releaseCopy();
+      await Promise.allSettled(runs);
+    }
+    await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+  });
+
+  it("completes a targeted rescan while a disjoint copy is still transferring", async () => {
+    const copyFixture = await insertCopySymlink({ itemName: "Copy During Rescan", kind: "remote", storagePolicy: "location_1", content: "copy stays active" });
+    await insertCopySymlink({ itemName: "Rescan During Copy", kind: "remote", storagePolicy: "location_1", content: "rescan independently" });
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies"],
+      localSections: [],
+      titleScopes: [{ section: "movies", itemName: "Rescan During Copy" }]
+    });
+    let releaseCopy!: () => void;
+    let markCopyStarted!: () => void;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const copyStarted = new Promise<void>((resolve) => {
+      markCopyStarted = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        markCopyStarted();
+        await copyReleased;
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 1,
+      maxRunningAudits: 1,
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
+    };
+    const workers = ["copy-rescan-worker-1", "copy-rescan-worker-2"].map(
+      (workerId) => new JobWorker(ctx.database.db, { workerId, pollIntervalMs: 1, heartbeatIntervalMs: 10, logger: silentLogger, copyRunner: blockingRunner, concurrency })
+    );
+    const runs = workers.map((worker) => worker.runOnce());
+
+    try {
+      await copyStarted;
+      let scanStatus: string | undefined;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        scanStatus = (await ctx.jobs.getJob(scanJobId))?.status;
+        if (scanStatus === "completed") break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(scanStatus).toBe("completed");
+      expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "running" });
+    } finally {
+      releaseCopy();
+      await Promise.allSettled(runs);
+    }
+    await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+    expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "completed" });
+  });
+
+  it("copies independent titles concurrently within one copy job", async () => {
+    const fixtures = await Promise.all([
+      insertCopySymlink({ itemName: "Concurrent Title One", kind: "remote", storagePolicy: "location_1", content: "concurrent title one" }),
+      insertCopySymlink({ itemName: "Concurrent Title Two", kind: "remote", storagePolicy: "location_1", content: "concurrent title two" })
+    ]);
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: fixtures.map((fixture) => fixture.id) });
+    let activeTransfers = 0;
+    let maximumActiveTransfers = 0;
+    const trackingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        activeTransfers += 1;
+        maximumActiveTransfers = Math.max(maximumActiveTransfers, activeTransfers);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+        } finally {
+          activeTransfers -= 1;
+        }
+      }
+    };
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "within-job-parallel-worker",
+      pollIntervalMs: 1,
+      heartbeatIntervalMs: 10,
+      logger: silentLogger,
+      copyRunner: trackingRunner,
+      concurrency: {
+        workerCount: 1,
+        maxRunningJobs: 1,
+        maxRunningScans: 1,
+        maxRunningAudits: 1,
+        maxRunningCopies: 1,
+        copyFileConcurrency: 2,
+        maxActiveCopyFiles: 2
+      }
+    });
+
+    expect(await worker.runOnce()).toBe(true);
+    expect(maximumActiveTransfers).toBe(2);
+    expect(await ctx.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ copied: 2, failed: 0 }) });
+  });
+
+  it("copies links for the same title concurrently within one copy job", async () => {
+    const fixtures = await Promise.all([
+      insertCopySymlink({
+        itemName: "Serialized Title",
+        kind: "local",
+        storagePolicy: "location_2",
+        relativePath: path.join("Serialized Title", "serialized-title-cd1.mkv"),
+        content: "serialized title part one"
+      }),
+      insertCopySymlink({
+        itemName: "Serialized Title",
+        kind: "local",
+        storagePolicy: "location_2",
+        relativePath: path.join("Serialized Title", "serialized-title-cd2.mkv"),
+        content: "serialized title part two"
+      })
+    ]);
+    const jobId = await ctx.jobs.startCopy({ direction: "to_remote", linkIds: fixtures.map((fixture) => fixture.id) });
+    let activeTransfers = 0;
+    let maximumActiveTransfers = 0;
+    const trackingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        activeTransfers += 1;
+        maximumActiveTransfers = Math.max(maximumActiveTransfers, activeTransfers);
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 40));
+          await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+        } finally {
+          activeTransfers -= 1;
+        }
+      }
+    };
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "same-title-parallel-worker",
+      pollIntervalMs: 1,
+      heartbeatIntervalMs: 10,
+      logger: silentLogger,
+      copyRunner: trackingRunner,
+      concurrency: {
+        workerCount: 1,
+        maxRunningJobs: 1,
+        maxRunningScans: 1,
+        maxRunningAudits: 1,
+        maxRunningCopies: 1,
+        copyFileConcurrency: 2,
+        maxActiveCopyFiles: 2
+      }
+    });
+
+    expect(await worker.runOnce()).toBe(true);
+    expect(maximumActiveTransfers).toBe(2);
+    expect(await ctx.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ copied: 2, failed: 0 }) });
+  });
+
+  it("does not treat a same-title sibling destination that appears during replacement copy as a conflict or cleanup candidate", async () => {
+    const fixtures = await Promise.all(
+      ["first", "second", "third"].map((part) =>
+        insertCopySymlink({
+          itemName: "Parallel Replacement Title",
+          kind: "remote",
+          storagePolicy: "location_1",
+          relativePath: path.join("Parallel Replacement Title", `${part}.mkv`),
+          content: `${part} parallel replacement`
+        })
+      )
+    );
+    const jobId = await ctx.jobs.startCopy({
+      direction: "to_local",
+      linkIds: fixtures.map((fixture) => fixture.id),
+      localConflictStrategy: "replace"
+    });
+    const transferGates = new Map<string, { wait: Promise<void>; release: () => void }>();
+    for (const fixture of fixtures) {
+      let release: (() => void) | null = null;
+      const wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      if (!release) throw new Error(`Transfer gate was not initialized for ${fixture.sourcePath}`);
+      transferGates.set(fixture.sourcePath, { wait, release });
+    }
+    const startedSources: string[] = [];
+    let activeTransfers = 0;
+    let maximumActiveTransfers = 0;
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        activeTransfers += 1;
+        maximumActiveTransfers = Math.max(maximumActiveTransfers, activeTransfers);
+        startedSources.push(sourcePath);
+        try {
+          const gate = transferGates.get(sourcePath);
+          if (!gate) throw new Error(`Missing transfer gate for ${sourcePath}`);
+          await gate.wait;
+          await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+        } finally {
+          activeTransfers -= 1;
+        }
+      }
+    };
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "same-title-replacement-parallel-worker",
+      pollIntervalMs: 1,
+      heartbeatIntervalMs: 10,
+      logger: silentLogger,
+      copyRunner: blockingRunner,
+      concurrency: {
+        workerCount: 1,
+        maxRunningJobs: 1,
+        maxRunningScans: 1,
+        maxRunningAudits: 1,
+        maxRunningCopies: 1,
+        copyFileConcurrency: 2,
+        maxActiveCopyFiles: 2
+      }
+    });
+    const run = worker.runOnce();
+
+    try {
+      await vi.waitFor(() => expect(startedSources).toHaveLength(2));
+      const completedSource = startedSources[0]!;
+      transferGates.get(completedSource)!.release();
+      await vi.waitFor(() => expect(startedSources).toHaveLength(3));
+      const completedFixture = fixtures.find((fixture) => fixture.sourcePath === completedSource);
+      if (!completedFixture) throw new Error(`Missing completed fixture for ${completedSource}`);
+      expect(activeTransfers).toBe(2);
+      await expect(fs.readFile(completedFixture.destinationPath, "utf8")).resolves.toBe(
+        `${path.basename(completedFixture.sourcePath, ".mkv")} parallel replacement`
+      );
+      for (const gate of transferGates.values()) gate.release();
+      expect(await run).toBe(true);
+    } finally {
+      for (const gate of transferGates.values()) gate.release();
+      await Promise.allSettled([run]);
+    }
+
+    expect(maximumActiveTransfers).toBe(2);
+    expect(await ctx.jobs.getJob(jobId)).toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 3, conflicts: 0, failed: 0 })
+    });
+    for (const fixture of fixtures) {
+      await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe(
+        `${path.basename(fixture.sourcePath, ".mkv")} parallel replacement`
+      );
+      await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
+    }
+    const events = await ctx.jobs.listEvents(jobId);
+    expect(events.some((event) => event.message === "Local replacement candidates changed after copy admission")).toBe(false);
+    expect(events.some((event) => event.message === "Replaced previous local files")).toBe(false);
+    expect((await fs.readdir(path.dirname(fixtures[0].destinationPath))).filter((file) => file.includes(".srtl-replace-"))).toEqual([]);
+  });
+
+  it("shares the active-copy-file limit across workers in one process", async () => {
+    const fixtures = await Promise.all([
+      insertCopySymlink({ itemName: "Global Limit One", kind: "remote", storagePolicy: "location_1", content: "global limit one" }),
+      insertCopySymlink({ itemName: "Global Limit Two", kind: "remote", storagePolicy: "location_1", content: "global limit two" })
+    ]);
+    const jobIds = await Promise.all(fixtures.map((fixture) => ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })));
+    let activeTransfers = 0;
+    let maximumActiveTransfers = 0;
+    let observedBothJobsRunning = false;
+    const trackingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        activeTransfers += 1;
+        maximumActiveTransfers = Math.max(maximumActiveTransfers, activeTransfers);
+        try {
+          for (let attempt = 0; attempt < 100; attempt += 1) {
+            const jobs = await Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)));
+            if (jobs.every((job) => job?.status === "running")) {
+              observedBothJobsRunning = true;
+              break;
+            }
+            await new Promise((resolve) => setTimeout(resolve, 5));
+          }
+          await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+        } finally {
+          activeTransfers -= 1;
+        }
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 2,
+      maxRunningAudits: 2,
+      maxRunningCopies: 2,
+      copyFileConcurrency: 2,
+      maxActiveCopyFiles: 1
+    };
+    const copyTransferLimiter = new CopyTransferLimiter(1);
+    const workers = ["global-limit-worker-1", "global-limit-worker-2"].map(
+      (workerId) =>
+        new JobWorker(ctx.database.db, {
+          workerId,
+          pollIntervalMs: 1,
+          heartbeatIntervalMs: 10,
+          logger: silentLogger,
+          copyRunner: trackingRunner,
+          concurrency,
+          copyTransferLimiter
+        })
+    );
+
+    await expect(Promise.all(workers.map((worker) => worker.runOnce()))).resolves.toEqual([true, true]);
+    expect(observedBothJobsRunning).toBe(true);
+    expect(maximumActiveTransfers).toBe(1);
+    await expect(Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)))).resolves.toEqual([
+      expect.objectContaining({ status: "completed" }),
+      expect.objectContaining({ status: "completed" })
+    ]);
+  });
+
+  it("enforces a per-type limit independently of the global running-job limit", async () => {
+    const timestamp = new Date().toISOString();
+    const active = await first(
+      ctx.database.db
+        .insert(schema.jobs)
+        .values({
+          type: "copy",
+          status: "running",
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+          lockedBy: "active-copy-worker",
+          lockedAt: timestamp,
+          heartbeatAt: timestamp,
+          leaseVersion: 1,
+          exclusive: false,
+          progress: "{}"
+        })
+        .returning({ id: schema.jobs.id })
+    );
+    if (!active) throw new Error("Active copy job was not inserted");
+    const fixture = await insertCopySymlink({ itemName: "Type Limited Copy", kind: "remote", storagePolicy: "location_1", content: "queued by type" });
+    const queuedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "type-limited-worker",
+      pollIntervalMs: 1,
+      heartbeatIntervalMs: 10,
+      logger: silentLogger,
+      concurrency: {
+        workerCount: 2,
+        maxRunningJobs: 2,
+        maxRunningScans: 2,
+        maxRunningAudits: 2,
+        maxRunningCopies: 1,
+        copyFileConcurrency: 1,
+        maxActiveCopyFiles: 2
+      }
+    });
+
+    expect(await worker.runOnce()).toBe(false);
+    expect(await ctx.jobs.getJob(queuedJobId)).toMatchObject({ status: "queued", startedAt: null, lockedBy: null, leaseVersion: 0 });
+  });
+
+  it("does not claim work past a queued exclusive barrier", async () => {
+    const fixtures = await Promise.all([
+      insertCopySymlink({ itemName: "Before Barrier Copy", kind: "remote", storagePolicy: "location_1", content: "before barrier" }),
+      insertCopySymlink({ itemName: "After Barrier Copy", kind: "remote", storagePolicy: "location_1", content: "after barrier" })
+    ]);
+    const firstCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[0].id] });
+    const barrierId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
+    const secondCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[1].id] });
+    const concurrency = {
+      workerCount: 3,
+      maxRunningJobs: 3,
+      maxRunningScans: 3,
+      maxRunningAudits: 3,
+      maxRunningCopies: 3,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 3
+    };
+    const firstWorker = new JobWorker(ctx.database.db, { workerId: "barrier-worker-1", logger: silentLogger, concurrency }) as unknown as {
+      claimNextJob(): Promise<{ job: { id: number } } | null>;
+    };
+    const secondWorker = new JobWorker(ctx.database.db, { workerId: "barrier-worker-2", logger: silentLogger, concurrency }) as unknown as {
+      claimNextJob(): Promise<{ job: { id: number } } | null>;
+    };
+
+    await expect(firstWorker.claimNextJob()).resolves.toMatchObject({ job: { id: firstCopyId } });
+    await expect(secondWorker.claimNextJob()).resolves.toBeNull();
+    expect(await ctx.jobs.getJob(barrierId)).toMatchObject({ status: "queued", exclusive: true });
+    expect(await ctx.jobs.getJob(secondCopyId)).toMatchObject({ status: "queued", exclusive: false });
+  });
+
   it("reclaims stale running scan jobs in the worker process", async () => {
     const staleStartedAt = new Date(Date.now() - 30 * 60_000).toISOString();
     await fs.mkdir(path.join(tmpDir, "remote", "Recovered Release"), { recursive: true });
@@ -2644,7 +3613,7 @@ describe("api app", () => {
     const scanRuns = await ctx.database.db.select().from(schema.scanRuns).where(eq(schema.scanRuns.jobId, job.id));
     expect(scanRuns).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ status: "failed", errorMessage: "Stale job reclaimed by worker" }),
+        expect.objectContaining({ status: "failed", errorMessage: "Stale running job lease fenced and requeued" }),
         expect.objectContaining({ status: "completed", remoteFiles: 1 })
       ])
     );
@@ -2685,7 +3654,97 @@ describe("api app", () => {
     expect(await worker.runOnce()).toBe(true);
 
     expect(await ctx.jobs.getJob(job.id)).toMatchObject({ status: "completed", lockedBy: null, heartbeatAt: null });
-    expect(await ctx.jobs.listEvents(job.id)).toEqual(expect.arrayContaining([expect.objectContaining({ message: "Interrupted job reclaimed by replacement worker" })]));
+    expect(await ctx.jobs.listEvents(job.id)).toEqual(expect.arrayContaining([expect.objectContaining({ message: "Interrupted job lease fenced and requeued" })]));
+  });
+
+  it("allows exactly one worker to reclaim a stale lease and increments its version", async () => {
+    const staleStartedAt = new Date(Date.now() - 30 * 60_000).toISOString();
+    const job = await first(
+      ctx.database.db
+        .insert(schema.jobs)
+        .values({
+          type: "scan",
+          status: "running",
+          createdAt: staleStartedAt,
+          startedAt: staleStartedAt,
+          finishedAt: null,
+          lockedBy: "dead-worker",
+          lockedAt: staleStartedAt,
+          heartbeatAt: staleStartedAt,
+          leaseVersion: 7,
+          exclusive: true,
+          progress: JSON.stringify({
+            options: { scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] }
+          })
+        })
+        .returning({ id: schema.jobs.id })
+    );
+    if (!job) throw new Error("Stale lease job was not inserted");
+    await insertRunningScanRun(job.id, staleStartedAt);
+    const workers = ["stale-contender-1", "stale-contender-2"].map(
+      (workerId) =>
+        new JobWorker(ctx.database.db, {
+          workerId,
+          reclaimStaleAfterMs: 60_000,
+          pollIntervalMs: 1,
+          heartbeatIntervalMs: 10,
+          logger: silentLogger
+        })
+    );
+
+    const results = await Promise.all(workers.map((worker) => worker.runOnce()));
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(await ctx.jobs.getJob(job.id)).toMatchObject({ status: "completed", leaseVersion: 9, lockedBy: null });
+    expect((await ctx.jobs.listEvents(job.id)).filter((event) => event.message === "Stale running job lease fenced and requeued")).toHaveLength(1);
+  });
+
+  it("rejects progress, finish, and requeue writes from an old lease", async () => {
+    const timestamp = new Date().toISOString();
+    const inserted = await first(
+      ctx.database.db
+        .insert(schema.jobs)
+        .values({
+          type: "copy",
+          status: "running",
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: null,
+          lockedBy: "old-lease-worker",
+          lockedAt: timestamp,
+          heartbeatAt: timestamp,
+          leaseVersion: 3,
+          exclusive: false,
+          progress: JSON.stringify({ stage: "original" })
+        })
+        .returning()
+    );
+    if (!inserted) throw new Error("Old lease job was not inserted");
+    const worker = new JobWorker(ctx.database.db, { workerId: "old-lease-worker", logger: silentLogger });
+    const fencedWorker = worker as unknown as {
+      setLeasedProgress(job: unknown, progress: unknown): Promise<void>;
+      addLeasedEvent(job: unknown, level: "info", message: string, data?: unknown): Promise<void>;
+      heartbeat(job: unknown): Promise<void>;
+      finishJob(job: unknown, status: "completed", level: "info", message: string): Promise<void>;
+      requeueInterruptedJob(job: unknown, message?: string): Promise<void>;
+    };
+    await ctx.database.db
+      .update(schema.jobs)
+      .set({ lockedBy: "replacement-worker", leaseVersion: 4, heartbeatAt: new Date().toISOString() })
+      .where(eq(schema.jobs.id, inserted.id));
+
+    await expect(fencedWorker.setLeasedProgress(inserted, { stage: "stale" })).rejects.toMatchObject({ name: "LeaseLostError" });
+    await expect(fencedWorker.addLeasedEvent(inserted, "info", "stale event")).rejects.toMatchObject({ name: "LeaseLostError" });
+    await expect(fencedWorker.heartbeat(inserted)).rejects.toMatchObject({ name: "LeaseLostError" });
+    await expect(fencedWorker.finishJob(inserted, "completed", "info", "stale finish")).rejects.toMatchObject({ name: "LeaseLostError" });
+    await expect(fencedWorker.requeueInterruptedJob(inserted)).rejects.toMatchObject({ name: "LeaseLostError" });
+    expect(await ctx.jobs.getJob(inserted.id)).toMatchObject({
+      status: "running",
+      lockedBy: "replacement-worker",
+      leaseVersion: 4,
+      progress: { stage: "original" }
+    });
+    expect(await ctx.jobs.listEvents(inserted.id)).toEqual([]);
   });
 
   it("saves section display titles and types separately from symlink directory names", async () => {
@@ -2728,6 +3787,111 @@ describe("api app", () => {
         expect.objectContaining({ section: "anime", title: "Anime", type: "shows", seasonCount: 1 })
       ])
     );
+  });
+
+  it("rejects storage policy changes overlapping a queued copy while allowing a disjoint title", async () => {
+    const cookie = await createAdminSession();
+    const copyFixture = await insertCopySymlink({
+      itemName: "Policy Copy Movie",
+      kind: "remote",
+      storagePolicy: "location_1",
+      content: "copy remains isolated"
+    });
+    const disjointLinkId = await insertMediaLink("Disjoint Policy Movie");
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+
+    const overlapping = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Policy Copy Movie", policy: "location_2" }
+    });
+    expect(overlapping.statusCode).toBe(409);
+    expect(overlapping.json()).toMatchObject({ error: expect.stringContaining(`copy job #${copyJobId} is queued for the same media`) });
+    expect(await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, copyFixture.id)).limit(1))).toMatchObject({
+      storagePolicy: "location_1"
+    });
+
+    const disjoint = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Disjoint Policy Movie", policy: "location_2" }
+    });
+    expect(disjoint.statusCode).toBe(200);
+    expect(disjoint.json()).toMatchObject({ title: "Disjoint Policy Movie", policy: "location_2" });
+    expect(await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, disjointLinkId)).limit(1))).toMatchObject({
+      storagePolicy: "location_2"
+    });
+  });
+
+  it("rejects bulk and delete policy mutations overlapping a running audit", async () => {
+    const cookie = await createAdminSession();
+    const linkId = await insertMediaLink("Policy Audit Movie");
+    const assigned = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Policy Audit Movie", policy: "location_2" }
+    });
+    expect(assigned.statusCode).toBe(200);
+    const policyId = assigned.json<{ id: number }>().id;
+
+    const auditJobId = await ctx.jobs.startAudit({ mode: "fast", linkIds: [linkId] });
+    const timestamp = new Date().toISOString();
+    await ctx.database.db
+      .update(schema.jobs)
+      .set({ status: "running", startedAt: timestamp, lockedBy: "policy-test-worker", lockedAt: timestamp, heartbeatAt: timestamp })
+      .where(eq(schema.jobs.id, auditJobId));
+
+    const bulk = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies/bulk",
+      headers: { cookie },
+      payload: { titles: ["Policy Audit Movie"], policy: "location_1" }
+    });
+    expect(bulk.statusCode).toBe(409);
+    expect(bulk.json()).toMatchObject({ error: expect.stringContaining(`audit job #${auditJobId} is running for the same media`) });
+
+    const remove = await ctx.app.inject({ method: "DELETE", url: `/api/storage-policies/${policyId}`, headers: { cookie } });
+    expect(remove.statusCode).toBe(409);
+    expect(remove.json()).toMatchObject({ error: expect.stringContaining(`audit job #${auditJobId} is running for the same media`) });
+    expect(await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, linkId)).limit(1))).toMatchObject({
+      storagePolicy: "location_2"
+    });
+    expect(await first(ctx.database.db.select().from(schema.storagePolicies).where(eq(schema.storagePolicies.id, policyId)).limit(1))).toMatchObject({
+      policy: "location_2"
+    });
+  });
+
+  it("applies storage policies to canonical-equivalent media and storage titles", async () => {
+    const cookie = await createAdminSession();
+    const ampersandLinkId = await insertMediaLink("Rock & Roll Movie");
+    const wordLinkId = await insertMediaLink("Rock and Roll Movie");
+    await insertStorageFile("remote", path.join("movies", "Rock & Roll Movie", "ampersand.mkv"));
+    await insertStorageFile("remote", path.join("movies", "Rock and Roll Movie", "word.mkv"));
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Rock and Roll Movie", policy: "location_2" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ policy: "location_2", linkCount: 2, fileCount: 2 });
+    const links = await ctx.database.db
+      .select({ id: schema.mediaLinks.id, storagePolicy: schema.mediaLinks.storagePolicy })
+      .from(schema.mediaLinks)
+      .where(inArray(schema.mediaLinks.id, [ampersandLinkId, wordLinkId]));
+    expect(links).toHaveLength(2);
+    expect(links.every((link) => link.storagePolicy === "location_2")).toBe(true);
+    const files = await ctx.database.db
+      .select({ itemName: schema.storageFiles.itemName, storagePolicy: schema.storageFiles.storagePolicy })
+      .from(schema.storageFiles)
+      .where(inArray(schema.storageFiles.itemName, ["Rock & Roll Movie", "Rock and Roll Movie"]));
+    expect(files).toHaveLength(2);
+    expect(files.every((file) => file.storagePolicy === "location_2")).toBe(true);
   });
 
   it("manages storage policies and bulk assignments", async () => {

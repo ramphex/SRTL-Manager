@@ -4,6 +4,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { first, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
+import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
 import {
   findStoragePolicyCandidateTitle,
   findStoragePolicyCandidateTitles,
@@ -55,6 +56,23 @@ const storagePolicyBulkInputSchema = z.object({
 const mediaLinkLookupInputSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).max(1000)
 });
+
+class StoragePolicyRequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "StoragePolicyRequestError";
+  }
+}
+
+function mediaLinkIdsFromMutationResources(resources: Array<{ resourceType: string; resourceKey: string }>): number[] {
+  return resources
+    .filter((resource) => resource.resourceType === "media")
+    .map((resource) => Number(resource.resourceKey))
+    .filter((id) => Number.isSafeInteger(id) && id > 0);
+}
 
 const copyInputSchema = z
   .object({
@@ -285,31 +303,54 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
     return listStoragePolicyCandidates(db, query.q, query.limit);
   });
 
-  app.post("/api/storage-policies", async (request, reply) => {
+  app.post("/api/storage-policies", async (request) => {
     const body = storagePolicyInputSchema.parse(request.body);
-    const candidateTitle = await findStoragePolicyCandidateTitle(db, body.title);
-    if (!candidateTitle) {
-      return reply.code(400).send({ error: "Choose a title from the scanned library." });
-    }
-    return setStoragePolicyTitle(db, candidateTitle, body.policy as StoragePolicyKind);
+    return withResourceMutationGuard(db, async (transaction) => {
+      const candidateTitle = await findStoragePolicyCandidateTitle(transaction, body.title);
+      if (!candidateTitle) throw new StoragePolicyRequestError(400, "Choose a title from the scanned library.");
+      const resources = await storagePolicyMutationResources(transaction, [candidateTitle]);
+      return {
+        resources,
+        mutate: () =>
+          setStoragePolicyTitle(transaction, candidateTitle, body.policy as StoragePolicyKind, {
+            mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
+          })
+      };
+    });
   });
 
-  app.post("/api/storage-policies/bulk", async (request, reply) => {
+  app.post("/api/storage-policies/bulk", async (request) => {
     const body = storagePolicyBulkInputSchema.parse(request.body);
-    const { candidateTitles, invalidTitles } = await findStoragePolicyCandidateTitles(db, body.titles);
-
-    if (invalidTitles.length > 0) {
-      return reply.code(400).send({ error: `Choose titles from the scanned library: ${invalidTitles.join(", ")}` });
-    }
-
-    return setStoragePolicyTitles(db, candidateTitles, body.policy as StoragePolicyKind);
+    return withResourceMutationGuard(db, async (transaction) => {
+      const { candidateTitles, invalidTitles } = await findStoragePolicyCandidateTitles(transaction, body.titles);
+      if (invalidTitles.length > 0) {
+        throw new StoragePolicyRequestError(400, `Choose titles from the scanned library: ${invalidTitles.join(", ")}`);
+      }
+      const resources = await storagePolicyMutationResources(transaction, candidateTitles);
+      return {
+        resources,
+        mutate: () =>
+          setStoragePolicyTitles(transaction, candidateTitles, body.policy as StoragePolicyKind, {
+            mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
+          })
+      };
+    });
   });
 
-  app.delete("/api/storage-policies/:id", async (request, reply) => {
+  app.delete("/api/storage-policies/:id", async (request) => {
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
-    const row = await removeStoragePolicyTitle(db, params.id);
-    if (!row) return reply.code(404).send({ error: "Storage policy item not found" });
-    return row;
+    return withResourceMutationGuard(db, async (transaction) => {
+      const existing = await first(transaction.select().from(schema.storagePolicies).where(eq(schema.storagePolicies.id, params.id)).limit(1));
+      if (!existing) throw new StoragePolicyRequestError(404, "Storage policy item not found");
+      return {
+        resources: await storagePolicyMutationResources(transaction, [existing.normalizedTitle]),
+        mutate: async () => {
+          const row = await removeStoragePolicyTitle(transaction, params.id);
+          if (!row) throw new StoragePolicyRequestError(404, "Storage policy item not found");
+          return row;
+        }
+      };
+    });
   });
 
 }

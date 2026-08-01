@@ -671,6 +671,31 @@ function formatSectionCompositionPart(part: { value: number; unit: string }): st
 
 const dashboardRemoteWorkLinkLimit = 250;
 
+async function loadAllRemoteWorkLinks(
+  params: Omit<Parameters<typeof api.mediaLinksPage>[0], "limit" | "offset">
+): Promise<Awaited<ReturnType<typeof api.mediaLinksPage>>> {
+  const rows: MediaLinkRow[] = [];
+  const seenIds = new Set<number>();
+  let offset = 0;
+  let total: number;
+
+  while (true) {
+    const page = await api.mediaLinksPage({ ...params, limit: dashboardRemoteWorkLinkLimit, offset });
+    total = page.total;
+    for (const row of page.rows) {
+      if (seenIds.has(row.id)) continue;
+      seenIds.add(row.id);
+      rows.push(row);
+    }
+    if (!page.hasMore) break;
+    const nextOffset = page.offset + page.rows.length;
+    if (nextOffset <= offset) throw new Error("The work list did not advance while loading additional results");
+    offset = nextOffset;
+  }
+
+  return { rows, total, limit: dashboardRemoteWorkLinkLimit, offset: 0, hasMore: false };
+}
+
 type ActionableEpisode = {
   episodeName: string;
   link: MediaLinkRow;
@@ -802,15 +827,13 @@ function RemoteWorkLinksTable({
   const remoteWorkLinks = useQuery({
     queryKey: ["dashboard-remote-work-links", selection?.kind, selectedSection, selectedPrefix, trimmedSearch],
     queryFn: () =>
-      api.mediaLinksPage({
+      loadAllRemoteWorkLinks({
         kind: detail?.kind,
         section: selectedSection ?? "",
         storagePolicy: detail?.storagePolicy ?? "unassigned",
         relativePathPrefix: selectedPrefix,
-        search: trimmedSearch,
-        limit: dashboardRemoteWorkLinkLimit,
-        offset: 0
-    }),
+        search: trimmedSearch
+      }),
     enabled: Boolean(selectedSection && detail)
   });
   const jobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
@@ -939,17 +962,24 @@ function RemoteWorkLinksTable({
   }
 
   function queueShowCopy(show: ActionableShowGroup) {
-    if (!copyDirection) return;
-    const links = showLinks(show);
-    if (links.length === 0) return;
-    queueCopy(`Copy ${show.showName} to ${copyDestinationLabel}`, `${title} / ${show.showName}`, { direction: copyDirection, linkIds: links.map((link) => link.id) });
+    if (!copyDirection || !selectedSection) return;
+    queueCopy(`Copy ${show.showName} to ${copyDestinationLabel}`, `${title} / ${show.showName}`, {
+      direction: copyDirection,
+      section: selectedSection,
+      itemName: show.showName,
+      ...(selectedPrefix ? { relativePathPrefix: selectedPrefix } : {})
+    });
   }
 
   function queueSeasonCopy(showName: string, season: ActionableSeasonGroup) {
-    if (!copyDirection) return;
-    const links = seasonLinks(season);
-    if (links.length === 0) return;
-    queueCopy(`Copy ${showName} / ${season.seasonName} to ${copyDestinationLabel}`, `${title} / ${showName} / ${season.seasonName}`, { direction: copyDirection, linkIds: links.map((link) => link.id) });
+    if (!copyDirection || !selectedSection) return;
+    const prefix = scopedRelativePrefix(selectedPrefix, seasonRelativePrefix(season));
+    queueCopy(`Copy ${showName} / ${season.seasonName} to ${copyDestinationLabel}`, `${title} / ${showName} / ${season.seasonName}`, {
+      direction: copyDirection,
+      section: selectedSection,
+      itemName: showName,
+      ...(prefix ? { relativePathPrefix: prefix } : {})
+    });
   }
 
   function queueLinkCopy(link: MediaLinkRow) {
@@ -964,7 +994,7 @@ function RemoteWorkLinksTable({
 
   function queueSeasonAudit(showName: string, season: ActionableSeasonGroup) {
     if (!selectedSection) return;
-    const prefix = seasonRelativePrefix(season);
+    const prefix = scopedRelativePrefix(selectedPrefix, seasonRelativePrefix(season));
     queueAudit(`Audit ${showName} / ${season.seasonName}`, `${title} / ${showName} / ${season.seasonName}`, {
       section: selectedSection,
       itemName: showName,
@@ -999,8 +1029,8 @@ function RemoteWorkLinksTable({
             {remoteWorkLinks.data ? (
               <small>
                 {isShowSection
-                  ? `Showing ${formatNumber(rows.length)} links across ${formatNumber(showGroups.length)} shows of ${formatNumber(shownTotal)}`
-                  : `Showing ${formatNumber(rows.length)} of ${formatNumber(shownTotal)}`}
+                  ? `Showing all ${formatNumber(rows.length)} links across ${formatNumber(showGroups.length)} shows`
+                  : `Showing all ${formatNumber(rows.length)}`}
               </small>
             ) : null}
             {canCopy ? (
@@ -1276,6 +1306,16 @@ function seasonRelativePrefix(season: ActionableSeasonGroup): string | null {
   const parts = splitMediaRelativePath(firstLink.relativePath);
   if (parts.length < 2) return null;
   return parts.slice(0, 2).join("/");
+}
+
+function scopedRelativePrefix(selectedPrefix: string, actionPrefix: string | null): string | undefined {
+  const selected = splitMediaRelativePath(selectedPrefix).join("/");
+  const action = actionPrefix ? splitMediaRelativePath(actionPrefix).join("/") : "";
+  if (!selected) return action || undefined;
+  if (!action) return selected;
+  if (selected === action || selected.startsWith(`${action}/`)) return selected;
+  if (action.startsWith(`${selected}/`)) return action;
+  return action;
 }
 
 function remoteWorkDetail(kind: SectionWorkKind, storageLocations: StorageLocationsSettings): {

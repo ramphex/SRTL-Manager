@@ -241,7 +241,9 @@ export function CopyDialog({
 
         {startCopy.error ? <p className="panel-message action-error">{startCopy.error.message}</p> : null}
 
-        {needsLocalConflictResolution && prompt.conflicts ? (
+        {startCopy.error && !jobId ? (
+          <p className="panel-message">The copy job was not queued. No files were changed.</p>
+        ) : needsLocalConflictResolution && prompt.conflicts ? (
           <CopyConflictResolution conflicts={prompt.conflicts} onKeepBoth={() => setLocalConflictStrategy("keep_both")} onReplace={() => setLocalConflictStrategy("replace")} />
         ) : (
           <CopyProgressPanel
@@ -254,7 +256,7 @@ export function CopyDialog({
           />
         )}
 
-        <div className="audit-dialog-events">
+        {startCopy.error && !jobId ? null : <div className="audit-dialog-events">
           <JobEventsHeader label="Copy events" jobId={jobId} loaded={events.events.length} total={events.total} loading={events.isLoading} loadingOlder={events.isFetchingNextPage} />
           {jobId && events.isLoading ? <p className="panel-message">Loading copy events...</p> : null}
           {events.error ? <p className="panel-message action-error">{events.error.message}</p> : null}
@@ -268,7 +270,7 @@ export function CopyDialog({
               ))}
             </div>
           ) : null}
-        </div>
+        </div>}
         <TerminateJobDialog
           job={terminatePrompt}
           error={terminateJob.error?.message}

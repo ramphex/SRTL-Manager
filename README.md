@@ -12,7 +12,8 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Fast and deep audits across local and remote targets.
 - Bidirectional copies with live progress, transient transfer retry, conflict handling, configurable verification, and source/title risk checks.
 - Safe job termination, complete event timelines, restart recovery, and durable per-file copy journals.
-- Required path-change review before changed mounts can affect managed links.
+- Configurable parallel job and copy-file execution with database-backed overlap protection.
+- Required path-change review before different configured roots or storage mount sources can affect managed links.
 - Editable storage-location names while deployment paths remain environment-managed.
 - Postgres-backed API and worker services in a hardened container stack.
 - Dark, light, and system themes with responsive administration views.
@@ -73,9 +74,19 @@ The default configuration follows the current stable `latest` image. Pin `SRTL_I
 
 The API receives read-only root mounts. The worker alone receives writable roots for copy and path-migration jobs. Postgres is reachable only inside the Compose network.
 
+### Worker concurrency
+
+The single Compose worker service can host any positive number of independent job slots. Set `SRTL_WORKER_COUNT` to the desired slot count; there is no fixed two-worker ceiling. Jobs still pass database-backed admission, resource-claim, and lease checks, so adding slots does not allow two jobs to mutate the same managed resources.
+
+The optional `SRTL_MAX_RUNNING_JOBS` setting limits total simultaneous jobs and must not exceed `SRTL_WORKER_COUNT`. `SRTL_MAX_RUNNING_SCANS`, `SRTL_MAX_RUNNING_AUDITS`, and `SRTL_MAX_RUNNING_COPIES` apply per-type limits, may be zero to pause that job type, and must not exceed the total-job limit. When omitted, the total limit follows the configured worker count and the per-type limits follow that total limit.
+
+`SRTL_COPY_FILE_CONCURRENCY` controls how many files one copy job may transfer at once. `SRTL_MAX_ACTIVE_COPY_FILES` is the worker process-wide copy-file ceiling and must be at least the per-job value. Their defaults keep one file active per copy job while allowing separate copy jobs to use separate slots. Start conservatively and raise copy limits only when the storage endpoints and network can sustain the additional I/O.
+
+Scale with `SRTL_WORKER_COUNT`; do not simultaneously run `docker compose up --scale worker=...`. The supported deployment model keeps job slots and the active-copy-file safeguard inside one worker process. Compose gives that process two minutes to stop active jobs and perform safe rollback during shutdown.
+
 The API checks the public GitHub Releases endpoint for stable and beta version information at startup and when version status is refreshed. This request does not include credentials, paths, or inventory data.
 
-When a configured root changes, restart the stack. The UI enters maintenance mode until it validates and applies a path migration or the prior value is restored. This rebases managed paths; it does not move stored content.
+When a configured root changes, restart the stack. The UI enters maintenance mode until it validates and applies a path migration or the prior value is restored. This rebases managed paths; it does not move stored content. Routine Linux remounts are accepted automatically when the canonical path, mount point, filesystem type, and mount source are unchanged; exact device and inode checks still fence active filesystem mutations.
 
 ## Backup And Restore
 
@@ -142,4 +153,4 @@ SRTL Manager is available under the [MIT License](LICENSE). Contributions are ac
 - Optional remote source-availability preflight checks where providers expose reliable metadata.
 - Event-driven targeted refresh hooks.
 - Additional numbered storage locations and per-location assignment policies.
-- Controlled multi-worker execution after single-worker recovery semantics are fully proven.
+- Per-location throughput telemetry and concurrency recommendations.

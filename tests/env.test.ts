@@ -8,14 +8,25 @@ SYMLINK_DIR="/symlinks"
 SRTL_LOCATION_1_PATH='/local'
 SRTL_LOCATION_2_PATH=/remote
 SRTL_WORKER_COUNT=4
-SRTL_MAX_RUNNING_JOBS=8
+SRTL_MAX_RUNNING_JOBS=4
+SRTL_MAX_RUNNING_SCANS=1
+SRTL_MAX_RUNNING_AUDITS=3
+SRTL_MAX_RUNNING_COPIES=2
+SRTL_COPY_FILE_CONCURRENCY=2
+SRTL_MAX_ACTIVE_COPY_FILES=4
 IGNORED=value
 `);
     expect(env).toEqual({
       SYMLINK_DIR: "/symlinks",
       SRTL_LOCATION_1_PATH: "/local",
       SRTL_LOCATION_2_PATH: "/remote",
-      SRTL_WORKER_COUNT: "4"
+      SRTL_WORKER_COUNT: "4",
+      SRTL_MAX_RUNNING_JOBS: "4",
+      SRTL_MAX_RUNNING_SCANS: "1",
+      SRTL_MAX_RUNNING_AUDITS: "3",
+      SRTL_MAX_RUNNING_COPIES: "2",
+      SRTL_COPY_FILE_CONCURRENCY: "2",
+      SRTL_MAX_ACTIVE_COPY_FILES: "4"
     });
   });
 
@@ -30,13 +41,18 @@ SRTL_LOCATION_2_PATH=/old/remote
       SRTL_LOCATION_1_PATH: "/mnt/local/nas/local",
       SRTL_LOCATION_2_PATH: "/mnt/remote",
       SRTL_WORKER_COUNT: "2",
-      SRTL_MAX_RUNNING_COPIES: "1"
+      SRTL_MAX_RUNNING_COPIES: "1",
+      SRTL_COPY_FILE_CONCURRENCY: "2",
+      SRTL_MAX_ACTIVE_COPY_FILES: "3"
     });
     expect(mergeEnvSettings(fileDefaults, runtime)).toEqual({
       SYMLINK_DIR: "/mnt/local/nas/symlinks",
       SRTL_LOCATION_1_PATH: "/mnt/local/nas/local",
       SRTL_LOCATION_2_PATH: "/mnt/remote",
-      SRTL_WORKER_COUNT: "2"
+      SRTL_WORKER_COUNT: "2",
+      SRTL_MAX_RUNNING_COPIES: "1",
+      SRTL_COPY_FILE_CONCURRENCY: "2",
+      SRTL_MAX_ACTIVE_COPY_FILES: "3"
     });
   });
 });

@@ -6,7 +6,7 @@ import { scanOptionsFromJob } from "./jobScopeLocks";
 import { mergeJobEventPages } from "./jobEvents";
 import { defaultRecentJobsCompletedWindowMinutes } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
-import { type AuditMode, type AuditOptions, type AppReleaseInfo, type AppVersionInfo, type CopyConflictPreview, type InventorySummary, type JobRecord, type JobStatus, type CopyMediaValidationMode, type CopyOptions, type CopyVerificationProfile, type MediaLinkTreeKindFilter, type ScanOptions, type SectionContentType, type SectionSettings, type SectionSummary, type StoragePolicyCategory, type StoragePolicyKind, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference, type UserPreferences } from "../shared/types";
+import { type AuditMode, type AuditOptions, type AppReleaseInfo, type AppVersionInfo, type CopyConflictPreview, type InventorySummary, type JobRecord, type JobStatus, type CopyMediaValidationMode, type CopyOptions, type CopyVerificationProfile, type MediaLinkTreeKindFilter, type PathMigrationStatus, type ScanOptions, type SectionContentType, type SectionSettings, type SectionSummary, type StoragePolicyCategory, type StoragePolicyKind, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 
 export type ThemePreference = "light" | "dark" | "system";
 
@@ -685,6 +685,22 @@ export function pathMigrationProgress(job: JobRecord | null): { current: number;
     total: finiteNumberFromUnknown(progress?.total),
     message: typeof progress?.message === "string" ? progress.message : "Waiting for the migration worker"
   };
+}
+
+export function isActivePathMigrationStatus(status: PathMigrationStatus | null | undefined): boolean {
+  return status === "queued" || status === "running" || status === "rollback_pending";
+}
+
+export function pathMigrationStatusLabel(status: PathMigrationStatus): string {
+  if (status === "planned") return "Ready";
+  if (status === "queued") return "Queued";
+  if (status === "running") return "Running";
+  if (status === "rollback_pending") return "Rolling back";
+  return "Needs attention";
+}
+
+export function pathMigrationProgressTitle(status: PathMigrationStatus, message: string): string {
+  return status === "rollback_pending" ? "Rolling back paths" : message;
 }
 
 export function dateTimeFormatOptions(timeFormat: TimeFormatPreference): Intl.DateTimeFormatOptions {

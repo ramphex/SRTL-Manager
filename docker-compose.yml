@@ -84,6 +84,9 @@ services:
     image: ${SRTL_IMAGE:?Set SRTL_IMAGE in .env}
     command: ["node", "dist/server/worker.js"]
     restart: unless-stopped
+    # SRTL_WORKER_COUNT scales safe job slots inside this service. Do not also
+    # use `docker compose --scale worker=...` for the same deployment.
+    stop_grace_period: 2m
     user: "${SRTL_UID:?Set SRTL_UID in .env}:${SRTL_GID:?Set SRTL_GID in .env}"
     read_only: true
     env_file:
