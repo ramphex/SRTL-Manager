@@ -28,6 +28,7 @@ import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
+import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 import type {
   AuditMode,
@@ -463,7 +464,7 @@ function filterCopySelectedLinks(links: MediaLinkRow[], options: CopyOptions): M
 }
 
 function orderedCopySelection(links: MediaLinkRow[], options: CopyOptions): MediaLinkRow[] {
-  const selected = filterCopySelectedLinks(links, options);
+  const selected = filterCopyLinks(links, options);
   const requestedOrder = options.linkIds?.length ? new Map(options.linkIds.map((id, index) => [id, index])) : null;
   return requestedOrder
     ? [...selected].sort((firstLink, secondLink) => (requestedOrder.get(firstLink.id) ?? 0) - (requestedOrder.get(secondLink.id) ?? 0))
@@ -685,25 +686,23 @@ async function copyPathBindingsForLink(
   ];
 }
 
-async function copyResourceClaims(links: MediaLinkRow[], paths: PathsSettings, direction: CopyOptions["direction"]): Promise<ResourceClaim[]> {
-  const claims = await batchedMediaLinkResourceClaims(links, paths, "exclusive");
-  const eligibleLinkIds = new Set(
-    filterCopyLinks(links, { direction, linkIds: links.map((link) => link.id) }).map((link) => link.id)
-  );
-  for (let offset = 0; offset < links.length; offset += 16) {
-    const batch = links.slice(offset, offset + 16);
+async function copyResourceClaims(workLinks: MediaLinkRow[], claimedLinks: MediaLinkRow[], paths: PathsSettings, options: CopyOptions): Promise<ResourceClaim[]> {
+  const eligibleLinks = filterCopyLinks(workLinks, options);
+  const claims = await batchedMediaLinkResourceClaims(claimedLinks, paths, "exclusive");
+  for (let offset = 0; offset < eligibleLinks.length; offset += 16) {
+    const batch = eligibleLinks.slice(offset, offset + 16);
     const [destinationClaims, pathBindings] = await Promise.all([
       Promise.all(
         batch.map((link) =>
           managedPathResourceClaims(
-            storageRootForDirection(paths, direction),
-            copyDestinationPathForLink(link, paths, direction),
+            storageRootForDirection(paths, options.direction),
+            copyDestinationPathForLink(link, paths, options.direction),
             "Copy destination claim",
             "exclusive"
           )
         )
       ),
-      Promise.all(batch.filter((link) => eligibleLinkIds.has(link.id)).map((link) => copyPathBindingsForLink(link, paths, direction)))
+      Promise.all(batch.map((link) => copyPathBindingsForLink(link, paths, options.direction)))
     ]);
     claims.push(...destinationClaims.flat());
     claims.push(
@@ -1903,27 +1902,31 @@ export class JobRunner {
             JOIN jobs ON jobs.id = active.job_id
             WHERE jobs.status IN ('queued', 'running')
             UNION
-            SELECT active.job_id, active.resource_type, active.resource_key, active.access, 'reconciliation_required'::text AS status
-            FROM job_resource_claims AS active
-            JOIN copy_operations AS operation ON operation.job_id = active.job_id
-            WHERE operation.stage = 'reconciliation_required'
-              AND active.resource_type <> 'title'
+            SELECT copy_operations.job_id, 'media'::text, copy_operations.media_link_id::text, 'exclusive'::text, 'reconciliation_required'::text AS status
+            FROM copy_operations
+            WHERE ${unresolvedCopyReconciliation()}
             UNION
-            SELECT operation.job_id, 'media'::text, operation.media_link_id::text, 'exclusive'::text, 'reconciliation_required'::text AS status
-            FROM copy_operations AS operation
-            WHERE operation.stage = 'reconciliation_required'
-            UNION
-            SELECT operation.job_id, 'path'::text, paths.resource_key, 'exclusive'::text, 'reconciliation_required'::text AS status
-            FROM copy_operations AS operation
+            SELECT copy_operations.job_id, 'path'::text, paths.resource_key, 'exclusive'::text, 'reconciliation_required'::text AS status
+            FROM copy_operations
             CROSS JOIN LATERAL unnest(ARRAY[
-              operation.link_path,
-              operation.source_path,
-              operation.destination_path,
-              operation.temp_path,
-              operation.displaced_path
+              copy_operations.link_path,
+              copy_operations.source_path,
+              copy_operations.destination_path,
+              copy_operations.temp_path,
+              copy_operations.displaced_path
             ]) AS paths(resource_key)
-            WHERE operation.stage = 'reconciliation_required'
+            WHERE ${unresolvedCopyReconciliation()}
               AND paths.resource_key IS NOT NULL
+            UNION
+            SELECT copy_operations.job_id, 'path'::text, binding_paths.resource_key, 'exclusive'::text, 'reconciliation_required'::text AS status
+            FROM copy_operations
+            JOIN job_resource_claims AS binding
+              ON binding.job_id = copy_operations.job_id
+             AND binding.resource_type = 'copy_path_binding'
+             AND binding.resource_key::jsonb ->> 0 = copy_operations.media_link_id::text
+            CROSS JOIN LATERAL (VALUES (binding.resource_key::jsonb ->> 2), (binding.resource_key::jsonb ->> 3)) AS binding_paths(resource_key)
+            WHERE ${unresolvedCopyReconciliation()}
+              AND binding_paths.resource_key IS NOT NULL
           )
           SELECT active.job_id AS "jobId",
                  active.status,
@@ -2148,19 +2151,21 @@ export class JobRunner {
     const normalizedOptions = await normalizeCopyOptions(this.db, input);
     const links = await listMediaLinks(this.db, undefined, "current");
     const orderedSelectedLinks = orderedCopySelection(links, normalizedOptions);
+    const claimedLinks = normalizedOptions.linkIds === undefined ? orderedSelectedLinks : filterCopySelectedLinks(links, normalizedOptions);
     const optionsWithResolvedLinks = { ...normalizedOptions, linkIds: orderedSelectedLinks.map((link) => link.id) };
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
     const replacementClaims = await copyReplacementResourceClaims(this.db, orderedSelectedLinks, paths, optionsWithResolvedLinks);
     const expectedSelection = orderedSelectedLinks.map(copyAdmissionFingerprint);
+    const expectedClaimedSelection = claimedLinks.map(copyAdmissionFingerprint);
     return this.enqueuePreparedJob("copy", async (transaction) => {
-      const currentSelection = orderedCopySelection(
-        await listMediaLinks(transaction, undefined, "current"),
-        normalizedOptions
-      );
+      const currentLinks = await listMediaLinks(transaction, undefined, "current");
+      const currentSelection = orderedCopySelection(currentLinks, normalizedOptions);
+      const currentClaimedSelection = normalizedOptions.linkIds === undefined ? currentSelection : filterCopySelectedLinks(currentLinks, normalizedOptions);
       const currentPaths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
       if (
         JSON.stringify(currentSelection.map(copyAdmissionFingerprint)) !== JSON.stringify(expectedSelection) ||
+        JSON.stringify(currentClaimedSelection.map(copyAdmissionFingerprint)) !== JSON.stringify(expectedClaimedSelection) ||
         currentPaths.symlinkDir !== paths.symlinkDir ||
         currentPaths.localDir !== paths.localDir ||
         currentPaths.remoteDir !== paths.remoteDir
@@ -2170,7 +2175,7 @@ export class JobRunner {
       return {
         progress: { options: optionsWithResolvedLinks },
         exclusive: false,
-        claims: [...(await copyResourceClaims(orderedSelectedLinks, paths, normalizedOptions.direction)), ...replacementClaims]
+        claims: [...(await copyResourceClaims(orderedSelectedLinks, claimedLinks, paths, normalizedOptions)), ...replacementClaims]
       };
     });
   }

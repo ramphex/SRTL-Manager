@@ -307,12 +307,12 @@ export function sectionPolicyNeededCount(section: Pick<SectionSummary, "unassign
   return section.unassignedRemoteLinks + section.unassignedLocalLinks;
 }
 
-export function inventoryCopyToLocalCount(summary: Pick<InventorySummary, "actionableRemoteLinks" | "actionableRemoteFiles">): number {
-  return summary.actionableRemoteLinks + summary.actionableRemoteFiles;
+export function inventoryCopyToLocalCount(summary: Pick<InventorySummary, "actionableRemoteLinks">): number {
+  return summary.actionableRemoteLinks;
 }
 
-export function inventoryCopyToRemoteCount(summary: Pick<InventorySummary, "actionableLocalLinks" | "actionableLocalFiles">): number {
-  return summary.actionableLocalLinks + summary.actionableLocalFiles;
+export function inventoryCopyToRemoteCount(summary: Pick<InventorySummary, "actionableLocalLinks">): number {
+  return summary.actionableLocalLinks;
 }
 
 export function inventoryAssignedRemoteCount(summary: Pick<InventorySummary, "assignedRemoteLinks" | "assignedRemoteFiles">): number {

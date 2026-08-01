@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { copyCompletedItemSummaries, copyFailedItemSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
-import type { JobEventRecord, MediaLinkRow } from "../src/shared/types";
+import { copyCompletedItemSummaries, copyFailedItemSummaries, copyWorkTotalFromJob, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
+import type { JobEventRecord, JobRecord, MediaLinkRow } from "../src/shared/types";
 
 function event(id: number, message: string, data: unknown, level: JobEventRecord["level"] = "error"): JobEventRecord {
   return { id, jobId: 42, timestamp: "2026-07-17T12:00:00.000Z", level, message, data };
@@ -51,6 +51,56 @@ describe("selected link title display", () => {
     expect(singleSelectedLinkTitle([1, 3], rows)).toBeNull();
     expect(singleSelectedLinkTitle([1, 4], rows)).toBeNull();
     expect(singleSelectedLinkTitle([], rows)).toBeNull();
+  });
+
+  it("keeps a single title concise when several selected links share it", () => {
+    const rows = new Map([
+      [1, mediaLink(1, "shows", "Single Series (2026)")],
+      [2, mediaLink(2, "shows", "Single Series (2026)")]
+    ]);
+
+    expect(selectedLinkTitleSummaries([1, 2], rows)).toEqual(["Single Series (2026)"]);
+  });
+});
+
+describe("copy work total display", () => {
+  function copyJob(progress: Record<string, unknown>): JobRecord {
+    const timestamp = "2026-08-01T08:00:00.000Z";
+    return {
+      id: 386,
+      type: "copy",
+      status: "completed",
+      createdAt: timestamp,
+      startedAt: timestamp,
+      finishedAt: timestamp,
+      progress
+    };
+  }
+
+  it("removes legacy pre-existing title links from the displayed work total", () => {
+    expect(copyWorkTotalFromJob(copyJob({
+      options: { direction: "to_local", section: "shows", itemName: "Example Show", linkIds: Array.from({ length: 540 }, (_, index) => index + 1) },
+      total: 540,
+      copied: 3,
+      repointed: 0,
+      skipped: 537,
+      alreadyCompleted: 537,
+      conflicts: 0,
+      failed: 0
+    }), 540)).toBe(3);
+  });
+
+  it("preserves the original total for an explicitly selected resumed job", () => {
+    expect(copyWorkTotalFromJob(copyJob({
+      options: { direction: "to_local", linkIds: [1, 2, 3] },
+      total: 3,
+      copied: 3,
+      repointed: 0,
+      skipped: 0,
+      alreadyCompleted: 1,
+      conflicts: 0,
+      failed: 0
+    }), 3)).toBe(3);
   });
 });
 

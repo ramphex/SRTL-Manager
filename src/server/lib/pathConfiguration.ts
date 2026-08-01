@@ -3,6 +3,7 @@ import path from "node:path";
 import { and, asc, count, desc, eq, inArray, isNull, ne, notInArray, sql } from "drizzle-orm";
 import { first, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
+import { unresolvedCopyReconciliation } from "../jobs/copyReconciliation";
 import { schedulerLockKey } from "../jobs/scheduling";
 import { assertPathParentInside } from "./filesystemSafety";
 import { inspectMountIdentity, persistentRootIdentityMatch } from "./mountIdentity";
@@ -1009,7 +1010,7 @@ async function assertCopyOperationsReconciledForPathMigration(db: DbExecutor): P
     db
       .select({ id: schema.copyOperations.id })
       .from(schema.copyOperations)
-      .where(eq(schema.copyOperations.stage, "reconciliation_required"))
+      .where(unresolvedCopyReconciliation())
       .limit(1)
   );
   if (reconciliationOperation) {

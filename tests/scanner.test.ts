@@ -543,7 +543,7 @@ describe("scanner", () => {
     expect(result.storageFiles.map((file) => file.relativePath)).toEqual([path.join("shows", "Show One", "show.mkv")]);
   });
 
-  it("tracks bidirectional policy and copy work for symlinks and storage-only files", async () => {
+  it("limits policy and copy work to current symlinks while retaining storage-only files as unassigned orphans", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");
     const remoteDir = path.join(tmpDir, "remote");
@@ -610,11 +610,11 @@ describe("scanner", () => {
         actionableLocalLinks: 1,
         unassignedRemoteLinks: 1,
         unassignedLocalLinks: 1,
-        actionableRemoteFiles: 1,
-        actionableLocalFiles: 1,
-        assignedRemoteFiles: 1,
-        unassignedRemoteFiles: 1,
-        unassignedLocalFiles: 1
+        actionableRemoteFiles: 0,
+        actionableLocalFiles: 0,
+        assignedRemoteFiles: 0,
+        unassignedRemoteFiles: 3,
+        unassignedLocalFiles: 2
       });
 
       await persistScanResult(database.db, result, 1);
@@ -622,11 +622,18 @@ describe("scanner", () => {
         actionableRemoteLinks: 1,
         actionableLocalLinks: 1,
         unassignedRemoteLinks: 1,
-        actionableRemoteFiles: 1,
-        actionableLocalFiles: 1,
-        assignedRemoteFiles: 1,
-        unassignedRemoteFiles: 1,
-        unassignedLocalFiles: 1
+        actionableRemoteFiles: 0,
+        actionableLocalFiles: 0,
+        assignedRemoteFiles: 0,
+        unassignedRemoteFiles: 3,
+        unassignedLocalFiles: 2
+      });
+
+      expect((await listStorageFiles(database.db, "remote", true)).find((file) => file.itemName === "Remote File Copy Local")).toMatchObject({
+        storagePolicy: "unassigned"
+      });
+      expect((await listStorageFiles(database.db, "remote")).find((file) => file.filePath === remoteCopyLinkTarget)).toMatchObject({
+        storagePolicy: "location_1"
       });
 
       expect(await listStoragePolicyCandidates(database.db, "Local File Needs", 10)).toEqual([]);
@@ -641,8 +648,8 @@ describe("scanner", () => {
       expect(await getInventorySummary(database.db)).toMatchObject({
         actionableRemoteLinks: 2,
         unassignedRemoteLinks: 0,
-        actionableRemoteFiles: 1,
-        unassignedRemoteFiles: 1
+        actionableRemoteFiles: 0,
+        unassignedRemoteFiles: 3
       });
     } finally {
       await database.close();

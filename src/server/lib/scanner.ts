@@ -10,6 +10,7 @@ import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
 import { isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
+import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -504,7 +505,7 @@ export async function scanLibrary(
     storageScanIssues.push(...remoteScan.issues);
   }
 
-  const classifiedStorageFiles = applyStorageFilePolicies(storageFiles, settings, storagePolicies);
+  const classifiedStorageFiles = applyStorageFileMetadata(storageFiles, settings);
   const reconciledStorageFiles = titleScopesBySection
     ? uniqueStorageFiles(links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null))
     : [];
@@ -595,14 +596,14 @@ function storageFileMetadata(relativePath: string, rootType: StorageRootType, se
   return { section: "", itemName: parts.length > 1 ? parts[0] : filenameTitle(parts[0]) };
 }
 
-function applyStorageFilePolicies(files: ClassifiedStorageFile[], settings: SectionSettings, storagePolicies: StoragePolicyLookup): ClassifiedStorageFile[] {
+function applyStorageFileMetadata(files: ClassifiedStorageFile[], settings: SectionSettings): ClassifiedStorageFile[] {
   const sectionNames = new Set(settings.sections);
   return files.map((file) => {
     const metadata = storageFileMetadata(file.relativePath, file.rootType, sectionNames);
     return {
       ...file,
       ...metadata,
-      storagePolicy: storagePolicyForTitle(storagePolicies, metadata.itemName)
+      storagePolicy: "unassigned"
     };
   });
 }
@@ -645,11 +646,11 @@ export function summarizeInventory(links: ClassifiedLink[], storageFiles: Classi
     unassignedLocalLinks: links.filter((link) => link.kind === "local" && link.storagePolicy === "unassigned").length,
     localFiles: localFiles.length,
     remoteFiles: remoteFiles.length,
-    actionableRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_1").length,
-    actionableLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "location_2").length,
-    assignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_2").length,
-    unassignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "unassigned").length,
-    unassignedLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "unassigned").length,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: unlinkedRemoteFiles.length,
+    unassignedLocalFiles: unlinkedLocalFiles.length,
     localOrphanFiles: unlinkedLocalFiles.length,
     remoteOrphanFiles: unlinkedRemoteFiles.length,
     missingLinks: 0,
@@ -725,14 +726,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   for (const file of filesToReconcile) {
     await throwIfPersistenceCancelled(isCancelled);
     const existing = await first(db.select().from(schema.storageFiles).where(eq(schema.storageFiles.filePath, file.filePath)).limit(1));
+    const persistedFile: ClassifiedStorageFile = { ...file, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
     const firstSeenAt = existing?.firstSeenAt ?? timestamp;
-    const lastChangedAt = storageFileChanged(existing, file) ? timestamp : existing?.lastChangedAt ?? timestamp;
+    const lastChangedAt = storageFileChanged(existing, persistedFile) ? timestamp : existing?.lastChangedAt ?? timestamp;
     await db
       .insert(schema.storageFiles)
-      .values({ ...file, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
+      .values({ ...persistedFile, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: schema.storageFiles.filePath,
-        set: { ...file, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
+        set: { ...persistedFile, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
       });
   }
 
@@ -818,6 +820,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   await throwIfPersistenceCancelled(isCancelled);
   await applyPendingOnboardingPolicy(db, jobId);
   await throwIfPersistenceCancelled(isCancelled);
+  await reconcileStorageFilePolicies(db, timestamp);
+  await throwIfPersistenceCancelled(isCancelled);
 
   const scannedLinks = (await db.select().from(schema.mediaLinks)).filter((link) => seenLinkPaths.has(link.linkPath) && !link.missingSince);
   const persistedLinkInventory = summarizeInventory(
@@ -866,11 +870,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     unassignedLocalLinks: persistedLinkInventory.unassignedLocalLinks,
     localFiles: localFiles.length,
     remoteFiles: remoteFiles.length,
-    actionableRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_1").length,
-    actionableLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "location_2").length,
-    assignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_2").length,
-    unassignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "unassigned").length,
-    unassignedLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "unassigned").length,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: unlinkedRemoteFiles.length,
+    unassignedLocalFiles: unlinkedLocalFiles.length,
     localOrphanFiles: unlinkedLocalFiles.length,
     remoteOrphanFiles: unlinkedRemoteFiles.length,
     missingLinks,
@@ -1475,49 +1479,15 @@ export async function getInventorySummary(db: Db): Promise<InventorySummary> {
     unassignedLocalLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'local' and storage_policy = 'unassigned'`),
     localFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is null and root_type = 'local'`),
     remoteFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is null and root_type = 'remote'`),
-    actionableRemoteFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and sf.storage_policy = 'location_1'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    actionableLocalFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'local'
-            and sf.storage_policy = 'location_2'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    assignedRemoteFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and sf.storage_policy = 'location_2'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
     unassignedRemoteFiles: await rawCount(
       db,
       sql`select count(*) as value
           from storage_files sf
           where sf.missing_since is null
             and sf.root_type = 'remote'
-            and sf.storage_policy = 'unassigned'
             and not exists (
               select 1 from media_links ml
               where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
@@ -1529,7 +1499,6 @@ export async function getInventorySummary(db: Db): Promise<InventorySummary> {
           from storage_files sf
           where sf.missing_since is null
             and sf.root_type = 'local'
-            and sf.storage_policy = 'unassigned'
             and not exists (
               select 1 from media_links ml
               where ml.missing_since is null and ml.resolved_storage_file_id = sf.id

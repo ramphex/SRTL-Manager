@@ -10,6 +10,7 @@ import type {
   StoragePolicyTitle
 } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
+import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 
 export function normalizeTitle(value: string): string {
   return value.trim().toLowerCase();
@@ -347,11 +348,7 @@ async function syncStoragePolicyMediaLinksForTitleKeys(
       await db.update(schema.mediaLinks).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
     }
   }
-  for (const file of await db.select().from(schema.storageFiles)) {
-    const policy = titlePolicies.get(canonicalTitleKey(file.itemName));
-    if (!policy || file.storagePolicy === policy) continue;
-    await db.update(schema.storageFiles).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
-  }
+  await reconcileStorageFilePolicies(db, timestamp);
 }
 
 export async function bootstrapLocalStoragePolicies(
@@ -475,10 +472,7 @@ export async function syncStoragePolicyMediaLinks(db: Db, normalizedTitle: strin
     if (canonicalTitleKey(link.itemName) !== titleKey) continue;
     await db.update(schema.mediaLinks).set({ storagePolicy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
   }
-  for (const file of await db.select().from(schema.storageFiles)) {
-    if (canonicalTitleKey(file.itemName) !== titleKey) continue;
-    await db.update(schema.storageFiles).set({ storagePolicy, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
-  }
+  await reconcileStorageFilePolicies(db, timestamp);
 }
 
 export async function setStoragePolicyTitles(

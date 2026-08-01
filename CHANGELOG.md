@@ -4,6 +4,16 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.2-beta.4] - 2026-08-01
+
+### Fixed
+
+- Prevented superseded legacy copy-reconciliation records from blocking newly scanned media while retaining exact media and managed-path safeguards for genuinely unresolved filesystem state.
+- Limited newly queued scoped copy jobs to their actionable media so already satisfied title links no longer inflate job totals or selected-title details.
+- Batched large selected-link title lookups and restored title tooltips for multi-link jobs without exceeding the API request limit.
+- Derived storage-file assignment exclusively from current linked symlinks so unlinked files cannot remain assigned to a storage location.
+- Reconciled legacy storage-file policies during migration and after scans or policy updates.
+
 ## [0.1.2-beta.3] - 2026-07-31
 
 ### Changed

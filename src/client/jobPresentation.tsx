@@ -11,7 +11,7 @@ import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOpt
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -626,9 +626,10 @@ export function CopyProgressPanel({
   const stagePercent = copyStagePercent(job, progress);
   const overallPercent = copyOverallProgressPercent(job, progress);
   const currentIndex = progress.current > 0 ? progress.current : completed;
+  const workTotal = job ? copyWorkTotalFromJob(job, progress.total) : progress.total;
   const currentItem = copyCurrentItem(progress, job);
   const statusLabel = isStarting ? "Starting" : copyStageLabel(progress.stage, progress.direction);
-  const countLabel = progress.total > 0 ? `${formatNumber(Math.min(Math.max(currentIndex, completed), progress.total))} / ${formatNumber(progress.total)}` : "No matching files";
+  const countLabel = workTotal > 0 ? `${formatNumber(Math.min(Math.max(currentIndex, completed), workTotal))} / ${formatNumber(workTotal)}` : "No matching files";
   const transferSpeedSecondary = copyTransferSpeedSecondaryLabel(progress);
   const throughputLabel = copyThroughputLabel(progress);
   return (
@@ -1035,9 +1036,12 @@ export function JobScope({
 
   if (job.type === "copy") {
     const options = copyOptionsFromJob(job);
-    const sectionText = formatCopyScope(options, sections);
     const directionText = `Copy to ${storageLocationName(storageLocations, options?.direction === "to_remote" ? "remote" : "local")}`;
     const selectedLinkIds = options?.linkIds ?? [];
+    const workTotal = copyWorkTotalFromJob(job, selectedLinkIds.length);
+    const sectionText = selectedLinkIds.length > 0
+      ? workTotal === 1 ? "1 selected link" : `${formatNumber(workTotal)} selected links`
+      : formatCopyScope(options, sections);
     return (
       <span className="job-scope-cell" title={selectedLinkIds.length > 0 ? undefined : sectionText}>
         <span>{directionText}</span>
@@ -1074,7 +1078,7 @@ function JobScopeDetail({
   linkRowsError?: string | null;
 }) {
   if (selectedLinkIds.length === 0) return <small>{text}</small>;
-  const singleTitle = !linkRowsLoading && !linkRowsError ? singleSelectedLinkTitle(selectedLinkIds, linkRowsById) : null;
+  const singleTitle = selectedLinkIds.length === 1 && !linkRowsLoading && !linkRowsError ? singleSelectedLinkTitle(selectedLinkIds, linkRowsById) : null;
   if (singleTitle) return <small title={singleTitle}>{singleTitle}</small>;
   const canShowTitleLookup = Boolean(linkRowsById || linkRowsLoading || linkRowsError);
   return (

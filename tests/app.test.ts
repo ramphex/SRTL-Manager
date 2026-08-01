@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { eq, inArray, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 import { createApp, type AppContext } from "../src/server/app";
 import { first, getJsonSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
@@ -12,6 +12,7 @@ import type { AuditCommandRunner } from "../src/server/lib/auditor";
 import { readCopyFileIdentity, serializeCopyFileIdentity, type CopyCommandRunner, type CopyFileProgressReporter } from "../src/server/lib/copier";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { getInventorySummary } from "../src/server/lib/scanner";
 import { bootstrapLocalStoragePolicies, normalizeTitle } from "../src/server/lib/storagePolicies";
 import type { AuditMode, SectionContentType, StoragePolicyKind } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
@@ -311,6 +312,54 @@ async function markCopyFixtureInstalled(jobId: number, fixture: Awaited<ReturnTy
       sizeBytes: stat.size
     })
   });
+}
+
+async function insertCopyOperationFixture({
+  jobId,
+  fixture,
+  stage,
+  resultStatus = null,
+  errorMessage = null
+}: {
+  jobId: number;
+  fixture: Awaited<ReturnType<typeof insertCopySymlink>>;
+  stage: "committed" | "reconciliation_required";
+  resultStatus?: "copied" | "repointed" | null;
+  errorMessage?: string | null;
+}): Promise<number> {
+  const mediaLink = await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1));
+  if (!mediaLink) throw new Error("Copy operation fixture media link was not found");
+  const timestamp = new Date().toISOString();
+  const operation = await first(
+    ctx.database.db
+      .insert(schema.copyOperations)
+      .values({
+        jobId,
+        mediaLinkId: fixture.id,
+        linkPath: fixture.linkPath,
+        sourcePath: fixture.sourcePath,
+        destinationPath: fixture.destinationPath,
+        originalTargetPath: fixture.sourcePath,
+        originalLinkState: JSON.stringify(mediaLink),
+        previousCopySource: null,
+        tempPath: null,
+        displacedPath: null,
+        tempIdentity: null,
+        destinationIdentity: null,
+        displacedIdentity: null,
+        stage,
+        resultStatus,
+        localConflictStrategy: null,
+        sizeBytes: mediaLink.sizeBytes,
+        errorMessage,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+        completedAt: stage === "committed" ? timestamp : null
+      })
+      .returning({ id: schema.copyOperations.id })
+  );
+  if (!operation) throw new Error("Copy operation fixture was not inserted");
+  return operation.id;
 }
 
 describe("api app", () => {
@@ -818,7 +867,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.3",
+      currentVersion: "0.1.2-beta.4",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: null,
@@ -885,7 +934,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.3",
+      currentVersion: "0.1.2-beta.4",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: "0.2.0-beta.1",
@@ -1867,6 +1916,99 @@ describe("api app", () => {
     });
   });
 
+  it("limits reconciliation blockers to the exact uncertain media from a legacy multi-item job", async () => {
+    const blockedFixture = await insertCopySymlink({ itemName: "Uncertain Legacy Movie", kind: "remote", storagePolicy: "location_1", content: "uncertain source" });
+    const relatedFixture = await insertCopySymlink({ itemName: "Independent Legacy Movie", kind: "remote", storagePolicy: "location_1", content: "independent source" });
+    const legacyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [blockedFixture.id, relatedFixture.id] });
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", finishedAt: timestamp }).where(eq(schema.jobs.id, legacyJobId));
+    await insertCopyOperationFixture({
+      jobId: legacyJobId,
+      fixture: blockedFixture,
+      stage: "reconciliation_required",
+      errorMessage: "The first media item has unresolved filesystem state"
+    });
+
+    const relatedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [relatedFixture.id] });
+    await expect(ctx.jobs.getJob(relatedJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [blockedFixture.id] })).rejects.toThrow(
+      `Copy data from job #${legacyJobId} requires manual reconciliation`
+    );
+    await expect(ctx.jobs.terminate(relatedJobId)).resolves.toBe(true);
+  });
+
+  it("does not let a stale local title item block new actionable copy work", async () => {
+    const itemName = "Superseded Title Copy";
+    const localFixture = await insertCopySymlink({
+      itemName,
+      kind: "local",
+      storagePolicy: "location_1",
+      section: "shows",
+      relativePath: path.join(itemName, "Season 01", "episode-09.mkv"),
+      content: "existing local episode"
+    });
+    const remoteFixture = await insertCopySymlink({
+      itemName,
+      kind: "remote",
+      storagePolicy: "location_1",
+      section: "shows",
+      relativePath: path.join(itemName, "Season 01", "episode-10.mkv"),
+      content: "new remote episode"
+    });
+    const legacyJobId = await ctx.jobs.createJob("copy");
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", finishedAt: timestamp }).where(eq(schema.jobs.id, legacyJobId));
+    await insertCopyOperationFixture({
+      jobId: legacyJobId,
+      fixture: localFixture,
+      stage: "reconciliation_required",
+      errorMessage: "Legacy local episode state is uncertain"
+    });
+
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", section: "shows", itemName });
+    const mediaClaims = await ctx.database.db
+      .select({ resourceKey: schema.jobResourceClaims.resourceKey })
+      .from(schema.jobResourceClaims)
+      .where(and(eq(schema.jobResourceClaims.jobId, copyJobId), eq(schema.jobResourceClaims.resourceType, "media")));
+    expect(mediaClaims).toEqual([{ resourceKey: String(remoteFixture.id) }]);
+    await expect(runQueuedJob(copyJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ total: 1, copied: 1, skipped: 0, failed: 0 })
+    });
+    await expect(fs.readlink(localFixture.linkPath)).resolves.toBe(localFixture.sourcePath);
+    await expect(fs.readlink(remoteFixture.linkPath)).resolves.toBe(remoteFixture.destinationPath);
+  });
+
+  it("ignores legacy reconciliation state superseded by a later committed copy", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Later Commit Wins", kind: "remote", storagePolicy: "location_1", content: "later committed copy" });
+    const legacyJobId = await ctx.jobs.createJob("copy");
+    const legacyTimestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", finishedAt: legacyTimestamp }).where(eq(schema.jobs.id, legacyJobId));
+    const legacyOperationId = await insertCopyOperationFixture({
+      jobId: legacyJobId,
+      fixture,
+      stage: "reconciliation_required",
+      errorMessage: "Legacy copy ownership cannot be proven"
+    });
+
+    const committedJobId = await ctx.jobs.createJob("copy");
+    const committedTimestamp = new Date().toISOString();
+    await markCopyFixtureInstalled(committedJobId, fixture, committedTimestamp);
+    const committedOperationId = await insertCopyOperationFixture({ jobId: committedJobId, fixture, stage: "committed", resultStatus: "copied" });
+    await ctx.database.db.update(schema.jobs).set({ status: "completed", finishedAt: committedTimestamp }).where(eq(schema.jobs.id, committedJobId));
+    expect(committedOperationId).toBeGreaterThan(legacyOperationId);
+
+    const policyMutation = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: "Later Commit Wins", policy: "location_2" }
+    });
+    expect(policyMutation.statusCode).toBe(200);
+    expect(policyMutation.json()).toMatchObject({ title: "Later Commit Wins", policy: "location_2" });
+  });
+
   it("rejects duplicate copy jobs while matching media is already queued", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Duplicate Queue Movie", kind: "remote", storagePolicy: "location_1", content: "copy once" });
@@ -2257,12 +2399,18 @@ describe("api app", () => {
     await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
       status: "completed",
       progress: expect.objectContaining({
-        options: expect.objectContaining({ direction: "to_local", section: "shows", itemName: "Scoped Copy Show", relativePathPrefix: "Scoped Copy Show/Season 01" }),
-        current: 2,
-        total: 2,
+        options: expect.objectContaining({
+          direction: "to_local",
+          linkIds: [needsCopy.id],
+          section: "shows",
+          itemName: "Scoped Copy Show",
+          relativePathPrefix: "Scoped Copy Show/Season 01"
+        }),
+        current: 1,
+        total: 1,
         copied: 1,
-        skipped: 1,
-        alreadyCompleted: 1,
+        skipped: 0,
+        alreadyCompleted: 0,
         conflicts: 0,
         failed: 0
       })
@@ -3864,7 +4012,7 @@ describe("api app", () => {
     });
   });
 
-  it("applies storage policies to canonical-equivalent media and storage titles", async () => {
+  it("applies canonical-equivalent media policies without assigning unlinked storage files", async () => {
     const cookie = await createAdminSession();
     const ampersandLinkId = await insertMediaLink("Rock & Roll Movie");
     const wordLinkId = await insertMediaLink("Rock and Roll Movie");
@@ -3891,7 +4039,41 @@ describe("api app", () => {
       .from(schema.storageFiles)
       .where(inArray(schema.storageFiles.itemName, ["Rock & Roll Movie", "Rock and Roll Movie"]));
     expect(files).toHaveLength(2);
-    expect(files.every((file) => file.storagePolicy === "location_2")).toBe(true);
+    expect(files.every((file) => file.storagePolicy === "unassigned")).toBe(true);
+  });
+
+  it("does not treat a completed copy source as storage policy work after its symlink moves local", async () => {
+    const cookie = await createAdminSession();
+    const itemName = "Completed Source Movie";
+    const remoteStorageFileId = await insertStorageFile("remote", path.join("movies", itemName, "remote-source.mkv"));
+    const localStorageFileId = await insertStorageFile("local", path.join("movies", itemName, "local-copy.mkv"));
+    const linkId = await insertMediaLink(itemName, "remote", "movies", undefined, "location_1", remoteStorageFileId);
+    const localStorageFile = await first(ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, localStorageFileId)).limit(1));
+    if (!localStorageFile) throw new Error("Local storage fixture was not found");
+    await ctx.database.db
+      .update(schema.mediaLinks)
+      .set({ kind: "local", targetPath: localStorageFile.filePath, resolvedStorageFileId: localStorageFileId, updatedAt: new Date().toISOString() })
+      .where(eq(schema.mediaLinks.id, linkId));
+    await ctx.database.db.update(schema.storageFiles).set({ storagePolicy: "location_1" }).where(eq(schema.storageFiles.id, remoteStorageFileId));
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/api/storage-policies",
+      headers: { cookie },
+      payload: { title: itemName, policy: "location_1" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(await first(ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, remoteStorageFileId)).limit(1))).toMatchObject({
+      storagePolicy: "unassigned"
+    });
+    expect(await first(ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, localStorageFileId)).limit(1))).toMatchObject({
+      storagePolicy: "location_1"
+    });
+    await expect(getInventorySummary(ctx.database.db)).resolves.toMatchObject({
+      actionableRemoteFiles: 0,
+      unassignedRemoteFiles: 1
+    });
   });
 
   it("manages storage policies and bulk assignments", async () => {
@@ -4032,8 +4214,8 @@ describe("api app", () => {
     const filesAfterBulkAssign = await ctx.app.inject({ method: "GET", url: "/api/storage-files?rootType=remote", headers: { cookie } });
     expect(filesAfterBulkAssign.json<Array<{ itemName: string; storagePolicy: string }>>()).toEqual(
       expect.arrayContaining([
-        expect.objectContaining({ itemName: "Manual Movie", storagePolicy: "location_2" }),
-        expect.objectContaining({ itemName: "Manual Show", storagePolicy: "location_2" })
+        expect.objectContaining({ itemName: "Manual Movie", storagePolicy: "unassigned" }),
+        expect.objectContaining({ itemName: "Manual Show", storagePolicy: "unassigned" })
       ])
     );
 

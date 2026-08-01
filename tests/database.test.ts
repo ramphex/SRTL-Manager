@@ -35,7 +35,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }]);
 
       const workerColumns = await database.pool.query<{ column_name: string }>(`
         select column_name
@@ -163,7 +163,66 @@ describe("database bootstrap", () => {
         { version: 4 },
         { version: 5 },
         { version: 6 },
-        { version: 7 }
+        { version: 7 },
+        { version: 8 }
+      ]);
+    } finally {
+      await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("clears storage policies that are not backed by one current symlink policy", async () => {
+    const testDatabase = await createTestDatabase();
+    const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
+    try {
+      await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+      await legacyPool.query(`
+        INSERT INTO schema_migrations (version, name, applied_at)
+        VALUES
+          (1, 'initial_postgres_schema', now()::text),
+          (2, 'beta_security_and_recovery', now()::text),
+          (3, 'beta_runtime_health_and_cleanup', now()::text),
+          (4, 'location_identity_storage_policies', now()::text),
+          (5, 'multi_worker_job_claims', now()::text),
+          (6, 'copy_operation_file_identities', now()::text),
+          (7, 'path_migration_target_identities', now()::text)
+      `);
+      await legacyPool.query(`CREATE TABLE storage_files (id SERIAL PRIMARY KEY, storage_policy TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+      await legacyPool.query(`
+        CREATE TABLE media_links (
+          id SERIAL PRIMARY KEY,
+          resolved_storage_file_id INTEGER,
+          storage_policy TEXT NOT NULL,
+          missing_since TEXT
+        )
+      `);
+      await legacyPool.query(`
+        INSERT INTO storage_files (storage_policy, updated_at)
+        VALUES ('location_1', now()::text), ('location_1', now()::text), ('location_1', now()::text), ('location_2', now()::text)
+      `);
+      await legacyPool.query(`
+        INSERT INTO media_links (resolved_storage_file_id, storage_policy, missing_since)
+        VALUES
+          (1, 'location_1', NULL),
+          (3, 'location_1', NULL),
+          (3, 'location_2', NULL),
+          (4, 'location_2', now()::text)
+      `);
+    } finally {
+      await legacyPool.end();
+    }
+
+    const database = await openDatabase(testDatabase.databaseUrl);
+    try {
+      expect((await database.pool.query<{ id: number; storage_policy: string }>(`SELECT id, storage_policy FROM storage_files ORDER BY id`)).rows).toEqual([
+        { id: 1, storage_policy: "location_1" },
+        { id: 2, storage_policy: "unassigned" },
+        { id: 3, storage_policy: "unassigned" },
+        { id: 4, storage_policy: "unassigned" }
+      ]);
+      expect((await database.pool.query<{ version: number; name: string }>(`SELECT version, name FROM schema_migrations WHERE version = 8`)).rows).toEqual([
+        { version: 8, name: "linked_storage_file_policies" }
       ]);
     } finally {
       await database.close();
@@ -287,7 +346,8 @@ describe("database bootstrap", () => {
       ).toEqual([
         { version: 5, name: "multi_worker_job_claims" },
         { version: 6, name: "copy_operation_file_identities" },
-        { version: 7, name: "path_migration_target_identities" }
+        { version: 7, name: "path_migration_target_identities" },
+        { version: 8, name: "linked_storage_file_policies" }
       ]);
     } finally {
       await database.close();

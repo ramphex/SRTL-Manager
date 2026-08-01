@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../db/database";
 import * as schema from "../db/schema";
 import { canonicalTitleKey } from "../lib/storagePolicies";
+import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 
 export interface MutationResource {
@@ -96,15 +97,9 @@ export async function withResourceMutationGuard<T>(
             join jobs on jobs.id = active.job_id
             where jobs.status in ('queued', 'running')
             union
-            select active.job_id, active.resource_type, active.resource_key, 'copy'::text as type, 'reconciliation_required'::text as status
-            from job_resource_claims as active
-            join copy_operations as operation on operation.job_id = active.job_id
-            where operation.stage = 'reconciliation_required'
-              and active.resource_type <> 'title'
-            union
-            select operation.job_id, 'media'::text, operation.media_link_id::text, 'copy'::text as type, 'reconciliation_required'::text as status
-            from copy_operations as operation
-            where operation.stage = 'reconciliation_required'
+            select copy_operations.job_id, 'media'::text, copy_operations.media_link_id::text, 'copy'::text as type, 'reconciliation_required'::text as status
+            from copy_operations
+            where ${unresolvedCopyReconciliation()}
           )
           select active.job_id as "jobId", active.type, active.status
           from requested_resources as requested

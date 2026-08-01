@@ -279,6 +279,7 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
     try {
       return { jobId: await jobs.startCopy(body) };
     } catch (error: unknown) {
+      request.log.warn({ err: error }, "Copy admission rejected");
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });

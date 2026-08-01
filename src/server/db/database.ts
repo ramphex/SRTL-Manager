@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 7;
+export const currentSchemaVersion = 8;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -222,6 +222,59 @@ async function initializeDatabase(pool: Pool): Promise<void> {
       try {
         await client.query(`ALTER TABLE path_migration_items ADD COLUMN IF NOT EXISTS target_identity TEXT`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'path_migration_target_identities', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(8)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF to_regclass('public.storage_files') IS NOT NULL
+              AND to_regclass('public.media_links') IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'storage_files' AND column_name = 'updated_at'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'media_links' AND column_name = 'resolved_storage_file_id'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'media_links' AND column_name = 'missing_since'
+              )
+            THEN
+              EXECUTE $cleanup$
+                WITH desired_policies AS (
+                  SELECT
+                    storage_files.id,
+                    CASE
+                      WHEN count(DISTINCT media_links.storage_policy) = 1 THEN min(media_links.storage_policy)
+                      ELSE 'unassigned'
+                    END AS storage_policy
+                  FROM storage_files
+                  LEFT JOIN media_links
+                    ON media_links.resolved_storage_file_id = storage_files.id
+                   AND media_links.missing_since IS NULL
+                  GROUP BY storage_files.id
+                )
+                UPDATE storage_files
+                SET storage_policy = desired_policies.storage_policy,
+                    updated_at = now()::text
+                FROM desired_policies
+                WHERE storage_files.id = desired_policies.id
+                  AND storage_files.storage_policy IS DISTINCT FROM desired_policies.storage_policy
+              $cleanup$;
+            END IF;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'linked_storage_file_policies', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

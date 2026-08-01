@@ -58,6 +58,20 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   return (await response.json()) as T;
 }
 
+const mediaLinkLookupBatchSize = 1000;
+
+export async function mediaLinksByIds(ids: number[]): Promise<MediaLinkRow[]> {
+  const uniqueIds = [...new Set(ids)];
+  if (uniqueIds.length === 0) return [];
+
+  const rows: MediaLinkRow[] = [];
+  for (let offset = 0; offset < uniqueIds.length; offset += mediaLinkLookupBatchSize) {
+    const batch = uniqueIds.slice(offset, offset + mediaLinkLookupBatchSize);
+    rows.push(...(await request<MediaLinkRow[]>("/api/media-links/by-ids", { method: "POST", body: JSON.stringify({ ids: batch }) })));
+  }
+  return rows;
+}
+
 export const api = {
   me: () => request<{ authenticated: boolean; setupRequired: boolean; user: { id: number; username: string } | null }>("/api/auth/me"),
   setup: (body: { username: string; password: string; confirmPassword: string }) =>
@@ -97,7 +111,7 @@ export const api = {
   startCopy: (body: CopyOptions) => request<{ jobId: number }>("/api/copies", { method: "POST", body: JSON.stringify(body) }),
   copyConflicts: (body: CopyOptions) => request<CopyConflictPreview>("/api/copies/conflicts", { method: "POST", body: JSON.stringify(body) }),
   mediaLinks: (kind?: string) => request<MediaLinkRow[]>(`/api/media-links${kind ? `?kind=${kind}` : ""}`),
-  mediaLinksByIds: (ids: number[]) => request<MediaLinkRow[]>("/api/media-links/by-ids", { method: "POST", body: JSON.stringify({ ids }) }),
+  mediaLinksByIds,
   mediaLinksPage: (params: { kind?: LinkKind; section?: string; storagePolicy?: StoragePolicyKind; relativePathPrefix?: string; search?: string; limit: number; offset: number }) => {
     const search = new URLSearchParams({ limit: String(params.limit), offset: String(params.offset) });
     if (params.kind) search.set("kind", params.kind);
