@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
-import { getRouteApi, Link } from "@tanstack/react-router";
+import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowUp, Blocks, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Radar, Search, ServerCog, Settings, TriangleAlert, UserCog } from "lucide-react";
+import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, TriangleAlert, UserCog } from "lucide-react";
 import { api } from "./api";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
@@ -10,7 +10,7 @@ import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
 import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
-import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatDate, formatDuration, formatNumber, integrationPlaceholders, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useStorageLocations, useUserPreferences } from "./appShared";
+import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
 import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
 
@@ -426,60 +426,6 @@ function MetricGroup({ title, description, metrics }: { title: string; descripti
   );
 }
 
-export function IntegrationsPage() {
-  return (
-    <Page title="Integrations" subtitle="Automation hooks and metadata-assisted workflows will land here.">
-      <section className="coming-soon-panel">
-        <div>
-          <Blocks size={24} />
-          <h2>Coming soon</h2>
-          <p>Integration-driven workflows are not active yet. Connection settings live under Settings &gt; Integrations while this page is being built out.</p>
-        </div>
-        <Link to="/settings/integrations" className="button-link">
-          <ServerCog size={16} />
-          Open integration settings
-        </Link>
-      </section>
-    </Page>
-  );
-}
-
-function IntegrationSettingsPanel() {
-  return (
-    <>
-      <p className="section-settings-help">Integration settings are placeholders until the adapters are built. These fields are intentionally disabled and do not connect, save, sync, or run health checks yet.</p>
-      <div className="integration-grid">
-        {integrationPlaceholders.map((integration) => (
-          <Panel key={integration.name} title={integration.name} icon={<Radar size={18} />}>
-            <div className="integration-placeholder-copy">
-              <p>{integration.description}</p>
-              <span className="pill pill-info">Coming soon</span>
-            </div>
-            <fieldset className="form-grid integration-placeholder-fields" disabled aria-disabled="true">
-              <label>
-                Enabled
-                <input type="checkbox" checked={false} readOnly />
-              </label>
-              <label>
-                Base URL
-                <input value="" readOnly placeholder={integration.urlPlaceholder} />
-              </label>
-              <label>
-                API key
-                <input value="" readOnly placeholder={integration.keyPlaceholder} />
-              </label>
-            </fieldset>
-          </Panel>
-        ))}
-      </div>
-      <button type="button" disabled>
-        <CheckCircle2 size={16} />
-        Save integrations unavailable
-      </button>
-    </>
-  );
-}
-
 export function SettingsPage({ activeView }: { activeView: SettingsView }) {
   const queryClient = useQueryClient();
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths, enabled: activeView === "library" });
@@ -505,12 +451,10 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
   const subtitle =
     activeView === "library"
       ? "Name storage locations, review mounted paths, and manage library sections."
-      : activeView === "integrations"
-        ? "Preview planned external connection settings."
       : activeView === "advanced"
         ? "Tune job behavior and verification defaults."
         : "Manage display preferences and account access.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "integrations" ? "Integrations" : activeView === "advanced" ? "Advanced" : "User settings";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -534,7 +478,6 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
           </Panel>
         </>
       ) : null}
-      {activeView === "integrations" ? <IntegrationSettingsPanel /> : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
     </Page>
@@ -642,6 +585,7 @@ function StorageLocationsPanel({ paths, isLoadingPaths, pathsError }: { paths: P
 function AdvancedSettingsPanel() {
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
+  const reconciliation = useQuery({ queryKey: ["copy-reconciliation"], queryFn: api.copyReconciliation, refetchInterval: 30_000 });
   const [draft, setDraft] = useState<AdvancedSettings>(defaultAdvancedSettings);
   const [message, setMessage] = useState<string | null>(null);
   const savedAdvancedSettings = normalizeAdvancedSettings(settings.data ?? defaultAdvancedSettings);
@@ -657,6 +601,13 @@ function AdvancedSettingsPanel() {
       queryClient.setQueryData(["advanced-settings"], normalized);
       setDraft(normalized);
       setMessage("Advanced settings saved.");
+    }
+  });
+  const recheckReconciliation = useMutation({
+    mutationFn: api.recheckCopyReconciliation,
+    onSuccess: (state) => {
+      queryClient.setQueryData(["copy-reconciliation"], state);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
     }
   });
   useEffect(() => {
@@ -762,6 +713,11 @@ function AdvancedSettingsPanel() {
               ))}
             </ol>
           </div>
+          {copyVerificationDisabled ? (
+            <p className="panel-message verification-disabled-warning" role="alert">
+              Verification is disabled. Copies still use a temporary file and guarded promotion, but source bytes and media integrity are not checked before the symlink is repointed.
+            </p>
+          ) : null}
           {validationError ? <p className="panel-message action-error">{validationError}</p> : null}
         </section>
 
@@ -799,6 +755,39 @@ function AdvancedSettingsPanel() {
               </span>
             </label>
           </div>
+        </section>
+
+        <section className="advanced-settings-section">
+          <div className="advanced-settings-heading">
+            <div>
+              <h3>Copy recovery</h3>
+              <p>Rechecks interrupted copy journals and automatically closes only states proven safe from the current symlink and journal files.</p>
+            </div>
+            <span className={`pill ${reconciliation.data?.unresolvedCount ? "pill-warning" : "pill-info"}`}>
+              {reconciliation.isLoading ? "Checking" : `${formatNumber(reconciliation.data?.unresolvedCount ?? 0)} unresolved`}
+            </span>
+          </div>
+          {reconciliation.error ? <p className="panel-message action-error">{reconciliation.error.message}</p> : null}
+          {recheckReconciliation.data?.resolvedNow ? (
+            <p className="panel-message success">Resolved {formatNumber(recheckReconciliation.data.resolvedNow)} stale copy journal {recheckReconciliation.data.resolvedNow === 1 ? "entry" : "entries"}.</p>
+          ) : null}
+          {(reconciliation.data?.unresolved ?? []).length > 0 ? (
+            <ul className="settings-reconciliation-list">
+              {(reconciliation.data?.unresolved ?? []).slice(0, 20).map((operation) => (
+                <li key={operation.id}>
+                  <strong>Operation #{operation.id} / job #{operation.jobId}</strong>
+                  <span>{operation.errorMessage ?? "Filesystem state is still uncertain."}</span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="section-settings-help">No copy journals currently require operator attention.</p>
+          )}
+          <button type="button" className="secondary" onClick={() => recheckReconciliation.mutate()} disabled={recheckReconciliation.isPending || reconciliation.isLoading}>
+            <Activity size={16} />
+            {recheckReconciliation.isPending ? "Rechecking..." : "Recheck filesystem state"}
+          </button>
+          {recheckReconciliation.error ? <span className="error">{recheckReconciliation.error.message}</span> : null}
         </section>
 
         <div className="advanced-settings-actions">

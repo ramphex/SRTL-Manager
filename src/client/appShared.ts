@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { Blocks, FolderCog, Gauge, ListChecks, Monitor, Moon, Search, Sun, UserCog } from "lucide-react";
+import { FolderCog, Gauge, ListChecks, Monitor, Moon, Search, Sun, UserCog } from "lucide-react";
 import { api } from "./api";
 import { scanOptionsFromJob } from "./jobScopeLocks";
 import { mergeJobEventPages } from "./jobEvents";
@@ -12,7 +12,7 @@ export type ThemePreference = "light" | "dark" | "system";
 
 export type SymlinkKindFilter = Exclude<MediaLinkTreeKindFilter, "other" | "non_media"> | "all";
 
-export type SettingsView = "library" | "integrations" | "advanced" | "user";
+export type SettingsView = "library" | "advanced" | "user";
 
 export type SidebarGroup = "history" | "settings";
 
@@ -112,24 +112,8 @@ export const historySections = [
 
 export const settingsSections = [
   { view: "library", to: "/settings", label: "Library", icon: FolderCog },
-  { view: "integrations", to: "/settings/integrations", label: "Integrations", icon: Blocks },
   { view: "advanced", to: "/settings/advanced", label: "Advanced", icon: Gauge },
   { view: "user", to: "/settings/user", label: "User settings", icon: UserCog }
-] as const;
-
-export const integrationPlaceholders = [
-  {
-    name: "Metadata integration",
-    description: "Future metadata lookup, health checks, and candidate mapping.",
-    urlPlaceholder: "Connection URL",
-    keyPlaceholder: "Encrypted API key"
-  },
-  {
-    name: "Automation integration",
-    description: "Future refresh hooks and event-driven inventory updates.",
-    urlPlaceholder: "Connection URL",
-    keyPlaceholder: "Encrypted API key"
-  }
 ] as const;
 
 export const copyProfileOptions: Array<{ value: CopyVerificationProfile; label: string; detail: string }> = [

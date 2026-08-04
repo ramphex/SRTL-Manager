@@ -2,7 +2,7 @@ import { sql } from "drizzle-orm";
 import type { Db } from "../db/database";
 import * as schema from "../db/schema";
 import { canonicalTitleKey } from "../lib/storagePolicies";
-import { unresolvedCopyReconciliation } from "./copyReconciliation";
+import { reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 
 export interface MutationResource {
@@ -38,6 +38,15 @@ export class ActiveJobResourceConflictError extends Error {
   }
 }
 
+export class ActiveJobConfigurationConflictError extends Error {
+  readonly statusCode = 409;
+
+  constructor(job: ActiveJobConflict) {
+    super(`Library folders cannot be changed while ${job.type} job #${job.jobId} is ${job.status}. Wait for it to finish or terminate it first.`);
+    this.name = "ActiveJobConfigurationConflictError";
+  }
+}
+
 function normalizeResources(resources: MutationResource[]): MutationResource[] {
   const unique = new Map<string, MutationResource>();
   for (const resource of resources) unique.set(`${resource.resourceType}\0${resource.resourceKey}`, resource);
@@ -66,6 +75,7 @@ export async function withResourceMutationGuard<T>(
   db: Db,
   prepare: (transaction: Db) => Promise<PreparedResourceMutation<T>>
 ): Promise<T> {
+  await reconcileProvablySettledCopyOperations(db);
   return db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
     const prepared = await prepare(transaction);
@@ -114,5 +124,22 @@ export async function withResourceMutationGuard<T>(
     }
 
     return prepared.mutate();
+  });
+}
+
+export async function withQueueConfigurationGuard<T>(db: Db, mutate: (transaction: Db) => Promise<T>): Promise<T> {
+  return db.transaction(async (transaction) => {
+    await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
+    const activeJob = (
+      await transaction.execute<ActiveJobConflict>(sql`
+        select id as "jobId", type, status
+        from jobs
+        where status in ('queued', 'running')
+        order by id
+        limit 1
+      `)
+    ).rows[0];
+    if (activeJob) throw new ActiveJobConfigurationConflictError(activeJob);
+    return mutate(transaction);
   });
 }

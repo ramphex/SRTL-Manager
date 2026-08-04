@@ -3,7 +3,7 @@ import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { JobConcurrencySettings } from "../config";
-import { dbGet, first, getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
+import { dbAll, dbGet, first, getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { auditMediaLink, defaultAuditRunner, type AuditCommandRunner } from "../lib/auditor";
 import {
@@ -28,7 +28,7 @@ import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
-import { unresolvedCopyReconciliation } from "./copyReconciliation";
+import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 import type {
   AuditMode,
@@ -38,11 +38,14 @@ import type {
   CopyLocalConflict,
   CopyLocalConflictCandidate,
   CopyLocalConflictStrategy,
+  CopyJobBehaviorSettings,
   CopyOptions,
   InventorySummary,
   JobEventPage,
   JobEventRecord,
   JobRecord,
+  CopyReconciliationState,
+  JobSelectionSummary,
   JobStatus,
   MediaLinkRow,
   PathsSettings,
@@ -53,7 +56,10 @@ import type {
 } from "../../shared/types";
 
 type JobRow = typeof schema.jobs.$inferSelect;
+type StoredCopyOptions = CopyOptions & { behavior?: CopyJobBehaviorSettings };
 type CopyProgressStage = CopyProgressUpdate["stage"] | "queued" | "done" | "skipped" | "conflict" | "partially_failed" | "failed" | "completed" | "cancelled";
+const maxSelectionTitlesPerJob = 100;
+const maxAdvisorySelectionLinkIds = 1_000;
 
 class WorkerShutdownError extends Error {
   constructor() {
@@ -96,6 +102,9 @@ interface ResourceClaim {
 
 interface PreparedJob {
   progress: unknown;
+  options?: unknown;
+  selection?: MediaLinkRow[];
+  selectionFrozen?: boolean;
   exclusive: boolean;
   claims: ResourceClaim[];
 }
@@ -241,12 +250,34 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+function compactJobProgress(progress: unknown): unknown {
+  if (!isRecord(progress) || !("options" in progress)) return progress;
+  const { options: _options, ...compact } = progress;
+  return compact;
+}
+
+function progressOptions(progress: unknown): unknown {
+  return isRecord(progress) && "options" in progress ? progress.options : {};
+}
+
+function compactFrozenOptions(options: unknown): unknown {
+  if (!isRecord(options) || !("linkIds" in options)) return options;
+  const { linkIds: _linkIds, ...compact } = options;
+  return compact;
+}
+
+function progressWithOptions(progress: unknown, options: unknown): unknown {
+  if (!isRecord(progress) || !isRecord(options) || Object.keys(options).length === 0) return progress;
+  return { ...progress, options };
+}
+
 function finiteNumberFromRecord(record: Record<string, unknown>, key: string): number {
   const value = record[key];
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 function jobProgressOptions<T>(job: JobRecord): T | null {
+  if (isRecord(job.options) && Object.keys(job.options).length > 0) return job.options as T;
   if (!isRecord(job.progress)) return null;
   return "options" in job.progress ? (job.progress.options as T) : null;
 }
@@ -305,7 +336,7 @@ async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): P
   };
 }
 
-function readAuditOptions(job: JobRecord): AuditOptions {
+function readAuditOptions(job: JobRecord, frozenLinkIds?: number[]): AuditOptions {
   const options = jobProgressOptions<AuditOptions>(job);
   if (!options || (options.mode !== "fast" && options.mode !== "deep")) {
     throw new Error("Audit job is missing valid options");
@@ -314,7 +345,11 @@ function readAuditOptions(job: JobRecord): AuditOptions {
     mode: options.mode,
     ...(Array.isArray(options.sections) ? { sections: options.sections.filter((section) => typeof section === "string" && section.trim()).map((section) => section.trim()) } : {}),
     ...(Array.isArray(options.targets) ? { targets: normalizeAuditTargets(options.targets) } : {}),
-    ...(Array.isArray(options.linkIds) ? { linkIds: options.linkIds.filter((id) => Number.isInteger(id) && id > 0) } : {}),
+    ...(frozenLinkIds !== undefined
+      ? { linkIds: frozenLinkIds }
+      : Array.isArray(options.linkIds)
+        ? { linkIds: options.linkIds.filter((id) => Number.isInteger(id) && id > 0) }
+        : {}),
     ...(typeof options.section === "string" && options.section.trim() ? { section: options.section.trim() } : {}),
     ...(typeof options.itemName === "string" && options.itemName.trim() ? { itemName: options.itemName.trim() } : {}),
     ...(typeof options.relativePathPrefix === "string" && options.relativePathPrefix.trim() ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
@@ -349,27 +384,31 @@ async function normalizeCopyOptions(db: Db, options: CopyOptions): Promise<CopyO
     ...(section ? { section } : {}),
     ...(options.itemName?.trim() ? { itemName: options.itemName.trim() } : {}),
     ...(normalizeRelativePrefix(options.relativePathPrefix) ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
-    ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {})
+    ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
+    ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {})
   };
   if (!normalized.linkIds?.length && !normalized.section && !normalized.itemName) throw new Error("Copy requires link IDs, a folder scope, or a title");
   return normalized;
 }
 
-function readCopyOptions(job: JobRecord): CopyOptions {
-  const options = jobProgressOptions<CopyOptions>(job);
+function readCopyOptions(job: JobRecord, frozenLinkIds?: number[]): StoredCopyOptions {
+  const options = jobProgressOptions<StoredCopyOptions>(job);
   if (!options) throw new Error("Copy job is missing options");
-  return normalizeCopyOptionsFromProgress(options);
+  return normalizeCopyOptionsFromProgress({ ...options, ...(frozenLinkIds !== undefined ? { linkIds: frozenLinkIds } : {}) });
 }
 
-function normalizeCopyOptionsFromProgress(options: CopyOptions): CopyOptions {
+function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCopyOptions {
   if (options.direction !== "to_local" && options.direction !== "to_remote") throw new Error("Copy job has invalid direction");
+  const behavior = options.behavior ? normalizeAdvancedSettings({ copy: options.behavior }).copy : undefined;
   return {
     direction: options.direction,
     ...(Array.isArray(options.linkIds) ? { linkIds: options.linkIds.filter((id) => Number.isInteger(id) && id > 0) } : {}),
     ...(typeof options.section === "string" && options.section.trim() ? { section: options.section.trim() } : {}),
     ...(typeof options.itemName === "string" && options.itemName.trim() ? { itemName: options.itemName.trim() } : {}),
     ...(typeof options.relativePathPrefix === "string" && options.relativePathPrefix.trim() ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
-    ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {})
+    ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
+    ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
+    ...(behavior ? { behavior } : {})
   };
 }
 
@@ -487,6 +526,10 @@ function copyAdmissionFingerprint(link: MediaLinkRow): string {
     link.sizeBytes,
     link.missingSince
   ]);
+}
+
+export function copyAdmissionSelectionFingerprint(links: readonly MediaLinkRow[]): string {
+  return JSON.stringify(links.map(copyAdmissionFingerprint).sort());
 }
 
 function resourceClaimKey(claim: Pick<ResourceClaim, "resourceType" | "resourceKey">): string {
@@ -1006,19 +1049,28 @@ async function copyLocalConflictForLink(
 }
 
 async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyOptions): Promise<CopyConflictPreview> {
-  if (options.direction !== "to_local") return { conflicts: [], totalConflicts: 0, totalCandidates: 0 };
   const selectedLinks = orderedCopySelection(await listMediaLinks(db), options);
   const links = filterCopyLinks(selectedLinks, { ...options, linkIds: selectedLinks.map((link) => link.id) });
+  const sourceTitleRisks = links.flatMap((link) => {
+    const risk = evaluateSourceTitleRisk({ expectedTitle: link.itemName, sourcePath: link.targetPath });
+    return risk.severity === "block"
+      ? [{ linkId: link.id, itemName: link.itemName, relativePath: link.relativePath, sourcePath: link.targetPath, reason: risk.reason }]
+      : [];
+  });
   const selectedDestinations = await copySelectedDestinationsForLinks(selectedLinks, paths, options.direction);
   const conflicts: CopyLocalConflict[] = [];
-  for (const link of links) {
-    const conflict = await copyLocalConflictForLink(db, link, paths, selectedDestinations);
-    if (conflict) conflicts.push(conflict);
+  if (options.direction === "to_local") {
+    for (const link of links) {
+      const conflict = await copyLocalConflictForLink(db, link, paths, selectedDestinations);
+      if (conflict) conflicts.push(conflict);
+    }
   }
   return {
     conflicts,
     totalConflicts: conflicts.length,
-    totalCandidates: conflicts.reduce((total, conflict) => total + conflict.candidates.length, 0)
+    totalCandidates: conflicts.reduce((total, conflict) => total + conflict.candidates.length, 0),
+    sourceTitleRisks,
+    totalSourceTitleBlocks: sourceTitleRisks.length
   };
 }
 
@@ -1823,16 +1875,106 @@ async function readCopyResumeState(db: Db, jobId: number, selectedLinks: MediaLi
 
 function toJobRecord(row: JobRow): LeasedJob {
   const progress = parseJson(row.progress);
-  const normalizedProgress = normalizeJobProgress(row.type, row.status, progress);
+  const options = parseJson(row.options);
+  const normalizedProgress = normalizeJobProgress(row.type, row.status, progressWithOptions(progress, options));
   const status = normalizeJobStatus(row.type, row.status, progress);
   return {
     ...row,
     type: row.type as JobRecord["type"],
     status,
+    options,
+    selectionFrozen: row.selectionFrozen,
     progress: normalizedProgress,
     leaseVersion: row.leaseVersion,
     exclusive: row.exclusive
   };
+}
+
+function legacySelectionCount(job: JobRecord): number {
+  const options = jobProgressOptions<{ linkIds?: unknown }>(job);
+  return Array.isArray(options?.linkIds) ? options.linkIds.length : 0;
+}
+
+async function attachJobSelections(db: DbExecutor, jobs: JobRecord[]): Promise<JobRecord[]> {
+  const selectedJobs = jobs.filter((job) => job.selectionFrozen);
+  if (selectedJobs.length === 0) return jobs;
+  const jobIds = selectedJobs.map((job) => job.id);
+  const titleRows = await dbAll<{ jobId: number; section: string; itemName: string; count: number; titleCount: number; selectionCount: number }>(db as Db, sql`
+    WITH selected_job_ids AS (
+      SELECT value::integer AS job_id
+      FROM jsonb_array_elements_text(${JSON.stringify(jobIds)}::jsonb)
+    ), title_counts AS (
+      SELECT items.job_id,
+             items.section,
+             items.item_name,
+             count(*)::integer AS count
+      FROM job_selection_items AS items
+      JOIN selected_job_ids ON selected_job_ids.job_id = items.job_id
+      GROUP BY items.job_id, items.section, items.item_name
+    ), ranked_titles AS (
+      SELECT title_counts.*,
+             count(*) OVER (PARTITION BY title_counts.job_id)::integer AS title_count,
+             sum(title_counts.count) OVER (PARTITION BY title_counts.job_id)::integer AS selection_count,
+             row_number() OVER (PARTITION BY title_counts.job_id ORDER BY title_counts.item_name, title_counts.section) AS title_order
+      FROM title_counts
+    )
+    SELECT ranked_titles.job_id AS "jobId",
+           ranked_titles.section,
+           ranked_titles.item_name AS "itemName",
+           ranked_titles.count,
+           ranked_titles.title_count AS "titleCount",
+           ranked_titles.selection_count AS "selectionCount"
+    FROM ranked_titles
+    WHERE ranked_titles.title_order <= ${maxSelectionTitlesPerJob}
+    ORDER BY ranked_titles.job_id, ranked_titles.title_order
+  `);
+  const activeJobIds = selectedJobs.filter((job) => job.status === "queued" || job.status === "running").map((job) => job.id);
+  const activeLinkRows = activeJobIds.length === 0
+    ? []
+    : await dbAll<{ jobId: number; mediaLinkId: number; selectionOrder: number }>(db as Db, sql`
+        WITH active_job_ids AS (
+          SELECT value::integer AS job_id
+          FROM jsonb_array_elements_text(${JSON.stringify(activeJobIds)}::jsonb)
+        ), eligible_jobs AS (
+          SELECT items.job_id
+          FROM job_selection_items AS items
+          JOIN active_job_ids ON active_job_ids.job_id = items.job_id
+          GROUP BY items.job_id
+          HAVING count(*) <= ${maxAdvisorySelectionLinkIds}
+        )
+        SELECT items.job_id AS "jobId",
+               items.media_link_id AS "mediaLinkId",
+               items.selection_order AS "selectionOrder"
+        FROM job_selection_items AS items
+        JOIN eligible_jobs ON eligible_jobs.job_id = items.job_id
+        ORDER BY items.job_id, items.selection_order
+      `);
+  const summaryByJobId = new Map<number, JobSelectionSummary>();
+  const titleCountByJobId = new Map<number, number>();
+  const selectionCountByJobId = new Map<number, number>();
+  for (const job of selectedJobs) {
+    summaryByJobId.set(job.id, { total: legacySelectionCount(job), titles: [], unavailable: 0 });
+  }
+  for (const row of titleRows) {
+    const summary = summaryByJobId.get(row.jobId);
+    if (!summary) continue;
+    summary.titles.push({ section: row.section, itemName: row.itemName, count: Number(row.count) });
+    titleCountByJobId.set(row.jobId, Number(row.titleCount));
+    selectionCountByJobId.set(row.jobId, Number(row.selectionCount));
+  }
+  for (const [jobId, summary] of summaryByJobId) {
+    const snapshotCount = selectionCountByJobId.get(jobId) ?? 0;
+    summary.total = Math.max(summary.total, snapshotCount);
+    summary.unavailable = Math.max(0, summary.total - snapshotCount);
+    const omittedTitles = Math.max(0, (titleCountByJobId.get(jobId) ?? summary.titles.length) - summary.titles.length);
+    if (omittedTitles > 0) summary.omittedTitles = omittedTitles;
+  }
+  for (const row of activeLinkRows) {
+    const summary = summaryByJobId.get(row.jobId);
+    if (!summary) continue;
+    (summary.linkIds ??= []).push(row.mediaLinkId);
+  }
+  return jobs.map((job) => ({ ...job, ...(summaryByJobId.has(job.id) ? { selection: summaryByJobId.get(job.id) } : {}) }));
 }
 
 function normalizeJobStatus(type: string, status: string, progress: unknown): JobStatus {
@@ -1875,10 +2017,11 @@ export class JobRunner {
   }
 
   private async enqueueJob(type: JobRecord["type"], progress: unknown, exclusive: boolean, requestedClaims: ResourceClaim[]): Promise<number> {
-    return this.enqueuePreparedJob(type, async () => ({ progress, exclusive, claims: requestedClaims }));
+    return this.enqueuePreparedJob(type, async () => ({ progress, options: progressOptions(progress), exclusive, claims: requestedClaims }));
   }
 
   private async enqueuePreparedJob(type: JobRecord["type"], prepare: (db: DbExecutor) => Promise<PreparedJob>): Promise<number> {
+    await reconcileProvablySettledCopyOperations(this.db);
     if (type !== "path_migration" && (await isPathConfigurationBlocked(this.db))) {
       throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
     }
@@ -1953,6 +2096,9 @@ export class JobRunner {
       }
 
       const timestamp = nowIso();
+      const selection = prepared.selection ?? [];
+      const selectionFrozen = prepared.selectionFrozen === true;
+      const immutableOptions = selectionFrozen ? compactFrozenOptions(prepared.options ?? progressOptions(prepared.progress)) : (prepared.options ?? progressOptions(prepared.progress));
       const row = await first(
         transaction
           .insert(schema.jobs)
@@ -1967,12 +2113,28 @@ export class JobRunner {
             heartbeatAt: null,
             leaseVersion: 0,
             exclusive: prepared.exclusive,
+            options: JSON.stringify(immutableOptions),
+            selectionFrozen,
             cancelRequestedAt: null,
-            progress: JSON.stringify(prepared.progress)
+            progress: JSON.stringify(compactJobProgress(prepared.progress))
           })
           .returning({ id: schema.jobs.id })
       );
       if (!row) throw new Error("Job was not queued");
+      for (let offset = 0; offset < selection.length; offset += 500) {
+        await transaction.insert(schema.jobSelectionItems).values(
+          selection.slice(offset, offset + 500).map((link, index) => ({
+            jobId: row.id,
+            mediaLinkId: link.id,
+            selectionOrder: offset + index,
+            section: link.section,
+            itemName: link.itemName,
+            relativePath: link.relativePath,
+            linkPath: link.linkPath,
+            createdAt: timestamp
+          }))
+        );
+      }
       for (let offset = 0; offset < claims.length; offset += 500) {
         await transaction.insert(schema.jobResourceClaims).values(
           claims.slice(offset, offset + 500).map((claim) => ({
@@ -1994,7 +2156,7 @@ export class JobRunner {
     const activeStatuses: JobStatus[] = ["queued", "running"];
     const terminalStatuses: JobStatus[] = ["completed", "partially_failed", "failed", "cancelled"];
     const activeRows = await this.db.select().from(schema.jobs).where(inArray(schema.jobs.status, activeStatuses)).orderBy(desc(schema.jobs.id));
-    if (options.activeOnly) return activeRows.map(toJobRecord);
+    if (options.activeOnly) return attachJobSelections(this.db, activeRows.map(toJobRecord));
 
     const terminalRows = options.completedSince
       ? await this.db
@@ -2009,12 +2171,22 @@ export class JobRunner {
           .where(inArray(schema.jobs.status, terminalStatuses))
           .orderBy(desc(schema.jobs.id))
           .limit(limit);
-    return [...activeRows, ...terminalRows].sort((a, b) => b.id - a.id).map(toJobRecord);
+    return attachJobSelections(this.db, [...activeRows, ...terminalRows].sort((a, b) => b.id - a.id).map(toJobRecord));
   }
 
   async getJob(jobId: number): Promise<JobRecord | null> {
     const row = await first(this.db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).limit(1));
-    return row ? toJobRecord(row) : null;
+    if (!row) return null;
+    return (await attachJobSelections(this.db, [toJobRecord(row)]))[0] ?? null;
+  }
+
+  async copyReconciliationState(): Promise<CopyReconciliationState> {
+    const unresolved = await listCopyReconciliation(this.db);
+    return { unresolved, unresolvedCount: unresolved.length, resolvedNow: 0 };
+  }
+
+  async recheckCopyReconciliation(): Promise<CopyReconciliationState> {
+    return reconcileProvablySettledCopyOperations(this.db);
   }
 
   async listEvents(jobId: number, afterId = 0, limit = 100): Promise<JobEventRecord[]> {
@@ -2118,6 +2290,7 @@ export class JobRunner {
       }
       return {
         progress: { options: normalizedOptions },
+        options: normalizedOptions,
         exclusive: false,
         claims: await titleScanResourceClaims(normalizedOptions, scanLinks, paths)
       };
@@ -2141,6 +2314,9 @@ export class JobRunner {
       const frozenOptions = { ...optionsWithDefaults, linkIds: auditLinks.map((link) => link.id) };
       return {
         progress: { options: frozenOptions },
+        options: frozenOptions,
+        selection: auditLinks,
+        selectionFrozen: true,
         exclusive: false,
         claims: await auditResourceClaims(auditLinks, paths)
       };
@@ -2153,19 +2329,21 @@ export class JobRunner {
     const orderedSelectedLinks = orderedCopySelection(links, normalizedOptions);
     const claimedLinks = normalizedOptions.linkIds === undefined ? orderedSelectedLinks : filterCopySelectedLinks(links, normalizedOptions);
     const optionsWithResolvedLinks = { ...normalizedOptions, linkIds: orderedSelectedLinks.map((link) => link.id) };
+    const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
+    const storedOptions: StoredCopyOptions = { ...optionsWithResolvedLinks, behavior: advancedSettings.copy };
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
     const replacementClaims = await copyReplacementResourceClaims(this.db, orderedSelectedLinks, paths, optionsWithResolvedLinks);
-    const expectedSelection = orderedSelectedLinks.map(copyAdmissionFingerprint);
-    const expectedClaimedSelection = claimedLinks.map(copyAdmissionFingerprint);
+    const expectedSelection = copyAdmissionSelectionFingerprint(orderedSelectedLinks);
+    const expectedClaimedSelection = copyAdmissionSelectionFingerprint(claimedLinks);
     return this.enqueuePreparedJob("copy", async (transaction) => {
       const currentLinks = await listMediaLinks(transaction, undefined, "current");
       const currentSelection = orderedCopySelection(currentLinks, normalizedOptions);
       const currentClaimedSelection = normalizedOptions.linkIds === undefined ? currentSelection : filterCopySelectedLinks(currentLinks, normalizedOptions);
       const currentPaths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
       if (
-        JSON.stringify(currentSelection.map(copyAdmissionFingerprint)) !== JSON.stringify(expectedSelection) ||
-        JSON.stringify(currentClaimedSelection.map(copyAdmissionFingerprint)) !== JSON.stringify(expectedClaimedSelection) ||
+        copyAdmissionSelectionFingerprint(currentSelection) !== expectedSelection ||
+        copyAdmissionSelectionFingerprint(currentClaimedSelection) !== expectedClaimedSelection ||
         currentPaths.symlinkDir !== paths.symlinkDir ||
         currentPaths.localDir !== paths.localDir ||
         currentPaths.remoteDir !== paths.remoteDir
@@ -2173,7 +2351,10 @@ export class JobRunner {
         throw new Error("Copy selection changed while the job was being prepared. Review the current inventory and queue it again.");
       }
       return {
-        progress: { options: optionsWithResolvedLinks },
+        progress: { options: storedOptions },
+        options: storedOptions,
+        selection: orderedSelectedLinks,
+        selectionFrozen: true,
         exclusive: false,
         claims: [...(await copyResourceClaims(orderedSelectedLinks, claimedLinks, paths, normalizedOptions)), ...replacementClaims]
       };
@@ -2786,17 +2967,32 @@ export class JobWorker {
   }
 
   private async runHandler(job: JobRecord, ctx: JobContext): Promise<void> {
+    const frozenLinkIds = job.selectionFrozen
+      ? (() => {
+          const legacyIds = jobProgressOptions<{ linkIds?: unknown }>(job)?.linkIds;
+          return Array.isArray(legacyIds) && legacyIds.every((id) => Number.isInteger(id) && Number(id) > 0)
+            ? legacyIds.map(Number)
+            : null;
+        })() ??
+        (
+          await this.db
+            .select({ mediaLinkId: schema.jobSelectionItems.mediaLinkId })
+            .from(schema.jobSelectionItems)
+            .where(eq(schema.jobSelectionItems.jobId, job.id))
+            .orderBy(asc(schema.jobSelectionItems.selectionOrder))
+        ).map((item) => item.mediaLinkId)
+      : undefined;
     if (job.type === "scan") {
       const options = jobProgressOptions<ScanOptions>(job) ?? defaultScanOptions;
       await this.runScanJob(job.id, await normalizeScanOptions(this.db, { ...defaultScanOptions, ...options }), ctx);
       return;
     }
     if (job.type === "audit") {
-      await this.runAuditJob(job.id, readAuditOptions(job), ctx);
+      await this.runAuditJob(job.id, readAuditOptions(job, frozenLinkIds), ctx);
       return;
     }
     if (job.type === "copy") {
-      await this.runCopyJob(readCopyOptions(job), ctx);
+      await this.runCopyJob(readCopyOptions(job, frozenLinkIds), ctx);
       return;
     }
     if (job.type === "path_migration") {
@@ -2871,7 +3067,7 @@ export class JobWorker {
     const row = await first(
       this.db
         .update(schema.jobs)
-        .set({ progress: JSON.stringify(progress) })
+        .set({ progress: JSON.stringify(compactJobProgress(progress)) })
         .where(
           and(
             eq(schema.jobs.id, job.id),
@@ -3125,7 +3321,7 @@ export class JobWorker {
         await completeOnboardingScan(leaseDb, jobId);
         await leaseDb
           .update(schema.jobs)
-          .set({ progress: JSON.stringify(scanProgressPayload(normalizedOptions, "completed", completionMessage, inventory)) })
+          .set({ progress: JSON.stringify(compactJobProgress(scanProgressPayload(normalizedOptions, "completed", completionMessage, inventory))) })
           .where(eq(schema.jobs.id, jobId));
         await leaseDb.insert(schema.jobEvents).values({
           jobId,
@@ -3225,7 +3421,7 @@ export class JobWorker {
         sections: normalizedOptions.sections,
         section: normalizedOptions.section,
         itemName: normalizedOptions.itemName,
-        linkIds: normalizedOptions.linkIds,
+        selectedLinkCount: normalizedOptions.linkIds?.length,
         relativePathPrefix: normalizedOptions.relativePathPrefix
       });
       const sourceLookup = await this.db.select().from(schema.copySources);
@@ -3301,7 +3497,7 @@ export class JobWorker {
           .update(schema.auditRuns)
           .set({ status: "completed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: null })
           .where(eq(schema.auditRuns.id, auditRun.id));
-        await leaseDb.update(schema.jobs).set({ progress: JSON.stringify(completedProgress) }).where(eq(schema.jobs.id, jobId));
+        await leaseDb.update(schema.jobs).set({ progress: JSON.stringify(compactJobProgress(completedProgress)) }).where(eq(schema.jobs.id, jobId));
         await leaseDb.insert(schema.jobEvents).values({
           jobId,
           timestamp: nowIso(),
@@ -3338,7 +3534,7 @@ export class JobWorker {
     }
   }
 
-  private async runCopyJob(normalizedOptions: CopyOptions, ctx: JobContext): Promise<void> {
+  private async runCopyJob(normalizedOptions: StoredCopyOptions, ctx: JobContext): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
     const durableClaims = await this.db.select().from(schema.jobResourceClaims).where(eq(schema.jobResourceClaims.jobId, ctx.jobId));
@@ -3376,7 +3572,7 @@ export class JobWorker {
         return expected?.lexicalPath === binding.lexicalPath && expected.canonicalPath === binding.canonicalPath;
       });
     };
-    const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
+    const copyBehavior = normalizedOptions.behavior ?? normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).copy;
     await ctx.assertLease();
     // Path-blocked copy jobs are admitted only to reconcile and roll back their
     // durable journal. Mark the context cancelled before replaying that journal.
@@ -3418,8 +3614,6 @@ export class JobWorker {
     let failed = unavailable;
     const resumedCopied = copied;
     const resumedRepointed = repointed;
-    let activeLink: MediaLinkRow | undefined;
-    let activeUpdate: Partial<CopyProgressUpdate> | undefined;
     const replacementCandidateEntries = new Map<
       number,
       { linkId: number; destinationPath: string; candidates: CopyLocalConflictCandidate[]; expectedIdentities: Map<string, CopyCleanupIdentity> }
@@ -3488,7 +3682,7 @@ export class JobWorker {
       skipped,
       unavailable,
       alreadyCompleted,
-      copyBehavior: advancedSettings.copy
+      copyBehavior
     });
     if (links.length === 0) {
       if (failed > 0) {
@@ -3513,9 +3707,7 @@ export class JobWorker {
     let cancellationReported = false;
     const processLink = async (link: MediaLinkRow): Promise<void> => {
       if (await ctx.isCancelled()) return;
-      activeLink = link;
       let linkUpdate: Partial<CopyProgressUpdate> | undefined;
-      activeUpdate = linkUpdate;
       let activeOperationId: number | null = null;
       let filesystemMutationCompleted = false;
       current += 1;
@@ -3528,14 +3720,13 @@ export class JobWorker {
         return;
       }
       const sourceTitleRisk = evaluateSourceTitleRisk({ expectedTitle: link.itemName, sourcePath: link.targetPath });
-      if (sourceTitleRisk.severity === "block") {
+      if (sourceTitleRisk.severity === "block" && !normalizedOptions.allowSourceTitleMismatch) {
         conflicts += 1;
-        activeUpdate = {
+        linkUpdate = {
           sourcePath: link.targetPath,
           linkPath: link.linkPath,
           sizeBytes: link.sizeBytes ?? undefined
         };
-        linkUpdate = activeUpdate;
         await setCopyProgress("conflict", "Source title mismatch blocked copy", link, linkUpdate);
         await ctx.event("warn", "Source title mismatch blocked copy", {
           direction: normalizedOptions.direction,
@@ -3545,6 +3736,15 @@ export class JobWorker {
           risk: sourceTitleRisk
         });
         return;
+      }
+      if (sourceTitleRisk.severity === "block" && normalizedOptions.allowSourceTitleMismatch) {
+        await ctx.event("warn", "Source title mismatch override accepted", {
+          direction: normalizedOptions.direction,
+          itemName: link.itemName,
+          linkPath: link.linkPath,
+          sourcePath: link.targetPath,
+          risk: sourceTitleRisk
+        });
       }
       if (sourceTitleRisk.severity === "warn") {
         await ctx.event("warn", "Source title risk warning", {
@@ -3579,13 +3779,12 @@ export class JobWorker {
           }
           if (unclaimedCandidates.length > 0) {
             conflicts += 1;
-            activeUpdate = {
+            linkUpdate = {
               sourcePath: link.targetPath,
               destinationPath: localConflict.destinationPath,
               linkPath: link.linkPath,
               sizeBytes: link.sizeBytes ?? undefined
             };
-            linkUpdate = activeUpdate;
             await setCopyProgress("conflict", "Local replacement candidates changed after copy admission; queue the copy again", link, linkUpdate);
             await ctx.event("warn", "Local replacement candidates changed after copy admission", {
               ...localConflict,
@@ -3596,13 +3795,12 @@ export class JobWorker {
         }
         if (localConflict && !normalizedOptions.localConflictStrategy) {
           conflicts += 1;
-          activeUpdate = {
+          linkUpdate = {
             sourcePath: link.targetPath,
             destinationPath: localConflict.destinationPath,
             linkPath: link.linkPath,
             sizeBytes: link.sizeBytes ?? undefined
           };
-          linkUpdate = activeUpdate;
           await setCopyProgress("conflict", "Existing local file requires copy resolution", link, linkUpdate);
           await ctx.event("warn", "Existing local file requires copy resolution", localConflict);
           return;
@@ -3630,7 +3828,6 @@ export class JobWorker {
             this.copyRunner,
             async (update) => {
               linkUpdate = update;
-              activeUpdate = linkUpdate;
               await setCopyProgress(update.stage, update.message, link, linkUpdate);
               if (update.stage === "copying" || (update.stage === "preparing" && !/retry/i.test(update.message))) return;
               const progressEventKey = `${update.stage}:${update.message}`;
@@ -3657,7 +3854,7 @@ export class JobWorker {
                 })
               );
             },
-            advancedSettings.copy,
+            copyBehavior,
             ctx.signal,
             normalizedOptions.localConflictStrategy,
             (update) => ctx.withLeaseDb((leaseDb) => updateCopyOperation(leaseDb, operation.id, update)),
@@ -3671,9 +3868,8 @@ export class JobWorker {
           await ctx.withLeaseDb((leaseDb) => commitCopyOperation(leaseDb, operation.id, link, result));
           copied += 1;
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
-          activeUpdate = linkUpdate;
           await setCopyProgress("done", result.message, link, linkUpdate);
-          await ctx.event("info", advancedSettings.copy.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
+          await ctx.event("info", copyBehavior.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.set(link.id, {
               linkId: link.id,
@@ -3686,7 +3882,6 @@ export class JobWorker {
           await ctx.withLeaseDb((leaseDb) => commitCopyOperation(leaseDb, operation.id, link, result));
           repointed += 1;
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
-          activeUpdate = linkUpdate;
           await setCopyProgress("done", result.message, link, linkUpdate);
           await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
@@ -3701,14 +3896,12 @@ export class JobWorker {
           conflicts += 1;
           await ctx.withLeaseDb((leaseDb) => completeCopyOperationWithoutMutation(leaseDb, operation.id, result));
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
-          activeUpdate = linkUpdate;
           await setCopyProgress("conflict", result.message, link, linkUpdate);
           await ctx.event("warn", "Destination conflict; file was not overwritten", result);
         } else {
           skipped += 1;
           await ctx.withLeaseDb((leaseDb) => completeCopyOperationWithoutMutation(leaseDb, operation.id, result));
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
-          activeUpdate = linkUpdate;
           await setCopyProgress("skipped", result.message, link, linkUpdate);
           await ctx.event("info", "Copy skipped", result);
         }
@@ -3764,7 +3957,7 @@ export class JobWorker {
       throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new WorkerShutdownError());
     }
     const rollbackCancelledCopy = async () => {
-      await setCopyProgress("cancelled", "Rolling back completed copy changes", activeLink, activeUpdate);
+      await setCopyProgress("cancelled", "Rolling back completed copy changes");
       const { rolledBack, warnings } = await rollbackDurableCopyOperations(this.db, ctx.jobId, paths, ctx);
       copied = resumedCopied;
       repointed = resumedRepointed;
@@ -3779,7 +3972,7 @@ export class JobWorker {
       const completed = copied + repointed + skipped + conflicts;
       const partialFailure = completed > 0;
       const failureMessage = partialFailure ? `Copy job partially failed: ${failed} of ${total} ${itemLabel} failed` : `Copy job failed: ${failed} of ${total} ${itemLabel} failed`;
-      await setCopyProgress(partialFailure ? "partially_failed" : "failed", failureMessage, activeLink, activeUpdate);
+      await setCopyProgress(partialFailure ? "partially_failed" : "failed", failureMessage);
       await ctx.event(partialFailure ? "warn" : "error", partialFailure ? "Copy job partially failed processing media" : "Copy job failed processing media", {
         total,
         copied,
@@ -3794,9 +3987,9 @@ export class JobWorker {
     }
     if (!cancelled) {
       if (replacementCandidateEntries.size > 0) {
-        await setCopyProgress("symlinking", "Finalizing previous local-file replacements", activeLink, activeUpdate);
+        await setCopyProgress("symlinking", "Finalizing previous local-file replacements");
       }
-      await setCopyProgress("completed", links.length === 0 && alreadyCompleted === 0 ? "No matching media found" : "Copy job finished", activeLink, activeUpdate);
+      await setCopyProgress("completed", links.length === 0 && alreadyCompleted === 0 ? "No matching media found" : "Copy job finished");
       await ctx.event("info", "Copy job finished processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
       const finalized = await ctx.finishCompletedIsolated(async (leaseDb) => {
         const finalizationWarnings: string[] = [];
@@ -3857,7 +4050,7 @@ export class JobWorker {
       if (finalized) return;
       await rollbackCancelledCopy();
     }
-    await setCopyProgress("cancelled", "Copy job terminated", activeLink, activeUpdate);
+    await setCopyProgress("cancelled", "Copy job terminated");
     await ctx.event("warn", "Copy job terminated", { total, copied, repointed, skipped, conflicts, failed, unavailable });
   }
 }

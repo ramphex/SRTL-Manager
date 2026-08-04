@@ -504,7 +504,7 @@ async function markUncertainLegacyFailedCopyOperations(db: DbExecutor): Promise<
     await db
       .select()
       .from(schema.copyOperations)
-      .where(eq(schema.copyOperations.stage, "failed"))
+      .where(and(eq(schema.copyOperations.stage, "failed"), isNull(schema.copyOperations.reconciliationResolvedAt)))
   ).filter(
     (operation) =>
       operation.tempIdentity == null &&

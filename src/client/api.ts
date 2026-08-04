@@ -1,11 +1,12 @@
 import type {
   AuditOptions,
-  AuditResultRecord,
+  AuditResultPage,
   AuditRunRecord,
   AuditSettings,
   AdvancedSettings,
   AppVersionInfo,
   CopyConflictPreview,
+  CopyReconciliationState,
   InventorySummary,
   InventoryScanTimestamps,
   JobEventPage,
@@ -110,6 +111,8 @@ export const api = {
   inventoryScanTimestamps: () => request<InventoryScanTimestamps>("/api/inventory/scan-timestamps"),
   startCopy: (body: CopyOptions) => request<{ jobId: number }>("/api/copies", { method: "POST", body: JSON.stringify(body) }),
   copyConflicts: (body: CopyOptions) => request<CopyConflictPreview>("/api/copies/conflicts", { method: "POST", body: JSON.stringify(body) }),
+  copyReconciliation: () => request<CopyReconciliationState>("/api/job-reconciliation"),
+  recheckCopyReconciliation: () => request<CopyReconciliationState>("/api/job-reconciliation/recheck", { method: "POST" }),
   mediaLinks: (kind?: string) => request<MediaLinkRow[]>(`/api/media-links${kind ? `?kind=${kind}` : ""}`),
   mediaLinksByIds,
   mediaLinksPage: (params: { kind?: LinkKind; section?: string; storagePolicy?: StoragePolicyKind; relativePathPrefix?: string; search?: string; limit: number; offset: number }) => {
@@ -141,7 +144,13 @@ export const api = {
   startAudit: (body: AuditOptions) => request<{ jobId: number }>("/api/audits", { method: "POST", body: JSON.stringify(body) }),
   audits: () => request<AuditRunRecord[]>("/api/audits"),
   auditByJob: (jobId: number) => request<AuditRunRecord | null>(`/api/audits/job/${jobId}`),
-  auditResults: (id: number) => request<AuditResultRecord[]>(`/api/audits/${id}/results`),
+  auditResultPage: (id: number, options: { offset?: number; limit?: number; attentionOnly?: boolean } = {}) => {
+    const search = new URLSearchParams();
+    if (options.offset) search.set("offset", String(options.offset));
+    if (options.limit) search.set("limit", String(options.limit));
+    if (options.attentionOnly) search.set("attentionOnly", "true");
+    return request<AuditResultPage>(`/api/audits/${id}/results/page${search.size > 0 ? `?${search.toString()}` : ""}`);
+  },
   jobs: (options: { activeOnly?: boolean; completedWithinMinutes?: number; limit?: number } = {}) => {
     const search = new URLSearchParams();
     if (options.activeOnly) search.set("activeOnly", "true");

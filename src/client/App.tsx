@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Blocks, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
@@ -264,7 +264,6 @@ function RootLayout() {
   const nav = [
     { to: "/", label: "Dashboard", icon: Gauge },
     { to: "/library", label: "Library", icon: Library },
-    { to: "/integrations", label: "Integrations", icon: Blocks },
     { to: "/logs", label: "Logs", icon: FileText }
   ];
   const toggleGroup = (group: SidebarGroup) => {
@@ -1203,17 +1202,14 @@ const loadOperationsRoutes = () => import("./operationsRoutes");
 const DashboardPage = lazyRouteComponent(loadLibraryRoutes, "DashboardPage");
 const LibraryPage = lazyRouteComponent(loadLibraryRoutes, "LibraryPage");
 const RunsPage = lazyRouteComponent(loadOperationsRoutes, "RunsPage");
-const IntegrationsPage = lazyRouteComponent(loadOperationsRoutes, "IntegrationsPage");
 const SettingsPage = lazyRouteComponent(loadOperationsRoutes, "SettingsPage");
 const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
 const libraryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/library", component: LibraryPage });
 const scansRoute = createRoute({ getParentRoute: () => rootRoute, path: "/scans", component: () => <RunsPage type="scan" /> });
 const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audits", component: () => <RunsPage type="audit" /> });
-const integrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/integrations", component: IntegrationsPage });
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });
 const settingsSectionsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/sections", component: () => <SettingsPage activeView="library" /> });
-const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
 const settingsAdvancedRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/advanced", component: () => <SettingsPage activeView="advanced" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
@@ -1222,10 +1218,8 @@ const routeTree = rootRoute.addChildren([
   libraryRoute,
   scansRoute,
   auditsRoute,
-  integrationsRoute,
   settingsRoute,
   settingsSectionsRoute,
-  settingsIntegrationsRoute,
   settingsAdvancedRoute,
   settingsUserRoute,
   logsRoute

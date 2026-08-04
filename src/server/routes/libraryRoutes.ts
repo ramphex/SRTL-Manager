@@ -42,6 +42,8 @@ const scanOptionsSchema = z
   });
 
 const storagePolicySchema = z.enum(["unassigned", "location_1", "location_2"]);
+const maxBulkSelectionItems = 100_000;
+const largeSelectionBodyLimitBytes = 4 * 1024 * 1024;
 
 const storagePolicyInputSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(500, "Title is too long"),
@@ -77,11 +79,12 @@ function mediaLinkIdsFromMutationResources(resources: Array<{ resourceType: stri
 const copyInputSchema = z
   .object({
     direction: z.enum(["to_local", "to_remote"]),
-    linkIds: z.array(z.coerce.number().int().positive()).max(1000).optional(),
+    linkIds: z.array(z.coerce.number().int().positive()).max(maxBulkSelectionItems).optional(),
     section: z.string().trim().min(1).max(200).optional(),
     itemName: z.string().trim().min(1).max(500).optional(),
     relativePathPrefix: z.string().trim().min(1).max(2000).optional(),
-    localConflictStrategy: z.enum(["keep_both", "replace"]).optional()
+    localConflictStrategy: z.enum(["keep_both", "replace"]).optional(),
+    allowSourceTitleMismatch: z.boolean().optional()
   })
   .refine((value) => Boolean(value.linkIds?.length || value.section || value.itemName), { message: "Copy requires link IDs, a folder scope, or a title" });
 
@@ -122,10 +125,11 @@ async function latestErrorMessages(db: Db, jobIds: Set<number>): Promise<Map<num
   return messages;
 }
 
-function scanOptionsFromProgress(progressJson: string): ScanOptions | null {
+function scanOptionsFromJob(progressJson: string, optionsJson = ""): ScanOptions | null {
   try {
     const progress = JSON.parse(progressJson) as { options?: unknown };
-    const options = progress?.options;
+    const storedOptions = optionsJson ? (JSON.parse(optionsJson) as unknown) : null;
+    const options = storedOptions && typeof storedOptions === "object" && !Array.isArray(storedOptions) ? storedOptions : progress?.options;
     if (!options || typeof options !== "object" || Array.isArray(options)) return null;
     return scanOptionsSchema.parse(options);
   } catch {
@@ -142,7 +146,10 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
   const orphanedFailedJobs = scanJobs.filter((job) => terminalFailureStatuses.has(job.status as JobStatus) && !recordedJobIds.has(job.id));
   const errorMessages = await latestErrorMessages(db, new Set(orphanedFailedJobs.map((job) => job.id)));
   const zeroTotals = emptyScanTotals();
-  const recordedRuns: ScanRunRecord[] = scanRuns.map((run) => ({ ...run, status: run.status as JobStatus, options: scanOptionsFromProgress(jobById.get(run.jobId)?.progress ?? "") }));
+  const recordedRuns: ScanRunRecord[] = scanRuns.map((run) => {
+    const job = jobById.get(run.jobId);
+    return { ...run, status: run.status as JobStatus, options: scanOptionsFromJob(job?.progress ?? "", job?.options ?? "") };
+  });
   const legacyRuns: ScanRunRecord[] = orphanedFailedJobs.map((job) => ({
     id: null,
     jobId: job.id,
@@ -150,7 +157,7 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
     startedAt: job.startedAt ?? job.createdAt,
     finishedAt: job.finishedAt,
     errorMessage: errorMessages.get(job.id) ?? (job.status === "failed" ? "Scan failed before a history row was created." : null),
-    options: scanOptionsFromProgress(job.progress),
+    options: scanOptionsFromJob(job.progress, job.options),
     ...zeroTotals
   }));
   return [...recordedRuns, ...legacyRuns].sort((a, b) => b.jobId - a.jobId).slice(0, 25);
@@ -274,7 +281,7 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
 
   app.get("/api/inventory/scan-timestamps", async () => getInventoryScanTimestamps(db));
 
-  app.post("/api/copies", async (request, reply) => {
+  app.post("/api/copies", { bodyLimit: largeSelectionBodyLimitBytes }, async (request, reply) => {
     const body = copyInputSchema.parse(request.body);
     try {
       return { jobId: await jobs.startCopy(body) };
@@ -284,7 +291,7 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
     }
   });
 
-  app.post("/api/copies/conflicts", async (request) => {
+  app.post("/api/copies/conflicts", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = copyInputSchema.parse(request.body);
     return jobs.previewCopyConflicts(body);
   });

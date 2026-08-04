@@ -102,6 +102,46 @@ describe("copy work total display", () => {
       failed: 0
     }), 3)).toBe(3);
   });
+
+  it("uses the immutable selection total instead of unrelated legacy progress totals", () => {
+    const job = copyJob({
+      options: { direction: "to_local", section: "shows", itemName: "Example Show" },
+      total: 540,
+      copied: 3,
+      repointed: 0,
+      skipped: 0,
+      alreadyCompleted: 0,
+      conflicts: 0,
+      failed: 0
+    });
+    job.selection = {
+      total: 3,
+      titles: [{ section: "shows", itemName: "Example Show", count: 3 }],
+      unavailable: 0
+    };
+
+    expect(copyWorkTotalFromJob(job, 540)).toBe(3);
+  });
+
+  it("excludes unavailable migrated links from the immutable copy work total", () => {
+    const job = copyJob({
+      options: { direction: "to_local", section: "shows", itemName: "Example Show", linkIds: Array.from({ length: 540 }, (_, index) => index + 1) },
+      total: 540,
+      copied: 3,
+      repointed: 0,
+      skipped: 537,
+      alreadyCompleted: 537,
+      conflicts: 0,
+      failed: 0
+    });
+    job.selection = {
+      total: 540,
+      titles: [{ section: "shows", itemName: "Example Show", count: 3 }],
+      unavailable: 537
+    };
+
+    expect(copyWorkTotalFromJob(job, 540)).toBe(3);
+  });
 });
 
 describe("copy failure summaries", () => {

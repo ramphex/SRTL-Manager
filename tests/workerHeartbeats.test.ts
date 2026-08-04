@@ -144,6 +144,7 @@ describe("worker heartbeat history", () => {
       await app.database.db.insert(schema.workerHeartbeats).values({ workerId: "historical-worker", startedAt: heartbeatAt, heartbeatAt, status: "stopped" });
 
       const response = await app.app.inject({ method: "GET", url: "/api/health" });
+      const readiness = await app.app.inject({ method: "GET", url: "/api/health/ready" });
 
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({
@@ -153,6 +154,8 @@ describe("worker heartbeat history", () => {
         readyWorkerCount: 0,
         staleWorkerCount: 0
       });
+      expect(readiness.statusCode).toBe(503);
+      expect(readiness.json()).toMatchObject({ ok: false, worker: "not_started" });
     } finally {
       if (app) await app.app.close();
       await testDatabase.cleanup();
@@ -196,6 +199,7 @@ describe("worker heartbeat history", () => {
       ]);
 
       const readyResponse = await app.app.inject({ method: "GET", url: "/api/health" });
+      const readyReadiness = await app.app.inject({ method: "GET", url: "/api/health/ready" });
       expect(readyResponse.statusCode).toBe(200);
       expect(readyResponse.json()).toMatchObject({
         worker: "ready",
@@ -204,15 +208,20 @@ describe("worker heartbeat history", () => {
         readyWorkerCount: 5,
         staleWorkerCount: 7
       });
+      expect(readyReadiness.statusCode).toBe(200);
+      expect(readyReadiness.json()).toMatchObject({ ok: true, worker: "ready" });
 
       await app.database.db.update(schema.workerHeartbeats).set({ status: "stopped" }).where(eq(schema.workerHeartbeats.workerId, "fresh-b"));
       const partialResponse = await app.app.inject({ method: "GET", url: "/api/health" });
+      const partialReadiness = await app.app.inject({ method: "GET", url: "/api/health/ready" });
       expect(partialResponse.json()).toMatchObject({
         worker: "stale",
         expectedWorkerCount: 5,
         readyWorkerCount: 2,
         staleWorkerCount: 7
       });
+      expect(partialReadiness.statusCode).toBe(503);
+      expect(partialReadiness.json()).toMatchObject({ ok: false, worker: "stale" });
     } finally {
       if (app) await app.app.close();
       await testDatabase.cleanup();

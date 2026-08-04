@@ -26,6 +26,7 @@ describe("config", () => {
     expect(config.host).toBe("0.0.0.0");
     expect(config.port).toBe(3009);
     expect(config.sessionCookieName).toBe("srtl_session_5178");
+    expect(config.jobHistoryRetentionDays).toBe(90);
     expect(config.paths).toEqual({ symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" });
   });
 
@@ -96,6 +97,19 @@ describe("config", () => {
     expect(loadConfig({ rootDir: tmpDir }).jobConcurrency.maxRunningScans).toBe(0);
   });
 
+  it("allows one job slot to transfer several files under an explicit process-wide ceiling", async () => {
+    await fs.writeFile(
+      path.join(tmpDir, ".env"),
+      ["SRTL_WORKER_COUNT=1", "SRTL_COPY_FILE_CONCURRENCY=4", "SRTL_MAX_ACTIVE_COPY_FILES=4"].join("\n")
+    );
+
+    expect(loadConfig({ rootDir: tmpDir }).jobConcurrency).toMatchObject({
+      workerCount: 1,
+      copyFileConcurrency: 4,
+      maxActiveCopyFiles: 4
+    });
+  });
+
   it("rejects malformed and contradictory worker concurrency settings", async () => {
     const invalidSettings = [
       ["SRTL_WORKER_COUNT=0", "SRTL_WORKER_COUNT must be a positive safe integer"],
@@ -103,7 +117,8 @@ describe("config", () => {
       ["SRTL_WORKER_COUNT=9007199254740992", "SRTL_WORKER_COUNT must be a positive safe integer"],
       [["SRTL_WORKER_COUNT=2", "SRTL_MAX_RUNNING_JOBS=3"].join("\n"), "SRTL_MAX_RUNNING_JOBS must not exceed SRTL_WORKER_COUNT"],
       [["SRTL_WORKER_COUNT=4", "SRTL_MAX_RUNNING_JOBS=2", "SRTL_MAX_RUNNING_COPIES=3"].join("\n"), "SRTL_MAX_RUNNING_COPIES must not exceed SRTL_MAX_RUNNING_JOBS"],
-      [["SRTL_COPY_FILE_CONCURRENCY=3", "SRTL_MAX_ACTIVE_COPY_FILES=2"].join("\n"), "SRTL_COPY_FILE_CONCURRENCY must not exceed SRTL_MAX_ACTIVE_COPY_FILES"]
+      [["SRTL_COPY_FILE_CONCURRENCY=3", "SRTL_MAX_ACTIVE_COPY_FILES=2"].join("\n"), "SRTL_COPY_FILE_CONCURRENCY must not exceed SRTL_MAX_ACTIVE_COPY_FILES"],
+      ["SRTL_JOB_HISTORY_RETENTION_DAYS=-1", "SRTL_JOB_HISTORY_RETENTION_DAYS must be a non-negative safe integer"]
     ] as const;
 
     for (const [contents, message] of invalidSettings) {

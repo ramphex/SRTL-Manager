@@ -59,12 +59,16 @@ export const adminUsers = pgTable("admin_users", {
   createdAt: text("created_at").notNull()
 });
 
-export const sessions = pgTable("sessions", {
-  tokenHash: text("token_hash").primaryKey(),
-  userId: integer("user_id").notNull(),
-  expiresAt: text("expires_at").notNull(),
-  createdAt: text("created_at").notNull()
-});
+export const sessions = pgTable(
+  "sessions",
+  {
+    tokenHash: text("token_hash").primaryKey(),
+    userId: integer("user_id").notNull(),
+    expiresAt: text("expires_at").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("sessions_expires_idx").on(table.expiresAt)]
+);
 
 export const sections = pgTable("sections", {
   id: serial("id").primaryKey(),
@@ -148,21 +152,49 @@ export const copySources = pgTable(
   (table) => [uniqueIndex("copy_sources_destination_idx").on(table.destinationPath)]
 );
 
-export const jobs = pgTable("jobs", {
-  id: serial("id").primaryKey(),
-  type: text("type").notNull(),
-  status: text("status").notNull(),
-  createdAt: text("created_at").notNull(),
-  startedAt: text("started_at"),
-  finishedAt: text("finished_at"),
-  lockedBy: text("locked_by"),
-  lockedAt: text("locked_at"),
-  heartbeatAt: text("heartbeat_at"),
-  leaseVersion: integer("lease_version").notNull().default(0),
-  exclusive: boolean("exclusive").notNull().default(true),
-  cancelRequestedAt: text("cancel_requested_at"),
-  progress: text("progress").notNull()
-});
+export const jobs = pgTable(
+  "jobs",
+  {
+    id: serial("id").primaryKey(),
+    type: text("type").notNull(),
+    status: text("status").notNull(),
+    createdAt: text("created_at").notNull(),
+    startedAt: text("started_at"),
+    finishedAt: text("finished_at"),
+    lockedBy: text("locked_by"),
+    lockedAt: text("locked_at"),
+    heartbeatAt: text("heartbeat_at"),
+    leaseVersion: integer("lease_version").notNull().default(0),
+    exclusive: boolean("exclusive").notNull().default(true),
+    options: text("options").notNull().default("{}"),
+    selectionFrozen: boolean("selection_frozen").notNull().default(false),
+    cancelRequestedAt: text("cancel_requested_at"),
+    progress: text("progress").notNull()
+  },
+  (table) => [index("jobs_terminal_retention_idx").on(table.status, table.finishedAt, table.id)]
+);
+
+export const jobSelectionItems = pgTable(
+  "job_selection_items",
+  {
+    id: serial("id").primaryKey(),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    mediaLinkId: integer("media_link_id").notNull(),
+    selectionOrder: integer("selection_order").notNull(),
+    section: text("section").notNull(),
+    itemName: text("item_name").notNull(),
+    relativePath: text("relative_path").notNull(),
+    linkPath: text("link_path").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("job_selection_items_job_media_idx").on(table.jobId, table.mediaLinkId),
+    uniqueIndex("job_selection_items_job_order_idx").on(table.jobId, table.selectionOrder),
+    index("job_selection_items_job_title_idx").on(table.jobId, table.section, table.itemName)
+  ]
+);
 
 export const jobResourceClaims = pgTable(
   "job_resource_claims",
@@ -217,6 +249,7 @@ export const copyOperations = pgTable(
     localConflictStrategy: text("local_conflict_strategy"),
     sizeBytes: bigint("size_bytes", { mode: "number" }),
     errorMessage: text("error_message"),
+    reconciliationResolvedAt: text("reconciliation_resolved_at"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     completedAt: text("completed_at")
@@ -283,15 +316,19 @@ export const auditRuns = pgTable("audit_runs", {
   errorMessage: text("error_message")
 });
 
-export const auditResults = pgTable("audit_results", {
-  id: serial("id").primaryKey(),
-  auditRunId: integer("audit_run_id").notNull(),
-  linkPath: text("link_path").notNull(),
-  targetPath: text("target_path").notNull(),
-  sourcePath: text("source_path"),
-  status: text("status").notNull(),
-  ffmpegStatus: text("ffmpeg_status").notNull(),
-  cmpStatus: text("cmp_status").notNull(),
-  message: text("message").notNull(),
-  createdAt: text("created_at").notNull()
-});
+export const auditResults = pgTable(
+  "audit_results",
+  {
+    id: serial("id").primaryKey(),
+    auditRunId: integer("audit_run_id").notNull(),
+    linkPath: text("link_path").notNull(),
+    targetPath: text("target_path").notNull(),
+    sourcePath: text("source_path"),
+    status: text("status").notNull(),
+    ffmpegStatus: text("ffmpeg_status").notNull(),
+    cmpStatus: text("cmp_status").notNull(),
+    message: text("message").notNull(),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [index("audit_results_run_id_idx").on(table.auditRunId, table.id)]
+);

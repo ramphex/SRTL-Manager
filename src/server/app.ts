@@ -119,7 +119,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     }
   });
 
-  app.get("/api/health", async () => {
+  const workerHealth = async () => {
     await database.pool.query("select 1");
     const workers = await database.db
       .select()
@@ -137,16 +137,23 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
       return !Number.isFinite(heartbeatAt) || Math.max(0, now - heartbeatAt) > 30_000 ? capacity + worker.capacity : capacity;
     }, 0);
     const expectedWorkerCount = config.jobConcurrency.maxRunningJobs;
+    const ready = readyWorkerCount >= expectedWorkerCount;
     return {
-      ok: true,
+      ok: ready,
       database: "ready",
-      worker: readyWorkerCount >= expectedWorkerCount ? "ready" : workers.length > 0 ? "stale" : "not_started",
+      worker: ready ? "ready" : workers.length > 0 ? "stale" : "not_started",
       workerHeartbeatAt: latestWorker?.heartbeatAt ?? null,
       expectedWorkerCount,
       readyWorkerCount,
       staleWorkerCount
     };
+  };
+  app.get("/api/health/live", async () => ({ ok: true, service: "running" }));
+  app.get("/api/health/ready", async (_request, reply) => {
+    const health = await workerHealth();
+    return health.ok ? health : reply.code(503).send(health);
   });
+  app.get("/api/health", async () => ({ ...(await workerHealth()), ok: true }));
   registerAuthRoutes(app, database.db, {
     cookieName: config.sessionCookieName,
     cookieSecure: config.sessionCookieSecure
@@ -155,7 +162,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   app.addHook("preHandler", async (request, reply) => {
     const documentationRequest = config.apiDocsEnabled && request.url.startsWith("/documentation");
     if (!request.url.startsWith("/api/") && !documentationRequest) return;
-    if (request.url.startsWith("/api/auth/") || request.url === "/api/health") return;
+    if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
     await requireAuth(database.db, config.sessionCookieName)(request, reply);
     if (reply.sent) return;
     if (documentationRequest) return;

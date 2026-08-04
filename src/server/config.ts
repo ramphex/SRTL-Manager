@@ -16,6 +16,7 @@ export interface AppConfig {
   autoMigrate: boolean;
   trustProxy: boolean;
   webRoot: string;
+  jobHistoryRetentionDays: number;
   jobConcurrency: JobConcurrencySettings;
   paths: PathsSettings;
 }
@@ -197,6 +198,12 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       overrides.autoMigrate ?? booleanSetting(process.env.SRTL_AUTO_MIGRATE ?? envFile.SRTL_AUTO_MIGRATE, process.env.NODE_ENV !== "production"),
     trustProxy: overrides.trustProxy ?? booleanSetting(process.env.SRTL_TRUST_PROXY ?? envFile.SRTL_TRUST_PROXY, false),
     webRoot: overrides.webRoot ?? process.env.SRTL_WEB_ROOT ?? envFile.SRTL_WEB_ROOT ?? path.join(rootDir, "dist", "client"),
+    jobHistoryRetentionDays: integerSetting(
+      overrides.jobHistoryRetentionDays ?? process.env.SRTL_JOB_HISTORY_RETENTION_DAYS ?? envFile.SRTL_JOB_HISTORY_RETENTION_DAYS,
+      90,
+      "SRTL_JOB_HISTORY_RETENTION_DAYS",
+      0
+    ),
     jobConcurrency: loadJobConcurrency(envFile, overrides.jobConcurrency),
     paths: overrides.paths ?? {
       symlinkDir: environment.SYMLINK_DIR ?? "",

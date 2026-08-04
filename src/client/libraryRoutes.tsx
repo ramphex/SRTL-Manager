@@ -103,7 +103,7 @@ export function DashboardPage() {
       return api.copyConflicts(prompt.options);
     },
     onSuccess: (conflicts, prompt) => {
-      if (conflicts.totalConflicts > 0) {
+      if (conflicts.totalConflicts > 0 || (conflicts.totalSourceTitleBlocks ?? 0) > 0) {
         setCopyPrompt({ ...prompt, conflicts });
         return;
       }
@@ -312,7 +312,7 @@ export function DashboardPage() {
 
   function handleCopyRequest(prompt: CopyPrompt) {
     startScan.reset();
-    if (prompt.options?.direction === "to_local" && !prompt.options.localConflictStrategy) {
+    if (prompt.options && (!prompt.options.allowSourceTitleMismatch || (prompt.options.direction === "to_local" && !prompt.options.localConflictStrategy))) {
       copyConflictCheck.mutate(prompt);
       return;
     }
@@ -1723,7 +1723,7 @@ export function LibraryPage() {
       return api.copyConflicts(prompt.options);
     },
     onSuccess: (conflicts, prompt) => {
-      if (conflicts.totalConflicts > 0) {
+      if (conflicts.totalConflicts > 0 || (conflicts.totalSourceTitleBlocks ?? 0) > 0) {
         setCopyPrompt({ ...prompt, conflicts });
         return;
       }
@@ -1736,7 +1736,7 @@ export function LibraryPage() {
   });
 
   function handleCopyRequest(prompt: CopyPrompt) {
-    if (prompt.options?.direction === "to_local" && !prompt.options.localConflictStrategy) {
+    if (prompt.options && (!prompt.options.allowSourceTitleMismatch || (prompt.options.direction === "to_local" && !prompt.options.localConflictStrategy))) {
       copyConflictCheck.mutate(prompt);
       return;
     }

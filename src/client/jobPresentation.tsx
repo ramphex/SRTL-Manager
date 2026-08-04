@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -8,7 +8,7 @@ import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogD
 import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./jobScopeLocks";
 import { jobEventCountLabel } from "./jobEvents";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
+import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
 import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
@@ -185,6 +185,7 @@ export function CopyDialog({
   const [jobId, setJobId] = useState<number | null>(prompt?.jobId ?? null);
   const [startedPromptKey, setStartedPromptKey] = useState<string | null>(null);
   const [localConflictStrategy, setLocalConflictStrategy] = useState<CopyLocalConflictStrategy | null>(null);
+  const [allowSourceTitleMismatch, setAllowSourceTitleMismatch] = useState(false);
   const [terminatePrompt, setTerminatePrompt] = useState<JobRecord | null>(null);
   const terminateJob = useTerminateJobMutation(() => setTerminatePrompt(null));
   const jobQuery = useQuery({
@@ -199,23 +200,31 @@ export function CopyDialog({
   const jobActive = currentJob ? currentJob.status === "queued" || currentJob.status === "running" : Boolean(jobId);
   const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 500 : 2500, loadAll: true });
   const startCopy = useStartCopyJob((result) => setJobId(result.jobId));
+  const resetStartCopy = startCopy.reset;
 
   useEffect(() => {
+    resetStartCopy();
     setJobId(prompt?.jobId ?? null);
     setStartedPromptKey(null);
     setLocalConflictStrategy(null);
-  }, [prompt?.key, prompt?.jobId]);
+    setAllowSourceTitleMismatch(false);
+  }, [prompt?.key, prompt?.jobId, resetStartCopy]);
 
   useEffect(() => {
     if (!prompt?.autoStart || !prompt.options || jobId || startedPromptKey === prompt.key || startCopy.isPending) return;
     const requiresLocalResolution = Boolean(prompt.conflicts?.totalConflicts && !prompt.options.localConflictStrategy && !localConflictStrategy);
-    if (requiresLocalResolution) return;
-    const options = localConflictStrategy ? { ...prompt.options, localConflictStrategy } : prompt.options;
-    const resolvedPromptKey = localConflictStrategy ? `${prompt.key}:${localConflictStrategy}` : prompt.key;
+    const requiresSourceResolution = Boolean((prompt.conflicts?.totalSourceTitleBlocks ?? 0) > 0 && !prompt.options.allowSourceTitleMismatch && !allowSourceTitleMismatch);
+    if (requiresLocalResolution || requiresSourceResolution) return;
+    const options = {
+      ...prompt.options,
+      ...(localConflictStrategy ? { localConflictStrategy } : {}),
+      ...(allowSourceTitleMismatch ? { allowSourceTitleMismatch: true } : {})
+    };
+    const resolvedPromptKey = [prompt.key, localConflictStrategy, allowSourceTitleMismatch ? "source-title-override" : null].filter(Boolean).join(":");
     if (startedPromptKey === resolvedPromptKey) return;
     setStartedPromptKey(resolvedPromptKey);
     startCopy.mutate({ ...prompt, key: resolvedPromptKey, options });
-  }, [jobId, localConflictStrategy, prompt, startCopy, startedPromptKey]);
+  }, [allowSourceTitleMismatch, jobId, localConflictStrategy, prompt, startCopy, startedPromptKey]);
 
   useEffect(() => {
     if (!currentJobId || currentJobStatus === "queued" || currentJobStatus === "running") return;
@@ -226,6 +235,7 @@ export function CopyDialog({
 
   const displayedEvents = [...events.events].reverse();
   const needsLocalConflictResolution = Boolean(prompt.conflicts?.totalConflicts && !prompt.options?.localConflictStrategy && !localConflictStrategy && !jobId);
+  const needsSourceTitleResolution = Boolean((prompt.conflicts?.totalSourceTitleBlocks ?? 0) > 0 && !prompt.options?.allowSourceTitleMismatch && !allowSourceTitleMismatch && !jobId);
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -243,6 +253,8 @@ export function CopyDialog({
 
         {startCopy.error && !jobId ? (
           <p className="panel-message">The copy job was not queued. No files were changed.</p>
+        ) : needsSourceTitleResolution && prompt.conflicts ? (
+          <CopySourceTitleResolution conflicts={prompt.conflicts} onContinue={() => setAllowSourceTitleMismatch(true)} />
         ) : needsLocalConflictResolution && prompt.conflicts ? (
           <CopyConflictResolution conflicts={prompt.conflicts} onKeepBoth={() => setLocalConflictStrategy("keep_both")} onReplace={() => setLocalConflictStrategy("replace")} />
         ) : (
@@ -261,7 +273,8 @@ export function CopyDialog({
           {jobId && events.isLoading ? <p className="panel-message">Loading copy events...</p> : null}
           {events.error ? <p className="panel-message action-error">{events.error.message}</p> : null}
           {jobId && !events.isLoading && !events.error && displayedEvents.length === 0 ? <p className="panel-message">No events yet.</p> : null}
-          {!jobId && !startCopy.error && !needsLocalConflictResolution ? <p className="panel-message">Starting the copy job. Closing this window after start leaves the job running in the background.</p> : null}
+          {!jobId && !startCopy.error && !needsLocalConflictResolution && !needsSourceTitleResolution ? <p className="panel-message">Starting the copy job. Closing this window after start leaves the job running in the background.</p> : null}
+          {needsSourceTitleResolution ? <p className="panel-message">Review and explicitly accept the source-title mismatch before starting this copy.</p> : null}
           {needsLocalConflictResolution ? <p className="panel-message">Choose how to handle the existing local file before starting this copy.</p> : null}
           {displayedEvents.length > 0 ? (
             <div className="events audit-dialog-event-list">
@@ -279,6 +292,36 @@ export function CopyDialog({
           onConfirm={(targetJobId) => terminateJob.mutate(targetJobId)}
         />
       </section>
+    </div>
+  );
+}
+
+function CopySourceTitleResolution({ conflicts, onContinue }: { conflicts: CopyConflictPreview; onContinue: () => void }) {
+  const risks = conflicts.sourceTitleRisks ?? [];
+  return (
+    <div className="copy-conflict-panel">
+      <div className="copy-conflict-header">
+        <TriangleAlert size={18} />
+        <span>
+          <strong>Source title mismatch</strong>
+          <small>{formatNumber(risks.length)} source file{risks.length === 1 ? " does" : "s do"} not look like the selected library title.</small>
+        </span>
+      </div>
+      <div className="copy-conflict-list">
+        {risks.map((risk) => (
+          <div key={`${risk.linkId}:${risk.sourcePath}`} className="copy-conflict-item">
+            <strong>{risk.itemName}</strong>
+            <small>{risk.relativePath}</small>
+            <small>{risk.reason}: {risk.sourcePath}</small>
+          </div>
+        ))}
+      </div>
+      <div className="copy-conflict-actions">
+        <button type="button" className="danger" onClick={onContinue}>
+          <TriangleAlert size={14} />
+          Copy these sources anyway
+        </button>
+      </div>
     </div>
   );
 }
@@ -432,9 +475,11 @@ export function AuditStatusDialog({
   });
   const auditRun = auditRunQuery.data ?? null;
   const auditRunId = prompt?.auditRunId ?? auditRun?.id ?? null;
-  const auditResults = useQuery({
+  const auditResults = useInfiniteQuery({
     queryKey: ["audit-results", auditRunId],
-    queryFn: () => api.auditResults(auditRunId!),
+    queryFn: ({ pageParam }) => api.auditResultPage(auditRunId!, { offset: pageParam, limit: 100, attentionOnly: true }),
+    initialPageParam: 0,
+    getNextPageParam: (page) => (page.hasMore ? page.offset + page.results.length : undefined),
     enabled: Boolean(prompt && auditRunId),
     refetchInterval: jobActive ? 1500 : false
   });
@@ -443,6 +488,7 @@ export function AuditStatusDialog({
   if (!prompt) return null;
 
   const displayedEvents = [...events.events].reverse();
+  const auditResultRecords = auditResults.data?.pages.flatMap((page) => page.results) ?? [];
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
@@ -462,7 +508,13 @@ export function AuditStatusDialog({
 
         <AuditProgressPanel job={currentJob} pendingJobId={jobId} auditRun={auditRun} />
 
-        {auditRunId && !auditResults.isLoading && !auditResults.error ? <AuditResultSummary results={auditResults.data ?? []} /> : null}
+        {auditRunId && !auditResults.isLoading && !auditResults.error ? <AuditResultSummary results={auditResultRecords} /> : null}
+        {auditResults.hasNextPage && jobActive ? <p className="panel-message">Additional findings can be loaded after the audit finishes so newly inserted rows cannot shift the current page.</p> : null}
+        {auditResults.hasNextPage && !jobActive ? (
+          <button className="secondary" type="button" disabled={auditResults.isFetchingNextPage} onClick={() => auditResults.fetchNextPage()}>
+            {auditResults.isFetchingNextPage ? "Loading more findings..." : "Load more audit findings"}
+          </button>
+        ) : null}
 
         <div className="audit-dialog-events">
           <JobEventsHeader label="Audit events" jobId={jobId} loaded={events.events.length} total={events.total} loading={events.isLoading} loadingOlder={events.isFetchingNextPage} />
@@ -1023,13 +1075,14 @@ export function JobScope({
 
   if (job.type === "audit") {
     const options = auditOptionsFromJob(job);
-    const sectionText = formatAuditScope(options, sections);
+    const selectedCount = job.selection?.total ?? options.linkIds?.length ?? 0;
+    const sectionText = selectedCount > 0 ? (selectedCount === 1 ? "1 selected link" : `${formatNumber(selectedCount)} selected links`) : formatAuditScope(options, sections);
     const modeText = options.mode === "fast" ? "Fast audit" : options.mode === "deep" ? "Deep audit" : "Audit";
     const selectedLinkIds = options.linkIds ?? [];
     return (
-      <span className="job-scope-cell" title={selectedLinkIds.length > 0 ? undefined : sectionText}>
+      <span className="job-scope-cell" title={selectedCount > 0 ? undefined : sectionText}>
         <span>{modeText}</span>
-        <JobScopeDetail text={sectionText} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
+        <JobScopeDetail text={sectionText} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
       </span>
     );
   }
@@ -1038,14 +1091,15 @@ export function JobScope({
     const options = copyOptionsFromJob(job);
     const directionText = `Copy to ${storageLocationName(storageLocations, options?.direction === "to_remote" ? "remote" : "local")}`;
     const selectedLinkIds = options?.linkIds ?? [];
-    const workTotal = copyWorkTotalFromJob(job, selectedLinkIds.length);
-    const sectionText = selectedLinkIds.length > 0
+    const selectedCount = job.selection?.total ?? selectedLinkIds.length;
+    const workTotal = copyWorkTotalFromJob(job, selectedCount);
+    const sectionText = selectedCount > 0
       ? workTotal === 1 ? "1 selected link" : `${formatNumber(workTotal)} selected links`
       : formatCopyScope(options, sections);
     return (
-      <span className="job-scope-cell" title={selectedLinkIds.length > 0 ? undefined : sectionText}>
+      <span className="job-scope-cell" title={selectedCount > 0 ? undefined : sectionText}>
         <span>{directionText}</span>
-        <JobScopeDetail text={sectionText} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
+        <JobScopeDetail text={sectionText} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
       </span>
     );
   }
@@ -1066,17 +1120,35 @@ export function JobScope({
 
 function JobScopeDetail({
   text,
+  selection,
   selectedLinkIds,
   linkRowsById,
   linkRowsLoading,
   linkRowsError
 }: {
   text: string;
+  selection?: JobSelectionSummary;
   selectedLinkIds: number[];
   linkRowsById?: Map<number, MediaLinkRow>;
   linkRowsLoading?: boolean;
   linkRowsError?: string | null;
 }) {
+  if (selection && selection.total > 0) {
+    const snapshotSummaries = selection.titles.map((title) =>
+      selection.titles.length > 1 && title.count > 1 ? `${title.itemName} (${formatNumber(title.count)} links)` : title.itemName
+    );
+    if (selection.omittedTitles) snapshotSummaries.push(`${formatNumber(selection.omittedTitles)} additional title${selection.omittedTitles === 1 ? "" : "s"}`);
+    if (selection.unavailable > 0) snapshotSummaries.push(`${formatNumber(selection.unavailable)} unavailable historical link${selection.unavailable === 1 ? "" : "s"}`);
+    if (selection.total === 1 && selection.titles.length === 1 && selection.unavailable === 0) {
+      return <small title={selection.titles[0]?.itemName}>{selection.titles[0]?.itemName}</small>;
+    }
+    return (
+      <small className="job-scope-detail-line">
+        <span>{text}</span>
+        <SelectedLinkTitlesTooltip summaries={snapshotSummaries} />
+      </small>
+    );
+  }
   if (selectedLinkIds.length === 0) return <small>{text}</small>;
   const singleTitle = selectedLinkIds.length === 1 && !linkRowsLoading && !linkRowsError ? singleSelectedLinkTitle(selectedLinkIds, linkRowsById) : null;
   if (singleTitle) return <small title={singleTitle}>{singleTitle}</small>;
@@ -1090,17 +1162,19 @@ function JobScopeDetail({
 }
 
 function SelectedLinkTitlesTooltip({
+  summaries: suppliedSummaries,
   linkIds,
   linkRowsById,
   isLoading,
   error
 }: {
-  linkIds: number[];
+  summaries?: string[];
+  linkIds?: number[];
   linkRowsById?: Map<number, MediaLinkRow>;
   isLoading?: boolean;
   error?: string | null;
 }) {
-  const summaries = selectedLinkTitleSummaries(linkIds, linkRowsById);
+  const summaries = suppliedSummaries ?? selectedLinkTitleSummaries(linkIds ?? [], linkRowsById);
   return (
     <span className="job-link-title-tooltip" tabIndex={0} aria-label="View selected titles">
       <Info size={12} />
@@ -1111,8 +1185,8 @@ function SelectedLinkTitlesTooltip({
         {!isLoading && !error && summaries.length === 0 ? <span>No matching titles found in the current inventory.</span> : null}
         {!isLoading && !error && summaries.length > 0 ? (
           <ul>
-            {summaries.map((title) => (
-              <li key={title}>{title}</li>
+            {summaries.map((title, index) => (
+              <li key={`${index}:${title}`}>{title}</li>
             ))}
           </ul>
         ) : null}

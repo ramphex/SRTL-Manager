@@ -5,6 +5,10 @@ const baseUrl = process.env.SRTL_E2E_BASE_URL;
 const sessionToken = process.env.SRTL_E2E_SESSION_TOKEN;
 const sessionCookieName = process.env.SRTL_E2E_SESSION_COOKIE_NAME ?? (baseUrl && new URL(baseUrl).port ? `srtl_session_${new URL(baseUrl).port}` : "srtl_session");
 
+if (process.env.CI && baseUrl && !sessionToken) {
+  throw new Error("CI browser checks require SRTL_E2E_SESSION_TOKEN so authenticated coverage cannot be skipped.");
+}
+
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser smoke checks.");
 
 test.beforeEach(async ({ context }) => {
@@ -89,7 +93,7 @@ test("dashboard task notifications overlay without shifting content", async ({ p
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
     else if (url.pathname === "/api/system/version") {
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
-      body = { currentVersion: "0.1.2-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+      body = { currentVersion: "0.1.2", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     } else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
     else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] };
@@ -220,7 +224,7 @@ test("refreshes an open work list when an inventory job finishes", async ({ page
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
     else if (url.pathname === "/api/system/version") {
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
-      body = { currentVersion: "0.1.2-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+      body = { currentVersion: "0.1.2", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     }
     else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
@@ -313,7 +317,7 @@ test("loads every work-list page and scopes show copies beyond the first page", 
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
     else if (url.pathname === "/api/system/version") {
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
-      body = { currentVersion: "0.1.2-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+      body = { currentVersion: "0.1.2", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     }
     else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
@@ -367,10 +371,8 @@ test("renders every authenticated route without page errors or global overflow",
     { path: "/library", expected: "Library" },
     { path: "/scans", expected: "History > Scans" },
     { path: "/audits", expected: "History > Audits" },
-    { path: "/integrations", expected: "Coming soon" },
     { path: "/logs", expected: "Logs" },
     { path: "/settings", expected: "Settings > Library" },
-    { path: "/settings/integrations", expected: "Settings > Integrations" },
     { path: "/settings/advanced", expected: "Settings > Advanced" },
     { path: "/settings/user", expected: "Settings > User settings" }
   ];
@@ -774,6 +776,7 @@ test("advanced settings can disable copy verification and identify the recommend
   await expect(byteCompare).not.toBeChecked();
   await expect(byteCompare).toBeDisabled();
   await expect(copySection.locator(".advanced-readonly-value")).toContainText("Off");
+  await expect(copySection.getByRole("alert")).toContainText("source bytes and media integrity are not checked");
   await page.getByRole("button", { name: "Save advanced settings", exact: true }).click();
   await expect(copySection.getByText("Current: Off", { exact: true })).toBeVisible();
   expect(savedSettings).toMatchObject({ copy: { profile: "off", byteCompare: false, mediaValidation: "off" } });
@@ -865,6 +868,7 @@ test("title rescan controls explain their scope and lock sibling actions while q
 test("failed copy admission does not display a waiting job", async ({ page }) => {
   const timestamp = "2026-07-29T20:42:08.000Z";
   const title = "Newly Scanned Title (2026)";
+  const retryTitle = "Independent Copy Candidate (2026)";
   const item = {
     id: 42,
     title,
@@ -882,7 +886,14 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     source: "scan",
     updatedAt: timestamp
   };
+  const retryItem = {
+    ...item,
+    id: 43,
+    title: retryTitle,
+    normalizedTitle: "independent copy candidate (2026)"
+  };
   const admissionError = "Copy data from job #199 requires manual reconciliation before another action can touch the same media item or managed path.";
+  let copyAttempts = 0;
 
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -896,7 +907,7 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
     else if (url.pathname === "/api/system/version") {
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
-      body = { currentVersion: "0.1.2-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+      body = { currentVersion: "0.1.2", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     }
     else if (url.pathname === "/api/settings/sections") body = { sections: ["shows"], sectionTitles: { shows: "Shows" }, sectionTypes: { shows: "shows" } };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
@@ -904,11 +915,32 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     else if (url.pathname === "/api/inventory/summary") body = {};
     else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: { shows: timestamp }, localSections: { shows: null }, remoteRoot: null };
     else if (url.pathname === "/api/jobs") body = [];
-    else if (url.pathname === "/api/storage-policies") body = url.searchParams.get("policy") === "location_1" ? [item] : [];
+    else if (url.pathname === "/api/jobs/200/events/page") body = { events: [], total: 0, hasOlder: false };
+    else if (url.pathname === "/api/jobs/200") {
+      body = {
+        id: 200,
+        type: "copy",
+        status: "queued",
+        createdAt: timestamp,
+        startedAt: null,
+        finishedAt: null,
+        lockedBy: null,
+        lockedAt: null,
+        heartbeatAt: null,
+        cancelRequestedAt: null,
+        progress: { options: { direction: "to_local" }, stage: "queued", current: 0, total: 1 }
+      };
+    }
+    else if (url.pathname === "/api/storage-policies") body = url.searchParams.get("policy") === "location_1" ? [item, retryItem] : [];
     else if (url.pathname === "/api/copies/conflicts") body = { conflicts: [], totalConflicts: 0, totalCandidates: 0 };
     else if (url.pathname === "/api/copies") {
-      status = 409;
-      body = { error: admissionError };
+      copyAttempts += 1;
+      if (copyAttempts === 1) {
+        status = 409;
+        body = { error: admissionError };
+      } else {
+        body = { jobId: 200 };
+      }
     }
 
     await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
@@ -927,6 +959,17 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
   await expect(dialog.getByText("The copy job was not queued. No files were changed.", { exact: true })).toBeVisible();
   await expect(dialog.locator(".copy-progress-panel")).toHaveCount(0);
   await expect(dialog.locator(".audit-dialog-events")).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Close copy window", exact: true }).click();
+  await page.getByPlaceholder("Filter scanned titles", { exact: true }).fill(retryTitle);
+  const retryRow = page.locator("tbody tr").filter({ hasText: retryTitle });
+  await expect(retryRow).toHaveCount(1);
+  await retryRow.getByRole("button", { name: "Copy to Local", exact: true }).click();
+
+  await expect(dialog.getByRole("heading", { name: `Copy ${retryTitle} to Local`, exact: true })).toBeVisible();
+  await expect(dialog.locator(".action-error")).toHaveCount(0);
+  await expect(dialog.getByText(admissionError, { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText(`Job #200 - ${retryTitle}`, { exact: true })).toBeVisible();
 });
 
 test("recent jobs identifies a targeted scan by title instead of only its parent folder", async ({ page }) => {
@@ -987,7 +1030,8 @@ test("recent copy jobs show a single link title directly and retain title inspec
       createdAt: timestamp,
       startedAt: timestamp,
       finishedAt: timestamp,
-      progress: { options: { direction: "to_local", linkIds: [9101] }, stage: "completed", total: 1, current: 1, copied: 1 }
+      selection: { total: 1, unavailable: 0, titles: [{ section: "movies", itemName: singleMovieTitle, count: 1 }] },
+      progress: { options: { direction: "to_local" }, stage: "completed", total: 1, current: 1, copied: 1 }
     },
     {
       id: 999992,
@@ -996,7 +1040,8 @@ test("recent copy jobs show a single link title directly and retain title inspec
       createdAt: timestamp,
       startedAt: timestamp,
       finishedAt: timestamp,
-      progress: { options: { direction: "to_local", linkIds: [9201, 9202] }, stage: "completed", total: 2, current: 2, copied: 2 }
+      selection: { total: 2, unavailable: 0, titles: [{ section: "shows", itemName: singleSeriesTitle, count: 2 }] },
+      progress: { options: { direction: "to_local" }, stage: "completed", total: 2, current: 2, copied: 2 }
     },
     {
       id: 999993,
@@ -1005,7 +1050,15 @@ test("recent copy jobs show a single link title directly and retain title inspec
       createdAt: timestamp,
       startedAt: timestamp,
       finishedAt: timestamp,
-      progress: { options: { direction: "to_local", linkIds: [9301, 9302] }, stage: "completed", total: 2, current: 2, copied: 2 }
+      selection: {
+        total: 2,
+        unavailable: 0,
+        titles: [
+          { section: "movies", itemName: "Alpha Multi Title (2026)", count: 1 },
+          { section: "movies", itemName: "Zulu Multi Title (2026)", count: 1 }
+        ]
+      },
+      progress: { options: { direction: "to_local" }, stage: "completed", total: 2, current: 2, copied: 2 }
     }
   ];
   const link = (id: number, section: string, itemName: string) => ({
@@ -1060,13 +1113,24 @@ test("recent copy jobs show a single link title directly and retain title inspec
   const singleSeriesTrigger = singleSeriesRow.getByLabel("View selected titles");
   await expect(singleSeriesTrigger).toHaveCount(1);
   await singleSeriesTrigger.hover();
+  await expect(singleSeriesTrigger.getByRole("tooltip")).toBeVisible();
   await expect(singleSeriesTrigger.locator("li")).toHaveText([singleSeriesTitle]);
 
   await expect(multiTitleRow.locator(".job-scope-detail-line > span:first-child")).toHaveText("2 selected links");
   const multiTitleTrigger = multiTitleRow.getByLabel("View selected titles");
   await expect(multiTitleTrigger).toHaveCount(1);
   await multiTitleTrigger.hover();
+  const multiTitleTooltip = multiTitleTrigger.getByRole("tooltip");
+  await expect(multiTitleTooltip).toBeVisible();
   await expect(multiTitleTrigger.locator("li")).toHaveText(["Alpha Multi Title (2026)", "Zulu Multi Title (2026)"]);
+  const tooltipBox = await multiTitleTooltip.boundingBox();
+  const viewport = page.viewportSize();
+  expect(tooltipBox).not.toBeNull();
+  expect(viewport).not.toBeNull();
+  expect(tooltipBox!.x).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.y).toBeGreaterThanOrEqual(0);
+  expect(tooltipBox!.x + tooltipBox!.width).toBeLessThanOrEqual(viewport!.width);
+  expect(tooltipBox!.y + tooltipBox!.height).toBeLessThanOrEqual(viewport!.height);
 });
 
 test("job progress shows the complete event timeline and opens the selected full log", async ({ page }) => {
@@ -1356,7 +1420,7 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
     else if (url.pathname === "/api/system/version") {
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
-      body = { currentVersion: "0.1.2-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+      body = { currentVersion: "0.1.2", currentChannel: "stable", currentChannelLabel: "Stable", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     } else if (url.pathname === `/api/jobs/${jobId}/events/page`) body = { events, total: events.length, hasOlder: false };
     else if (url.pathname === `/api/jobs/${jobId}`) body = job;
     else if (url.pathname === "/api/jobs") body = [job];

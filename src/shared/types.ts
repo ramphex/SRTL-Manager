@@ -256,6 +256,14 @@ export interface CopyConflictPreview {
   conflicts: CopyLocalConflict[];
   totalConflicts: number;
   totalCandidates: number;
+  sourceTitleRisks?: Array<{
+    linkId: number;
+    itemName: string;
+    relativePath: string;
+    sourcePath: string;
+    reason: string;
+  }>;
+  totalSourceTitleBlocks?: number;
 }
 
 export interface CopyOptions {
@@ -265,6 +273,7 @@ export interface CopyOptions {
   itemName?: string;
   relativePathPrefix?: string;
   localConflictStrategy?: CopyLocalConflictStrategy;
+  allowSourceTitleMismatch?: boolean;
 }
 
 export interface SectionSummary {
@@ -497,7 +506,43 @@ export interface JobRecord {
   lockedAt?: string | null;
   heartbeatAt?: string | null;
   cancelRequestedAt?: string | null;
+  /** Immutable admission options. Legacy records may expose these through progress.options instead. */
+  options?: unknown;
+  /** True when the job owns an immutable selected-media snapshot, including an intentionally empty selection. */
+  selectionFrozen?: boolean;
+  selection?: JobSelectionSummary;
   progress: unknown;
+}
+
+export interface JobSelectionTitle {
+  section: string;
+  itemName: string;
+  count: number;
+}
+
+export interface JobSelectionSummary {
+  total: number;
+  titles: JobSelectionTitle[];
+  unavailable: number;
+  /** Additional title groups omitted from the bounded job-list payload. */
+  omittedTitles?: number;
+  /** Present only for active jobs so the client can show advisory per-item locks. */
+  linkIds?: number[];
+}
+
+export interface CopyReconciliationRecord {
+  id: number;
+  jobId: number;
+  mediaLinkId: number;
+  linkPath: string;
+  errorMessage: string | null;
+  updatedAt: string;
+}
+
+export interface CopyReconciliationState {
+  unresolved: CopyReconciliationRecord[];
+  unresolvedCount: number;
+  resolvedNow: number;
 }
 
 export interface ScanRunRecord {
@@ -563,6 +608,13 @@ export interface AuditResultRecord {
   cmpStatus: "pass" | "fail" | "source_unknown" | "source_missing" | "source_error" | "skipped";
   message: string;
   createdAt: string;
+}
+
+export interface AuditResultPage {
+  results: AuditResultRecord[];
+  total: number;
+  offset: number;
+  hasMore: boolean;
 }
 
 export interface JobEventRecord {

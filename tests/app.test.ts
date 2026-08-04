@@ -460,11 +460,6 @@ describe("api app", () => {
     const setupPaths = await ctx.app.inject({ method: "GET", url: "/api/settings/paths", headers: { cookie: String(setupCookie) } });
     expect(setupPaths.statusCode).toBe(200);
 
-    const integrationPlaceholders = await ctx.app.inject({ method: "GET", url: "/api/settings/integrations", headers: { cookie: String(setupCookie) } });
-    expect(integrationPlaceholders.json()).toEqual([]);
-    const disabledIntegrationSave = await ctx.app.inject({ method: "PUT", url: "/api/settings/integrations", headers: { cookie: String(setupCookie) }, payload: [] });
-    expect(disabledIntegrationSave.statusCode).toBe(501);
-
     const defaultScanSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/scan", headers: { cookie: String(setupCookie) } });
     expect(defaultScanSettings.statusCode).toBe(200);
     expect(defaultScanSettings.json()).toEqual({ scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies", "shows"], localSections: ["movies", "shows"] });
@@ -712,6 +707,18 @@ describe("api app", () => {
     expect(paths.json()).toMatchObject({ localDir: path.join(tmpDir, "local"), remoteDir: path.join(tmpDir, "remote") });
   });
 
+  it("fails loudly when a stored JSON setting is corrupt", async () => {
+    await ctx.database.db.insert(schema.appSettings).values({
+      key: "corruptSetting",
+      value: "{not-json",
+      updatedAt: new Date().toISOString()
+    });
+
+    await expect(getJsonSetting(ctx.database.db, "corruptSetting", { fallback: true })).rejects.toThrow(
+      'Stored setting "corruptSetting" contains invalid JSON'
+    );
+  });
+
   it("bounds authentication input sizes before password hashing", async () => {
     const oversizedUsername = await ctx.app.inject({
       method: "POST",
@@ -729,6 +736,31 @@ describe("api app", () => {
     });
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "Password must be 256 characters or fewer" });
+  });
+
+  it("rejects malformed stored password digests without throwing", async () => {
+    await createAdminSession();
+    await ctx.database.db.update(schema.adminUsers).set({ passwordHash: "scrypt$valid-salt$invalid" });
+
+    const response = await ctx.app.inject({
+      method: "POST",
+      url: "/api/auth/login",
+      payload: { username: "admin", password: "password123" }
+    });
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toMatchObject({ error: "Invalid username or password" });
+  });
+
+  it("deletes expired sessions when they are presented", async () => {
+    const cookie = await createAdminSession();
+    await ctx.database.db.update(schema.sessions).set({ expiresAt: new Date(Date.now() - 1_000).toISOString() });
+
+    const response = await ctx.app.inject({ method: "GET", url: "/api/auth/me", headers: { cookie } });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ authenticated: false, user: null });
+    await expect(ctx.database.db.select().from(schema.sessions)).resolves.toHaveLength(0);
   });
 
   it("serializes concurrent first-admin setup attempts", async () => {
@@ -753,11 +785,20 @@ describe("api app", () => {
     expect(health.headers["x-content-type-options"]).toBe("nosniff");
     expect(health.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(health.headers["content-security-policy"]).not.toContain("upgrade-insecure-requests");
+    const liveHealth = await ctx.app.inject({ method: "GET", url: "/api/health/live" });
+    expect(liveHealth.statusCode).toBe(200);
+    expect(liveHealth.json()).toEqual({ ok: true, service: "running" });
+    const unavailableReadiness = await ctx.app.inject({ method: "GET", url: "/api/health/ready" });
+    expect(unavailableReadiness.statusCode).toBe(503);
+    expect(unavailableReadiness.json()).toMatchObject({ ok: false, worker: "not_started", readyWorkerCount: 0 });
 
     const heartbeatAt = new Date().toISOString();
     await ctx.database.db.insert(schema.workerHeartbeats).values({ workerId: "test-worker", startedAt: heartbeatAt, heartbeatAt, status: "running" });
     const workerReadyHealth = await ctx.app.inject({ method: "GET", url: "/api/health" });
     expect(workerReadyHealth.json()).toMatchObject({ worker: "ready", workerHeartbeatAt: heartbeatAt });
+    const availableReadiness = await ctx.app.inject({ method: "GET", url: "/api/health/ready" });
+    expect(availableReadiness.statusCode).toBe(200);
+    expect(availableReadiness.json()).toMatchObject({ ok: true, worker: "ready", workerHeartbeatAt: heartbeatAt });
 
     const cookie = await createAdminSession();
     const crossSite = await ctx.app.inject({
@@ -867,9 +908,9 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.4",
-      currentChannel: "beta",
-      currentChannelLabel: "Beta",
+      currentVersion: "0.1.2",
+      currentChannel: "stable",
+      currentChannelLabel: "Stable",
       latestVersion: null,
       updateAvailable: false,
       status: "unavailable",
@@ -934,13 +975,13 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2-beta.4",
-      currentChannel: "beta",
-      currentChannelLabel: "Beta",
-      latestVersion: "0.2.0-beta.1",
+      currentVersion: "0.1.2",
+      currentChannel: "stable",
+      currentChannelLabel: "Stable",
+      latestVersion: "0.1.1",
       updateAvailable: true,
       status: "update_available",
-      releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.2.0-beta.1",
+      releaseUrl: "https://github.com/ramphex/srtl-manager/releases/tag/v0.1.1",
       message: "Beta v0.2.0-beta.1 available",
       checkedAt: expect.any(String),
       stable: {
@@ -1325,6 +1366,22 @@ describe("api app", () => {
       path.join(tmpDir, "remote", "Remote Show", "remote-show.mkv")
     ].sort());
 
+    const firstResultPage = await ctx.app.inject({
+      method: "GET",
+      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=2&offset=0`,
+      headers: { cookie }
+    });
+    expect(firstResultPage.statusCode).toBe(200);
+    expect(firstResultPage.json()).toMatchObject({ total: 4, offset: 0, hasMore: true });
+    expect(firstResultPage.json().results).toHaveLength(2);
+    const secondResultPage = await ctx.app.inject({
+      method: "GET",
+      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=2&offset=2`,
+      headers: { cookie }
+    });
+    expect(secondResultPage.json()).toMatchObject({ total: 4, offset: 2, hasMore: false });
+    expect(secondResultPage.json().results).toHaveLength(2);
+
     const unknownFolder = await ctx.app.inject({
       method: "POST",
       url: "/api/audits",
@@ -1434,17 +1491,18 @@ describe("api app", () => {
     const { jobId } = audit.json<{ jobId: number }>();
     await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({
       status: "completed",
-      progress: expect.objectContaining({ options: { mode: "fast", linkIds: [fixture.id], byteCompare: false }, checked: 1, passed: 1 })
+      selection: { total: 1, titles: [{ section: "movies", itemName: "No Compare Movie", count: 1 }], unavailable: 0 },
+      progress: expect.objectContaining({ options: { mode: "fast", byteCompare: false }, checked: 1, passed: 1 })
     });
 
     const history = await ctx.app.inject({ method: "GET", url: "/api/audits", headers: { cookie } });
     expect(history.statusCode).toBe(200);
     expect(history.json<Array<{ jobId: number; options: unknown }>>()).toEqual(
-      expect.arrayContaining([expect.objectContaining({ jobId, options: { mode: "fast", linkIds: [fixture.id], byteCompare: false } })])
+      expect.arrayContaining([expect.objectContaining({ jobId, options: { mode: "fast", byteCompare: false } })])
     );
     const directRun = await ctx.app.inject({ method: "GET", url: `/api/audits/job/${jobId}`, headers: { cookie } });
     expect(directRun.statusCode).toBe(200);
-    expect(directRun.json()).toMatchObject({ jobId, options: { mode: "fast", linkIds: [fixture.id], byteCompare: false } });
+    expect(directRun.json()).toMatchObject({ jobId, options: { mode: "fast", byteCompare: false } });
     expect(await ctx.database.db.select().from(schema.auditResults)).toMatchObject([expect.objectContaining({ cmpStatus: "skipped", status: "pass" })]);
   });
 
@@ -1510,10 +1568,19 @@ describe("api app", () => {
     });
     expect(audit.statusCode).toBe(200);
     const { jobId } = audit.json<{ jobId: number }>();
+    const queuedAuditRow = await first(ctx.database.db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).limit(1));
+    expect(JSON.parse(queuedAuditRow?.options ?? "{}")).not.toHaveProperty("linkIds");
+    expect(JSON.parse(queuedAuditRow?.progress ?? "{}")).not.toHaveProperty("options.linkIds");
+    await expect(ctx.database.db.select().from(schema.jobSelectionItems).where(eq(schema.jobSelectionItems.jobId, jobId))).resolves.toMatchObject([
+      expect.objectContaining({ mediaLinkId: remoteLink?.id, section: "movies", itemName: "Remote Scoped Movie", selectionOrder: 0 })
+    ]);
+    await expect(ctx.jobs.getJob(jobId)).resolves.toMatchObject({
+      selection: { total: 1, unavailable: 0, titles: [{ section: "movies", itemName: "Remote Scoped Movie", count: 1 }], linkIds: [remoteLink?.id] }
+    });
     await expect(runQueuedJob(jobId)).resolves.toMatchObject({
       status: "completed",
       progress: {
-        options: { mode: "fast", linkIds: [remoteLink?.id] },
+        options: { mode: "fast" },
         checked: 1,
         total: 1,
         passed: 0,
@@ -1589,7 +1656,8 @@ describe("api app", () => {
 
     await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({
       status: "completed",
-      progress: expect.objectContaining({ options: expect.objectContaining({ linkIds: [firstFixture.id] }), checked: 1, total: 1 })
+      selection: expect.objectContaining({ total: 1 }),
+      progress: expect.objectContaining({ options: expect.not.objectContaining({ linkIds: expect.anything() }), checked: 1, total: 1 })
     });
     expect(auditedPaths).toEqual([firstFixture.sourcePath]);
     expect(auditedPaths).not.toContain(secondFixture.sourcePath);
@@ -1615,7 +1683,8 @@ describe("api app", () => {
 
     await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({
       status: "completed",
-      progress: expect.objectContaining({ options: expect.objectContaining({ linkIds: [] }), checked: 0, total: 0 })
+      selection: { total: 0, titles: [], unavailable: 0 },
+      progress: expect.objectContaining({ checked: 0, total: 0 })
     });
     expect(auditCalls).toBe(0);
   });
@@ -1644,9 +1713,12 @@ describe("api app", () => {
         conflicts: 0,
         failed: 0,
         stage: "completed",
-        currentTitle: "Copy Local Movie",
-        currentFile: fixture.relativePath,
-        destinationPath: fixture.destinationPath,
+        currentTitle: null,
+        currentFile: null,
+        sourcePath: null,
+        destinationPath: null,
+        linkPath: null,
+        sizeBytes: null,
         bytesCopied: null,
         bytesProcessed: null,
         totalBytes: null,
@@ -1916,7 +1988,7 @@ describe("api app", () => {
     });
   });
 
-  it("limits reconciliation blockers to the exact uncertain media from a legacy multi-item job", async () => {
+  it("auto-closes provably empty legacy reconciliation state without blocking related or retried media", async () => {
     const blockedFixture = await insertCopySymlink({ itemName: "Uncertain Legacy Movie", kind: "remote", storagePolicy: "location_1", content: "uncertain source" });
     const relatedFixture = await insertCopySymlink({ itemName: "Independent Legacy Movie", kind: "remote", storagePolicy: "location_1", content: "independent source" });
     const legacyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [blockedFixture.id, relatedFixture.id] });
@@ -1931,10 +2003,57 @@ describe("api app", () => {
 
     const relatedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [relatedFixture.id] });
     await expect(ctx.jobs.getJob(relatedJobId)).resolves.toMatchObject({ status: "queued" });
-    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [blockedFixture.id] })).rejects.toThrow(
-      `Copy data from job #${legacyJobId} requires manual reconciliation`
-    );
+    const retriedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [blockedFixture.id] });
+    await expect(ctx.jobs.getJob(retriedJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, legacyJobId)).limit(1))).resolves.toMatchObject({
+      stage: "rolled_back",
+      errorMessage: null
+    });
     await expect(ctx.jobs.terminate(relatedJobId)).resolves.toBe(true);
+    await expect(ctx.jobs.terminate(retriedJobId)).resolves.toBe(true);
+  });
+
+  it("preserves an unlinked legacy destination and returns it to normal copy conflict handling", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Legacy Destination Conflict", kind: "remote", storagePolicy: "location_1", content: "current remote source" });
+    const legacyJobId = await ctx.jobs.createJob("copy");
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", finishedAt: timestamp }).where(eq(schema.jobs.id, legacyJobId));
+    await fs.mkdir(path.dirname(fixture.destinationPath), { recursive: true });
+    await fs.writeFile(fixture.destinationPath, "preserved unowned destination");
+    await insertCopyOperationFixture({
+      jobId: legacyJobId,
+      fixture,
+      stage: "reconciliation_required",
+      errorMessage: "Legacy destination ownership cannot be proven"
+    });
+
+    const retriedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("preserved unowned destination");
+    const resolvedOperation = await first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, legacyJobId)).limit(1));
+    expect(resolvedOperation).toMatchObject({
+      stage: "failed",
+      completedAt: expect.any(String),
+      reconciliationResolvedAt: expect.any(String),
+      errorMessage: expect.stringContaining("existing destination was left untouched for normal conflict handling")
+    });
+    await expect(ctx.jobs.getJob(retriedJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(ctx.jobs.terminate(retriedJobId)).resolves.toBe(true);
+
+    await reconcileEnvironmentPaths(ctx.database.db, {
+      symlinkDir: path.join(tmpDir, "plex"),
+      localDir: path.join(tmpDir, "local"),
+      remoteDir: path.join(tmpDir, "remote")
+    });
+
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.jobId, legacyJobId)).limit(1))).resolves.toMatchObject({
+      stage: "failed",
+      reconciliationResolvedAt: resolvedOperation?.reconciliationResolvedAt
+    });
+    const secondRetryJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(ctx.jobs.getJob(secondRetryJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(ctx.jobs.terminate(secondRetryJobId)).resolves.toBe(true);
   });
 
   it("does not let a stale local title item block new actionable copy work", async () => {
@@ -2186,6 +2305,31 @@ describe("api app", () => {
     expect(copyFfmpegModes).toEqual(["deep"]);
   });
 
+  it("freezes copy verification settings when a job is queued", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Frozen Verify Movie", kind: "remote", storagePolicy: "location_1", content: "copy with queued settings" });
+    const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+
+    const settings = await ctx.app.inject({
+      method: "PUT",
+      url: "/api/settings/advanced",
+      headers: { cookie },
+      payload: {
+        copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+      }
+    });
+    expect(settings.statusCode).toBe(200);
+
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      options: expect.objectContaining({ behavior: { profile: "balanced", byteCompare: true, mediaValidation: "fast" } }),
+      progress: expect.objectContaining({ copied: 1, failed: 0 })
+    });
+    expect(copyCmpCalls).toBe(1);
+    expect(copyFfmpegModes).toEqual(["fast"]);
+  });
+
   it("copies with verification disabled while retaining guarded transfer and promotion", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "No Verify Movie", kind: "remote", storagePolicy: "location_1", content: "copy without content verification" });
@@ -2239,6 +2383,18 @@ describe("api app", () => {
       content: "wrong but valid media"
     });
 
+    const preview = await ctx.app.inject({
+      method: "POST",
+      url: "/api/copies/conflicts",
+      headers: { cookie },
+      payload: { direction: "to_local", linkIds: [fixture.id] }
+    });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      totalSourceTitleBlocks: 1,
+      sourceTitleRisks: [expect.objectContaining({ linkId: fixture.id, itemName: "Mother Jugs and Speed (1976)" })]
+    });
+
     const copy = await ctx.app.inject({
       method: "POST",
       url: "/api/copies",
@@ -2275,6 +2431,23 @@ describe("api app", () => {
     await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
     expect(copyFfmpegModes).toEqual([]);
+
+    const override = await ctx.app.inject({
+      method: "POST",
+      url: "/api/copies",
+      headers: { cookie },
+      payload: { direction: "to_local", linkIds: [fixture.id], allowSourceTitleMismatch: true }
+    });
+    expect(override.statusCode).toBe(200);
+    const overrideJobId = override.json<{ jobId: number }>().jobId;
+    await expect(runQueuedJob(overrideJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 1, conflicts: 0, failed: 0 })
+    });
+    await expect(ctx.jobs.listEvents(overrideJobId)).resolves.toEqual(
+      expect.arrayContaining([expect.objectContaining({ level: "warn", message: "Source title mismatch override accepted" })])
+    );
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("wrong but valid media");
   });
 
   it("copies assign-remote local symlinks to remote storage with verification", async () => {
@@ -2401,7 +2574,6 @@ describe("api app", () => {
       progress: expect.objectContaining({
         options: expect.objectContaining({
           direction: "to_local",
-          linkIds: [needsCopy.id],
           section: "shows",
           itemName: "Scoped Copy Show",
           relativePathPrefix: "Scoped Copy Show/Season 01"
@@ -2447,8 +2619,8 @@ describe("api app", () => {
 
     await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
       status: "completed",
+      selection: { total: 0, titles: [], unavailable: 0 },
       progress: expect.objectContaining({
-        options: expect.objectContaining({ linkIds: [] }),
         current: 0,
         total: 0,
         copied: 0,
@@ -2460,6 +2632,46 @@ describe("api app", () => {
     await expect(fs.readlink(laterFixture.linkPath)).resolves.toBe(laterFixture.sourcePath);
   });
 
+  it("bounds large immutable-selection metadata without changing the selected total", async () => {
+    const timestamp = new Date().toISOString();
+    const job = await first(
+      ctx.database.db
+        .insert(schema.jobs)
+        .values({
+          type: "copy",
+          status: "queued",
+          createdAt: timestamp,
+          options: JSON.stringify({ direction: "to_local" }),
+          selectionFrozen: true,
+          progress: "{}"
+        })
+        .returning({ id: schema.jobs.id })
+    );
+    if (!job) throw new Error("Large selection job was not inserted");
+    await ctx.database.pool.query(
+      `
+        INSERT INTO job_selection_items (
+          job_id, media_link_id, selection_order, section, item_name, relative_path, link_path, created_at
+        )
+        SELECT $1,
+               value,
+               value - 1,
+               'shows',
+               'Large title ' || lpad(value::text, 4, '0'),
+               'Large title ' || value || '/episode.mkv',
+               '/links/Large title ' || value || '/episode.mkv',
+               $2
+        FROM generate_series(1, 1001) AS value
+      `,
+      [job.id, timestamp]
+    );
+
+    const record = await ctx.jobs.getJob(job.id);
+    expect(record?.selection).toMatchObject({ total: 1001, unavailable: 0, omittedTitles: 901 });
+    expect(record?.selection?.titles).toHaveLength(100);
+    expect(record?.selection?.linkIds).toBeUndefined();
+  });
+
   it("resumes stale copy jobs without shrinking the original selected total", async () => {
     const fixtures = await Promise.all([
       insertCopySymlink({ itemName: "Resume Copy One", kind: "remote", storagePolicy: "location_1", content: "resume one" }),
@@ -2469,7 +2681,8 @@ describe("api app", () => {
     const linkIds = fixtures.map((fixture) => fixture.id);
     const jobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds });
     await expect(ctx.jobs.getJob(jobId)).resolves.toMatchObject({
-      progress: expect.objectContaining({ options: expect.objectContaining({ direction: "to_local", linkIds }) })
+      selection: expect.objectContaining({ total: 3, linkIds }),
+      progress: expect.objectContaining({ options: expect.objectContaining({ direction: "to_local" }) })
     });
 
     const staleStartedAt = new Date(Date.now() - 30 * 60_000).toISOString();
@@ -3443,7 +3656,21 @@ describe("api app", () => {
 
     expect(await worker.runOnce()).toBe(true);
     expect(maximumActiveTransfers).toBe(2);
-    expect(await ctx.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ copied: 2, failed: 0 }) });
+    expect(await ctx.jobs.getJob(jobId)).toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({
+        current: 2,
+        total: 2,
+        copied: 2,
+        failed: 0,
+        currentTitle: null,
+        currentFile: null,
+        sourcePath: null,
+        destinationPath: null,
+        linkPath: null,
+        sizeBytes: null
+      })
+    });
   });
 
   it("copies links for the same title concurrently within one copy job", async () => {
@@ -3937,6 +4164,22 @@ describe("api app", () => {
     );
   });
 
+  it("rejects section configuration changes while queued work could depend on them", async () => {
+    const cookie = await createAdminSession();
+    const jobId = await ctx.jobs.startScan({ scanSymlinks: true, scanLocal: false, scanRemote: false });
+
+    const response = await ctx.app.inject({
+      method: "PUT",
+      url: "/api/settings/sections",
+      headers: { cookie },
+      payload: { sections: ["movies"], sectionTitles: {}, sectionTypes: { movies: "movies" } }
+    });
+
+    expect(response.statusCode).toBe(409);
+    expect(response.json()).toMatchObject({ error: expect.stringContaining(`scan job #${jobId} is queued`) });
+    await expect(ctx.jobs.terminate(jobId)).resolves.toBe(true);
+  });
+
   it("rejects storage policy changes overlapping a queued copy while allowing a disjoint title", async () => {
     const cookie = await createAdminSession();
     const copyFixture = await insertCopySymlink({
@@ -4318,6 +4561,34 @@ describe("api app", () => {
       { id: secondId, itemName: "Second Selected Title" },
       { id: firstId, itemName: "First Selected Title" }
     ]);
+  });
+
+  it("accepts explicit copy and audit selections larger than the old 1000-item preview limit", async () => {
+    const cookie = await createAdminSession();
+    const linkIds = Array.from({ length: 1_001 }, (_unused, index) => index + 1);
+
+    const copy = await ctx.app.inject({
+      method: "POST",
+      url: "/api/copies",
+      headers: { cookie },
+      payload: { direction: "to_local", linkIds }
+    });
+    expect(copy.statusCode).toBe(200);
+    const copyJobId = copy.json<{ jobId: number }>().jobId;
+    await expect(ctx.jobs.getJob(copyJobId)).resolves.toMatchObject({ status: "queued", selection: { total: 0, titles: [] } });
+
+    const audit = await ctx.app.inject({
+      method: "POST",
+      url: "/api/audits",
+      headers: { cookie },
+      payload: { mode: "fast", linkIds }
+    });
+    expect(audit.statusCode).toBe(200);
+    const auditJobId = audit.json<{ jobId: number }>().jobId;
+    await expect(ctx.jobs.getJob(auditJobId)).resolves.toMatchObject({ status: "queued", selection: { total: 0, titles: [] } });
+
+    await expect(ctx.jobs.terminate(copyJobId)).resolves.toBe(true);
+    await expect(ctx.jobs.terminate(auditJobId)).resolves.toBe(true);
   });
 
   it("filters media link pages by section and storage policy", async () => {

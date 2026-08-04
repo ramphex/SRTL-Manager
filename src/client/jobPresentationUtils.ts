@@ -152,6 +152,7 @@ export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {
 }
 
 export function copyWorkTotalFromJob(job: JobRecord, fallbackTotal = 0): number {
+  if (job.selection) return Math.max(0, job.selection.total - job.selection.unavailable);
   const progress = recordFromUnknown(job.progress);
   const options = copyOptionsFromJob(job);
   const total = finiteNumberFromUnknown(progress?.total) || fallbackTotal;
@@ -508,6 +509,7 @@ export function selectedLinkIdsFromJob(job: JobRecord): number[] {
 export function selectedLinkIdsFromJobs(jobs: JobRecord[]): number[] {
   const ids = new Set<number>();
   for (const job of jobs) {
+    if (job.selection) continue;
     for (const id of selectedLinkIdsFromJob(job)) ids.add(id);
   }
   return [...ids].sort((first, second) => first - second);
@@ -615,6 +617,7 @@ export function copyPromptKey(options: CopyOptions): string {
     options.itemName ?? "",
     options.relativePathPrefix ?? "",
     options.linkIds?.join(",") ?? "",
-    options.localConflictStrategy ?? ""
+    options.localConflictStrategy ?? "",
+    options.allowSourceTitleMismatch ? "allow-source-title-mismatch" : ""
   ].join(":");
 }

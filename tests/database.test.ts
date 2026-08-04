@@ -13,6 +13,21 @@ describe("database bootstrap", () => {
     }
   });
 
+  it("fails closed when a migration gap exists below the current version", async () => {
+    const testDatabase = await createTestDatabase();
+    const database = await openDatabase(testDatabase.databaseUrl);
+    try {
+      await database.pool.query(`DELETE FROM schema_migrations WHERE version = 4`);
+    } finally {
+      await database.close();
+    }
+    try {
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow("Missing migration 4");
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+
   it("creates the current schema and applies versioned migrations idempotently", async () => {
     const testDatabase = await createTestDatabase();
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -35,7 +50,15 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }]);
+
+      const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
+        SELECT conname
+        FROM pg_constraint
+        WHERE connamespace = 'public'::regnamespace
+          AND convalidated = FALSE
+      `);
+      expect(unvalidatedConstraints.rows).toEqual([]);
 
       const workerColumns = await database.pool.query<{ column_name: string }>(`
         select column_name
@@ -52,7 +75,7 @@ describe("database bootstrap", () => {
       const copyOperationColumns = await database.pool.query<{ column_name: string; is_nullable: string }>(`
         SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'copy_operations'
       `);
-      for (const columnName of ["temp_identity", "destination_identity", "displaced_identity"]) {
+      for (const columnName of ["temp_identity", "destination_identity", "displaced_identity", "reconciliation_resolved_at"]) {
         expect(copyOperationColumns.rows).toContainEqual({ column_name: columnName, is_nullable: "YES" });
       }
       const pathMigrationColumns = await database.pool.query<{ column_name: string; is_nullable: string }>(`
@@ -100,6 +123,52 @@ describe("database bootstrap", () => {
       ]);
     } finally {
       await secondDatabase.close();
+      await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("backfills durable resolution markers for copy journals already closed by reconciliation", async () => {
+    const testDatabase = await createTestDatabase();
+    const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
+    try {
+      await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
+      await legacyPool.query(`INSERT INTO schema_migrations (version, name, applied_at) SELECT version, 'legacy', now()::text FROM generate_series(1, 11) AS version`);
+      await legacyPool.query(`
+        CREATE TABLE copy_operations (
+          id SERIAL PRIMARY KEY,
+          error_message TEXT,
+          updated_at TEXT,
+          completed_at TEXT
+        )
+      `);
+      await legacyPool.query(
+        `
+          INSERT INTO copy_operations (error_message, updated_at, completed_at)
+          VALUES
+            ('Automatically closed after recheck: settled journal', $1, $2),
+            ('Unrelated copy failure', $1, $2)
+        `,
+        ["2026-08-02T21:00:00.000Z", "2026-08-02T21:01:00.000Z"]
+      );
+    } finally {
+      await legacyPool.end();
+    }
+
+    const database = await openDatabase(testDatabase.databaseUrl);
+    try {
+      expect(
+        (await database.pool.query<{ id: number; reconciliation_resolved_at: string | null }>(
+          `SELECT id, reconciliation_resolved_at FROM copy_operations ORDER BY id`
+        )).rows
+      ).toEqual([
+        { id: 1, reconciliation_resolved_at: "2026-08-02T21:01:00.000Z" },
+        { id: 2, reconciliation_resolved_at: null }
+      ]);
+      expect((await database.pool.query<{ version: number; name: string }>(`SELECT version, name FROM schema_migrations WHERE version = 12`)).rows).toEqual([
+        { version: 12, name: "durable_copy_reconciliation_resolution" }
+      ]);
+    } finally {
       await database.close();
       await testDatabase.cleanup();
     }
@@ -164,7 +233,11 @@ describe("database bootstrap", () => {
         { version: 5 },
         { version: 6 },
         { version: 7 },
-        { version: 8 }
+        { version: 8 },
+        { version: 9 },
+        { version: 10 },
+        { version: 11 },
+        { version: 12 }
       ]);
     } finally {
       await database.close();
@@ -347,7 +420,11 @@ describe("database bootstrap", () => {
         { version: 5, name: "multi_worker_job_claims" },
         { version: 6, name: "copy_operation_file_identities" },
         { version: 7, name: "path_migration_target_identities" },
-        { version: 8, name: "linked_storage_file_policies" }
+        { version: 8, name: "linked_storage_file_policies" },
+        { version: 9, name: "immutable_job_inputs_and_selections" },
+        { version: 10, name: "retention_and_history_indexes" },
+        { version: 11, name: "validate_integrity_constraints" },
+        { version: 12, name: "durable_copy_reconciliation_resolution" }
       ]);
     } finally {
       await database.close();

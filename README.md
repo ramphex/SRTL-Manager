@@ -80,9 +80,11 @@ The single Compose worker service can host any positive number of independent jo
 
 The optional `SRTL_MAX_RUNNING_JOBS` setting limits total simultaneous jobs and must not exceed `SRTL_WORKER_COUNT`. `SRTL_MAX_RUNNING_SCANS`, `SRTL_MAX_RUNNING_AUDITS`, and `SRTL_MAX_RUNNING_COPIES` apply per-type limits, may be zero to pause that job type, and must not exceed the total-job limit. When omitted, the total limit follows the configured worker count and the per-type limits follow that total limit.
 
-`SRTL_COPY_FILE_CONCURRENCY` controls how many files one copy job may transfer at once. `SRTL_MAX_ACTIVE_COPY_FILES` is the worker process-wide copy-file ceiling and must be at least the per-job value. Their defaults keep one file active per copy job while allowing separate copy jobs to use separate slots. Start conservatively and raise copy limits only when the storage endpoints and network can sustain the additional I/O.
+`SRTL_COPY_FILE_CONCURRENCY` controls how many files one copy job may transfer at once. `SRTL_MAX_ACTIVE_COPY_FILES` is the independent worker process-wide copy-file ceiling and must be at least the per-job value. Their defaults keep one file active per copy job while allowing separate copy jobs to use separate slots. Setting both values above the worker count is supported, including parallel file transfers from one copy job in a one-slot worker; start conservatively and raise copy limits only when the storage endpoints and network can sustain the additional I/O.
 
 Scale with `SRTL_WORKER_COUNT`; do not simultaneously run `docker compose up --scale worker=...`. The supported deployment model keeps job slots and the active-copy-file safeguard inside one worker process. Compose gives that process two minutes to stop active jobs and perform safe rollback during shutdown.
+
+`SRTL_JOB_HISTORY_RETENTION_DAYS` controls automatic cleanup of terminal job, event, audit, and scan history. The default is 90 days; set it to `0` to preserve all history. Jobs with unresolved copy-recovery state are always retained.
 
 The API checks the public GitHub Releases endpoint for stable and beta version information at startup and when version status is refreshed. This request does not include credentials, paths, or inventory data.
 
@@ -131,6 +133,8 @@ npm run test:e2e
 ```
 
 Stop the disposable database with `docker stop srtl-manager-dev-postgres`. To use an existing Postgres instance instead, provide the `SRTL_POSTGRES_*` settings or `SRTL_DATABASE_URL` in a local `.env`.
+
+The optional `npm run sync:server` helper synchronizes source to an existing development server selected by `SRTL_REMOTE` (or `SRTL_REMOTE_HOST`). It preserves remote `.env`, data, dependencies, and logs, refuses an unrelated non-empty destination, and supports a non-mutating preview with `SRTL_SYNC_DRY_RUN=1`. A normal first sync initializes the destination marker that later syncs require.
 
 ## Releases And Contributions
 

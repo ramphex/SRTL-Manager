@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 30
     services:
       postgres:
-        image: postgres:17-alpine
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
         env:
           POSTGRES_DB: postgres
           POSTGRES_USER: srtl_test
@@ -81,7 +81,7 @@ jobs:
           npm run start:api > /tmp/srtl-api.log 2>&1 &
           echo $! > /tmp/srtl-api.pid
           for _ in {1..30}; do
-            curl -fsS http://127.0.0.1:3010/api/health && exit 0
+            curl -fsS http://127.0.0.1:3010/api/health/live && exit 0
             sleep 1
           done
           cat /tmp/srtl-api.log
@@ -177,7 +177,7 @@ jobs:
         run: docker build --check .
       - uses: docker/setup-qemu-action@96fe6ef7f33517b61c61be40b68a1882f3264fb8 # v4
       - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4
-      - uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

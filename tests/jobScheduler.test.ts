@@ -7,10 +7,11 @@ import { createApp, type AppContext } from "../src/server/app";
 import type { JobConcurrencySettings } from "../src/server/config";
 import { first, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
-import { JobWorker } from "../src/server/jobs/jobRunner";
+import { copyAdmissionSelectionFingerprint, JobWorker } from "../src/server/jobs/jobRunner";
 import { schedulerLockKey } from "../src/server/jobs/scheduling";
 import type { AuditCommandRunner } from "../src/server/lib/auditor";
 import type { CopyCommandRunner } from "../src/server/lib/copier";
+import type { MediaLinkRow } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 
 const silentLogger = {
@@ -28,6 +29,42 @@ const twoJobConcurrency: JobConcurrencySettings = {
   copyFileConcurrency: 1,
   maxActiveCopyFiles: 2
 };
+
+function admissionLink(id: number, overrides: Partial<MediaLinkRow> = {}): MediaLinkRow {
+  const timestamp = "2026-08-02T00:00:00.000Z";
+  return {
+    id,
+    section: "shows",
+    itemName: `Admission Show ${id}`,
+    relativePath: `Admission Show ${id}/Season 01/episode-${id}.mkv`,
+    linkPath: `/symlinks/shows/Admission Show ${id}/Season 01/episode-${id}.mkv`,
+    targetPath: `/remote/shows/Admission Show ${id}/Season 01/episode-${id}.mkv`,
+    kind: "remote",
+    targetExists: true,
+    isMedia: true,
+    storagePolicy: "location_1",
+    resolvedStorageFileId: id,
+    sizeBytes: id * 1_000,
+    firstSeenAt: timestamp,
+    lastSeenAt: timestamp,
+    lastChangedAt: timestamp,
+    missingSince: null,
+    updatedAt: timestamp,
+    ...overrides
+  };
+}
+
+describe("copy admission selection fingerprint", () => {
+  it("ignores database row order while preserving metadata change detection", () => {
+    const first = admissionLink(11);
+    const second = admissionLink(12);
+
+    expect(copyAdmissionSelectionFingerprint([first, second])).toBe(copyAdmissionSelectionFingerprint([second, first]));
+    expect(copyAdmissionSelectionFingerprint([first, second])).not.toBe(
+      copyAdmissionSelectionFingerprint([first, { ...second, targetPath: `${second.targetPath}.changed` }])
+    );
+  });
+});
 
 let tmpDir: string;
 let ctx: AppContext;
