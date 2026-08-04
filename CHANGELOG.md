@@ -4,12 +4,6 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
-## [0.1.3-beta.1] - 2026-08-04
-
-### Changed
-
-- Started the 0.1.3 beta development line from the 0.1.2 stable release.
-
 ## [0.1.2] - 2026-08-04
 
 ### Added
