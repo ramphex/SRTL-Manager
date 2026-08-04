@@ -8,6 +8,7 @@ export type CopyProgressView = {
   copied: number;
   repointed: number;
   skipped: number;
+  alreadyCompleted: number;
   conflicts: number;
   failed: number;
   stage: string;
@@ -131,6 +132,7 @@ export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {
     copied: finiteNumberFromUnknown(progress?.copied),
     repointed: finiteNumberFromUnknown(progress?.repointed),
     skipped: finiteNumberFromUnknown(progress?.skipped),
+    alreadyCompleted: finiteNumberFromUnknown(progress?.alreadyCompleted),
     conflicts: finiteNumberFromUnknown(progress?.conflicts),
     failed: finiteNumberFromUnknown(progress?.failed),
     stage: typeof progress?.stage === "string" ? progress.stage : job?.status === "queued" ? "queued" : "waiting",
@@ -147,6 +149,20 @@ export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {
     remainingSeconds: finiteNullableNumberFromUnknown(progress?.remainingSeconds),
     direction
   };
+}
+
+export function copyWorkTotalFromJob(job: JobRecord, fallbackTotal = 0): number {
+  if (job.selection) return Math.max(0, job.selection.total - job.selection.unavailable);
+  const progress = recordFromUnknown(job.progress);
+  const options = copyOptionsFromJob(job);
+  const total = finiteNumberFromUnknown(progress?.total) || fallbackTotal;
+  const skipped = finiteNumberFromUnknown(progress?.skipped);
+  const alreadyCompleted = finiteNumberFromUnknown(progress?.alreadyCompleted);
+  const legacyScopedSelection = Boolean(options?.linkIds?.length && (options.section || options.itemName || options.relativePathPrefix));
+  if (legacyScopedSelection && alreadyCompleted > 0 && skipped === alreadyCompleted) {
+    return Math.max(0, total - alreadyCompleted);
+  }
+  return total;
 }
 
 export function copyCompletedCount(progress: Pick<CopyProgressView, "copied" | "repointed" | "skipped" | "conflicts" | "failed">): number {
@@ -493,6 +509,7 @@ export function selectedLinkIdsFromJob(job: JobRecord): number[] {
 export function selectedLinkIdsFromJobs(jobs: JobRecord[]): number[] {
   const ids = new Set<number>();
   for (const job of jobs) {
+    if (job.selection) continue;
     for (const id of selectedLinkIdsFromJob(job)) ids.add(id);
   }
   return [...ids].sort((first, second) => first - second);
@@ -513,11 +530,28 @@ export function selectedLinkTitleSummaries(linkIds: number[], linkRowsById: Map<
     counts.set(title, (counts.get(title) ?? 0) + 1);
   }
 
+  const includeLinkCounts = counts.size > 1;
   const summaries = [...counts.entries()]
     .sort(([firstTitle], [secondTitle]) => firstTitle.localeCompare(secondTitle, undefined, { numeric: true, sensitivity: "base" }))
-    .map(([title, count]) => (count > 1 ? `${title} (${formatNumber(count)} links)` : title));
+    .map(([title, count]) => (includeLinkCounts && count > 1 ? `${title} (${formatNumber(count)} links)` : title));
   if (missingCount > 0) summaries.push(`${formatNumber(missingCount)} link${missingCount === 1 ? "" : "s"} not found in current inventory`);
   return summaries;
+}
+
+export function singleSelectedLinkTitle(linkIds: number[], linkRowsById: Map<number, MediaLinkRow> | undefined): string | null {
+  if (!linkRowsById || linkIds.length === 0) return null;
+  let selectedTitle: { key: string; label: string } | null = null;
+
+  for (const id of linkIds) {
+    const link = linkRowsById.get(id);
+    const label = link?.itemName.trim();
+    if (!link || !label) return null;
+    const key = `${link.section}\0${label}`;
+    if (selectedTitle && selectedTitle.key !== key) return null;
+    selectedTitle = { key, label };
+  }
+
+  return selectedTitle?.label ?? null;
 }
 
 export function copyPromptFromJob(
@@ -583,6 +617,7 @@ export function copyPromptKey(options: CopyOptions): string {
     options.itemName ?? "",
     options.relativePathPrefix ?? "",
     options.linkIds?.join(",") ?? "",
-    options.localConflictStrategy ?? ""
+    options.localConflictStrategy ?? "",
+    options.allowSourceTitleMismatch ? "allow-source-title-mismatch" : ""
   ].join(":");
 }

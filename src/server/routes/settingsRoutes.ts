@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { getJsonSetting, getSectionSettings, setSetting, type Db } from "../db/database";
 import { parseSectionSettings, persistSectionSettings } from "../lib/sectionSettings";
+import { withQueueConfigurationGuard } from "../jobs/resourceMutationGuard";
 import {
   getStorageLocationsSettings,
   persistStorageLocationNames,
@@ -106,7 +107,7 @@ export function registerSettingsRoutes(app: FastifyInstance, db: Db): void {
 
   app.put("/api/settings/sections", async (request) => {
     const body: SectionSettings = parseSectionSettings(request.body);
-    await persistSectionSettings(db, body);
+    await withQueueConfigurationGuard(db, async (transaction) => persistSectionSettings(transaction, body));
     return body;
   });
 
@@ -150,9 +151,4 @@ export function registerSettingsRoutes(app: FastifyInstance, db: Db): void {
     return body;
   });
 
-  app.get("/api/settings/integrations", async () => []);
-
-  app.put("/api/settings/integrations", async (_request, reply) =>
-    reply.code(501).send({ error: "External integrations are not available in this release" })
-  );
 }

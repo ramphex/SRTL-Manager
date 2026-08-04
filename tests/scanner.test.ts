@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openTestDatabase } from "./testDb";
 import * as schema from "../src/server/db/schema";
@@ -447,6 +448,15 @@ describe("scanner", () => {
       const summary = await persistScanResult(database.db, titleRescan, 2);
 
       expect(titleRescan.links.map((link) => link.linkPath)).toEqual([newFirstLink]);
+      expect(titleRescan.reconciledStorageFiles).toEqual([
+        expect.objectContaining({
+          rootType: "remote",
+          section: "shows",
+          itemName: "First Title",
+          filePath: newFirstTarget,
+          sizeBytes: 3
+        })
+      ]);
       expect(summary).toMatchObject({ totalLinks: 1, remoteLinks: 1, missingLinks: 1 });
       const persistedLinks = (await database.db.select().from(schema.mediaLinks)).filter((link) => !link.missingSince);
       expect(persistedLinks.map((link) => [link.linkPath, link.lastSeenJobId]).sort()).toEqual(
@@ -455,10 +465,53 @@ describe("scanner", () => {
           [secondLink, 1]
         ].sort()
       );
+      const rescannedLink = persistedLinks.find((link) => link.linkPath === newFirstLink);
+      expect(rescannedLink?.resolvedStorageFileId).toEqual(expect.any(Number));
+      expect(await listStorageFiles(database.db, "remote")).toEqual([
+        expect.objectContaining({ filePath: newFirstTarget, section: "shows", itemName: "First Title" })
+      ]);
+      await expect(database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.filePath, newFirstTarget))).resolves.toEqual([
+        expect.objectContaining({ filePath: newFirstTarget, lastSeenJobId: 2 })
+      ]);
       expect(await listMediaLinks(database.db, undefined, "missing")).toMatchObject([{ linkPath: oldFirstLink, missingSince: expect.any(String) }]);
     } finally {
       await database.close();
     }
+  });
+
+  it("marks a targeted symlink broken when its target cannot pass the bounded read preflight", async () => {
+    const symlinkDir = path.join(tmpDir, "links");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleRoot = path.join(symlinkDir, "movies", "Unreadable Title");
+    const invalidTarget = path.join(remoteDir, "invalid-target.mkv");
+    await fs.mkdir(titleRoot, { recursive: true });
+    await fs.mkdir(invalidTarget, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.symlink(invalidTarget, path.join(titleRoot, "Unreadable Title.mkv"));
+
+    const result = await scanLibrary(
+      { symlinkDir, localDir, remoteDir },
+      { sections: ["movies"], sectionTypes: { movies: "movies" } },
+      new Map(),
+      {
+        scanSymlinks: true,
+        scanLocal: false,
+        scanRemote: false,
+        symlinkSections: ["movies"],
+        titleScopes: [{ section: "movies", itemName: "Unreadable Title" }]
+      }
+    );
+
+    expect(result.links).toEqual([
+      expect.objectContaining({
+        itemName: "Unreadable Title",
+        kind: "broken",
+        targetExists: false,
+        targetReadError: expect.stringContaining("not a regular file")
+      })
+    ]);
+    expect(result.reconciledStorageFiles).toEqual([]);
   });
 
   it("uses separate section scopes for symlink and local file scans", async () => {
@@ -490,7 +543,7 @@ describe("scanner", () => {
     expect(result.storageFiles.map((file) => file.relativePath)).toEqual([path.join("shows", "Show One", "show.mkv")]);
   });
 
-  it("tracks bidirectional policy and copy work for symlinks and storage-only files", async () => {
+  it("limits policy and copy work to current symlinks while retaining storage-only files as unassigned orphans", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");
     const remoteDir = path.join(tmpDir, "remote");
@@ -557,11 +610,11 @@ describe("scanner", () => {
         actionableLocalLinks: 1,
         unassignedRemoteLinks: 1,
         unassignedLocalLinks: 1,
-        actionableRemoteFiles: 1,
-        actionableLocalFiles: 1,
-        assignedRemoteFiles: 1,
-        unassignedRemoteFiles: 1,
-        unassignedLocalFiles: 1
+        actionableRemoteFiles: 0,
+        actionableLocalFiles: 0,
+        assignedRemoteFiles: 0,
+        unassignedRemoteFiles: 3,
+        unassignedLocalFiles: 2
       });
 
       await persistScanResult(database.db, result, 1);
@@ -569,11 +622,18 @@ describe("scanner", () => {
         actionableRemoteLinks: 1,
         actionableLocalLinks: 1,
         unassignedRemoteLinks: 1,
-        actionableRemoteFiles: 1,
-        actionableLocalFiles: 1,
-        assignedRemoteFiles: 1,
-        unassignedRemoteFiles: 1,
-        unassignedLocalFiles: 1
+        actionableRemoteFiles: 0,
+        actionableLocalFiles: 0,
+        assignedRemoteFiles: 0,
+        unassignedRemoteFiles: 3,
+        unassignedLocalFiles: 2
+      });
+
+      expect((await listStorageFiles(database.db, "remote", true)).find((file) => file.itemName === "Remote File Copy Local")).toMatchObject({
+        storagePolicy: "unassigned"
+      });
+      expect((await listStorageFiles(database.db, "remote")).find((file) => file.filePath === remoteCopyLinkTarget)).toMatchObject({
+        storagePolicy: "location_1"
       });
 
       expect(await listStoragePolicyCandidates(database.db, "Local File Needs", 10)).toEqual([]);
@@ -588,8 +648,8 @@ describe("scanner", () => {
       expect(await getInventorySummary(database.db)).toMatchObject({
         actionableRemoteLinks: 2,
         unassignedRemoteLinks: 0,
-        actionableRemoteFiles: 1,
-        unassignedRemoteFiles: 1
+        actionableRemoteFiles: 0,
+        unassignedRemoteFiles: 3
       });
     } finally {
       await database.close();

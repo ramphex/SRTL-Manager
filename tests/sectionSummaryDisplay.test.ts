@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { inventoryCopyToLocalCount, inventoryCopyToRemoteCount } from "../src/client/appShared";
 import { inventoryPolicyNeededCount, mediaLinkTreeStatusCounts, orderSectionSummaries, sectionActionUnit, sectionCompositionParts } from "../src/client/sectionSummaryDisplay";
 import type { SectionSummary } from "../src/shared/types";
 
@@ -25,6 +26,12 @@ function sectionSummary(section: string): SectionSummary {
 }
 
 describe("section summary display helpers", () => {
+  it("does not present unlinked storage files as copyable library work", () => {
+    const summary = { actionableRemoteLinks: 195, actionableRemoteFiles: 54, actionableLocalLinks: 7, actionableLocalFiles: 3 };
+    expect(inventoryCopyToLocalCount(summary)).toBe(195);
+    expect(inventoryCopyToRemoteCount(summary)).toBe(7);
+  });
+
   it("uses episode units for show section action counts", () => {
     expect(sectionActionUnit({ section: "shows", type: "shows" }, 92)).toBe("episodes");
     expect(sectionActionUnit({ section: "anime", type: "shows" }, 1)).toBe("episode");

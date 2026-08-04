@@ -1,16 +1,19 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
-import { desc, eq, inArray } from "drizzle-orm";
+import { and, count, desc, eq, inArray, ne } from "drizzle-orm";
 import { first, getSectionSettings, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
-import type { AuditOptions, AuditRunRecord, JobStatus } from "../../shared/types";
+import type { AuditOptions, AuditResultPage, AuditRunRecord, JobStatus } from "../../shared/types";
+
+const maxBulkSelectionItems = 100_000;
+const largeSelectionBodyLimitBytes = 4 * 1024 * 1024;
 
 const auditOptionsSchema = z.object({
   mode: z.enum(["fast", "deep"]),
   sections: z.array(z.string().trim().min(1).max(200)).min(1, "Select at least one audit folder").optional(),
   targets: z.array(z.enum(["local", "remote"])).min(1, "Select at least one audit target").optional(),
-  linkIds: z.array(z.coerce.number().int().positive()).max(1000).optional(),
+  linkIds: z.array(z.coerce.number().int().positive()).max(maxBulkSelectionItems).optional(),
   section: z.string().trim().min(1).max(200).optional(),
   itemName: z.string().trim().min(1).max(500).optional(),
   relativePathPrefix: z.string().trim().min(1).max(2000).optional(),
@@ -28,10 +31,11 @@ function normalizeAuditSections(selectedSections: string[] | undefined, configur
   return normalized;
 }
 
-function auditOptionsFromProgress(progressJson: string): AuditOptions | null {
+function auditOptionsFromJob(progressJson: string, optionsJson = ""): AuditOptions | null {
   try {
     const progress = JSON.parse(progressJson) as { options?: unknown };
-    const parsed = auditOptionsSchema.safeParse(progress?.options);
+    const storedOptions = optionsJson ? (JSON.parse(optionsJson) as unknown) : null;
+    const parsed = auditOptionsSchema.safeParse(storedOptions && typeof storedOptions === "object" && !Array.isArray(storedOptions) ? storedOptions : progress?.options);
     return parsed.success ? parsed.data : null;
   } catch {
     return null;
@@ -47,11 +51,12 @@ async function listAuditHistory(db: Db): Promise<AuditRunRecord[]> {
 }
 
 function serializeAuditRun(run: typeof schema.auditRuns.$inferSelect, jobById: Map<number, typeof schema.jobs.$inferSelect>): AuditRunRecord {
+  const job = jobById.get(run.jobId);
   return {
     ...run,
     mode: run.mode as AuditRunRecord["mode"],
     status: run.status as JobStatus,
-    options: auditOptionsFromProgress(jobById.get(run.jobId)?.progress ?? "")
+    options: auditOptionsFromJob(job?.progress ?? "", job?.options ?? "")
   };
 }
 
@@ -63,7 +68,7 @@ async function findAuditRunByJobId(db: Db, jobId: number): Promise<AuditRunRecor
 }
 
 export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
-  app.post("/api/audits", async (request, reply) => {
+  app.post("/api/audits", { bodyLimit: largeSelectionBodyLimitBytes }, async (request, reply) => {
     const body = auditOptionsSchema.parse(request.body);
     const configuredSections = (await getSectionSettings(db)).sections;
     let sections: string[] | undefined;
@@ -103,8 +108,28 @@ export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunne
     return row;
   });
 
-  app.get("/api/audits/:id/results", async (request) => {
-    const params = z.object({ id: z.coerce.number() }).parse(request.params);
-    return db.select().from(schema.auditResults).where(eq(schema.auditResults.auditRunId, params.id)).orderBy(desc(schema.auditResults.id));
+  app.get("/api/audits/:id/results/page", async (request): Promise<AuditResultPage> => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const query = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(500).default(100),
+        offset: z.coerce.number().int().min(0).default(0),
+        attentionOnly: z.string().transform((value) => value === "true").default(false)
+      })
+      .parse(request.query);
+    const where = query.attentionOnly
+      ? and(eq(schema.auditResults.auditRunId, params.id), ne(schema.auditResults.status, "pass"))
+      : eq(schema.auditResults.auditRunId, params.id);
+    const [results, totalRow] = await Promise.all([
+      db.select().from(schema.auditResults).where(where).orderBy(desc(schema.auditResults.id)).limit(query.limit).offset(query.offset),
+      first(db.select({ value: count() }).from(schema.auditResults).where(where).limit(1))
+    ]);
+    const total = Number(totalRow?.value ?? 0);
+    return {
+      results: results as AuditResultPage["results"],
+      total,
+      offset: query.offset,
+      hasMore: query.offset + results.length < total
+    };
   });
 }

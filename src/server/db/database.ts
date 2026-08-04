@@ -6,6 +6,7 @@ import type { SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 
 export type Db = NodePgDatabase<typeof schema>;
+export type DbExecutor = Db;
 export { inferSectionContentType } from "../../shared/sections";
 
 export interface DatabaseContext {
@@ -20,13 +21,13 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 4;
+export const currentSchemaVersion = 12;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS path_configurations (id SERIAL PRIMARY KEY, status TEXT NOT NULL, symlink_dir TEXT NOT NULL, local_dir TEXT NOT NULL, remote_dir TEXT NOT NULL, symlink_identity TEXT NOT NULL, local_identity TEXT NOT NULL, remote_identity TEXT NOT NULL, created_at TEXT NOT NULL, applied_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS path_migrations (id SERIAL PRIMARY KEY, source_config_id INTEGER, target_config_id INTEGER NOT NULL, status TEXT NOT NULL, job_id INTEGER, error_message TEXT, created_at TEXT NOT NULL, planned_at TEXT, started_at TEXT, finished_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS path_migration_items (id SERIAL PRIMARY KEY, migration_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, item_name TEXT NOT NULL, current_link_path TEXT NOT NULL, link_path_before TEXT NOT NULL, link_path_after TEXT NOT NULL, target_path_before TEXT NOT NULL, target_path_after TEXT NOT NULL, target_changed BOOLEAN NOT NULL, expected_size_bytes BIGINT, validation_status TEXT NOT NULL, message TEXT NOT NULL, applied_at TEXT, rolled_back_at TEXT)`,
+  `CREATE TABLE IF NOT EXISTS path_migration_items (id SERIAL PRIMARY KEY, migration_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, item_name TEXT NOT NULL, current_link_path TEXT NOT NULL, link_path_before TEXT NOT NULL, link_path_after TEXT NOT NULL, target_path_before TEXT NOT NULL, target_path_after TEXT NOT NULL, target_changed BOOLEAN NOT NULL, expected_size_bytes BIGINT, target_identity TEXT, validation_status TEXT NOT NULL, message TEXT NOT NULL, applied_at TEXT, rolled_back_at TEXT)`,
   `CREATE TABLE IF NOT EXISTS admin_users (id SERIAL PRIMARY KEY, username TEXT NOT NULL UNIQUE, password_hash TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sessions (token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires_at TEXT NOT NULL, created_at TEXT NOT NULL)`,
   `CREATE TABLE IF NOT EXISTS sections (id SERIAL PRIMARY KEY, name TEXT NOT NULL UNIQUE, display_name TEXT, content_type TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -61,7 +62,7 @@ const ddl = [
 ];
 
 const hardeningDdl = [
-  `CREATE TABLE IF NOT EXISTS copy_operations (id SERIAL PRIMARY KEY, job_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, link_path TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, original_target_path TEXT NOT NULL, original_link_state TEXT NOT NULL, previous_copy_source TEXT, temp_path TEXT, displaced_path TEXT, stage TEXT NOT NULL, result_status TEXT, local_conflict_strategy TEXT, size_bytes BIGINT, error_message TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(job_id, media_link_id))`,
+  `CREATE TABLE IF NOT EXISTS copy_operations (id SERIAL PRIMARY KEY, job_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, link_path TEXT NOT NULL, source_path TEXT NOT NULL, destination_path TEXT NOT NULL, original_target_path TEXT NOT NULL, original_link_state TEXT NOT NULL, previous_copy_source TEXT, temp_path TEXT, displaced_path TEXT, temp_identity TEXT, destination_identity TEXT, displaced_identity TEXT, stage TEXT NOT NULL, result_status TEXT, local_conflict_strategy TEXT, size_bytes BIGINT, error_message TEXT, reconciliation_resolved_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT, UNIQUE(job_id, media_link_id))`,
   `CREATE INDEX IF NOT EXISTS copy_operations_job_stage_idx ON copy_operations(job_id, stage, id)`,
   `CREATE UNIQUE INDEX IF NOT EXISTS admin_users_singleton_idx ON admin_users ((true))`,
   `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'sessions_user_fk') THEN ALTER TABLE sessions ADD CONSTRAINT sessions_user_fk FOREIGN KEY (user_id) REFERENCES admin_users(id) ON DELETE CASCADE NOT VALID; END IF; END $$`,
@@ -123,7 +124,9 @@ async function initializeDatabase(pool: Pool): Promise<void> {
     if (!applied.has(3)) {
       await client.query("BEGIN");
       try {
-        await client.query(`CREATE TABLE IF NOT EXISTS worker_heartbeats (worker_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, status TEXT NOT NULL)`);
+        await client.query(
+          `CREATE TABLE IF NOT EXISTS worker_heartbeats (worker_id TEXT PRIMARY KEY, started_at TEXT NOT NULL, heartbeat_at TEXT NOT NULL, status TEXT NOT NULL, capacity BIGINT NOT NULL DEFAULT 1)`
+        );
         await client.query(`DROP TABLE IF EXISTS legacy_policy_import_tombstones`);
         await client.query(`DROP TABLE IF EXISTS integration_sync_runs`);
         await client.query(`DROP TABLE IF EXISTS integration_configs`);
@@ -171,6 +174,312 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         throw error;
       }
     }
+
+    if (!applied.has(5)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS lease_version INTEGER NOT NULL DEFAULT 0`);
+        await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS exclusive BOOLEAN NOT NULL DEFAULT TRUE`);
+        await client.query(`
+          CREATE TABLE IF NOT EXISTS job_resource_claims (
+            id SERIAL PRIMARY KEY,
+            job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            resource_type TEXT NOT NULL,
+            resource_key TEXT NOT NULL,
+            access TEXT NOT NULL DEFAULT 'exclusive',
+            created_at TEXT NOT NULL,
+            CONSTRAINT job_resource_claims_job_resource_idx UNIQUE (job_id, resource_type, resource_key),
+            CONSTRAINT job_resource_claims_access_check CHECK (access IN ('shared', 'exclusive'))
+          )
+        `);
+        await client.query(`CREATE INDEX IF NOT EXISTS job_resource_claims_lookup_idx ON job_resource_claims(resource_type, resource_key, access)`);
+        await client.query(`ALTER TABLE worker_heartbeats ADD COLUMN IF NOT EXISTS capacity BIGINT NOT NULL DEFAULT 1`);
+        await client.query(`CREATE INDEX IF NOT EXISTS worker_heartbeats_status_heartbeat_idx ON worker_heartbeats(status, heartbeat_at)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (5, 'multi_worker_job_claims', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(6)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS temp_identity TEXT`);
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS destination_identity TEXT`);
+        await client.query(`ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS displaced_identity TEXT`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (6, 'copy_operation_file_identities', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(7)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE path_migration_items ADD COLUMN IF NOT EXISTS target_identity TEXT`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (7, 'path_migration_target_identities', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(8)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF to_regclass('public.storage_files') IS NOT NULL
+              AND to_regclass('public.media_links') IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'storage_files' AND column_name = 'updated_at'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'media_links' AND column_name = 'resolved_storage_file_id'
+              )
+              AND EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_schema = 'public' AND table_name = 'media_links' AND column_name = 'missing_since'
+              )
+            THEN
+              EXECUTE $cleanup$
+                WITH desired_policies AS (
+                  SELECT
+                    storage_files.id,
+                    CASE
+                      WHEN count(DISTINCT media_links.storage_policy) = 1 THEN min(media_links.storage_policy)
+                      ELSE 'unassigned'
+                    END AS storage_policy
+                  FROM storage_files
+                  LEFT JOIN media_links
+                    ON media_links.resolved_storage_file_id = storage_files.id
+                   AND media_links.missing_since IS NULL
+                  GROUP BY storage_files.id
+                )
+                UPDATE storage_files
+                SET storage_policy = desired_policies.storage_policy,
+                    updated_at = now()::text
+                FROM desired_policies
+                WHERE storage_files.id = desired_policies.id
+                  AND storage_files.storage_policy IS DISTINCT FROM desired_policies.storage_policy
+              $cleanup$;
+            END IF;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (8, 'linked_storage_file_policies', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(9)) {
+      await client.query("BEGIN");
+      try {
+        const tables = await client.query<{ jobs: boolean; mediaLinks: boolean; mediaLinkSnapshots: boolean; jobProgress: boolean }>(`
+          SELECT to_regclass('public.jobs') IS NOT NULL AS jobs,
+                 to_regclass('public.media_links') IS NOT NULL AS "mediaLinks",
+                 (
+                   SELECT count(*) = 4 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'media_links'
+                     AND column_name IN ('section', 'item_name', 'relative_path', 'link_path')
+                 ) AS "mediaLinkSnapshots",
+                 EXISTS (
+                   SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'progress'
+                 ) AS "jobProgress"
+        `);
+        const available = tables.rows[0];
+        if (available?.jobs) {
+          await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS options TEXT NOT NULL DEFAULT '{}'`);
+          await client.query(`ALTER TABLE jobs ADD COLUMN IF NOT EXISTS selection_frozen BOOLEAN NOT NULL DEFAULT FALSE`);
+          if (available.jobProgress) {
+            await client.query(`
+              UPDATE jobs
+              SET options = CASE
+                WHEN jsonb_typeof(progress::jsonb -> 'options') = 'object' THEN (progress::jsonb -> 'options')::text
+                ELSE '{}'
+              END
+              WHERE options = '{}'
+            `);
+          }
+          await client.query(`
+            UPDATE jobs
+            SET selection_frozen = TRUE
+            WHERE jsonb_typeof(options::jsonb -> 'linkIds') = 'array'
+          `);
+          await client.query(`
+            CREATE TABLE IF NOT EXISTS job_selection_items (
+              id SERIAL PRIMARY KEY,
+              job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+              media_link_id INTEGER NOT NULL,
+              selection_order INTEGER NOT NULL,
+              section TEXT NOT NULL,
+              item_name TEXT NOT NULL,
+              relative_path TEXT NOT NULL,
+              link_path TEXT NOT NULL,
+              created_at TEXT NOT NULL,
+              CONSTRAINT job_selection_items_job_media_idx UNIQUE (job_id, media_link_id),
+              CONSTRAINT job_selection_items_job_order_idx UNIQUE (job_id, selection_order)
+            )
+          `);
+          await client.query(`CREATE INDEX IF NOT EXISTS job_selection_items_job_title_idx ON job_selection_items(job_id, section, item_name)`);
+          if (available.mediaLinks && available.mediaLinkSnapshots) {
+            await client.query(`
+              INSERT INTO job_selection_items (
+                job_id, media_link_id, selection_order, section, item_name, relative_path, link_path, created_at
+              )
+              SELECT jobs.id,
+                     selected.media_link_id,
+                     selected.selection_order,
+                     media_links.section,
+                     media_links.item_name,
+                     media_links.relative_path,
+                     media_links.link_path,
+                     jobs.created_at
+              FROM jobs
+              CROSS JOIN LATERAL (
+                SELECT value::integer AS media_link_id, ordinality::integer - 1 AS selection_order
+                FROM jsonb_array_elements_text(jobs.options::jsonb -> 'linkIds') WITH ORDINALITY
+              ) AS selected
+              JOIN media_links ON media_links.id = selected.media_link_id
+              WHERE jobs.selection_frozen = TRUE
+              ON CONFLICT (job_id, media_link_id) DO NOTHING
+            `);
+          }
+        }
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (9, 'immutable_job_inputs_and_selections', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(10)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF to_regclass('public.sessions') IS NOT NULL THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at)';
+            END IF;
+            IF to_regclass('public.jobs') IS NOT NULL
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'finished_at')
+            THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS jobs_terminal_retention_idx ON jobs(status, finished_at, id)';
+            END IF;
+            IF to_regclass('public.audit_results') IS NOT NULL THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS audit_results_run_id_idx ON audit_results(audit_run_id, id)';
+            END IF;
+            IF to_regclass('public.audit_runs') IS NOT NULL THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS audit_runs_job_id_idx ON audit_runs(job_id, id)';
+            END IF;
+            IF to_regclass('public.scan_runs') IS NOT NULL THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS scan_runs_job_id_idx ON scan_runs(job_id, id)';
+            END IF;
+            IF to_regclass('public.copy_operations') IS NOT NULL
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'copy_operations' AND column_name = 'media_link_id')
+            THEN
+              EXECUTE 'CREATE INDEX IF NOT EXISTS copy_operations_media_recovery_idx ON copy_operations(media_link_id, link_path, stage, id)';
+            END IF;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (10, 'retention_and_history_indexes', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(11)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          DECLARE
+            constraint_record RECORD;
+          BEGIN
+            FOR constraint_record IN
+              SELECT constraint_data.conrelid::regclass AS table_name, constraint_data.conname
+              FROM pg_constraint AS constraint_data
+              JOIN pg_namespace AS constraint_namespace ON constraint_namespace.oid = constraint_data.connamespace
+              WHERE constraint_namespace.nspname = 'public'
+                AND constraint_data.convalidated = FALSE
+                AND constraint_data.conname = ANY (ARRAY[
+                  'sessions_user_fk',
+                  'job_events_job_fk',
+                  'scan_runs_job_fk',
+                  'audit_runs_job_fk',
+                  'audit_results_run_fk',
+                  'copy_operations_job_fk',
+                  'copy_operations_media_link_fk',
+                  'path_migration_items_migration_fk',
+                  'jobs_status_check',
+                  'jobs_type_check',
+                  'media_links_kind_check',
+                  'media_links_policy_check',
+                  'storage_files_policy_check',
+                  'storage_files_root_type_check',
+                  'storage_policies_policy_check',
+                  'copy_operations_stage_check'
+                ])
+            LOOP
+              EXECUTE format('ALTER TABLE %s VALIDATE CONSTRAINT %I', constraint_record.table_name, constraint_record.conname);
+            END LOOP;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (11, 'validate_integrity_constraints', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(12)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF to_regclass('public.copy_operations') IS NOT NULL THEN
+              ALTER TABLE copy_operations ADD COLUMN IF NOT EXISTS reconciliation_resolved_at TEXT;
+              IF (
+                SELECT count(*) = 3
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                  AND table_name = 'copy_operations'
+                  AND column_name IN ('error_message', 'updated_at', 'completed_at')
+              ) THEN
+                EXECUTE $backfill$
+                  UPDATE copy_operations
+                  SET reconciliation_resolved_at = coalesce(completed_at, updated_at, now()::text)
+                  WHERE reconciliation_resolved_at IS NULL
+                    AND error_message LIKE 'Automatically closed after recheck:%'
+                $backfill$;
+              END IF;
+            END IF;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (12, 'durable_copy_reconciliation_resolution', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
   } finally {
     await client.query("select pg_advisory_unlock($1)", [bootstrapLockKey]).catch(() => undefined);
     client.release();
@@ -186,11 +495,13 @@ export async function openDatabase(options: DatabaseOpenOptions | string): Promi
     if (shouldMigrate) {
       await initializeDatabase(pool);
     } else {
-      const migration = await pool.query<{ version: number | null }>("select max(version) as version from schema_migrations").catch((error: unknown) => {
+      const migration = await pool.query<{ version: number }>("select version from schema_migrations order by version").catch((error: unknown) => {
         throw new Error("Database schema is not initialized. Run the migration service before starting SRTL Manager.", { cause: error });
       });
-      if (Number(migration.rows[0]?.version ?? 0) < currentSchemaVersion) {
-        throw new Error(`Database schema is out of date. Expected migration ${currentSchemaVersion}; run the migration service.`);
+      const appliedVersions = new Set(migration.rows.map((row) => Number(row.version)));
+      const missingVersions = Array.from({ length: currentSchemaVersion }, (_unused, index) => index + 1).filter((version) => !appliedVersions.has(version));
+      if (missingVersions.length > 0) {
+        throw new Error(`Database schema is out of date. Missing migration${missingVersions.length === 1 ? "" : "s"} ${missingVersions.join(", ")}; run the migration service.`);
       }
     }
   } catch (error) {
@@ -249,8 +560,8 @@ export async function getJsonSetting<T>(db: Db, key: string, fallback: T): Promi
   if (!raw) return fallback;
   try {
     return JSON.parse(raw) as T;
-  } catch {
-    return fallback;
+  } catch (error) {
+    throw new Error(`Stored setting "${key}" contains invalid JSON; repair or remove that setting before continuing.`, { cause: error });
   }
 }
 

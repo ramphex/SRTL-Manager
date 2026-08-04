@@ -1,18 +1,18 @@
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { Blocks, FolderCog, Gauge, ListChecks, Monitor, Moon, Search, Sun, UserCog } from "lucide-react";
+import { FolderCog, Gauge, ListChecks, Monitor, Moon, Search, Sun, UserCog } from "lucide-react";
 import { api } from "./api";
 import { scanOptionsFromJob } from "./jobScopeLocks";
 import { mergeJobEventPages } from "./jobEvents";
 import { defaultRecentJobsCompletedWindowMinutes } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
-import { type AuditMode, type AuditOptions, type AppReleaseInfo, type AppVersionInfo, type CopyConflictPreview, type InventorySummary, type JobRecord, type JobStatus, type CopyMediaValidationMode, type CopyOptions, type CopyVerificationProfile, type MediaLinkTreeKindFilter, type ScanOptions, type SectionContentType, type SectionSettings, type SectionSummary, type StoragePolicyCategory, type StoragePolicyKind, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference, type UserPreferences } from "../shared/types";
+import { type AuditMode, type AuditOptions, type AppReleaseInfo, type AppVersionInfo, type CopyConflictPreview, type InventorySummary, type JobRecord, type JobStatus, type CopyMediaValidationMode, type CopyOptions, type CopyVerificationProfile, type MediaLinkTreeKindFilter, type PathMigrationStatus, type ScanOptions, type SectionContentType, type SectionSettings, type SectionSummary, type StoragePolicyCategory, type StoragePolicyKind, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 
 export type ThemePreference = "light" | "dark" | "system";
 
 export type SymlinkKindFilter = Exclude<MediaLinkTreeKindFilter, "other" | "non_media"> | "all";
 
-export type SettingsView = "library" | "integrations" | "advanced" | "user";
+export type SettingsView = "library" | "advanced" | "user";
 
 export type SidebarGroup = "history" | "settings";
 
@@ -112,24 +112,8 @@ export const historySections = [
 
 export const settingsSections = [
   { view: "library", to: "/settings", label: "Library", icon: FolderCog },
-  { view: "integrations", to: "/settings/integrations", label: "Integrations", icon: Blocks },
   { view: "advanced", to: "/settings/advanced", label: "Advanced", icon: Gauge },
   { view: "user", to: "/settings/user", label: "User settings", icon: UserCog }
-] as const;
-
-export const integrationPlaceholders = [
-  {
-    name: "Metadata integration",
-    description: "Future metadata lookup, health checks, and candidate mapping.",
-    urlPlaceholder: "Connection URL",
-    keyPlaceholder: "Encrypted API key"
-  },
-  {
-    name: "Automation integration",
-    description: "Future refresh hooks and event-driven inventory updates.",
-    urlPlaceholder: "Connection URL",
-    keyPlaceholder: "Encrypted API key"
-  }
 ] as const;
 
 export const copyProfileOptions: Array<{ value: CopyVerificationProfile; label: string; detail: string }> = [
@@ -307,12 +291,12 @@ export function sectionPolicyNeededCount(section: Pick<SectionSummary, "unassign
   return section.unassignedRemoteLinks + section.unassignedLocalLinks;
 }
 
-export function inventoryCopyToLocalCount(summary: Pick<InventorySummary, "actionableRemoteLinks" | "actionableRemoteFiles">): number {
-  return summary.actionableRemoteLinks + summary.actionableRemoteFiles;
+export function inventoryCopyToLocalCount(summary: Pick<InventorySummary, "actionableRemoteLinks">): number {
+  return summary.actionableRemoteLinks;
 }
 
-export function inventoryCopyToRemoteCount(summary: Pick<InventorySummary, "actionableLocalLinks" | "actionableLocalFiles">): number {
-  return summary.actionableLocalLinks + summary.actionableLocalFiles;
+export function inventoryCopyToRemoteCount(summary: Pick<InventorySummary, "actionableLocalLinks">): number {
+  return summary.actionableLocalLinks;
 }
 
 export function inventoryAssignedRemoteCount(summary: Pick<InventorySummary, "assignedRemoteLinks" | "assignedRemoteFiles">): number {
@@ -685,6 +669,22 @@ export function pathMigrationProgress(job: JobRecord | null): { current: number;
     total: finiteNumberFromUnknown(progress?.total),
     message: typeof progress?.message === "string" ? progress.message : "Waiting for the migration worker"
   };
+}
+
+export function isActivePathMigrationStatus(status: PathMigrationStatus | null | undefined): boolean {
+  return status === "queued" || status === "running" || status === "rollback_pending";
+}
+
+export function pathMigrationStatusLabel(status: PathMigrationStatus): string {
+  if (status === "planned") return "Ready";
+  if (status === "queued") return "Queued";
+  if (status === "running") return "Running";
+  if (status === "rollback_pending") return "Rolling back";
+  return "Needs attention";
+}
+
+export function pathMigrationProgressTitle(status: PathMigrationStatus, message: string): string {
+  return status === "rollback_pending" ? "Rolling back paths" : message;
 }
 
 export function dateTimeFormatOptions(timeFormat: TimeFormatPreference): Intl.DateTimeFormatOptions {

@@ -4,6 +4,7 @@ import { desc, eq, inArray } from "drizzle-orm";
 import { first, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
+import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
 import {
   findStoragePolicyCandidateTitle,
   findStoragePolicyCandidateTitles,
@@ -41,6 +42,8 @@ const scanOptionsSchema = z
   });
 
 const storagePolicySchema = z.enum(["unassigned", "location_1", "location_2"]);
+const maxBulkSelectionItems = 100_000;
+const largeSelectionBodyLimitBytes = 4 * 1024 * 1024;
 
 const storagePolicyInputSchema = z.object({
   title: z.string().trim().min(1, "Title is required").max(500, "Title is too long"),
@@ -56,14 +59,32 @@ const mediaLinkLookupInputSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).max(1000)
 });
 
+class StoragePolicyRequestError extends Error {
+  constructor(
+    readonly statusCode: number,
+    message: string
+  ) {
+    super(message);
+    this.name = "StoragePolicyRequestError";
+  }
+}
+
+function mediaLinkIdsFromMutationResources(resources: Array<{ resourceType: string; resourceKey: string }>): number[] {
+  return resources
+    .filter((resource) => resource.resourceType === "media")
+    .map((resource) => Number(resource.resourceKey))
+    .filter((id) => Number.isSafeInteger(id) && id > 0);
+}
+
 const copyInputSchema = z
   .object({
     direction: z.enum(["to_local", "to_remote"]),
-    linkIds: z.array(z.coerce.number().int().positive()).max(1000).optional(),
+    linkIds: z.array(z.coerce.number().int().positive()).max(maxBulkSelectionItems).optional(),
     section: z.string().trim().min(1).max(200).optional(),
     itemName: z.string().trim().min(1).max(500).optional(),
     relativePathPrefix: z.string().trim().min(1).max(2000).optional(),
-    localConflictStrategy: z.enum(["keep_both", "replace"]).optional()
+    localConflictStrategy: z.enum(["keep_both", "replace"]).optional(),
+    allowSourceTitleMismatch: z.boolean().optional()
   })
   .refine((value) => Boolean(value.linkIds?.length || value.section || value.itemName), { message: "Copy requires link IDs, a folder scope, or a title" });
 
@@ -104,10 +125,11 @@ async function latestErrorMessages(db: Db, jobIds: Set<number>): Promise<Map<num
   return messages;
 }
 
-function scanOptionsFromProgress(progressJson: string): ScanOptions | null {
+function scanOptionsFromJob(progressJson: string, optionsJson = ""): ScanOptions | null {
   try {
     const progress = JSON.parse(progressJson) as { options?: unknown };
-    const options = progress?.options;
+    const storedOptions = optionsJson ? (JSON.parse(optionsJson) as unknown) : null;
+    const options = storedOptions && typeof storedOptions === "object" && !Array.isArray(storedOptions) ? storedOptions : progress?.options;
     if (!options || typeof options !== "object" || Array.isArray(options)) return null;
     return scanOptionsSchema.parse(options);
   } catch {
@@ -124,7 +146,10 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
   const orphanedFailedJobs = scanJobs.filter((job) => terminalFailureStatuses.has(job.status as JobStatus) && !recordedJobIds.has(job.id));
   const errorMessages = await latestErrorMessages(db, new Set(orphanedFailedJobs.map((job) => job.id)));
   const zeroTotals = emptyScanTotals();
-  const recordedRuns: ScanRunRecord[] = scanRuns.map((run) => ({ ...run, status: run.status as JobStatus, options: scanOptionsFromProgress(jobById.get(run.jobId)?.progress ?? "") }));
+  const recordedRuns: ScanRunRecord[] = scanRuns.map((run) => {
+    const job = jobById.get(run.jobId);
+    return { ...run, status: run.status as JobStatus, options: scanOptionsFromJob(job?.progress ?? "", job?.options ?? "") };
+  });
   const legacyRuns: ScanRunRecord[] = orphanedFailedJobs.map((job) => ({
     id: null,
     jobId: job.id,
@@ -132,7 +157,7 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
     startedAt: job.startedAt ?? job.createdAt,
     finishedAt: job.finishedAt,
     errorMessage: errorMessages.get(job.id) ?? (job.status === "failed" ? "Scan failed before a history row was created." : null),
-    options: scanOptionsFromProgress(job.progress),
+    options: scanOptionsFromJob(job.progress, job.options),
     ...zeroTotals
   }));
   return [...recordedRuns, ...legacyRuns].sort((a, b) => b.jobId - a.jobId).slice(0, 25);
@@ -256,16 +281,17 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
 
   app.get("/api/inventory/scan-timestamps", async () => getInventoryScanTimestamps(db));
 
-  app.post("/api/copies", async (request, reply) => {
+  app.post("/api/copies", { bodyLimit: largeSelectionBodyLimitBytes }, async (request, reply) => {
     const body = copyInputSchema.parse(request.body);
     try {
       return { jobId: await jobs.startCopy(body) };
     } catch (error: unknown) {
+      request.log.warn({ err: error }, "Copy admission rejected");
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 
-  app.post("/api/copies/conflicts", async (request) => {
+  app.post("/api/copies/conflicts", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = copyInputSchema.parse(request.body);
     return jobs.previewCopyConflicts(body);
   });
@@ -285,31 +311,54 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
     return listStoragePolicyCandidates(db, query.q, query.limit);
   });
 
-  app.post("/api/storage-policies", async (request, reply) => {
+  app.post("/api/storage-policies", async (request) => {
     const body = storagePolicyInputSchema.parse(request.body);
-    const candidateTitle = await findStoragePolicyCandidateTitle(db, body.title);
-    if (!candidateTitle) {
-      return reply.code(400).send({ error: "Choose a title from the scanned library." });
-    }
-    return setStoragePolicyTitle(db, candidateTitle, body.policy as StoragePolicyKind);
+    return withResourceMutationGuard(db, async (transaction) => {
+      const candidateTitle = await findStoragePolicyCandidateTitle(transaction, body.title);
+      if (!candidateTitle) throw new StoragePolicyRequestError(400, "Choose a title from the scanned library.");
+      const resources = await storagePolicyMutationResources(transaction, [candidateTitle]);
+      return {
+        resources,
+        mutate: () =>
+          setStoragePolicyTitle(transaction, candidateTitle, body.policy as StoragePolicyKind, {
+            mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
+          })
+      };
+    });
   });
 
-  app.post("/api/storage-policies/bulk", async (request, reply) => {
+  app.post("/api/storage-policies/bulk", async (request) => {
     const body = storagePolicyBulkInputSchema.parse(request.body);
-    const { candidateTitles, invalidTitles } = await findStoragePolicyCandidateTitles(db, body.titles);
-
-    if (invalidTitles.length > 0) {
-      return reply.code(400).send({ error: `Choose titles from the scanned library: ${invalidTitles.join(", ")}` });
-    }
-
-    return setStoragePolicyTitles(db, candidateTitles, body.policy as StoragePolicyKind);
+    return withResourceMutationGuard(db, async (transaction) => {
+      const { candidateTitles, invalidTitles } = await findStoragePolicyCandidateTitles(transaction, body.titles);
+      if (invalidTitles.length > 0) {
+        throw new StoragePolicyRequestError(400, `Choose titles from the scanned library: ${invalidTitles.join(", ")}`);
+      }
+      const resources = await storagePolicyMutationResources(transaction, candidateTitles);
+      return {
+        resources,
+        mutate: () =>
+          setStoragePolicyTitles(transaction, candidateTitles, body.policy as StoragePolicyKind, {
+            mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
+          })
+      };
+    });
   });
 
-  app.delete("/api/storage-policies/:id", async (request, reply) => {
+  app.delete("/api/storage-policies/:id", async (request) => {
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
-    const row = await removeStoragePolicyTitle(db, params.id);
-    if (!row) return reply.code(404).send({ error: "Storage policy item not found" });
-    return row;
+    return withResourceMutationGuard(db, async (transaction) => {
+      const existing = await first(transaction.select().from(schema.storagePolicies).where(eq(schema.storagePolicies.id, params.id)).limit(1));
+      if (!existing) throw new StoragePolicyRequestError(404, "Storage policy item not found");
+      return {
+        resources: await storagePolicyMutationResources(transaction, [existing.normalizedTitle]),
+        mutate: async () => {
+          const row = await removeStoragePolicyTitle(transaction, params.id);
+          if (!row) throw new StoragePolicyRequestError(404, "Storage policy item not found");
+          return row;
+        }
+      };
+    });
   });
 
 }

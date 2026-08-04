@@ -16,7 +16,7 @@ import { loadConfig } from "./config";
 import { hasAdmin, requireAuth } from "./auth";
 import { openDatabase, type DatabaseContext } from "./db/database";
 import * as schema from "./db/schema";
-import { desc } from "drizzle-orm";
+import { desc, eq } from "drizzle-orm";
 import { isPathConfigurationBlocked, reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { canAdoptEnvironmentPathsBeforeInitialScan, isOnboardingComplete, reconcileOnboardingState } from "./lib/onboarding";
 import { JobRunner } from "./jobs/jobRunner";
@@ -119,17 +119,41 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     }
   });
 
-  app.get("/api/health", async () => {
+  const workerHealth = async () => {
     await database.pool.query("select 1");
-    const worker = (await database.db.select().from(schema.workerHeartbeats).orderBy(desc(schema.workerHeartbeats.heartbeatAt)).limit(1))[0] ?? null;
-    const workerAgeMs = worker ? Math.max(0, Date.now() - Date.parse(worker.heartbeatAt)) : null;
+    const workers = await database.db
+      .select()
+      .from(schema.workerHeartbeats)
+      .where(eq(schema.workerHeartbeats.status, "running"))
+      .orderBy(desc(schema.workerHeartbeats.heartbeatAt));
+    const latestWorker = workers[0] ?? null;
+    const now = Date.now();
+    const readyWorkerCount = workers.reduce((capacity, worker) => {
+      const heartbeatAt = Date.parse(worker.heartbeatAt);
+      return Number.isFinite(heartbeatAt) && Math.max(0, now - heartbeatAt) <= 30_000 ? capacity + worker.capacity : capacity;
+    }, 0);
+    const staleWorkerCount = workers.reduce((capacity, worker) => {
+      const heartbeatAt = Date.parse(worker.heartbeatAt);
+      return !Number.isFinite(heartbeatAt) || Math.max(0, now - heartbeatAt) > 30_000 ? capacity + worker.capacity : capacity;
+    }, 0);
+    const expectedWorkerCount = config.jobConcurrency.maxRunningJobs;
+    const ready = readyWorkerCount >= expectedWorkerCount;
     return {
-      ok: true,
+      ok: ready,
       database: "ready",
-      worker: worker && worker.status === "running" && workerAgeMs != null && workerAgeMs <= 30_000 ? "ready" : worker ? "stale" : "not_started",
-      workerHeartbeatAt: worker?.heartbeatAt ?? null
+      worker: ready ? "ready" : workers.length > 0 ? "stale" : "not_started",
+      workerHeartbeatAt: latestWorker?.heartbeatAt ?? null,
+      expectedWorkerCount,
+      readyWorkerCount,
+      staleWorkerCount
     };
+  };
+  app.get("/api/health/live", async () => ({ ok: true, service: "running" }));
+  app.get("/api/health/ready", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async (_request, reply) => {
+    const health = await workerHealth();
+    return health.ok ? health : reply.code(503).send(health);
   });
+  app.get("/api/health", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async () => ({ ...(await workerHealth()), ok: true }));
   registerAuthRoutes(app, database.db, {
     cookieName: config.sessionCookieName,
     cookieSecure: config.sessionCookieSecure
@@ -138,7 +162,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   app.addHook("preHandler", async (request, reply) => {
     const documentationRequest = config.apiDocsEnabled && request.url.startsWith("/documentation");
     if (!request.url.startsWith("/api/") && !documentationRequest) return;
-    if (request.url.startsWith("/api/auth/") || request.url === "/api/health") return;
+    if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
     await requireAuth(database.db, config.sessionCookieName)(request, reply);
     if (reply.sent) return;
     if (documentationRequest) return;

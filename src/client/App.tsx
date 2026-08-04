@@ -1,14 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, Blocks, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
-import { inventoryJobRefreshKey } from "./recentJobs";
+import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
-import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
+import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
 export function SectionDraftList({ drafts, onChange, disabled = false }: { drafts: SectionDraft[]; onChange: (drafts: SectionDraft[]) => void; disabled?: boolean }) {
   const updateDraft = (id: string, patch: Partial<SectionDraft>) => {
     onChange(drafts.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft)));
@@ -264,7 +264,6 @@ function RootLayout() {
   const nav = [
     { to: "/", label: "Dashboard", icon: Gauge },
     { to: "/library", label: "Library", icon: Library },
-    { to: "/integrations", label: "Integrations", icon: Blocks },
     { to: "/logs", label: "Logs", icon: FileText }
   ];
   const toggleGroup = (group: SidebarGroup) => {
@@ -588,7 +587,7 @@ function InventoryJobDataRefresher() {
   const jobs = useQuery({
     queryKey: ["jobs", "inventory-refresh"],
     queryFn: () => api.jobs({ completedWithinMinutes: 15 }),
-    refetchInterval: 3000
+    refetchInterval: (query) => (query.state.data?.some((job) => (job.type === "scan" || job.type === "copy") && isActiveDashboardJob(job)) ? 500 : 3000)
   });
   const refreshKey = inventoryJobRefreshKey(jobs.data ?? []);
 
@@ -898,7 +897,7 @@ function PathMigrationGate({ state }: { state: PathConfigurationState }) {
     queryKey: ["job", migration?.jobId],
     queryFn: () => api.job(migration?.jobId ?? 0),
     enabled: Boolean(migration?.jobId),
-    refetchInterval: migration?.status === "queued" || migration?.status === "running" ? 1000 : false
+    refetchInterval: isActivePathMigrationStatus(migration?.status) ? 1000 : false
   });
   const progress = pathMigrationProgress(job.data ?? null);
   const progressPercent = progress.total > 0 ? Math.min(100, Math.max(0, (progress.current / progress.total) * 100)) : 0;
@@ -949,7 +948,7 @@ function PathMigrationGate({ state }: { state: PathConfigurationState }) {
                 </div>
                 {change.changed ? (
                   <span className={`path-identity path-identity-${change.identityMatch}`}>
-                    {change.identityMatch === "same" ? "Same root detected" : change.identityMatch === "different" ? "Different root identity" : "Root identity unavailable"}
+                    {change.identityMatch === "same" ? "Same storage mount" : change.identityMatch === "different" ? "Different storage mount" : "Storage mount unavailable"}
                   </span>
                 ) : null}
               </div>
@@ -961,15 +960,15 @@ function PathMigrationGate({ state }: { state: PathConfigurationState }) {
           <div className="path-migration-working" role="status"><RefreshCw className="is-spinning" size={18} /> Validating every affected symlink and mapped target...</div>
         ) : null}
 
-        {migration && ["planned", "queued", "running", "failed"].includes(migration.status) ? (
+        {migration && ["planned", "queued", "running", "rollback_pending", "failed"].includes(migration.status) ? (
           <section className="path-migration-section" aria-labelledby="migration-analysis-title">
             <div className="path-migration-section-heading">
               <div>
                 <h2 id="migration-analysis-title">Migration analysis</h2>
                 <p>Only path references are migrated. Storage content is never moved by this workflow.</p>
               </div>
-              <span className={`status status-${migration.summary.blockedLinks > 0 || migration.status === "failed" ? "failed" : migration.status === "running" || migration.status === "queued" ? "running" : "completed"}`}>
-                {migration.status === "planned" ? "Ready" : migration.status === "queued" ? "Queued" : migration.status === "running" ? "Running" : "Needs attention"}
+              <span className={`status status-${migration.summary.blockedLinks > 0 || migration.status === "failed" ? "failed" : isActivePathMigrationStatus(migration.status) ? "running" : "completed"}`}>
+                {pathMigrationStatusLabel(migration.status)}
               </span>
             </div>
             <div className="path-migration-stats">
@@ -997,10 +996,11 @@ function PathMigrationGate({ state }: { state: PathConfigurationState }) {
           </section>
         ) : null}
 
-        {migration && (migration.status === "queued" || migration.status === "running") ? (
+        {migration && isActivePathMigrationStatus(migration.status) ? (
           <section className="path-migration-section path-migration-progress" aria-live="polite">
-            <div className="path-migration-progress-heading"><strong>{progress.message}</strong><span>{formatNumber(progress.current)} / {formatNumber(progress.total)}</span></div>
+            <div className="path-migration-progress-heading"><strong>{pathMigrationProgressTitle(migration.status, progress.message)}</strong><span>{formatNumber(progress.current)} / {formatNumber(progress.total)}</span></div>
             <div className="audit-progress-track path-migration-progress-track"><span style={{ width: `${progressPercent}%` }} /></div>
+            {migration.status === "rollback_pending" && progress.message !== "Rolling back paths" ? <p>{progress.message}</p> : null}
             <p>Do not change mounts or edit symlinks while this migration is running. This page will unlock automatically when reconciliation completes.</p>
             <JobStatusTerminateAction job={job.data ?? null} isTerminating={terminateJob.isPending} onTerminate={setTerminatePrompt} />
           </section>
@@ -1202,17 +1202,14 @@ const loadOperationsRoutes = () => import("./operationsRoutes");
 const DashboardPage = lazyRouteComponent(loadLibraryRoutes, "DashboardPage");
 const LibraryPage = lazyRouteComponent(loadLibraryRoutes, "LibraryPage");
 const RunsPage = lazyRouteComponent(loadOperationsRoutes, "RunsPage");
-const IntegrationsPage = lazyRouteComponent(loadOperationsRoutes, "IntegrationsPage");
 const SettingsPage = lazyRouteComponent(loadOperationsRoutes, "SettingsPage");
 const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
 const libraryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/library", component: LibraryPage });
 const scansRoute = createRoute({ getParentRoute: () => rootRoute, path: "/scans", component: () => <RunsPage type="scan" /> });
 const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audits", component: () => <RunsPage type="audit" /> });
-const integrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/integrations", component: IntegrationsPage });
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });
 const settingsSectionsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/sections", component: () => <SettingsPage activeView="library" /> });
-const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
 const settingsAdvancedRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/advanced", component: () => <SettingsPage activeView="advanced" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
@@ -1221,10 +1218,8 @@ const routeTree = rootRoute.addChildren([
   libraryRoute,
   scansRoute,
   auditsRoute,
-  integrationsRoute,
   settingsRoute,
   settingsSectionsRoute,
-  settingsIntegrationsRoute,
   settingsAdvancedRoute,
   settingsUserRoute,
   logsRoute

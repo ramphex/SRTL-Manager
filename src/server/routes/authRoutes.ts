@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { eq } from "drizzle-orm";
-import { createAdmin, getSessionUser, hashPassword, hasAdmin, login, logout, verifyPassword } from "../auth";
+import { createAdmin, findAdminByUsername, getSessionUser, hashPassword, hasAdmin, login, logout, verifyPassword } from "../auth";
 import { first, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { markOnboardingAccountCreated } from "../lib/onboarding";
@@ -98,7 +98,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
     }
 
     const username = body.username.trim();
-    const conflictingUser = await first(db.select({ id: schema.adminUsers.id }).from(schema.adminUsers).where(eq(schema.adminUsers.username, username)).limit(1));
+    const conflictingUser = await findAdminByUsername(db, username);
     if (conflictingUser && conflictingUser.id !== user.id) {
       return reply.code(409).send({ error: "Username is already in use" });
     }

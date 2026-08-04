@@ -9,7 +9,8 @@ import { inferSectionContentType } from "../../shared/sections";
 import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
 import { isMediaFile, isPathInside, safeRelativePath } from "./media";
-import { withFilesystemTimeout } from "./filesystemSafety";
+import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
+import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -46,6 +47,8 @@ export interface ClassifiedLink {
   storagePolicy: StoragePolicyKind;
   resolvedStorageFileId?: number | null;
   sizeBytes: number | null;
+  targetMtimeMs: number | null;
+  targetReadError: string | null;
 }
 
 export interface ClassifiedStorageFile {
@@ -73,6 +76,7 @@ export interface ScanResult {
   options: ScanOptions;
   links: ClassifiedLink[];
   storageFiles: ClassifiedStorageFile[];
+  reconciledStorageFiles: ClassifiedStorageFile[];
   storageScanIssues: StorageScanIssue[];
   summaries: SectionSummary[];
   inventory: InventorySummary;
@@ -106,7 +110,8 @@ export async function classifySymlink(
   sectionRoot: string,
   paths: PathsSettings,
   section: string,
-  storagePolicies: StoragePolicyLookup
+  storagePolicies: StoragePolicyLookup,
+  verifyTargetReadability = false
 ): Promise<ClassifiedLink> {
   const rawTargetPath = await withFilesystemTimeout(fs.readlink(linkPath), `Symlink target read for ${linkPath}`);
   const targetPath = path.isAbsolute(rawTargetPath) ? rawTargetPath : path.resolve(path.dirname(linkPath), rawTargetPath);
@@ -116,17 +121,28 @@ export async function classifySymlink(
   const targetRootType: StorageRootType | "other" = isPathInside(paths.remoteDir, targetPath) ? "remote" : isPathInside(paths.localDir, targetPath) ? "local" : "other";
   let targetExists = false;
   let sizeBytes: number | null = null;
+  let targetMtimeMs: number | null = null;
+  let targetReadError: string | null = null;
 
-  const attempts = targetRootType === "remote" ? 2 : 1;
+  const attempts = targetRootType === "remote" ? (verifyTargetReadability ? 3 : 2) : 1;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     try {
-      const stat = await withFilesystemTimeout(fs.stat(targetPath), `Target check for ${targetPath}`);
+      if (verifyTargetReadability && media && targetRootType !== "other") {
+        const snapshot = await assertReadableRegularFile(targetPath, `Symlink target ${targetPath}`, { attempts: 1, timeoutMs: 5_000 });
+        sizeBytes = snapshot.size;
+        targetMtimeMs = Math.trunc(snapshot.mtimeMs);
+      } else {
+        const stat = await withFilesystemTimeout(fs.stat(targetPath), `Target check for ${targetPath}`);
+        sizeBytes = stat.isFile() ? stat.size : null;
+        targetMtimeMs = Math.trunc(stat.mtimeMs);
+      }
       targetExists = true;
-      sizeBytes = stat.isFile() ? stat.size : null;
+      targetReadError = null;
       break;
-    } catch {
+    } catch (error) {
       targetExists = false;
-      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, 100));
+      targetReadError = verifyTargetReadability ? describeError(error) : null;
+      if (attempt < attempts) await new Promise((resolve) => setTimeout(resolve, verifyTargetReadability ? 350 : 100));
     }
   }
 
@@ -154,7 +170,9 @@ export async function classifySymlink(
     targetExists,
     isMedia: media,
     storagePolicy,
-    sizeBytes
+    sizeBytes,
+    targetMtimeMs,
+    targetReadError
   };
 }
 
@@ -458,7 +476,7 @@ export async function scanLibrary(
         if (checkingUpdate) await checkingUpdate;
         for (const linkPath of symlinks) {
           await throwIfScanCancelled(isCancelled);
-          links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies));
+          links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection)));
           checkedLinks += 1;
           if (!shouldReportSymlinkActivity()) continue;
           const progressUpdate = reportSymlinkActivity(
@@ -487,9 +505,12 @@ export async function scanLibrary(
     storageScanIssues.push(...remoteScan.issues);
   }
 
-  const classifiedStorageFiles = applyStorageFilePolicies(storageFiles, settings, storagePolicies);
+  const classifiedStorageFiles = applyStorageFileMetadata(storageFiles, settings);
+  const reconciledStorageFiles = titleScopesBySection
+    ? uniqueStorageFiles(links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null))
+    : [];
   const summaries = summarizeLinks(links, scopedSettings.sections, scopedSettings.sectionTitles, scopedSettings.sectionTypes);
-  return { options, links, storageFiles: classifiedStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
+  return { options, links, storageFiles: classifiedStorageFiles, reconciledStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
 }
 
 export function summarizeLinks(
@@ -575,16 +596,33 @@ function storageFileMetadata(relativePath: string, rootType: StorageRootType, se
   return { section: "", itemName: parts.length > 1 ? parts[0] : filenameTitle(parts[0]) };
 }
 
-function applyStorageFilePolicies(files: ClassifiedStorageFile[], settings: SectionSettings, storagePolicies: StoragePolicyLookup): ClassifiedStorageFile[] {
+function applyStorageFileMetadata(files: ClassifiedStorageFile[], settings: SectionSettings): ClassifiedStorageFile[] {
   const sectionNames = new Set(settings.sections);
   return files.map((file) => {
     const metadata = storageFileMetadata(file.relativePath, file.rootType, sectionNames);
     return {
       ...file,
       ...metadata,
-      storagePolicy: storagePolicyForTitle(storagePolicies, metadata.itemName)
+      storagePolicy: "unassigned"
     };
   });
+}
+
+function storageFileFromTargetedLink(link: ClassifiedLink, paths: PathsSettings): ClassifiedStorageFile | null {
+  if (!link.targetExists || !link.isMedia || link.sizeBytes === null || link.targetMtimeMs === null) return null;
+  if (link.kind !== "local" && link.kind !== "remote") return null;
+  const rootPath = link.kind === "local" ? paths.localDir : paths.remoteDir;
+  return {
+    rootType: link.kind,
+    rootPath,
+    section: link.section,
+    itemName: link.itemName,
+    relativePath: safeRelativePath(rootPath, link.targetPath),
+    filePath: link.targetPath,
+    storagePolicy: link.storagePolicy,
+    sizeBytes: link.sizeBytes,
+    mtimeMs: link.targetMtimeMs
+  };
 }
 
 export function summarizeInventory(links: ClassifiedLink[], storageFiles: ClassifiedStorageFile[]): InventorySummary {
@@ -608,11 +646,11 @@ export function summarizeInventory(links: ClassifiedLink[], storageFiles: Classi
     unassignedLocalLinks: links.filter((link) => link.kind === "local" && link.storagePolicy === "unassigned").length,
     localFiles: localFiles.length,
     remoteFiles: remoteFiles.length,
-    actionableRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_1").length,
-    actionableLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "location_2").length,
-    assignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_2").length,
-    unassignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "unassigned").length,
-    unassignedLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "unassigned").length,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: unlinkedRemoteFiles.length,
+    unassignedLocalFiles: unlinkedLocalFiles.length,
     localOrphanFiles: unlinkedLocalFiles.length,
     remoteOrphanFiles: unlinkedRemoteFiles.length,
     missingLinks: 0,
@@ -670,6 +708,7 @@ async function throwIfPersistenceCancelled(isCancelled?: ScanCancellationCheck):
 export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
+  const filesToReconcile = uniqueStorageFiles([...result.storageFiles, ...result.reconciledStorageFiles]);
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
@@ -683,22 +722,25 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   let missingRemoteFiles = 0;
   if (result.options.scanLocal) scannedStorageRootTypes.add("local");
   if (result.options.scanRemote) scannedStorageRootTypes.add("remote");
+  const existingStorageFiles = await db.select().from(schema.storageFiles);
+  const existingStorageFileByPath = new Map(existingStorageFiles.map((file) => [file.filePath, file]));
 
-  for (const file of result.storageFiles) {
+  for (const file of filesToReconcile) {
     await throwIfPersistenceCancelled(isCancelled);
-    const existing = await first(db.select().from(schema.storageFiles).where(eq(schema.storageFiles.filePath, file.filePath)).limit(1));
+    const existing = existingStorageFileByPath.get(file.filePath);
+    const persistedFile: ClassifiedStorageFile = { ...file, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
     const firstSeenAt = existing?.firstSeenAt ?? timestamp;
-    const lastChangedAt = storageFileChanged(existing, file) ? timestamp : existing?.lastChangedAt ?? timestamp;
+    const lastChangedAt = storageFileChanged(existing, persistedFile) ? timestamp : existing?.lastChangedAt ?? timestamp;
     await db
       .insert(schema.storageFiles)
-      .values({ ...file, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
+      .values({ ...persistedFile, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: schema.storageFiles.filePath,
-        set: { ...file, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
+        set: { ...persistedFile, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
       });
   }
 
-  for (const file of await db.select().from(schema.storageFiles)) {
+  for (const file of existingStorageFiles) {
     await throwIfPersistenceCancelled(isCancelled);
     const fileSection = firstRelativePathPart(file.relativePath);
     const scannedFileSection = file.rootType === "remote" || !scannedLocalSections || scannedLocalSections.has(fileSection);
@@ -718,14 +760,34 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   if (result.options.scanSymlinks) {
     const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
     const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
+    const existingMediaLinks = await db.select().from(schema.mediaLinks);
+    const existingMediaLinkByPath = new Map(existingMediaLinks.map((link) => [link.linkPath, link]));
 
     for (const link of result.links) {
       await throwIfPersistenceCancelled(isCancelled);
       const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
-      const existing = await first(db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.linkPath, link.linkPath)).limit(1));
+      const existing = existingMediaLinkByPath.get(link.linkPath);
       const firstSeenAt = existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp;
       const lastChangedAt = linkChanged(existing, link, resolvedStorageFileId) ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp;
-      const values = { ...link, resolvedStorageFileId, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp };
+      const values = {
+        section: link.section,
+        itemName: link.itemName,
+        relativePath: link.relativePath,
+        linkPath: link.linkPath,
+        targetPath: link.targetPath,
+        kind: link.kind,
+        targetExists: link.targetExists,
+        isMedia: link.isMedia,
+        storagePolicy: link.storagePolicy,
+        sizeBytes: link.sizeBytes,
+        resolvedStorageFileId,
+        firstSeenAt,
+        lastSeenAt: timestamp,
+        lastChangedAt,
+        missingSince: null,
+        lastSeenJobId: jobId,
+        updatedAt: timestamp
+      };
       await db
         .insert(schema.mediaLinks)
         .values(values)
@@ -735,7 +797,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         });
     }
 
-    for (const link of await db.select().from(schema.mediaLinks)) {
+    for (const link of existingMediaLinks) {
       await throwIfPersistenceCancelled(isCancelled);
       const scannedLinkScope = scannedSymlinkTitles
         ? scannedSymlinkTitles.has(scanTitleScopeKey(link.section, link.itemName))
@@ -758,9 +820,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     }
   }
 
-  await reconcileResolvedStorageFiles(db, timestamp);
+  await reconcileResolvedStorageFiles(db, timestamp, result.options.titleScopes?.length ? seenLinkPaths : undefined);
   await throwIfPersistenceCancelled(isCancelled);
   await applyPendingOnboardingPolicy(db, jobId);
+  await throwIfPersistenceCancelled(isCancelled);
+  await reconcileStorageFilePolicies(db, timestamp);
   await throwIfPersistenceCancelled(isCancelled);
 
   const scannedLinks = (await db.select().from(schema.mediaLinks)).filter((link) => seenLinkPaths.has(link.linkPath) && !link.missingSince);
@@ -776,7 +840,9 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       isMedia: link.isMedia,
       storagePolicy: normalizeStoragePolicy(link.storagePolicy),
       resolvedStorageFileId: link.resolvedStorageFileId,
-      sizeBytes: link.sizeBytes
+      sizeBytes: link.sizeBytes,
+      targetMtimeMs: null,
+      targetReadError: null
     })),
     []
   );
@@ -808,11 +874,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     unassignedLocalLinks: persistedLinkInventory.unassignedLocalLinks,
     localFiles: localFiles.length,
     remoteFiles: remoteFiles.length,
-    actionableRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_1").length,
-    actionableLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "location_2").length,
-    assignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "location_2").length,
-    unassignedRemoteFiles: unlinkedRemoteFiles.filter((file) => file.storagePolicy === "unassigned").length,
-    unassignedLocalFiles: unlinkedLocalFiles.filter((file) => file.storagePolicy === "unassigned").length,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: unlinkedRemoteFiles.length,
+    unassignedLocalFiles: unlinkedLocalFiles.length,
     localOrphanFiles: unlinkedLocalFiles.length,
     remoteOrphanFiles: unlinkedRemoteFiles.length,
     missingLinks,
@@ -821,11 +887,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   };
 }
 
-async function reconcileResolvedStorageFiles(db: Db, timestamp: string): Promise<void> {
+async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scopedLinkPaths?: ReadonlySet<string>): Promise<void> {
   const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
   const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
   for (const link of await db.select().from(schema.mediaLinks)) {
-    if (link.missingSince) continue;
+    if (link.missingSince || (scopedLinkPaths && !scopedLinkPaths.has(link.linkPath))) continue;
     const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
     if (link.resolvedStorageFileId !== resolvedStorageFileId) {
       await db.update(schema.mediaLinks).set({ resolvedStorageFileId, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
@@ -914,12 +980,9 @@ function mediaLinkFilters(options: MediaLinkListFilters) {
 }
 
 export async function listMediaLinks(db: Db, kind?: LinkKind, status: MediaLinkStatusFilter = "current", filters: Pick<MediaLinkListFilters, "section" | "storagePolicy"> = {}): Promise<MediaLinkRow[]> {
-  return (await db.select().from(schema.mediaLinks))
-    .filter((row) => !kind || row.kind === kind)
-    .filter((row) => !filters.section || row.section === filters.section)
-    .filter((row) => !filters.storagePolicy || normalizeStoragePolicy(row.storagePolicy) === filters.storagePolicy)
-    .filter((row) => status === "all" || (status === "current" ? !row.missingSince : Boolean(row.missingSince)))
-    .map(serializeMediaLink);
+  const where = mediaLinkFilters({ kind, status, ...filters });
+  const rows = where ? await db.select().from(schema.mediaLinks).where(where) : await db.select().from(schema.mediaLinks);
+  return rows.map(serializeMediaLink);
 }
 
 export async function listMediaLinksByIds(db: Db, ids: number[]): Promise<MediaLinkRow[]> {
@@ -1397,111 +1460,75 @@ async function listStorageFileTreeRows(
   };
 }
 
-async function rawCount(db: Db, query: SQL<unknown>): Promise<number> {
-  const row = await dbGet<{ value: number }>(db, query);
-  return Number(row?.value ?? 0);
-}
-
 export async function getInventorySummary(db: Db): Promise<InventorySummary> {
+  const [links, files] = await Promise.all([
+    dbGet<Record<string, number>>(db, sql`
+      select
+        count(*) filter (where missing_since is null) as "totalLinks",
+        count(*) filter (where missing_since is null and kind = 'remote') as "remoteLinks",
+        count(*) filter (where missing_since is null and kind = 'local') as "localLinks",
+        count(*) filter (where missing_since is null and kind = 'broken') as "brokenLinks",
+        count(*) filter (where missing_since is null and kind = 'other') as "otherLinks",
+        count(*) filter (where missing_since is null and kind = 'non_media') as "nonMediaLinks",
+        count(*) filter (where missing_since is null and kind = 'remote' and storage_policy = 'location_1') as "actionableRemoteLinks",
+        count(*) filter (where missing_since is null and kind = 'local' and storage_policy = 'location_2') as "actionableLocalLinks",
+        count(*) filter (where missing_since is null and kind = 'remote' and storage_policy = 'location_2') as "assignedRemoteLinks",
+        count(*) filter (where missing_since is null and kind = 'remote' and storage_policy = 'unassigned') as "unassignedRemoteLinks",
+        count(*) filter (where missing_since is null and kind = 'local' and storage_policy = 'unassigned') as "unassignedLocalLinks",
+        count(*) filter (where missing_since is not null) as "missingLinks"
+      from media_links
+    `),
+    dbGet<Record<string, number>>(db, sql`
+      with file_state as (
+        select
+          sf.root_type,
+          sf.missing_since,
+          not exists (
+            select 1
+            from media_links ml
+            where ml.missing_since is null
+              and ml.resolved_storage_file_id = sf.id
+          ) as orphaned
+        from storage_files sf
+      )
+      select
+        count(*) filter (where missing_since is null and root_type = 'local') as "localFiles",
+        count(*) filter (where missing_since is null and root_type = 'remote') as "remoteFiles",
+        count(*) filter (where missing_since is null and root_type = 'remote' and orphaned) as "unassignedRemoteFiles",
+        count(*) filter (where missing_since is null and root_type = 'local' and orphaned) as "unassignedLocalFiles",
+        count(*) filter (where missing_since is null and root_type = 'local' and orphaned) as "localOrphanFiles",
+        count(*) filter (where missing_since is null and root_type = 'remote' and orphaned) as "remoteOrphanFiles",
+        count(*) filter (where missing_since is not null and root_type = 'local') as "missingLocalFiles",
+        count(*) filter (where missing_since is not null and root_type = 'remote') as "missingRemoteFiles"
+      from file_state
+    `)
+  ]);
+  const linkCount = (key: string) => Number(links?.[key] ?? 0);
+  const fileCount = (key: string) => Number(files?.[key] ?? 0);
   return {
-    totalLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null`),
-    remoteLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'remote'`),
-    localLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'local'`),
-    brokenLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'broken'`),
-    otherLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'other'`),
-    nonMediaLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'non_media'`),
-    actionableRemoteLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'remote' and storage_policy = 'location_1'`),
-    actionableLocalLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'local' and storage_policy = 'location_2'`),
-    assignedRemoteLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'remote' and storage_policy = 'location_2'`),
-    unassignedRemoteLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'remote' and storage_policy = 'unassigned'`),
-    unassignedLocalLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is null and kind = 'local' and storage_policy = 'unassigned'`),
-    localFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is null and root_type = 'local'`),
-    remoteFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is null and root_type = 'remote'`),
-    actionableRemoteFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and sf.storage_policy = 'location_1'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    actionableLocalFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'local'
-            and sf.storage_policy = 'location_2'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    assignedRemoteFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and sf.storage_policy = 'location_2'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    unassignedRemoteFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and sf.storage_policy = 'unassigned'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    unassignedLocalFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'local'
-            and sf.storage_policy = 'unassigned'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    localOrphanFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'local'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    remoteOrphanFiles: await rawCount(
-      db,
-      sql`select count(*) as value
-          from storage_files sf
-          where sf.missing_since is null
-            and sf.root_type = 'remote'
-            and not exists (
-              select 1 from media_links ml
-              where ml.missing_since is null and ml.resolved_storage_file_id = sf.id
-            )`
-    ),
-    missingLinks: await rawCount(db, sql`select count(*) as value from media_links where missing_since is not null`),
-    missingLocalFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is not null and root_type = 'local'`),
-    missingRemoteFiles: await rawCount(db, sql`select count(*) as value from storage_files where missing_since is not null and root_type = 'remote'`)
+    totalLinks: linkCount("totalLinks"),
+    remoteLinks: linkCount("remoteLinks"),
+    localLinks: linkCount("localLinks"),
+    brokenLinks: linkCount("brokenLinks"),
+    otherLinks: linkCount("otherLinks"),
+    nonMediaLinks: linkCount("nonMediaLinks"),
+    actionableRemoteLinks: linkCount("actionableRemoteLinks"),
+    actionableLocalLinks: linkCount("actionableLocalLinks"),
+    assignedRemoteLinks: linkCount("assignedRemoteLinks"),
+    unassignedRemoteLinks: linkCount("unassignedRemoteLinks"),
+    unassignedLocalLinks: linkCount("unassignedLocalLinks"),
+    localFiles: fileCount("localFiles"),
+    remoteFiles: fileCount("remoteFiles"),
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: fileCount("unassignedRemoteFiles"),
+    unassignedLocalFiles: fileCount("unassignedLocalFiles"),
+    localOrphanFiles: fileCount("localOrphanFiles"),
+    remoteOrphanFiles: fileCount("remoteOrphanFiles"),
+    missingLinks: linkCount("missingLinks"),
+    missingLocalFiles: fileCount("missingLocalFiles"),
+    missingRemoteFiles: fileCount("missingRemoteFiles")
   };
 }
 
@@ -1514,6 +1541,7 @@ type CompletedScanTimestampRow = {
   startedAt: string;
   finishedAt: string | null;
   progress: string;
+  options: string;
 };
 
 function recordFromUnknown(value: unknown): Record<string, unknown> | null {
@@ -1533,10 +1561,10 @@ function scanTitleScopesFromUnknown(value: unknown): ScanTitleScope[] | undefine
     .map((scope) => ({ section: String(scope.section), itemName: String(scope.itemName) }));
 }
 
-function scanOptionsFromProgress(progress: string): Partial<ScanOptions> | null {
+function scanOptionsFromProgress(progress: string, optionsJson: string): Partial<ScanOptions> | null {
   try {
     const parsed = recordFromUnknown(JSON.parse(progress));
-    const options = recordFromUnknown(parsed?.options);
+    const options = recordFromUnknown(JSON.parse(optionsJson)) ?? recordFromUnknown(parsed?.options);
     if (!options) return null;
     return {
       scanSymlinks: options.scanSymlinks === true,
@@ -1571,7 +1599,7 @@ export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanT
   let remoteRoot: string | null = null;
 
   const completedScans = await dbAll<CompletedScanTimestampRow>(db, sql`
-    select sr.started_at as "startedAt", sr.finished_at as "finishedAt", j.progress as progress
+    select sr.started_at as "startedAt", sr.finished_at as "finishedAt", j.progress as progress, j.options as options
     from scan_runs sr
     join jobs j on j.id = sr.job_id
     where sr.status = 'completed'
@@ -1579,7 +1607,7 @@ export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanT
   `);
 
   for (const scan of completedScans) {
-    const options = scanOptionsFromProgress(scan.progress);
+    const options = scanOptionsFromProgress(scan.progress, scan.options);
     if (!options) continue;
     const timestamp = scan.finishedAt ?? scan.startedAt;
 
@@ -1652,7 +1680,9 @@ export async function listSectionSummaries(db: Db): Promise<SectionSummary[]> {
     targetExists: row.targetExists,
     isMedia: row.isMedia,
     storagePolicy: row.storagePolicy,
-    sizeBytes: row.sizeBytes
+    sizeBytes: row.sizeBytes,
+    targetMtimeMs: null,
+    targetReadError: null
   }));
   return summarizeLinks(links, sections, sectionTitles, sectionTypes);
 }

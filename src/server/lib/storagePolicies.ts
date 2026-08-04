@@ -10,6 +10,7 @@ import type {
   StoragePolicyTitle
 } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
+import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 
 export function normalizeTitle(value: string): string {
   return value.trim().toLowerCase();
@@ -324,19 +325,30 @@ async function assignLocalPolicy(
     });
 }
 
-async function syncStoragePolicyMediaLinksForTitleKeys(db: Db, titlePolicies: Map<string, StoragePolicyKind>, timestamp: string): Promise<void> {
+async function syncStoragePolicyMediaLinksForTitleKeys(
+  db: Db,
+  titlePolicies: Map<string, StoragePolicyKind>,
+  timestamp: string,
+  mediaLinkIds?: readonly number[]
+): Promise<void> {
   if (titlePolicies.size === 0) return;
-  for (const link of await db.select().from(schema.mediaLinks)) {
-    const policy = titlePolicies.get(canonicalTitleKey(link.itemName));
-    if (!policy) continue;
-    if (link.storagePolicy === policy) continue;
-    await db.update(schema.mediaLinks).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
+  const policies = [...new Set(titlePolicies.values())];
+  if (mediaLinkIds !== undefined && policies.length === 1) {
+    const uniqueIds = [...new Set(mediaLinkIds)];
+    for (let offset = 0; offset < uniqueIds.length; offset += 500) {
+      await db
+        .update(schema.mediaLinks)
+        .set({ storagePolicy: policies[0]!, updatedAt: timestamp })
+        .where(inArray(schema.mediaLinks.id, uniqueIds.slice(offset, offset + 500)));
+    }
+  } else {
+    for (const link of await db.select().from(schema.mediaLinks)) {
+      const policy = titlePolicies.get(canonicalTitleKey(link.itemName));
+      if (!policy || link.storagePolicy === policy) continue;
+      await db.update(schema.mediaLinks).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
+    }
   }
-  for (const file of await db.select().from(schema.storageFiles)) {
-    const policy = titlePolicies.get(canonicalTitleKey(file.itemName));
-    if (!policy || file.storagePolicy === policy) continue;
-    await db.update(schema.storageFiles).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
-  }
+  await reconcileStorageFilePolicies(db, timestamp);
 }
 
 export async function bootstrapLocalStoragePolicies(
@@ -460,17 +472,14 @@ export async function syncStoragePolicyMediaLinks(db: Db, normalizedTitle: strin
     if (canonicalTitleKey(link.itemName) !== titleKey) continue;
     await db.update(schema.mediaLinks).set({ storagePolicy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
   }
-  for (const file of await db.select().from(schema.storageFiles)) {
-    if (canonicalTitleKey(file.itemName) !== titleKey) continue;
-    await db.update(schema.storageFiles).set({ storagePolicy, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
-  }
+  await reconcileStorageFilePolicies(db, timestamp);
 }
 
 export async function setStoragePolicyTitles(
   db: Db,
   titles: string[],
   policy: StoragePolicyKind,
-  options: { source?: string } = {}
+  options: { source?: string; mediaLinkIds?: readonly number[] } = {}
 ): Promise<StoragePolicyBulkResult> {
   const uniqueTitles = uniqueStoragePolicyTitles(titles);
   const timestamp = nowIso();
@@ -529,26 +538,8 @@ export async function setStoragePolicyTitles(
         }
       }
 
-      const policyRows = sql.join(
-        assignments.map((assignment) => sql`(${assignment.normalizedTitle}::text, ${policy}::text)`),
-        sql`, `
-      );
-      await transaction.execute(sql`
-        update media_links as ml
-        set storage_policy = policy_map.policy,
-            updated_at = ${timestamp}
-        from (values ${policyRows}) as policy_map(normalized_title, policy)
-        where lower(btrim(ml.item_name)) = policy_map.normalized_title
-          and ml.storage_policy <> policy_map.policy
-      `);
-      await transaction.execute(sql`
-        update storage_files as sf
-        set storage_policy = policy_map.policy,
-            updated_at = ${timestamp}
-        from (values ${policyRows}) as policy_map(normalized_title, policy)
-        where lower(btrim(sf.item_name)) = policy_map.normalized_title
-          and sf.storage_policy <> policy_map.policy
-      `);
+      const titlePolicies = new Map(assignments.map((assignment) => [canonicalTitleKey(assignment.title), policy]));
+      await syncStoragePolicyMediaLinksForTitleKeys(transaction, titlePolicies, timestamp, options.mediaLinkIds);
     });
   }
 
@@ -567,8 +558,13 @@ export async function setStoragePolicyTitles(
   return { updated: items.length, policy, items };
 }
 
-export async function setStoragePolicyTitle(db: Db, title: string, policy: StoragePolicyKind): Promise<StoragePolicyTitle> {
-  return (await setStoragePolicyTitles(db, [title], policy)).items[0] ?? {
+export async function setStoragePolicyTitle(
+  db: Db,
+  title: string,
+  policy: StoragePolicyKind,
+  options: { source?: string; mediaLinkIds?: readonly number[] } = {}
+): Promise<StoragePolicyTitle> {
+  return (await setStoragePolicyTitles(db, [title], policy, options)).items[0] ?? {
     id: null,
     title,
     normalizedTitle: normalizeTitle(title),

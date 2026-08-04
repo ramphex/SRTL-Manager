@@ -23,12 +23,12 @@ export function normalizeAuditTargets(targets: unknown): StorageRootType[] {
 
 export function auditOptionsFromJob(job: JobRecord): AuditJobOptions {
   const progress = recordFromUnknown(job.progress);
-  const options = recordFromUnknown(progress?.options) ?? progress;
+  const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;
   return {
     mode: options?.mode === "fast" || options?.mode === "deep" ? options.mode : null,
     sections: Array.isArray(options?.sections) ? options.sections.filter((section): section is string => typeof section === "string") : undefined,
     targets: Array.isArray(options?.targets) ? normalizeAuditTargets(options.targets) : undefined,
-    linkIds: Array.isArray(options?.linkIds) ? options.linkIds.filter((id): id is number => Number.isInteger(id)) : undefined,
+    linkIds: job.selection?.linkIds ?? (Array.isArray(options?.linkIds) ? options.linkIds.filter((id): id is number => Number.isInteger(id)) : undefined),
     section: typeof options?.section === "string" ? options.section : undefined,
     itemName: typeof options?.itemName === "string" ? options.itemName : undefined,
     relativePathPrefix: typeof options?.relativePathPrefix === "string" ? options.relativePathPrefix : undefined,
@@ -38,16 +38,17 @@ export function auditOptionsFromJob(job: JobRecord): AuditJobOptions {
 
 export function copyOptionsFromJob(job: JobRecord): CopyOptions | null {
   const progress = recordFromUnknown(job.progress);
-  const options = recordFromUnknown(progress?.options) ?? progress;
+  const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;
   const direction = options?.direction === "to_local" || options?.direction === "to_remote" ? options.direction : null;
   if (!direction) return null;
   return {
     direction,
-    linkIds: Array.isArray(options?.linkIds) ? options.linkIds.filter((id): id is number => Number.isInteger(id)) : undefined,
+    linkIds: job.selection?.linkIds ?? (Array.isArray(options?.linkIds) ? options.linkIds.filter((id): id is number => Number.isInteger(id)) : undefined),
     section: typeof options?.section === "string" ? options.section : undefined,
     itemName: typeof options?.itemName === "string" ? options.itemName : undefined,
     relativePathPrefix: typeof options?.relativePathPrefix === "string" ? options.relativePathPrefix : undefined,
-    localConflictStrategy: options?.localConflictStrategy === "keep_both" || options?.localConflictStrategy === "replace" ? options.localConflictStrategy : undefined
+    localConflictStrategy: options?.localConflictStrategy === "keep_both" || options?.localConflictStrategy === "replace" ? options.localConflictStrategy : undefined,
+    allowSourceTitleMismatch: options?.allowSourceTitleMismatch === true ? true : undefined
   };
 }
 
@@ -62,7 +63,7 @@ function scanTitleScopesFromUnknown(value: unknown): ScanTitleScope[] | undefine
 
 export function scanOptionsFromJob(job: JobRecord): Partial<ScanOptions> | null {
   const progress = recordFromUnknown(job.progress);
-  const options = recordFromUnknown(progress?.options) ?? progress;
+  const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;
   if (!options) return null;
   return {
     scanSymlinks: options.scanSymlinks === true,

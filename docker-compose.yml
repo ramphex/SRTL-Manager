@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:17-alpine
+    image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
     restart: unless-stopped
     environment:
       POSTGRES_DB: ${SRTL_POSTGRES_DB:?Set SRTL_POSTGRES_DB in .env}
@@ -65,7 +65,7 @@ services:
     tmpfs:
       - /tmp:size=256m,mode=1777
     healthcheck:
-      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3010/api/health/live').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 10s
       timeout: 5s
       retries: 12
@@ -84,6 +84,9 @@ services:
     image: ${SRTL_IMAGE:?Set SRTL_IMAGE in .env}
     command: ["node", "dist/server/worker.js"]
     restart: unless-stopped
+    # SRTL_WORKER_COUNT scales safe job slots inside this service. Do not also
+    # use `docker compose --scale worker=...` for the same deployment.
+    stop_grace_period: 2m
     user: "${SRTL_UID:?Set SRTL_UID in .env}:${SRTL_GID:?Set SRTL_GID in .env}"
     read_only: true
     env_file:

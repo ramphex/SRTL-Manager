@@ -7,7 +7,7 @@ import { pipeline } from "node:stream/promises";
 import { defaultCopyJobBehaviorSettings } from "../../shared/advancedSettings";
 import type { AuditMode, CopyDirection, CopyJobBehaviorSettings, CopyLocalConflictStrategy, MediaLinkRow, PathsSettings, StorageRootType } from "../../shared/types";
 import { isMediaFile, isPathInside } from "./media";
-import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside } from "./filesystemSafety";
+import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, assertReadableRegularFile } from "./filesystemSafety";
 import { appendBoundedOutput, commandTimeoutMs, terminateChildProcess } from "./processSafety";
 
 const copyDirectoryMode = 0o755;
@@ -54,15 +54,35 @@ export type CopyProgressReporter = (update: CopyProgressUpdate) => Promise<void>
 
 export type CopyOperationStage = "planned" | "transferring" | "verified" | "destination_displaced" | "promoted" | "repointed";
 
+export interface CopyFileIdentity {
+  dev: string;
+  ino: string;
+  size: string;
+  mtimeNs: string;
+  ctimeNs: string;
+}
+
 export interface CopyOperationUpdate {
   stage: CopyOperationStage;
   tempPath?: string | null;
   displacedPath?: string | null;
+  tempIdentity?: string | null;
+  destinationIdentity?: string | null;
+  displacedIdentity?: string | null;
   sizeBytes?: number | null;
   resultStatus?: CopyMediaResult["status"] | null;
 }
 
 export type CopyOperationReporter = (update: CopyOperationUpdate) => Promise<void>;
+
+export type CopyMutationGuard = <T>(mutation: () => Promise<T>) => Promise<T>;
+
+export class CopyReconciliationRequiredError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CopyReconciliationRequiredError";
+  }
+}
 
 export interface CopyMediaResult {
   status: "copied" | "repointed" | "skipped" | "conflict";
@@ -76,18 +96,18 @@ export interface CopyMediaResult {
   message: string;
 }
 
-function abortError(): Error {
-  return new Error("Job terminated");
+function abortError(signal?: AbortSignal): Error {
+  return signal?.reason instanceof Error ? signal.reason : new Error("Job terminated");
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw abortError();
+  if (signal?.aborted) throw abortError(signal);
 }
 
 function runCommand(command: string, args: string[], signal?: AbortSignal): Promise<CopyCommandResult> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(abortError());
+      reject(abortError(signal));
       return;
     }
     const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
@@ -99,7 +119,7 @@ function runCommand(command: string, args: string[], signal?: AbortSignal): Prom
       settled = true;
       clearTimeout(deadline);
       killTimer = terminateChildProcess(child);
-      reject(abortError());
+      reject(abortError(signal));
     };
     const deadline = setTimeout(() => {
       if (settled) return;
@@ -171,7 +191,7 @@ async function copyFileWithProgress(sourcePath: string, tempPath: string, report
 
   await emitProgress(true);
   const sourceStream = createReadStream(sourcePath);
-  const targetStream = createWriteStream(tempPath, { mode: copyFileMode });
+  const targetStream = createWriteStream(tempPath, { flags: "wx", mode: copyFileMode });
   const configuredStallTimeout = Number(process.env.SRTL_COPY_STALL_TIMEOUT_MS);
   const stallTimeoutMs = Number.isInteger(configuredStallTimeout) && configuredStallTimeout >= 60_000 ? Math.min(configuredStallTimeout, 60 * 60_000) : 10 * 60_000;
   let stallTimer: ReturnType<typeof setTimeout> | null = null;
@@ -188,7 +208,7 @@ async function copyFileWithProgress(sourcePath: string, tempPath: string, report
   const progressStream = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
       if (signal?.aborted) {
-        callback(abortError());
+        callback(abortError(signal));
         return;
       }
       bytesCopied += chunk.length;
@@ -200,7 +220,7 @@ async function copyFileWithProgress(sourcePath: string, tempPath: string, report
   });
   resetStallTimer();
   const abort = () => {
-    const error = abortError();
+    const error = abortError(signal);
     sourceStream.destroy(error);
     progressStream.destroy(error);
     targetStream.destroy(error);
@@ -310,7 +330,7 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
 
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
-      reject(abortError());
+      reject(abortError(signal));
       return;
     }
     const args =
@@ -325,7 +345,7 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
       settled = true;
       clearTimeout(deadline);
       killTimer = terminateChildProcess(child);
-      reject(abortError());
+      reject(abortError(signal));
     };
     const deadline = setTimeout(() => {
       if (settled) return;
@@ -455,6 +475,64 @@ async function destinationExists(destinationPath: string): Promise<boolean> {
   }
 }
 
+export async function readCopyFileIdentity(filePath: string): Promise<CopyFileIdentity | null> {
+  try {
+    const stat = await fs.lstat(filePath, { bigint: true });
+    if (!stat.isFile()) throw new Error(`Copy identity path is not a regular file: ${filePath}`);
+    return {
+      dev: stat.dev.toString(),
+      ino: stat.ino.toString(),
+      size: stat.size.toString(),
+      mtimeNs: stat.mtimeNs.toString(),
+      ctimeNs: stat.ctimeNs.toString()
+    };
+  } catch (error) {
+    if (isMissingPathError(error)) return null;
+    throw error;
+  }
+}
+
+export function copyFileIdentitiesMatch(left: CopyFileIdentity | null, right: CopyFileIdentity | null): boolean {
+  if (!left || !right) return left === right;
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+export function serializeCopyFileIdentity(identity: CopyFileIdentity): string {
+  return JSON.stringify(identity);
+}
+
+export function parseCopyFileIdentity(rawIdentity: string): CopyFileIdentity {
+  const identity = JSON.parse(rawIdentity) as Partial<CopyFileIdentity> | null;
+  const keys: Array<keyof CopyFileIdentity> = ["dev", "ino", "size", "mtimeNs", "ctimeNs"];
+  if (!identity || typeof identity !== "object" || !keys.every((key) => typeof identity[key] === "string" && /^\d+$/.test(identity[key]))) {
+    throw new Error("Copy file identity is invalid");
+  }
+  return {
+    dev: identity.dev!,
+    ino: identity.ino!,
+    size: identity.size!,
+    mtimeNs: identity.mtimeNs!,
+    ctimeNs: identity.ctimeNs!
+  };
+}
+
+async function requireCopyFileIdentity(filePath: string, label: string): Promise<CopyFileIdentity> {
+  const identity = await readCopyFileIdentity(filePath);
+  if (!identity) throw new Error(`${label} is missing or is not a regular file`);
+  return identity;
+}
+
+async function destinationState(destinationPath: string): Promise<CopyFileIdentity | null> {
+  return readCopyFileIdentity(destinationPath);
+}
+
+async function assertDestinationState(destinationPath: string, expected: CopyFileIdentity | null): Promise<void> {
+  const current = await destinationState(destinationPath);
+  if (!copyFileIdentitiesMatch(current, expected)) {
+    throw new Error("Destination changed before copy promotion; the copy was not installed");
+  }
+}
+
 function ensureMediaCandidate(sourcePath: string, destinationPath: string, linkPath: string): void {
   if (!isMediaFile(sourcePath) && !isMediaFile(destinationPath) && !isMediaFile(linkPath)) {
     throw new Error("Source is not a recognized media file");
@@ -469,6 +547,54 @@ function tempFilePath(destinationPath: string): string {
 
 function isMissingPathError(error: unknown): boolean {
   return Boolean(error && typeof error === "object" && "code" in error && error.code === "ENOENT");
+}
+
+const retryableTransferErrorCodes = new Set(["EAGAIN", "EBUSY", "EIO", "ENETDOWN", "ENETRESET", "ENETUNREACH", "ENOTCONN", "EREMOTEIO", "ESTALE", "ETIMEDOUT"]);
+
+function transferErrorCode(error: unknown): string | null {
+  if (!error || typeof error !== "object") return null;
+  if ("code" in error && typeof error.code === "string") return error.code;
+  if ("cause" in error) return transferErrorCode(error.cause);
+  return null;
+}
+
+function isRetryableTransferError(error: unknown): boolean {
+  const code = transferErrorCode(error);
+  if (code && retryableTransferErrorCodes.has(code)) return true;
+  return error instanceof Error && /timed out|temporarily unavailable/i.test(error.message);
+}
+
+async function waitForSourceRetry(signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  await new Promise<void>((resolve, reject) => {
+    const finish = () => {
+      signal?.removeEventListener("abort", abort);
+      resolve();
+    };
+    const timeout = setTimeout(finish, 500);
+    const abort = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", abort);
+      reject(abortError(signal));
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function assertExistingSourcePathInside(root: string, sourcePath: string, signal?: AbortSignal): Promise<void> {
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    throwIfAborted(signal);
+    try {
+      await assertExistingPathInside(root, sourcePath, "Source path");
+      return;
+    } catch (error) {
+      lastError = error;
+      if (attempt === 3 || !isRetryableTransferError(error)) throw error;
+      await waitForSourceRetry(signal);
+    }
+  }
+  throw lastError;
 }
 
 async function createDestinationParent(destinationRoot: string, destinationPath: string): Promise<void> {
@@ -672,9 +798,51 @@ export async function copyMediaLink(
   behavior: CopyJobBehaviorSettings = defaultCopyJobBehaviorSettings,
   signal?: AbortSignal,
   localConflictStrategy?: CopyLocalConflictStrategy,
-  reportOperation?: CopyOperationReporter
+  reportOperation?: CopyOperationReporter,
+  assertMutationAllowed?: CopyMutationGuard
 ): Promise<CopyMediaResult> {
   throwIfAborted(signal);
+  let mutationAuthorityLost = false;
+  const guardOwnedMutation = async <T>(mutation: () => Promise<T>): Promise<T> => {
+    if (assertMutationAllowed) {
+      let mutationCompleted = false;
+      try {
+        return await assertMutationAllowed(async () => {
+          const result = await mutation();
+          mutationCompleted = true;
+          return result;
+        });
+      } catch (error) {
+        if (error instanceof Error && error.name === "LeaseLostError") mutationAuthorityLost = true;
+        if (mutationCompleted && !(error instanceof CopyReconciliationRequiredError)) {
+          throw new CopyReconciliationRequiredError(
+            "Filesystem mutation completed, but the worker could not confirm its mutation lease; durable copy reconciliation is required",
+            { cause: error }
+          );
+        }
+        throw error;
+      }
+    }
+    return mutation();
+  };
+  const guardMutation = async <T>(mutation: () => Promise<T>): Promise<T> => {
+    throwIfAborted(signal);
+    return guardOwnedMutation(async () => {
+      throwIfAborted(signal);
+      return mutation();
+    });
+  };
+  const canRollbackSharedPaths = async () => {
+    if (mutationAuthorityLost || (signal?.reason instanceof Error && signal.reason.name === "LeaseLostError")) return false;
+    if (!assertMutationAllowed) return true;
+    try {
+      await guardOwnedMutation(async () => undefined);
+      return true;
+    } catch {
+      mutationAuthorityLost = true;
+      return false;
+    }
+  };
   const verificationEnabled = behavior.byteCompare || behavior.mediaValidation !== "off";
   const postTransferCheck = verificationEnabled ? "verification" : "transfer checks";
   const destinationRootType = rootForDirection(direction);
@@ -703,12 +871,17 @@ export async function copyMediaLink(
   const sourcePath = path.resolve(link.targetPath);
   await reportCopyProgress(reportProgress, { stage: "preparing", message: "Checking source, destination, and symlink state", sourcePath, linkPath: link.linkPath });
   assertInside(sourceRoot, sourcePath, "Source path");
-  await assertExistingPathInside(sourceRoot, sourcePath, "Source path");
+  await assertExistingSourcePathInside(sourceRoot, sourcePath, signal);
   await assertPathParentInside(paths.symlinkDir, link.linkPath, "Symlink path");
   ensureMediaCandidate(sourcePath, link.relativePath, link.linkPath);
   await validateLinkStillPointsTo(link, sourcePath);
 
-  const sourceStatBefore = await statRegularFile(sourcePath, "Source file");
+  const sourceStatBefore = await assertReadableRegularFile(sourcePath, "Source file", {
+    attempts: 3,
+    retryDelayMs: 500,
+    signal,
+    onRetry: () => reportCopyProgress(reportProgress, { stage: "preparing", message: "Source is temporarily unreadable; retrying preflight", sourcePath, linkPath: link.linkPath })
+  });
   const destinationPath = copyDestinationPath(link, paths, destinationRootType);
   assertInside(destinationRoot, destinationPath, "Destination path");
   await assertDestinationPathInside(destinationRoot, destinationPath, "Destination path");
@@ -716,7 +889,8 @@ export async function copyMediaLink(
   const canResolveLocalDestination = direction === "to_local" && (localConflictStrategy === "replace" || localConflictStrategy === "keep_both");
   await createDestinationParent(destinationRoot, destinationPath);
 
-  if (await destinationExists(destinationPath)) {
+  const initialDestinationState = await destinationState(destinationPath);
+  if (initialDestinationState) {
     await assertExistingPathInside(destinationRoot, destinationPath, "Destination path");
     const cmp = await compareMediaBytes(runner, sourcePath, destinationPath, reportProgress, baseProgress, "Comparing existing destination file", signal);
     if (cmp.status === "pass") {
@@ -726,8 +900,17 @@ export async function copyMediaLink(
       throwIfAborted(signal);
       const finalStat = await statRegularFile(destinationPath, "Destination file");
       await reportCopyProgress(reportProgress, { stage: "symlinking", message: "Repointing symlink to existing verified file", sourcePath, destinationPath, linkPath: link.linkPath, sizeBytes: finalStat.size });
-      await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
-      await reportOperation?.({ stage: "repointed", sizeBytes: finalStat.size, resultStatus: "repointed" });
+      await reportOperation?.({
+        stage: "repointed",
+        destinationIdentity: serializeCopyFileIdentity(initialDestinationState),
+        sizeBytes: finalStat.size,
+        resultStatus: "repointed"
+      });
+      await guardMutation(async () => {
+        await validateLinkStillPointsTo(link, sourcePath);
+        await assertDestinationState(destinationPath, initialDestinationState);
+        await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
+      });
       return {
         status: "repointed",
         direction,
@@ -765,10 +948,21 @@ export async function copyMediaLink(
 
   const tempPath = tempFilePath(destinationPath);
   let displacedDestinationPath: string | null = null;
+  let destinationDisplaced = false;
   let promotedPath: string | null = null;
-  let promotedSize: number | null = null;
+  let tempIdentity: CopyFileIdentity | null = null;
+  let displacedIdentity: CopyFileIdentity | null = null;
+  let promotedIdentity: CopyFileIdentity | null = null;
+  let linkRepointed = false;
   try {
-    await reportOperation?.({ stage: "transferring", tempPath, sizeBytes: sourceStatBefore.size });
+    await reportOperation?.({
+      stage: "transferring",
+      tempPath,
+      tempIdentity: null,
+      destinationIdentity: null,
+      displacedIdentity: null,
+      sizeBytes: sourceStatBefore.size
+    });
     const transferMessage = direction === "to_local" ? "Downloading source file to a temporary destination" : "Uploading source file to a temporary destination";
     await reportCopyProgress(reportProgress, {
       stage: "copying",
@@ -783,21 +977,39 @@ export async function copyMediaLink(
       bytesPerSecond: 0,
       remainingSeconds: null
     });
-    await runner.copyFile(
-      sourcePath,
-      tempPath,
-      (progress) =>
-        reportCopyProgress(reportProgress, {
-          stage: "copying",
-          message: transferMessage,
+    for (let transferAttempt = 1; transferAttempt <= 2; transferAttempt += 1) {
+      try {
+        await runner.copyFile(
+          sourcePath,
+          tempPath,
+          (progress) =>
+            reportCopyProgress(reportProgress, {
+              stage: "copying",
+              message: transferMessage,
+              sourcePath,
+              destinationPath,
+              linkPath: link.linkPath,
+              sizeBytes: sourceStatBefore.size,
+              ...progress
+            }),
+          signal
+        );
+        break;
+      } catch (error) {
+        if (transferAttempt === 2 || !isRetryableTransferError(error) || signal?.aborted) throw error;
+        await fs.rm(tempPath, { force: true }).catch(() => undefined);
+        await reportCopyProgress(reportProgress, {
+          stage: "preparing",
+          message: "Transfer hit a temporary I/O error; retrying once",
           sourcePath,
           destinationPath,
           linkPath: link.linkPath,
-          sizeBytes: sourceStatBefore.size,
-          ...progress
-        }),
-      signal
-    );
+          sizeBytes: sourceStatBefore.size
+        });
+        await waitForSourceRetry(signal);
+        await assertReadableRegularFile(sourcePath, "Source file", { attempts: 3, retryDelayMs: 500, signal });
+      }
+    }
     throwIfAborted(signal);
     await fs.chmod(tempPath, copyFileMode);
     const tempStat = await statRegularFile(tempPath, "Temporary copy");
@@ -805,23 +1017,43 @@ export async function copyMediaLink(
       throw new Error(`Size mismatch after copy (${sourceStatBefore.size} != ${tempStat.size})`);
     }
     await verifyCopiedFile(runner, sourcePath, tempPath, reportProgress, baseProgress, behavior, signal);
-    await reportOperation?.({ stage: "verified", tempPath, sizeBytes: tempStat.size });
+    tempIdentity = await requireCopyFileIdentity(tempPath, "Verified temporary copy");
+    await reportOperation?.({
+      stage: "verified",
+      tempPath,
+      tempIdentity: serializeCopyFileIdentity(tempIdentity),
+      sizeBytes: tempStat.size
+    });
     throwIfAborted(signal);
-    const sourceStatAfter = await statRegularFile(sourcePath, "Source file");
+    const sourceStatAfter = await assertReadableRegularFile(sourcePath, "Source file", { attempts: 3, retryDelayMs: 500, signal });
     if (sourceStatAfter.size !== sourceStatBefore.size || sourceStatAfter.mtimeMs !== sourceStatBefore.mtimeMs) {
       throw new Error("Source file changed during copy; destination was not promoted");
     }
-    if (await destinationExists(destinationPath)) {
+    const destinationStateBeforePromotion = await destinationState(destinationPath);
+    if (destinationStateBeforePromotion) {
       const cmp = await compareMediaBytes(runner, sourcePath, destinationPath, reportProgress, baseProgress, "Destination appeared during copy; comparing before promotion", signal);
       if (cmp.status === "pass") {
         if (behavior.mediaValidation !== "off") {
           await validateMediaStream(runner, behavior.mediaValidation, destinationPath, reportProgress, baseProgress, behavior.mediaValidation === "fast" ? "Fast validation of matching destination media" : "Deep validation of matching destination media", signal);
         }
         await fs.rm(tempPath, { force: true });
+        tempIdentity = null;
         throwIfAborted(signal);
         await reportCopyProgress(reportProgress, { stage: "symlinking", message: "Repointing symlink to matching destination", sourcePath, destinationPath, linkPath: link.linkPath, sizeBytes: tempStat.size });
-        await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
-        await reportOperation?.({ stage: "repointed", tempPath: null, sizeBytes: tempStat.size, resultStatus: "repointed" });
+        await reportOperation?.({
+          stage: "repointed",
+          tempPath: null,
+          tempIdentity: null,
+          destinationIdentity: serializeCopyFileIdentity(destinationStateBeforePromotion),
+          sizeBytes: tempStat.size,
+          resultStatus: "repointed"
+        });
+        await guardMutation(async () => {
+          await validateLinkStillPointsTo(link, sourcePath);
+          await assertDestinationState(destinationPath, destinationStateBeforePromotion);
+          await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
+        });
+        linkRepointed = true;
         return {
           status: "repointed",
           direction,
@@ -844,8 +1076,29 @@ export async function copyMediaLink(
         sizeBytes: tempStat.size
       });
       displacedDestinationPath = await destinationDisplacementPath(destinationPath, localConflictStrategy);
-      await fs.rename(destinationPath, displacedDestinationPath);
-      await reportOperation?.({ stage: "destination_displaced", tempPath, displacedPath: displacedDestinationPath, sizeBytes: tempStat.size });
+      await reportOperation?.({
+        stage: "destination_displaced",
+        tempPath,
+        displacedPath: displacedDestinationPath,
+        tempIdentity: serializeCopyFileIdentity(tempIdentity),
+        displacedIdentity: null,
+        sizeBytes: tempStat.size
+      });
+      await guardMutation(async () => {
+        await assertDestinationState(destinationPath, destinationStateBeforePromotion);
+        await fs.rename(destinationPath, displacedDestinationPath!);
+        destinationDisplaced = true;
+        displacedIdentity = await requireCopyFileIdentity(displacedDestinationPath!, "Displaced destination");
+      });
+      if (!displacedIdentity) throw new Error("Displaced destination identity was not captured");
+      await reportOperation?.({
+        stage: "destination_displaced",
+        tempPath,
+        displacedPath: displacedDestinationPath,
+        tempIdentity: serializeCopyFileIdentity(tempIdentity),
+        displacedIdentity: serializeCopyFileIdentity(displacedIdentity),
+        sizeBytes: tempStat.size
+      });
     }
     throwIfAborted(signal);
     await reportCopyProgress(reportProgress, {
@@ -856,18 +1109,49 @@ export async function copyMediaLink(
       linkPath: link.linkPath,
       sizeBytes: tempStat.size
     });
-    await fs.rename(tempPath, destinationPath);
-    promotedPath = destinationPath;
-    promotedSize = tempStat.size;
-    await reportOperation?.({ stage: "promoted", tempPath: null, displacedPath: displacedDestinationPath, sizeBytes: tempStat.size });
-    await statRegularFile(destinationPath, "Promoted destination file");
-    await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
-    await reportOperation?.({ stage: "repointed", tempPath: null, displacedPath: displacedDestinationPath, sizeBytes: tempStat.size, resultStatus: "copied" });
+    await reportOperation?.({
+      stage: "promoted",
+      tempPath,
+      displacedPath: displacedDestinationPath,
+      tempIdentity: serializeCopyFileIdentity(tempIdentity),
+      displacedIdentity: displacedIdentity ? serializeCopyFileIdentity(displacedIdentity) : null,
+      destinationIdentity: null,
+      sizeBytes: tempStat.size
+    });
+    await guardMutation(async () => {
+      await assertDestinationState(destinationPath, null);
+      await fs.rename(tempPath, destinationPath);
+      promotedPath = destinationPath;
+      promotedIdentity = await requireCopyFileIdentity(destinationPath, "Promoted destination file");
+    });
+    if (!promotedIdentity) throw new Error("Promoted destination identity was not captured");
+    const installedDestinationIdentity = promotedIdentity;
+    await reportOperation?.({
+      stage: "promoted",
+      tempPath,
+      displacedPath: displacedDestinationPath,
+      tempIdentity: serializeCopyFileIdentity(tempIdentity),
+      destinationIdentity: serializeCopyFileIdentity(installedDestinationIdentity),
+      displacedIdentity: displacedIdentity ? serializeCopyFileIdentity(displacedIdentity) : null,
+      sizeBytes: tempStat.size
+    });
+    await reportOperation?.({
+      stage: "repointed",
+      tempPath: null,
+      displacedPath: displacedDestinationPath,
+      tempIdentity: null,
+      destinationIdentity: serializeCopyFileIdentity(installedDestinationIdentity),
+      displacedIdentity: displacedIdentity ? serializeCopyFileIdentity(displacedIdentity) : null,
+      sizeBytes: tempStat.size,
+      resultStatus: "copied"
+    });
+    await guardMutation(async () => {
+      await validateLinkStillPointsTo(link, sourcePath);
+      await assertDestinationState(destinationPath, installedDestinationIdentity);
+      await replaceSymlink(paths.symlinkDir, link.linkPath, destinationPath);
+    });
+    linkRepointed = true;
     promotedPath = null;
-    if (displacedDestinationPath && localConflictStrategy === "replace") {
-      await fs.rm(displacedDestinationPath, { force: true });
-      displacedDestinationPath = null;
-    }
     return {
       status: "copied",
       direction,
@@ -880,17 +1164,61 @@ export async function copyMediaLink(
       message: verificationEnabled ? "Verified copy installed and symlink repointed" : "Copy installed without verification and symlink repointed"
     };
   } catch (error) {
-    await fs.rm(tempPath, { force: true }).catch(() => undefined);
-    if (promotedPath) {
-      const stat = await fs.stat(promotedPath).catch(() => null);
-      if (stat?.isFile() && stat.size === promotedSize) {
-        await fs.rm(promotedPath, { force: true }).catch(() => undefined);
+    const rollbackErrors: string[] = [];
+    try {
+      const currentTempIdentity = await readCopyFileIdentity(tempPath);
+      if (currentTempIdentity && tempIdentity && !copyFileIdentitiesMatch(currentTempIdentity, tempIdentity)) {
+        rollbackErrors.push("temporary copy changed before cleanup");
+      } else if (currentTempIdentity) {
+        await fs.rm(tempPath, { force: true });
+      }
+    } catch (rollbackError) {
+      rollbackErrors.push(`temporary copy cleanup failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+    }
+    const rollbackSharedPaths = await canRollbackSharedPaths();
+    let rollbackDestination = rollbackSharedPaths;
+    if (rollbackSharedPaths && linkRepointed) {
+      try {
+        await guardOwnedMutation(async () => {
+          await validateLinkStillPointsTo(link, destinationPath);
+          await replaceSymlink(paths.symlinkDir, link.linkPath, sourcePath);
+        });
+      } catch (rollbackError) {
+        rollbackDestination = false;
+        rollbackErrors.push(`symlink restore failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
       }
     }
-    if (displacedDestinationPath) {
-      const destinationStat = await fs.stat(destinationPath).catch(() => null);
-      if (destinationStat?.isFile()) await fs.rm(destinationPath, { force: true }).catch(() => undefined);
-      await fs.rename(displacedDestinationPath, destinationPath).catch(() => undefined);
+    if (rollbackDestination && promotedPath) {
+      try {
+        await guardOwnedMutation(async () => {
+          const currentPromotedIdentity = await readCopyFileIdentity(promotedPath!);
+          if (!promotedIdentity || !copyFileIdentitiesMatch(currentPromotedIdentity, promotedIdentity)) {
+            throw new Error("promoted destination changed before rollback");
+          }
+          await fs.rm(promotedPath!, { force: true });
+        });
+      } catch (rollbackError) {
+        rollbackDestination = false;
+        rollbackErrors.push(`promoted destination cleanup failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
+    if (rollbackDestination && displacedDestinationPath && destinationDisplaced) {
+      try {
+        await guardOwnedMutation(async () => {
+          const currentDestinationIdentity = await destinationState(destinationPath);
+          if (currentDestinationIdentity) throw new Error("destination path became occupied before displaced destination rollback");
+          const currentDisplacedIdentity = await readCopyFileIdentity(displacedDestinationPath!);
+          if (!displacedIdentity || !copyFileIdentitiesMatch(currentDisplacedIdentity, displacedIdentity)) {
+            throw new Error("displaced destination changed before rollback");
+          }
+          await fs.rename(displacedDestinationPath!, destinationPath);
+        });
+      } catch (rollbackError) {
+        rollbackErrors.push(`displaced destination restore failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`);
+      }
+    }
+    if (rollbackErrors.length > 0) {
+      throw new CopyReconciliationRequiredError(`Copy rollback requires manual reconciliation (${rollbackErrors.join("; ")})`, { cause: error });
     }
     throw error;
   }

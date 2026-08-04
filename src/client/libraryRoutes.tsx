@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
+import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
 import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/sourceTitleRisk";
 import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets } from "./jobScopeLocks";
@@ -32,6 +32,35 @@ function titleRescanOptions(titleScopes: ScanTitleScope[]): ScanOptions {
 
 function titleScopeIsPending(scopes: ScanTitleScope[] | undefined, section: string, itemName: string): boolean {
   return Boolean(scopes?.some((scope) => scope.section === section && scope.itemName === itemName));
+}
+
+function ActionToast({ message, tone }: { message: string | null; tone: "success" | "error" }) {
+  const [visibleMessage, setVisibleMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setVisibleMessage(message);
+    if (!message) return;
+
+    const timeout = window.setTimeout(() => setVisibleMessage(null), tone === "error" ? 10_000 : 6_000);
+    return () => window.clearTimeout(timeout);
+  }, [message, tone]);
+
+  if (!visibleMessage || typeof document === "undefined") return null;
+  const Icon = tone === "error" ? TriangleAlert : CheckCircle2;
+
+  return createPortal(
+    <div className={`action-toast action-toast-${tone}`} role={tone === "error" ? "alert" : "status"} aria-live={tone === "error" ? "assertive" : "polite"} aria-atomic="true">
+      <Icon className="action-toast-icon" size={20} />
+      <div className="action-toast-content">
+        <strong>{tone === "error" ? "Action failed" : "Task queued"}</strong>
+        <span>{visibleMessage}</span>
+      </div>
+      <button type="button" className="action-toast-dismiss" aria-label="Dismiss notification" onClick={() => setVisibleMessage(null)}>
+        <X size={16} />
+      </button>
+    </div>,
+    document.body
+  );
 }
 
 export function DashboardPage() {
@@ -74,7 +103,7 @@ export function DashboardPage() {
       return api.copyConflicts(prompt.options);
     },
     onSuccess: (conflicts, prompt) => {
-      if (conflicts.totalConflicts > 0) {
+      if (conflicts.totalConflicts > 0 || (conflicts.totalSourceTitleBlocks ?? 0) > 0) {
         setCopyPrompt({ ...prompt, conflicts });
         return;
       }
@@ -197,6 +226,7 @@ export function DashboardPage() {
     : startScan.data
       ? `Inventory scan job #${startScan.data.jobId} queued.`
       : null;
+  const actionToastMessage = actionError?.message ?? actionMessage;
 
   useEffect(() => {
     if (scanSettings.data) setScanOptions(stripLegacyScanSections(scanSettings.data));
@@ -282,7 +312,7 @@ export function DashboardPage() {
 
   function handleCopyRequest(prompt: CopyPrompt) {
     startScan.reset();
-    if (prompt.options?.direction === "to_local" && !prompt.options.localConflictStrategy) {
+    if (prompt.options && (!prompt.options.allowSourceTitleMismatch || (prompt.options.direction === "to_local" && !prompt.options.localConflictStrategy))) {
       copyConflictCheck.mutate(prompt);
       return;
     }
@@ -419,8 +449,7 @@ export function DashboardPage() {
           </button>
         </section>
       </div>
-      {actionError ? <p className="action-message action-error">{actionError.message}</p> : null}
-      {!actionError && actionMessage ? <p className="action-message">{actionMessage}</p> : null}
+      <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
       <div className="dashboard-summary">
         <section className="summary-group summary-group-attention" aria-labelledby="attention-summary-title">
           <div className="summary-group-title">
@@ -642,6 +671,31 @@ function formatSectionCompositionPart(part: { value: number; unit: string }): st
 
 const dashboardRemoteWorkLinkLimit = 250;
 
+async function loadAllRemoteWorkLinks(
+  params: Omit<Parameters<typeof api.mediaLinksPage>[0], "limit" | "offset">
+): Promise<Awaited<ReturnType<typeof api.mediaLinksPage>>> {
+  const rows: MediaLinkRow[] = [];
+  const seenIds = new Set<number>();
+  let offset = 0;
+  let total: number;
+
+  while (true) {
+    const page = await api.mediaLinksPage({ ...params, limit: dashboardRemoteWorkLinkLimit, offset });
+    total = page.total;
+    for (const row of page.rows) {
+      if (seenIds.has(row.id)) continue;
+      seenIds.add(row.id);
+      rows.push(row);
+    }
+    if (!page.hasMore) break;
+    const nextOffset = page.offset + page.rows.length;
+    if (nextOffset <= offset) throw new Error("The work list did not advance while loading additional results");
+    offset = nextOffset;
+  }
+
+  return { rows, total, limit: dashboardRemoteWorkLinkLimit, offset: 0, hasMore: false };
+}
+
 type ActionableEpisode = {
   episodeName: string;
   link: MediaLinkRow;
@@ -773,15 +827,13 @@ function RemoteWorkLinksTable({
   const remoteWorkLinks = useQuery({
     queryKey: ["dashboard-remote-work-links", selection?.kind, selectedSection, selectedPrefix, trimmedSearch],
     queryFn: () =>
-      api.mediaLinksPage({
+      loadAllRemoteWorkLinks({
         kind: detail?.kind,
         section: selectedSection ?? "",
         storagePolicy: detail?.storagePolicy ?? "unassigned",
         relativePathPrefix: selectedPrefix,
-        search: trimmedSearch,
-        limit: dashboardRemoteWorkLinkLimit,
-        offset: 0
-    }),
+        search: trimmedSearch
+      }),
     enabled: Boolean(selectedSection && detail)
   });
   const jobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
@@ -910,17 +962,24 @@ function RemoteWorkLinksTable({
   }
 
   function queueShowCopy(show: ActionableShowGroup) {
-    if (!copyDirection) return;
-    const links = showLinks(show);
-    if (links.length === 0) return;
-    queueCopy(`Copy ${show.showName} to ${copyDestinationLabel}`, `${title} / ${show.showName}`, { direction: copyDirection, linkIds: links.map((link) => link.id) });
+    if (!copyDirection || !selectedSection) return;
+    queueCopy(`Copy ${show.showName} to ${copyDestinationLabel}`, `${title} / ${show.showName}`, {
+      direction: copyDirection,
+      section: selectedSection,
+      itemName: show.showName,
+      ...(selectedPrefix ? { relativePathPrefix: selectedPrefix } : {})
+    });
   }
 
   function queueSeasonCopy(showName: string, season: ActionableSeasonGroup) {
-    if (!copyDirection) return;
-    const links = seasonLinks(season);
-    if (links.length === 0) return;
-    queueCopy(`Copy ${showName} / ${season.seasonName} to ${copyDestinationLabel}`, `${title} / ${showName} / ${season.seasonName}`, { direction: copyDirection, linkIds: links.map((link) => link.id) });
+    if (!copyDirection || !selectedSection) return;
+    const prefix = scopedRelativePrefix(selectedPrefix, seasonRelativePrefix(season));
+    queueCopy(`Copy ${showName} / ${season.seasonName} to ${copyDestinationLabel}`, `${title} / ${showName} / ${season.seasonName}`, {
+      direction: copyDirection,
+      section: selectedSection,
+      itemName: showName,
+      ...(prefix ? { relativePathPrefix: prefix } : {})
+    });
   }
 
   function queueLinkCopy(link: MediaLinkRow) {
@@ -935,7 +994,7 @@ function RemoteWorkLinksTable({
 
   function queueSeasonAudit(showName: string, season: ActionableSeasonGroup) {
     if (!selectedSection) return;
-    const prefix = seasonRelativePrefix(season);
+    const prefix = scopedRelativePrefix(selectedPrefix, seasonRelativePrefix(season));
     queueAudit(`Audit ${showName} / ${season.seasonName}`, `${title} / ${showName} / ${season.seasonName}`, {
       section: selectedSection,
       itemName: showName,
@@ -970,8 +1029,8 @@ function RemoteWorkLinksTable({
             {remoteWorkLinks.data ? (
               <small>
                 {isShowSection
-                  ? `Showing ${formatNumber(rows.length)} links across ${formatNumber(showGroups.length)} shows of ${formatNumber(shownTotal)}`
-                  : `Showing ${formatNumber(rows.length)} of ${formatNumber(shownTotal)}`}
+                  ? `Showing all ${formatNumber(rows.length)} links across ${formatNumber(showGroups.length)} shows`
+                  : `Showing all ${formatNumber(rows.length)}`}
               </small>
             ) : null}
             {canCopy ? (
@@ -1247,6 +1306,16 @@ function seasonRelativePrefix(season: ActionableSeasonGroup): string | null {
   const parts = splitMediaRelativePath(firstLink.relativePath);
   if (parts.length < 2) return null;
   return parts.slice(0, 2).join("/");
+}
+
+function scopedRelativePrefix(selectedPrefix: string, actionPrefix: string | null): string | undefined {
+  const selected = splitMediaRelativePath(selectedPrefix).join("/");
+  const action = actionPrefix ? splitMediaRelativePath(actionPrefix).join("/") : "";
+  if (!selected) return action || undefined;
+  if (!action) return selected;
+  if (selected === action || selected.startsWith(`${action}/`)) return selected;
+  if (action.startsWith(`${selected}/`)) return action;
+  return action;
 }
 
 function remoteWorkDetail(kind: SectionWorkKind, storageLocations: StorageLocationsSettings): {
@@ -1654,7 +1723,7 @@ export function LibraryPage() {
       return api.copyConflicts(prompt.options);
     },
     onSuccess: (conflicts, prompt) => {
-      if (conflicts.totalConflicts > 0) {
+      if (conflicts.totalConflicts > 0 || (conflicts.totalSourceTitleBlocks ?? 0) > 0) {
         setCopyPrompt({ ...prompt, conflicts });
         return;
       }
@@ -1667,7 +1736,7 @@ export function LibraryPage() {
   });
 
   function handleCopyRequest(prompt: CopyPrompt) {
-    if (prompt.options?.direction === "to_local" && !prompt.options.localConflictStrategy) {
+    if (prompt.options && (!prompt.options.allowSourceTitleMismatch || (prompt.options.direction === "to_local" && !prompt.options.localConflictStrategy))) {
       copyConflictCheck.mutate(prompt);
       return;
     }
