@@ -782,6 +782,7 @@ describe("api app", () => {
     const health = await ctx.app.inject({ method: "GET", url: "/api/health" });
     expect(health.statusCode).toBe(200);
     expect(health.json()).toMatchObject({ ok: true, database: "ready", worker: "not_started", workerHeartbeatAt: null });
+    expect(health.headers["x-ratelimit-limit"]).toBe("120");
     expect(health.headers["x-content-type-options"]).toBe("nosniff");
     expect(health.headers["content-security-policy"]).toContain("default-src 'self'");
     expect(health.headers["content-security-policy"]).not.toContain("upgrade-insecure-requests");
@@ -791,6 +792,7 @@ describe("api app", () => {
     const unavailableReadiness = await ctx.app.inject({ method: "GET", url: "/api/health/ready" });
     expect(unavailableReadiness.statusCode).toBe(503);
     expect(unavailableReadiness.json()).toMatchObject({ ok: false, worker: "not_started", readyWorkerCount: 0 });
+    expect(unavailableReadiness.headers["x-ratelimit-limit"]).toBe("120");
 
     const heartbeatAt = new Date().toISOString();
     await ctx.database.db.insert(schema.workerHeartbeats).values({ workerId: "test-worker", startedAt: heartbeatAt, heartbeatAt, status: "running" });

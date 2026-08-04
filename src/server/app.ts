@@ -149,11 +149,11 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     };
   };
   app.get("/api/health/live", async () => ({ ok: true, service: "running" }));
-  app.get("/api/health/ready", async (_request, reply) => {
+  app.get("/api/health/ready", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async (_request, reply) => {
     const health = await workerHealth();
     return health.ok ? health : reply.code(503).send(health);
   });
-  app.get("/api/health", async () => ({ ...(await workerHealth()), ok: true }));
+  app.get("/api/health", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async () => ({ ...(await workerHealth()), ok: true }));
   registerAuthRoutes(app, database.db, {
     cookieName: config.sessionCookieName,
     cookieSecure: config.sessionCookieSecure
