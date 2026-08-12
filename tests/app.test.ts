@@ -506,6 +506,7 @@ describe("api app", () => {
     const defaultAdvancedSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/advanced", headers: { cookie: String(setupCookie) } });
     expect(defaultAdvancedSettings.statusCode).toBe(200);
     expect(defaultAdvancedSettings.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
     });
@@ -521,6 +522,7 @@ describe("api app", () => {
     });
     expect(saveAdvancedSettings.statusCode).toBe(200);
     expect(saveAdvancedSettings.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
       audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false }
     });
@@ -536,6 +538,7 @@ describe("api app", () => {
     });
     expect(disableCopyVerification.statusCode).toBe(200);
     expect(disableCopyVerification.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
     });
@@ -554,7 +557,8 @@ describe("api app", () => {
 
     const scan = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie: String(setupCookie) } });
     expect(scan.statusCode).toBe(200);
-    expect(scan.json()).toEqual({ jobId: expect.any(Number) });
+    expect(scan.json()).toEqual({ jobId: expect.any(Number), jobIds: [expect.any(Number)] });
+    expect(await ctx.jobs.terminate(scan.json<{ jobId: number }>().jobId)).toBe(true);
 
     const scopedScan = await ctx.app.inject({
       method: "POST",
@@ -1067,6 +1071,102 @@ describe("api app", () => {
       symlinkSections: { movies: expect.any(String) },
       localSections: { movies: expect.any(String) },
       remoteRoot: expect.any(String)
+    });
+  });
+
+  it("queues one symlink scan job per selected folder when parallel scheduling is enabled", async () => {
+    const cookie = await createAdminSession();
+    const advanced = await ctx.app.inject({
+      method: "PUT",
+      url: "/api/settings/advanced",
+      headers: { cookie },
+      payload: {
+        scan: { symlinkFolderScheduling: "per_folder" },
+        copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+      }
+    });
+    expect(advanced.statusCode).toBe(200);
+
+    const scanPayload = {
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies", "shows"],
+      localSections: []
+    };
+    const scan = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie }, payload: scanPayload });
+    expect(scan.statusCode).toBe(200);
+    const { jobId, jobIds } = scan.json<{ jobId: number; jobIds: number[] }>();
+    expect(jobIds).toHaveLength(2);
+    expect(jobId).toBe(jobIds[0]);
+
+    const jobs = await Promise.all(jobIds.map((id) => ctx.jobs.getJob(id)));
+    expect(jobs).toEqual([
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] } }
+      })
+    ]);
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
+    expect(claims.map((claim) => [claim.resourceKey, claim.access]).sort()).toEqual([
+      ["movies", "exclusive"],
+      ["shows", "exclusive"]
+    ]);
+
+    const duplicate = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie }, payload: scanPayload });
+    expect(duplicate.statusCode).toBe(400);
+    expect(duplicate.json()).toMatchObject({ error: expect.stringContaining("already has scan job") });
+    expect((await ctx.jobs.listJobs()).filter((job) => job.type === "scan")).toHaveLength(2);
+  });
+
+  it("keeps selected storage scopes in one exclusive job beside parallel folder scans", async () => {
+    const cookie = await createAdminSession();
+    await setSetting(ctx.database.db, "advancedSettings", {
+      scan: { symlinkFolderScheduling: "per_folder" },
+      copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+    });
+
+    const scan = await ctx.app.inject({
+      method: "POST",
+      url: "/api/scans",
+      headers: { cookie },
+      payload: {
+        scanSymlinks: true,
+        scanLocal: true,
+        scanRemote: true,
+        symlinkSections: ["movies", "shows"],
+        localSections: ["movies", "shows"]
+      }
+    });
+    expect(scan.statusCode).toBe(200);
+    const { jobIds } = scan.json<{ jobIds: number[] }>();
+    expect(jobIds).toHaveLength(3);
+
+    const jobs = await Promise.all(jobIds.map((id) => ctx.jobs.getJob(id)));
+    expect(jobs.slice(0, 2)).toEqual([
+      expect.objectContaining({ status: "queued", exclusive: false }),
+      expect.objectContaining({ status: "queued", exclusive: false })
+    ]);
+    expect(jobs[2]).toMatchObject({
+      status: "queued",
+      exclusive: true,
+      progress: {
+        options: {
+          scanSymlinks: false,
+          scanLocal: true,
+          scanRemote: true,
+          symlinkSections: [],
+          localSections: ["movies", "shows"]
+        }
+      }
     });
   });
 
@@ -1926,7 +2026,7 @@ describe("api app", () => {
     });
     expect(scanResponse.statusCode).toBe(200);
     const scanJobId = Number(scanResponse.json().jobId);
-    await expect(ctx.jobs.getJob(scanJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
+    await expect(ctx.jobs.getJob(scanJobId)).resolves.toMatchObject({ status: "queued", exclusive: false });
     await expect(ctx.jobs.terminate(scanJobId)).resolves.toBe(true);
     const auditJobId = await ctx.jobs.startAudit("fast");
     await expect(ctx.jobs.getJob(auditJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
@@ -3556,6 +3656,125 @@ describe("api app", () => {
       await Promise.allSettled(runs);
     }
     await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+  });
+
+  it("completes a symlink-only section scan while a copy in another section is still transferring", async () => {
+    const copyFixture = await insertCopySymlink({
+      itemName: "Show Copy During Movie Scan",
+      kind: "remote",
+      storagePolicy: "location_1",
+      section: "shows",
+      content: "show copy stays active"
+    });
+    await insertCopySymlink({ itemName: "Movie Scan During Show Copy", kind: "remote", storagePolicy: "location_2", section: "movies", content: "scan independently" });
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies"],
+      localSections: []
+    });
+    let releaseCopy!: () => void;
+    let markCopyStarted!: () => void;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const copyStarted = new Promise<void>((resolve) => {
+      markCopyStarted = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        markCopyStarted();
+        await copyReleased;
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 1,
+      maxRunningAudits: 1,
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
+    };
+    const workers = ["section-copy-worker", "section-scan-worker"].map(
+      (workerId) => new JobWorker(ctx.database.db, { workerId, pollIntervalMs: 1, heartbeatIntervalMs: 10, logger: silentLogger, copyRunner: blockingRunner, concurrency })
+    );
+    const runs = workers.map((worker) => worker.runOnce());
+
+    try {
+      await copyStarted;
+      let scanStatus: string | undefined;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        scanStatus = (await ctx.jobs.getJob(scanJobId))?.status;
+        if (scanStatus === "completed") break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(scanStatus).toBe("completed");
+      expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ exclusive: false });
+      expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "running" });
+    } finally {
+      releaseCopy();
+      await Promise.allSettled(runs);
+    }
+    await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+  });
+
+  it("keeps a symlink-only section scan queued behind a copy in the same section", async () => {
+    const copyFixture = await insertCopySymlink({ itemName: "Movie Copy Before Movie Scan", kind: "remote", storagePolicy: "location_1", section: "movies", content: "same section" });
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies"],
+      localSections: []
+    });
+    let releaseCopy!: () => void;
+    let markCopyStarted!: () => void;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const copyStarted = new Promise<void>((resolve) => {
+      markCopyStarted = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        markCopyStarted();
+        await copyReleased;
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 1,
+      maxRunningAudits: 1,
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
+    };
+    const copyWorker = new JobWorker(ctx.database.db, { workerId: "same-section-copy-worker", logger: silentLogger, copyRunner: blockingRunner, concurrency });
+    const scanWorker = new JobWorker(ctx.database.db, { workerId: "same-section-scan-worker", logger: silentLogger, copyRunner: blockingRunner, concurrency });
+    const copyRun = copyWorker.runOnce();
+
+    try {
+      await copyStarted;
+      await expect(scanWorker.runOnce()).resolves.toBe(false);
+      expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "running" });
+      expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ status: "queued", exclusive: false, startedAt: null });
+    } finally {
+      releaseCopy();
+      await copyRun;
+    }
+
+    const finishingWorker = new JobWorker(ctx.database.db, { workerId: "same-section-finishing-worker", logger: silentLogger, concurrency });
+    await expect(finishingWorker.runOnce()).resolves.toBe(true);
+    expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ status: "completed" });
   });
 
   it("completes a targeted rescan while a disjoint copy is still transferring", async () => {

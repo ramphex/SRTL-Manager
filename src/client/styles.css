@@ -1122,6 +1122,21 @@ pre {
   color: var(--selected-muted);
 }
 
+.scope-toggle.busy {
+  border-color: color-mix(in srgb, var(--warn), var(--border) 50%);
+}
+
+.scope-toggle.busy .scope-toggle-copy small {
+  color: var(--warn);
+}
+
+.scan-scope-warning {
+  color: var(--warn);
+  font-size: 12px;
+  font-weight: 650;
+  margin: 0;
+}
+
 .scan-folder-group {
   display: grid;
   gap: 8px;
@@ -3931,6 +3946,60 @@ button.danger-button:hover:not(:disabled) {
   width: 100%;
 }
 
+.scan-batch-dialog {
+  max-width: 820px;
+}
+
+.scan-batch-summary {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+}
+
+.scan-batch-summary span,
+.scan-batch-row > div span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.scan-batch-list {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  display: grid;
+  overflow: hidden;
+}
+
+.scan-batch-row {
+  align-items: center;
+  background: var(--bg-subtle);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  min-height: 58px;
+  padding: 10px 12px;
+}
+
+.scan-batch-row + .scan-batch-row {
+  border-top: 1px solid var(--border-soft);
+}
+
+.scan-batch-row > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.scan-batch-row > div strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scan-batch-row button {
+  min-height: 34px;
+}
+
 .audit-dialog-header {
   align-items: flex-start;
   border-bottom: 1px solid var(--border-soft);
@@ -5715,6 +5784,16 @@ button.danger-button:hover:not(:disabled) {
     flex-direction: column;
   }
 
+  .scan-batch-row {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .scan-batch-row button {
+    grid-column: 1 / -1;
+    justify-content: center;
+  }
+
   .action-group-audits .folder-scope-grid,
   .action-group-audits .audit-actions {
     grid-template-columns: 1fr;
@@ -5820,6 +5899,10 @@ button.danger-button:hover:not(:disabled) {
   .auth-page {
     align-items: stretch;
     padding: 12px;
+  }
+
+  .auth-panel:not(.auth-panel-wide) {
+    align-self: center;
   }
 
   .auth-panel-wide {

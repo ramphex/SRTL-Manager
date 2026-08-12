@@ -8,7 +8,7 @@ import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters
 import { normalizeAuditTargets } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
-import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type TimeFormatPreference, type UserPreferences } from "../shared/types";
+import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
 import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
@@ -591,6 +591,7 @@ function AdvancedSettingsPanel() {
   const savedAdvancedSettings = normalizeAdvancedSettings(settings.data ?? defaultAdvancedSettings);
   const savedCopyProfileLabel = copyProfileOptions.find((option) => option.value === savedAdvancedSettings.copy.profile)?.label ?? savedAdvancedSettings.copy.profile;
   const savedAuditModeLabel = auditModeOptions.find((option) => option.value === savedAdvancedSettings.audit.defaultMode)?.label ?? savedAdvancedSettings.audit.defaultMode;
+  const savedScanSchedulingLabel = savedAdvancedSettings.scan.symlinkFolderScheduling === "per_folder" ? "Parallel by folder" : "Single job";
   const validationError = draft.copy.profile === "custom" && !draft.copy.byteCompare && draft.copy.mediaValidation === "off"
     ? "Custom copy verification must keep byte compare or media validation enabled."
     : null;
@@ -632,6 +633,11 @@ function AdvancedSettingsPanel() {
     setDraft((current) => ({ ...current, audit: { ...current.audit, ...patch } }));
   }
 
+  function updateScanScheduling(symlinkFolderScheduling: SymlinkScanSchedulingMode) {
+    setMessage(null);
+    setDraft((current) => ({ ...current, scan: { symlinkFolderScheduling } }));
+  }
+
   const copyVerificationDisabled = !draft.copy.byteCompare && draft.copy.mediaValidation === "off";
   const effectiveCopyPipeline = copyVerificationDisabled
     ? ["Transfer to temporary destination", "Confirm transferred file size", "Copy verification skipped", "Promote transferred file", "Repoint symlink"]
@@ -648,6 +654,35 @@ function AdvancedSettingsPanel() {
   return (
     <div className="advanced-settings">
       {settings.error ? <p className="panel-message action-error">{settings.error.message}</p> : null}
+        <section className="advanced-settings-section">
+          <div className="advanced-settings-heading">
+            <div>
+              <h3>Inventory scan scheduling</h3>
+              <p>Controls whether selected symlink folders share one scan job or use separate concurrent job slots.</p>
+            </div>
+            <span className="pill pill-info">Current: {savedScanSchedulingLabel}</span>
+          </div>
+          <div className="advanced-option-grid two-columns">
+            <button
+              type="button"
+              className={`advanced-option${draft.scan.symlinkFolderScheduling === "single_job" ? " selected" : ""}`}
+              onClick={() => updateScanScheduling("single_job")}
+            >
+              <strong>Single job</strong>
+              <small>Scan selected symlink folders in sequence.</small>
+            </button>
+            <button
+              type="button"
+              className={`advanced-option${draft.scan.symlinkFolderScheduling === "per_folder" ? " selected" : ""}`}
+              onClick={() => updateScanScheduling("per_folder")}
+            >
+              <strong>Parallel by folder</strong>
+              <small>Queue one scan job per folder, up to the configured scan capacity.</small>
+            </button>
+          </div>
+          <p className="section-settings-help">Parallel scans finish independent folders sooner but increase filesystem and mounted-storage activity.</p>
+        </section>
+
         <section className="advanced-settings-section">
           <div className="advanced-settings-heading">
             <div>

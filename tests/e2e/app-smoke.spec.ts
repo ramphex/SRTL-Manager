@@ -46,6 +46,47 @@ test("normal login starts with a blank username", async ({ page }) => {
   await expect(page.getByLabel("Username", { exact: true })).toHaveValue("");
 });
 
+test("keeps the login form compact across mobile and desktop viewports", async ({ page }) => {
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ setupRequired: false, authenticated: false, user: null })
+    });
+  });
+
+  for (const viewport of [
+    { width: 390, height: 844 },
+    { width: 1440, height: 1000 }
+  ]) {
+    await page.setViewportSize(viewport);
+    await page.goto(baseUrl!);
+
+    const panel = page.locator(".auth-panel");
+    const submitButton = page.getByRole("button", { name: "Sign in", exact: true });
+    await expect(panel).toBeVisible();
+    await expect(submitButton).toBeVisible();
+    const panelBox = await panel.boundingBox();
+    const inputBoxes = await page.locator(".auth-form input").evaluateAll((inputs) =>
+      inputs.map((input) => {
+        const box = input.getBoundingClientRect();
+        return { height: box.height, width: box.width };
+      })
+    );
+    const buttonBox = await submitButton.boundingBox();
+
+    expect(panelBox).not.toBeNull();
+    expect(buttonBox).not.toBeNull();
+    expect(panelBox!.height).toBeLessThan(420);
+    expect(inputBoxes).toHaveLength(2);
+    expect(inputBoxes.every((box) => box.height <= 48 && box.width <= viewport.width)).toBe(true);
+    expect(buttonBox!.height).toBeLessThanOrEqual(56);
+    expect(panelBox!.y).toBeGreaterThanOrEqual(0);
+    expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(viewport.height);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+});
+
 test("loads the authenticated dashboard when a development session is provided", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   await page.goto(baseUrl!);
@@ -746,10 +787,86 @@ test("first-run onboarding configures folders and queues the initial policy scan
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("parallel folder scans open a batch status window with independently viewable jobs", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const timestamp = "2026-08-11T12:00:00.000Z";
+  const scanOptionsByJobId = new Map([
+    [501, { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] }],
+    [502, { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] }]
+  ]);
+  const emptyInventory = {
+    totalLinks: 0,
+    remoteLinks: 0,
+    localLinks: 0,
+    brokenLinks: 0,
+    otherLinks: 0,
+    nonMediaLinks: 0,
+    actionableRemoteLinks: 0,
+    actionableLocalLinks: 0,
+    assignedRemoteLinks: 0,
+    unassignedRemoteLinks: 0,
+    unassignedLocalLinks: 0,
+    localFiles: 0,
+    remoteFiles: 0,
+    actionableRemoteFiles: 0,
+    actionableLocalFiles: 0,
+    assignedRemoteFiles: 0,
+    unassignedRemoteFiles: 0,
+    unassignedLocalFiles: 0,
+    localOrphanFiles: 0,
+    remoteOrphanFiles: 0,
+    missingLinks: 0,
+    missingLocalFiles: 0,
+    missingRemoteFiles: 0
+  };
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    let body: unknown;
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
+    else if (url.pathname === "/api/settings/advanced") body = { scan: { symlinkFolderScheduling: "per_folder" }, copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" }, audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true } };
+    else if (url.pathname === "/api/settings/sections") body = { sections: ["movies", "shows"], sectionTitles: { movies: "Movies", shows: "Shows" }, sectionTypes: { movies: "movies", shows: "shows" } };
+    else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
+    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies", "shows"], localSections: [] };
+    else if (url.pathname === "/api/settings/audit") body = { sections: ["movies", "shows"], targets: ["local", "remote"] };
+    else if (url.pathname === "/api/sections") body = [];
+    else if (url.pathname === "/api/inventory/summary") body = emptyInventory;
+    else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: { movies: null, shows: null }, localSections: { movies: null, shows: null }, remoteRoot: null };
+    else if (url.pathname === "/api/scans" && route.request().method() === "POST") body = { jobId: 501, jobIds: [501, 502] };
+    else if (url.pathname === "/api/jobs") body = [];
+    else if (/^\/api\/jobs\/\d+\/events\/page$/.test(url.pathname)) body = { events: [], total: 0, hasOlder: false };
+    else if (/^\/api\/jobs\/\d+$/.test(url.pathname)) {
+      const jobId = Number(url.pathname.split("/").at(-1));
+      const options = scanOptionsByJobId.get(jobId);
+      body = { id: jobId, type: "scan", status: jobId === 501 ? "running" : "queued", createdAt: timestamp, startedAt: jobId === 501 ? timestamp : null, finishedAt: null, options, progress: { options } };
+    } else if (url.pathname === "/api/system/version") body = { currentVersion: "0.1.3-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: {}, beta: {}, status: "unavailable" };
+    else body = {};
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: "Run Inventory Scan", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Folder scans" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".scan-batch-row")).toHaveCount(2);
+  await expect(dialog).toContainText("Symlinks - Movies");
+  await expect(dialog).toContainText("Symlinks - Shows");
+  await expect(dialog.getByText("0 of 2 folder jobs finished", { exact: true })).toBeVisible();
+
+  await dialog.getByRole("button", { name: "View status", exact: true }).first().click();
+  await expect(page.getByRole("dialog", { name: "Inventory scan" })).toBeVisible();
+  await expect(page.getByText("Job #501", { exact: false }).first()).toBeVisible();
+});
+
 test("advanced settings can disable copy verification and identify the recommended profile", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   let savedSettings: unknown = null;
   const initialSettings = {
+    scan: { symlinkFolderScheduling: "single_job" },
     copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
     audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
   };
@@ -764,6 +881,11 @@ test("advanced settings can disable copy verification and identify the recommend
   });
 
   await page.goto(`${baseUrl}/settings/advanced`);
+  const scanSection = page.locator(".advanced-settings-section").filter({ hasText: "Inventory scan scheduling" });
+  const parallelButton = scanSection.getByRole("button", { name: "Parallel by folder Queue one scan job per folder, up to the configured scan capacity.", exact: true });
+  await expect(scanSection.getByText("Current: Single job", { exact: true })).toBeVisible();
+  await parallelButton.click();
+  await expect(parallelButton).toHaveClass(/selected/);
   const copySection = page.locator(".advanced-settings-section").filter({ hasText: "Copy verification" });
   await expect(copySection).toHaveCount(1);
   await expect(copySection.getByRole("button", { name: "Balanced (recommended) Byte compare and fast validation", exact: true })).toHaveCount(1);
@@ -778,8 +900,12 @@ test("advanced settings can disable copy verification and identify the recommend
   await expect(copySection.locator(".advanced-readonly-value")).toContainText("Off");
   await expect(copySection.getByRole("alert")).toContainText("source bytes and media integrity are not checked");
   await page.getByRole("button", { name: "Save advanced settings", exact: true }).click();
+  await expect(scanSection.getByText("Current: Parallel by folder", { exact: true })).toBeVisible();
   await expect(copySection.getByText("Current: Off", { exact: true })).toBeVisible();
-  expect(savedSettings).toMatchObject({ copy: { profile: "off", byteCompare: false, mediaValidation: "off" } });
+  expect(savedSettings).toMatchObject({
+    scan: { symlinkFolderScheduling: "per_folder" },
+    copy: { profile: "off", byteCompare: false, mediaValidation: "off" }
+  });
 });
 
 test("title rescan controls explain their scope and lock sibling actions while queueing", async ({ page }) => {

@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link } from "@tanstack/react-router";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -10,8 +10,8 @@ import { jobEventCountLabel } from "./jobEvents";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
-import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
+import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -448,6 +448,76 @@ export function ScanStatusDialog({
   );
 }
 
+export function ScanBatchStatusDialog({
+  prompt,
+  sections,
+  onClose,
+  onJobSelect
+}: {
+  prompt: ScanBatchStatusPrompt | null;
+  sections: Array<{ section: string; title?: string | null }>;
+  onClose: () => void;
+  onJobSelect: (job: JobRecord) => void;
+}) {
+  const jobIds = prompt?.jobIds ?? [];
+  const jobQueries = useQueries({
+    queries: jobIds.map((jobId) => ({
+      queryKey: ["job", jobId],
+      queryFn: () => api.job(jobId),
+      enabled: Boolean(prompt),
+      refetchInterval: (query: { state: { data?: JobRecord } }) => {
+        const status = query.state.data?.status;
+        return status === "queued" || status === "running" || !status ? 500 : false;
+      }
+    }))
+  });
+
+  if (!prompt) return null;
+
+  const jobs = jobQueries.map((query) => query.data).filter((job): job is JobRecord => Boolean(job));
+  const finishedCount = jobs.filter((job) => job.status !== "queued" && job.status !== "running").length;
+  const error = jobQueries.find((query) => query.error)?.error;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="audit-dialog scan-batch-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-batch-dialog-title">
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <h2 id="scan-batch-dialog-title">{prompt.title}</h2>
+            <p>{prompt.description}</p>
+          </div>
+          <JobStatusHeaderActions closeLabel="Close folder scan status window" onClose={onClose} />
+        </div>
+        <div className="scan-batch-summary">
+          <strong>{finishedCount} of {jobIds.length} folder jobs finished</strong>
+          <span>Each folder runs independently up to the configured scan capacity.</span>
+        </div>
+        {error ? <p className="panel-message action-error">{error.message}</p> : null}
+        <div className="scan-batch-list" aria-label="Folder scan jobs">
+          {jobIds.map((jobId, index) => {
+            const job = jobQueries[index]?.data;
+            const options = job ? scanOptionsFromJob(job) : null;
+            return (
+              <div className="scan-batch-row" key={jobId}>
+                <div>
+                  <strong>{options ? formatScanScope(options, sections) : `Job #${jobId}`}</strong>
+                  <span>Job #{jobId}</span>
+                </div>
+                {job ? <StatusPill value={job.status} /> : <span className="pill pill-info">Loading</span>}
+                <button type="button" className="secondary" disabled={!job} onClick={() => job && onJobSelect(job)}>
+                  <Search size={15} />
+                  View status
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <p className="panel-message">Closing this window leaves all folder scans running in the background.</p>
+      </section>
+    </div>
+  );
+}
+
 export function AuditStatusDialog({
   prompt,
   onClose
@@ -598,6 +668,7 @@ export function ScanScopeBlock({
 }
 
 export function FolderScopePicker({
+  activeSections,
   ariaLabel,
   emptyMessage,
   lastScannedBySection,
@@ -605,6 +676,7 @@ export function FolderScopePicker({
   selectedSections,
   onToggle
 }: {
+  activeSections?: ReadonlySet<string>;
   ariaLabel: string;
   emptyMessage: string;
   lastScannedBySection: Record<string, string | null>;
@@ -620,9 +692,10 @@ export function FolderScopePicker({
         <ScopeToggle
           key={section.section}
           checked={selectedSections.includes(section.section)}
+          busy={activeSections?.has(section.section)}
           icon={<Folder size={15} />}
           label={sectionDisplayTitle(section)}
-          detail={scanAgeLabel(lastScannedBySection[section.section] ?? null)}
+          detail={activeSections?.has(section.section) ? "Scan active" : scanAgeLabel(lastScannedBySection[section.section] ?? null)}
           onChange={(checked) => onToggle(section.section, checked)}
         />
       ))}
@@ -631,12 +704,14 @@ export function FolderScopePicker({
 }
 
 function ScopeToggle({
+  busy = false,
   checked,
   detail,
   icon,
   label,
   onChange
 }: {
+  busy?: boolean;
   checked: boolean;
   detail?: string;
   icon: ReactNode;
@@ -644,7 +719,7 @@ function ScopeToggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className={checked ? "scope-toggle selected" : "scope-toggle"}>
+    <label className={`scope-toggle${checked ? " selected" : ""}${busy ? " busy" : ""}`}>
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
       {icon}
       <span className="scope-toggle-copy">

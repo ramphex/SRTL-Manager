@@ -3,14 +3,15 @@ import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
+import { normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/sourceTitleRisk";
-import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets } from "./jobScopeLocks";
+import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount, mediaLinkTreeStatusCounts, orderSectionSummaries, sectionActionUnit, sectionCompositionParts, type LinkStatusWorkKind } from "./sectionSummaryDisplay";
 import { inferSectionContentType } from "../shared/sections";
 import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyKind, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
-import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
-import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
+import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
+import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
 
 function stripLegacyScanSections(options: ScanOptions): ScanOptions {
@@ -76,11 +77,13 @@ export function DashboardPage() {
   const [auditStatusPrompt, setAuditStatusPrompt] = useState<AuditStatusPrompt | null>(null);
   const [copyPrompt, setCopyPrompt] = useState<CopyPrompt | null>(null);
   const [scanStatusPrompt, setScanStatusPrompt] = useState<ScanStatusPrompt | null>(null);
+  const [scanBatchStatusPrompt, setScanBatchStatusPrompt] = useState<ScanBatchStatusPrompt | null>(null);
   const sectionSummaries = useQuery({ queryKey: ["sections"], queryFn: api.sections, refetchInterval: 5000 });
   const sectionSettings = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths });
   const scanSettings = useQuery({ queryKey: ["scan-settings"], queryFn: api.getScanSettings });
   const auditSettings = useQuery({ queryKey: ["audit-settings"], queryFn: api.getAuditSettings });
+  const advancedSettings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
   const inventory = useQuery({ queryKey: ["inventory-summary"], queryFn: api.inventorySummary, refetchInterval: 5000 });
   const scanTimestamps = useQuery({ queryKey: ["inventory-scan-timestamps"], queryFn: api.inventoryScanTimestamps, refetchInterval: 60000 });
   const jobs = useQuery({
@@ -127,12 +130,22 @@ export function DashboardPage() {
       queryClient.invalidateQueries({ queryKey: ["storage-files"] });
       await queryClient.refetchQueries({ queryKey: ["jobs"] });
       if (autoOpenTaskStatus) {
-        setScanStatusPrompt({
-          key: `scan-job-${result.jobId}`,
-          title: "Inventory scan",
-          description: formatScanScope(submittedOptions, availableScanSections),
-          jobId: result.jobId
-        });
+        const jobIds = result.jobIds?.length ? result.jobIds : [result.jobId];
+        if (jobIds.length > 1) {
+          setScanBatchStatusPrompt({
+            key: `scan-batch-${jobIds.join("-")}`,
+            title: "Folder scans",
+            description: `${jobIds.length} inventory scan jobs queued`,
+            jobIds
+          });
+        } else {
+          setScanStatusPrompt({
+            key: `scan-job-${result.jobId}`,
+            title: "Inventory scan",
+            description: formatScanScope(submittedOptions, availableScanSections),
+            jobId: result.jobId
+          });
+        }
       }
     }
   });
@@ -142,6 +155,11 @@ export function DashboardPage() {
     title: sectionSettings.data?.sectionTitles?.[section] ?? sectionSummaries.data?.find((summary) => summary.section === section)?.title ?? section
   }));
   const availableScanSectionNames = availableScanSections.map((section) => section.section);
+  const activeSymlinkScanSections = new Set(
+    (jobs.data ?? [])
+      .filter((job) => job.type === "scan" && isActiveQueueJob(job))
+      .flatMap((job) => scanOptionsFromJob(job)?.symlinkSections ?? [])
+  );
   const selectedSymlinkSections = (scanOptions.symlinkSections ?? scanOptions.sections ?? availableScanSectionNames).filter((section) => availableScanSectionNames.includes(section));
   const selectedLocalSections = (scanOptions.localSections ?? scanOptions.sections ?? availableScanSectionNames).filter((section) => availableScanSectionNames.includes(section));
   const selectedSymlinkScanAge =
@@ -165,11 +183,20 @@ export function DashboardPage() {
     selectedLocalSections.length === availableScanSectionNames.length;
   const noInventorySelected = selectedInventoryScopeCount === 0 && selectedInventoryFolderCount === 0;
   const hasScanScope = scanOptions.scanSymlinks || scanOptions.scanLocal || scanOptions.scanRemote;
+  const selectedActiveScanSections = selectedSymlinkSections.filter((section) => activeSymlinkScanSections.has(section));
   const canRunScan =
     hasScanScope &&
     (!scanOptions.scanSymlinks || selectedSymlinkSections.length > 0) &&
     (!scanOptions.scanLocal || selectedLocalSections.length > 0) &&
-    (!scanOptions.scanRemote || Boolean(paths.data?.remoteDir));
+    (!scanOptions.scanRemote || Boolean(paths.data?.remoteDir)) &&
+    selectedActiveScanSections.length === 0;
+  const parallelFolderScans = normalizeAdvancedSettings(advancedSettings.data).scan.symlinkFolderScheduling === "per_folder";
+  const plannedScanJobCount =
+    parallelFolderScans && scanOptions.scanSymlinks && selectedSymlinkSections.length > 1
+      ? selectedSymlinkSections.length + (scanOptions.scanLocal || scanOptions.scanRemote ? 1 : 0)
+      : hasScanScope
+        ? 1
+        : 0;
   const canRunAudit = auditRemoteSelected || (auditLocalSelected && selectedAuditSections.length > 0);
   const sectionTotals = (sectionSummaries.data ?? []).reduce(
     (acc, section) => ({
@@ -220,11 +247,13 @@ export function DashboardPage() {
   const copyToLocalTotal = inventoryCopyToLocalCount(totals);
   const copyToRemoteTotal = inventoryCopyToRemoteCount(totals);
   const actionError =
-    startScan.error ?? copyConflictCheck.error ?? startCopySilently.error ?? paths.error ?? sectionSettings.error ?? scanSettings.error ?? auditSettings.error ?? saveScanSettings.error ?? saveAuditSettings.error;
+    startScan.error ?? copyConflictCheck.error ?? startCopySilently.error ?? paths.error ?? sectionSettings.error ?? scanSettings.error ?? auditSettings.error ?? advancedSettings.error ?? saveScanSettings.error ?? saveAuditSettings.error;
   const actionMessage = startCopySilently.data
     ? `Copy job #${startCopySilently.data.jobId} queued. View progress from Recent Jobs.`
     : startScan.data
-      ? `Inventory scan job #${startScan.data.jobId} queued.`
+      ? (startScan.data.jobIds?.length ?? 1) > 1
+        ? `${startScan.data.jobIds.length} folder scan jobs queued.`
+        : `Inventory scan job #${startScan.data.jobId} queued.`
       : null;
   const actionToastMessage = actionError?.message ?? actionMessage;
 
@@ -337,6 +366,7 @@ export function DashboardPage() {
           <div className="inventory-scope-toolbar">
             <span>
               {selectedInventoryScopeCount}/3 categories - {selectedInventoryFolderCount}/{totalInventoryFolderCount} folders
+              {parallelFolderScans && plannedScanJobCount > 1 ? ` - ${plannedScanJobCount} jobs` : ""}
             </span>
             <div className="inventory-scope-actions">
               <button type="button" className="secondary inventory-scope-action" onClick={selectAllInventoryScanOptions} disabled={allInventorySelected}>
@@ -360,6 +390,7 @@ export function DashboardPage() {
                 emptyMessage="No library sections configured."
                 sections={availableScanSections}
                 lastScannedBySection={scanTimestamps.data?.symlinkSections ?? {}}
+                activeSections={activeSymlinkScanSections}
                 selectedSections={selectedSymlinkSections}
                 onToggle={(section, checked) => toggleScanSection("symlinkSections", section, checked)}
               />
@@ -392,6 +423,9 @@ export function DashboardPage() {
             <RefreshCw size={16} />
             Run Inventory Scan
           </button>
+          {selectedActiveScanSections.length > 0 ? (
+            <p className="scan-scope-warning" role="status">Wait for the active scan in {selectedActiveScanSections.map((section) => sectionDisplayTitle(availableScanSections.find((item) => item.section === section) ?? { section })).join(", ")} or clear that folder before starting another scan.</p>
+          ) : null}
         </section>
         <section className="action-group action-group-audits" aria-labelledby="audit-actions-title">
           <div className="action-group-header">
@@ -517,6 +551,15 @@ export function DashboardPage() {
       <AuditDialog prompt={auditPrompt} onClose={() => setAuditPrompt(null)} />
       <AuditStatusDialog prompt={auditStatusPrompt} onClose={() => setAuditStatusPrompt(null)} />
       <CopyDialog prompt={copyPrompt} onClose={() => setCopyPrompt(null)} />
+      <ScanBatchStatusDialog
+        prompt={scanBatchStatusPrompt}
+        sections={availableScanSections}
+        onClose={() => setScanBatchStatusPrompt(null)}
+        onJobSelect={(job) => {
+          setScanBatchStatusPrompt(null);
+          setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections));
+        }}
+      />
       <ScanStatusDialog prompt={scanStatusPrompt} onClose={() => setScanStatusPrompt(null)} />
     </Page>
   );

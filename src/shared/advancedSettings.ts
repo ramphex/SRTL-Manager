@@ -1,4 +1,11 @@
-import type { AdvancedSettings, AuditJobBehaviorSettings, CopyJobBehaviorSettings, CopyMediaValidationMode, CopyVerificationProfile } from "./types";
+import type {
+  AdvancedSettings,
+  AuditJobBehaviorSettings,
+  CopyJobBehaviorSettings,
+  CopyMediaValidationMode,
+  CopyVerificationProfile,
+  ScanJobBehaviorSettings
+} from "./types";
 
 const copyProfiles: CopyVerificationProfile[] = ["off", "fast", "balanced", "deep", "custom"];
 const mediaValidationModes: CopyMediaValidationMode[] = ["off", "fast", "deep"];
@@ -18,7 +25,12 @@ export const defaultAuditJobBehaviorSettings: AuditJobBehaviorSettings = {
   byteCompareWhenSourceKnown: true
 };
 
+export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
+  symlinkFolderScheduling: "single_job"
+};
+
 export const defaultAdvancedSettings: AdvancedSettings = {
+  scan: defaultScanJobBehaviorSettings,
   copy: defaultCopyJobBehaviorSettings,
   audit: defaultAuditJobBehaviorSettings
 };
@@ -49,9 +61,17 @@ function normalizeAuditBehavior(value: unknown): AuditJobBehaviorSettings {
   };
 }
 
+function normalizeScanBehavior(value: unknown): ScanJobBehaviorSettings {
+  const record = isRecord(value) ? value : {};
+  return {
+    symlinkFolderScheduling: record.symlinkFolderScheduling === "per_folder" ? "per_folder" : "single_job"
+  };
+}
+
 export function normalizeAdvancedSettings(value: unknown): AdvancedSettings {
   const record = isRecord(value) ? value : {};
   return {
+    scan: normalizeScanBehavior(record.scan),
     copy: normalizeCopyBehavior(record.copy),
     audit: normalizeAuditBehavior(record.audit)
   };

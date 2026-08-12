@@ -52,7 +52,8 @@ import type {
   ScanOptions,
   ScanTitleScope,
   StoragePolicyKind,
-  StorageRootType
+  StorageRootType,
+  SymlinkScanSchedulingMode
 } from "../../shared/types";
 
 type JobRow = typeof schema.jobs.$inferSelect;
@@ -107,6 +108,7 @@ interface PreparedJob {
   selectionFrozen?: boolean;
   exclusive: boolean;
   claims: ResourceClaim[];
+  queueBehindClaimConflicts?: boolean;
 }
 
 type LeasedJob = JobRecord & { leaseVersion: number; exclusive: boolean };
@@ -546,6 +548,14 @@ function normalizeResourceClaims(claims: ResourceClaim[]): ResourceClaim[] {
   return [...normalized.values()];
 }
 
+function sectionResourceClaims(sections: Iterable<string>, access: ResourceClaimAccess): ResourceClaim[] {
+  return [...new Set([...sections].map((section) => section.trim()).filter(Boolean))].map((section) => ({
+    resourceType: "section",
+    resourceKey: section,
+    access
+  }));
+}
+
 async function managedPathResourceClaims(
   root: string | null,
   candidate: string,
@@ -592,7 +602,10 @@ async function batchedMediaLinkResourceClaims(
 }
 
 async function titleScanResourceClaims(options: ScanOptions, links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
-  const claims: ResourceClaim[] = [];
+  const claims: ResourceClaim[] = sectionResourceClaims(
+    (options.titleScopes ?? []).map((scope) => scope.section),
+    "shared"
+  );
   for (const scope of options.titleScopes ?? []) {
     claims.push({ resourceType: "title", resourceKey: JSON.stringify([scope.section, scope.itemName]), access: "exclusive" });
   }
@@ -601,7 +614,13 @@ async function titleScanResourceClaims(options: ScanOptions, links: MediaLinkRow
 }
 
 async function auditResourceClaims(links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
-  return normalizeResourceClaims(await batchedMediaLinkResourceClaims(links, paths, "shared"));
+  return normalizeResourceClaims([
+    ...sectionResourceClaims(
+      links.map((link) => link.section),
+      "shared"
+    ),
+    ...(await batchedMediaLinkResourceClaims(links, paths, "shared"))
+  ]);
 }
 
 type CopyPathBindingRole = "link" | "source" | "destination";
@@ -731,7 +750,13 @@ async function copyPathBindingsForLink(
 
 async function copyResourceClaims(workLinks: MediaLinkRow[], claimedLinks: MediaLinkRow[], paths: PathsSettings, options: CopyOptions): Promise<ResourceClaim[]> {
   const eligibleLinks = filterCopyLinks(workLinks, options);
-  const claims = await batchedMediaLinkResourceClaims(claimedLinks, paths, "exclusive");
+  const claims = [
+    ...sectionResourceClaims(
+      [...workLinks, ...claimedLinks].map((link) => link.section),
+      "shared"
+    ),
+    ...(await batchedMediaLinkResourceClaims(claimedLinks, paths, "exclusive"))
+  ];
   for (let offset = 0; offset < eligibleLinks.length; offset += 16) {
     const batch = eligibleLinks.slice(offset, offset + 16);
     const [destinationClaims, pathBindings] = await Promise.all([
@@ -2009,6 +2034,63 @@ function isStaleRunningJob(job: Pick<JobRecord, "createdAt" | "startedAt" | "hea
   return Number.isFinite(referenceAt) && Date.now() - referenceAt >= staleAfterMs;
 }
 
+function isSectionScopedSymlinkScan(options: ScanOptions): boolean {
+  return options.scanSymlinks === true && options.scanLocal !== true && options.scanRemote !== true && Boolean(options.symlinkSections?.length) && !options.titleScopes?.length;
+}
+
+async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions): Promise<PreparedJob> {
+  const targeted = Boolean(normalizedOptions.titleScopes?.length);
+  if (!targeted && !isSectionScopedSymlinkScan(normalizedOptions)) {
+    return { progress: { options: normalizedOptions }, options: normalizedOptions, exclusive: true, claims: [] };
+  }
+  if (!targeted) {
+    return {
+      progress: { options: normalizedOptions },
+      options: normalizedOptions,
+      exclusive: false,
+      claims: sectionResourceClaims(normalizedOptions.symlinkSections ?? [], "exclusive"),
+      queueBehindClaimConflicts: true
+    };
+  }
+
+  const scanLinks = filterScanLinks(await listMediaLinks(db, undefined, "current"), normalizedOptions);
+  const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+  if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+  const availableScopes = new Set(scanLinks.map((link) => `${link.section}\0${link.itemName}`));
+  const unavailableScopes = (normalizedOptions.titleScopes ?? []).filter(
+    (scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`)
+  );
+  if (unavailableScopes.length > 0) {
+    throw new Error(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
+  }
+  return {
+    progress: { options: normalizedOptions },
+    options: normalizedOptions,
+    exclusive: false,
+    claims: await titleScanResourceClaims(normalizedOptions, scanLinks, paths)
+  };
+}
+
+async function assertNoActiveSymlinkScanForSections(db: DbExecutor, sections: string[]): Promise<void> {
+  if (sections.length === 0) return;
+  const conflict = await dbGet<{ jobId: number; section: string; status: string }>(db, sql`
+    SELECT jobs.id AS "jobId", claims.resource_key AS section, jobs.status
+    FROM job_resource_claims AS claims
+    JOIN jobs ON jobs.id = claims.job_id
+    WHERE jobs.type = 'scan'
+      AND jobs.status IN ('queued', 'running')
+      AND claims.resource_type = 'section'
+      AND claims.resource_key IN (
+        SELECT value::text
+        FROM jsonb_array_elements_text(${JSON.stringify(sections)}::jsonb)
+      )
+    ORDER BY jobs.id
+    LIMIT 1
+  `);
+  if (!conflict) return;
+  throw new Error(`Symlink folder "${conflict.section}" already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
+}
+
 export class JobRunner {
   constructor(private readonly db: Db) {}
 
@@ -2021,6 +2103,13 @@ export class JobRunner {
   }
 
   private async enqueuePreparedJob(type: JobRecord["type"], prepare: (db: DbExecutor) => Promise<PreparedJob>): Promise<number> {
+    const jobIds = await this.enqueuePreparedJobs(type, async (db) => [await prepare(db)]);
+    const jobId = jobIds[0];
+    if (!jobId) throw new Error("Job was not queued");
+    return jobId;
+  }
+
+  private async enqueuePreparedJobs(type: JobRecord["type"], prepare: (db: DbExecutor) => Promise<PreparedJob[]>): Promise<number[]> {
     await reconcileProvablySettledCopyOperations(this.db);
     if (type !== "path_migration" && (await isPathConfigurationBlocked(this.db))) {
       throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
@@ -2030,11 +2119,15 @@ export class JobRunner {
       if (type !== "path_migration" && (await isPathConfigurationBlocked(transaction))) {
         throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
       }
-      const prepared = await prepare(transaction);
-      const claims = normalizeResourceClaims(prepared.claims);
+      const preparedJobs = await prepare(transaction);
+      if (preparedJobs.length === 0) throw new Error("No jobs were prepared");
+      const jobIds: number[] = [];
 
-      if (!prepared.exclusive && claims.length > 0) {
-        const conflict = await dbGet<{ jobId: number; status: string; overlapCount: number }>(transaction, sql`
+      for (const prepared of preparedJobs) {
+        const claims = normalizeResourceClaims(prepared.claims);
+
+        if (!prepared.exclusive && !prepared.queueBehindClaimConflicts && claims.length > 0) {
+          const conflict = await dbGet<{ jobId: number; status: string; overlapCount: number }>(transaction, sql`
           WITH requested_claims AS (
             SELECT "resourceType" AS resource_type, "resourceKey" AS resource_key, access
             FROM jsonb_to_recordset(${JSON.stringify(claims)}::jsonb)
@@ -2083,71 +2176,73 @@ export class JobRunner {
           ORDER BY active.job_id
           LIMIT 1
         `);
-        if (conflict) {
-          if (conflict.status === "reconciliation_required") {
+          if (conflict) {
+            if (conflict.status === "reconciliation_required") {
+              throw new Error(
+                `Copy data from job #${conflict.jobId} requires manual reconciliation before another action can touch the same media item or managed path.`
+              );
+            }
             throw new Error(
-              `Copy data from job #${conflict.jobId} requires manual reconciliation before another action can touch the same media item or managed path.`
+              `Job #${conflict.jobId} is already ${conflict.status} for ${conflict.overlapCount} matching media item${conflict.overlapCount === 1 ? "" : "s"}. Wait for it to finish or terminate it before queuing another action.`
             );
           }
-          throw new Error(
-            `Job #${conflict.jobId} is already ${conflict.status} for ${conflict.overlapCount} matching media item${conflict.overlapCount === 1 ? "" : "s"}. Wait for it to finish or terminate it before queuing another action.`
+        }
+
+        const timestamp = nowIso();
+        const selection = prepared.selection ?? [];
+        const selectionFrozen = prepared.selectionFrozen === true;
+        const immutableOptions = selectionFrozen ? compactFrozenOptions(prepared.options ?? progressOptions(prepared.progress)) : (prepared.options ?? progressOptions(prepared.progress));
+        const row = await first(
+          transaction
+            .insert(schema.jobs)
+            .values({
+              type,
+              status: "queued",
+              createdAt: timestamp,
+              startedAt: null,
+              finishedAt: null,
+              lockedBy: null,
+              lockedAt: null,
+              heartbeatAt: null,
+              leaseVersion: 0,
+              exclusive: prepared.exclusive,
+              options: JSON.stringify(immutableOptions),
+              selectionFrozen,
+              cancelRequestedAt: null,
+              progress: JSON.stringify(compactJobProgress(prepared.progress))
+            })
+            .returning({ id: schema.jobs.id })
+        );
+        if (!row) throw new Error("Job was not queued");
+        for (let offset = 0; offset < selection.length; offset += 500) {
+          await transaction.insert(schema.jobSelectionItems).values(
+            selection.slice(offset, offset + 500).map((link, index) => ({
+              jobId: row.id,
+              mediaLinkId: link.id,
+              selectionOrder: offset + index,
+              section: link.section,
+              itemName: link.itemName,
+              relativePath: link.relativePath,
+              linkPath: link.linkPath,
+              createdAt: timestamp
+            }))
           );
         }
+        for (let offset = 0; offset < claims.length; offset += 500) {
+          await transaction.insert(schema.jobResourceClaims).values(
+            claims.slice(offset, offset + 500).map((claim) => ({
+              jobId: row.id,
+              resourceType: claim.resourceType,
+              resourceKey: claim.resourceKey,
+              access: claim.access,
+              createdAt: timestamp
+            }))
+          );
+        }
+        await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp, level: "info", message: "Job queued", data: JSON.stringify({ type }) });
+        jobIds.push(row.id);
       }
-
-      const timestamp = nowIso();
-      const selection = prepared.selection ?? [];
-      const selectionFrozen = prepared.selectionFrozen === true;
-      const immutableOptions = selectionFrozen ? compactFrozenOptions(prepared.options ?? progressOptions(prepared.progress)) : (prepared.options ?? progressOptions(prepared.progress));
-      const row = await first(
-        transaction
-          .insert(schema.jobs)
-          .values({
-            type,
-            status: "queued",
-            createdAt: timestamp,
-            startedAt: null,
-            finishedAt: null,
-            lockedBy: null,
-            lockedAt: null,
-            heartbeatAt: null,
-            leaseVersion: 0,
-            exclusive: prepared.exclusive,
-            options: JSON.stringify(immutableOptions),
-            selectionFrozen,
-            cancelRequestedAt: null,
-            progress: JSON.stringify(compactJobProgress(prepared.progress))
-          })
-          .returning({ id: schema.jobs.id })
-      );
-      if (!row) throw new Error("Job was not queued");
-      for (let offset = 0; offset < selection.length; offset += 500) {
-        await transaction.insert(schema.jobSelectionItems).values(
-          selection.slice(offset, offset + 500).map((link, index) => ({
-            jobId: row.id,
-            mediaLinkId: link.id,
-            selectionOrder: offset + index,
-            section: link.section,
-            itemName: link.itemName,
-            relativePath: link.relativePath,
-            linkPath: link.linkPath,
-            createdAt: timestamp
-          }))
-        );
-      }
-      for (let offset = 0; offset < claims.length; offset += 500) {
-        await transaction.insert(schema.jobResourceClaims).values(
-          claims.slice(offset, offset + 500).map((claim) => ({
-            jobId: row.id,
-            resourceType: claim.resourceType,
-            resourceKey: claim.resourceKey,
-            access: claim.access,
-            createdAt: timestamp
-          }))
-        );
-      }
-      await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp, level: "info", message: "Job queued", data: JSON.stringify({ type }) });
-      return row.id;
+      return jobIds;
     });
   }
 
@@ -2275,25 +2370,47 @@ export class JobRunner {
 
   async startScan(options: ScanOptions = defaultScanOptions): Promise<number> {
     const normalizedOptions = await normalizeScanOptions(this.db, options);
-    const targeted = Boolean(normalizedOptions.titleScopes?.length);
-    if (!targeted) return this.enqueueJob("scan", { options: normalizedOptions }, true, []);
     return this.enqueuePreparedJob("scan", async (transaction) => {
-      const scanLinks = filterScanLinks(await listMediaLinks(transaction, undefined, "current"), normalizedOptions);
-      const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-      if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
-      const availableScopes = new Set(scanLinks.map((link) => `${link.section}\0${link.itemName}`));
-      const unavailableScopes = (normalizedOptions.titleScopes ?? []).filter(
-        (scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`)
-      );
-      if (unavailableScopes.length > 0) {
-        throw new Error(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
+      if (isSectionScopedSymlinkScan(normalizedOptions)) {
+        await assertNoActiveSymlinkScanForSections(transaction, normalizedOptions.symlinkSections ?? []);
       }
-      return {
-        progress: { options: normalizedOptions },
-        options: normalizedOptions,
-        exclusive: false,
-        claims: await titleScanResourceClaims(normalizedOptions, scanLinks, paths)
-      };
+      return prepareScanJob(transaction, normalizedOptions);
+    });
+  }
+
+  async startScanJobs(options: ScanOptions, scheduling: SymlinkScanSchedulingMode): Promise<number[]> {
+    const normalizedOptions = await normalizeScanOptions(this.db, options);
+    const selectedSections = normalizedOptions.symlinkSections ?? [];
+    const shouldSplit =
+      scheduling === "per_folder" &&
+      normalizedOptions.scanSymlinks &&
+      !normalizedOptions.titleScopes?.length &&
+      selectedSections.length > 1;
+    if (!shouldSplit) return [await this.startScan(normalizedOptions)];
+
+    const folderJobs = selectedSections.map<ScanOptions>((section) => ({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: [section],
+      localSections: []
+    }));
+    const storageJob = normalizedOptions.scanLocal || normalizedOptions.scanRemote
+      ? [{
+          scanSymlinks: false,
+          scanLocal: normalizedOptions.scanLocal,
+          scanRemote: normalizedOptions.scanRemote,
+          symlinkSections: [],
+          localSections: normalizedOptions.localSections ?? []
+        } satisfies ScanOptions]
+      : [];
+    const splitJobs = [...folderJobs, ...storageJob];
+
+    return this.enqueuePreparedJobs("scan", async (transaction) => {
+      await assertNoActiveSymlinkScanForSections(transaction, selectedSections);
+      const prepared: PreparedJob[] = [];
+      for (const scanOptions of splitJobs) prepared.push(await prepareScanJob(transaction, scanOptions));
+      return prepared;
     });
   }
 

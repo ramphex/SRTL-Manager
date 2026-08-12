@@ -287,6 +287,61 @@ describe("job scheduler", () => {
     }
   });
 
+  it("admits and claims four per-folder symlink scans concurrently", async () => {
+    const sectionNames = ["movies", "shows", "movies4k", "shows4k"];
+    const timestamp = new Date().toISOString();
+    await setSetting(ctx.database.db, "sections", {
+      sections: sectionNames,
+      sectionTitles: {},
+      sectionTypes: { movies: "movies", shows: "shows", movies4k: "movies", shows4k: "shows" }
+    });
+    await ctx.database.db
+      .insert(schema.sections)
+      .values(
+        sectionNames.map((name) => ({
+          name,
+          displayName: null,
+          contentType: name.includes("shows") ? ("shows" as const) : ("movies" as const),
+          createdAt: timestamp,
+          updatedAt: timestamp
+        }))
+      )
+      .onConflictDoNothing();
+
+    const jobIds = await ctx.jobs.startScanJobs(
+      {
+        scanSymlinks: true,
+        scanLocal: false,
+        scanRemote: false,
+        symlinkSections: sectionNames,
+        localSections: []
+      },
+      "per_folder"
+    );
+    expect(jobIds).toHaveLength(4);
+
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "parallel-folder-scan-worker",
+      logger: silentLogger,
+      concurrency: {
+        workerCount: 4,
+        maxRunningJobs: 4,
+        maxRunningScans: 4,
+        maxRunningAudits: 4,
+        maxRunningCopies: 4,
+        copyFileConcurrency: 1,
+        maxActiveCopyFiles: 4
+      }
+    }) as unknown as { claimNextJob(): Promise<{ job: { id: number } } | null> };
+
+    const claimed = [];
+    for (let index = 0; index < jobIds.length; index += 1) claimed.push(await worker.claimNextJob());
+    expect(claimed.map((entry) => entry?.job.id)).toEqual(jobIds);
+    await expect(Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)))).resolves.toEqual(
+      jobIds.map(() => expect.objectContaining({ status: "running", exclusive: false, lockedBy: "parallel-folder-scan-worker" }))
+    );
+  });
+
   it("rejects copy destinations that are distinct lexically but share a physical directory", async () => {
     const firstLinkId = await insertCopySymlink("Physical Alias One", "first alias", path.join("Physical Alias One", "shared.mkv"));
     const secondLinkId = await insertCopySymlink("Physical Alias Two", "second alias", path.join("Physical Alias Two", "shared.mkv"));
@@ -974,7 +1029,7 @@ describe("job scheduler", () => {
         .from(schema.jobResourceClaims)
         .where(eq(schema.jobResourceClaims.jobId, jobId))
     );
-    expect(Number(claimCount?.value ?? 0)).toBeGreaterThanOrEqual(linkCount * 4);
-    expect(Number(claimCount?.value ?? 0)).toBeLessThanOrEqual(linkCount * 6);
+    expect(Number(claimCount?.value ?? 0)).toBeGreaterThanOrEqual(linkCount * 4 + 1);
+    expect(Number(claimCount?.value ?? 0)).toBeLessThanOrEqual(linkCount * 6 + 1);
   }, 60_000);
 });

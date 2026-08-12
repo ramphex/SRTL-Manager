@@ -8,7 +8,12 @@ import {
   persistStorageLocationNames,
   storageLocationNamesUpdateSchema
 } from "../lib/storageLocations";
-import { defaultAuditJobBehaviorSettings, defaultCopyJobBehaviorSettings, normalizeAdvancedSettings } from "../../shared/advancedSettings";
+import {
+  defaultAuditJobBehaviorSettings,
+  defaultCopyJobBehaviorSettings,
+  defaultScanJobBehaviorSettings,
+  normalizeAdvancedSettings
+} from "../../shared/advancedSettings";
 import type {
   AdvancedSettings,
   AuditSettings,
@@ -34,6 +39,11 @@ const auditSettingsSchema = z.object({
 });
 
 const advancedSettingsSchema = z.object({
+  scan: z
+    .object({
+      symlinkFolderScheduling: z.enum(["single_job", "per_folder"]).default("single_job")
+    })
+    .default(defaultScanJobBehaviorSettings),
   copy: z
     .object({
       profile: z.enum(["off", "fast", "balanced", "deep", "custom"]).default("balanced"),

@@ -121,6 +121,119 @@ describe("scanner", () => {
     });
   });
 
+  it("refreshes a scan root when a discovered symlink is replaced before target checking", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "shows", "Example Show", "Season 01");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+
+    const oldTarget = path.join(remoteDir, "episode-720p.mkv");
+    const newTarget = path.join(remoteDir, "episode-1080p.mkv");
+    const oldLink = path.join(titleDir, "episode-720p.mkv");
+    const newLink = path.join(titleDir, "episode-1080p.mkv");
+    await fs.writeFile(oldTarget, "old");
+    await fs.writeFile(newTarget, "new");
+    await fs.symlink(oldTarget, oldLink);
+    let replaced = false;
+
+    const result = await scanLibrary(
+      { symlinkDir, localDir, remoteDir },
+      { sections: ["shows"], sectionTypes: { shows: "shows" } },
+      new Map(),
+      { scanSymlinks: true, scanLocal: false, scanRemote: false },
+      undefined,
+      async (activity) => {
+        if (replaced || activity.phase !== "checking_symlinks") return;
+        replaced = true;
+        await fs.rm(oldLink);
+        await fs.symlink(newTarget, newLink);
+      }
+    );
+
+    expect(replaced).toBe(true);
+    expect(result.links).toEqual([
+      expect.objectContaining({
+        linkPath: newLink,
+        targetPath: newTarget,
+        kind: "remote",
+        targetExists: true
+      })
+    ]);
+    expect(result.inventory).toMatchObject({ totalLinks: 1, remoteLinks: 1, brokenLinks: 0 });
+  });
+
+  it("continues when a nested symlink directory disappears during discovery", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "movies", "Removed Movie");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    await fs.symlink(path.join(remoteDir, "movie.mkv"), path.join(titleDir, "movie.mkv"));
+
+    const realReaddir = fs.readdir.bind(fs);
+    let removed = false;
+    const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (directory: unknown, options: unknown) => {
+      if (!removed && String(directory) === titleDir) {
+        removed = true;
+        await fs.rm(titleDir, { recursive: true });
+      }
+      return realReaddir(directory as never, options as never);
+    }) as typeof fs.readdir);
+
+    try {
+      const result = await scanLibrary(
+        { symlinkDir, localDir, remoteDir },
+        { sections: ["movies"] },
+        new Map(),
+        { scanSymlinks: true, scanLocal: false, scanRemote: false }
+      );
+
+      expect(removed).toBe(true);
+      expect(result.links).toEqual([]);
+      expect(result.inventory.totalLinks).toBe(0);
+    } finally {
+      readdirSpy.mockRestore();
+    }
+  });
+
+  it("still fails a scan for non-transient symlink read errors", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "movies", "Unreadable Movie");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+
+    const targetPath = path.join(remoteDir, "movie.mkv");
+    const linkPath = path.join(titleDir, "movie.mkv");
+    await fs.writeFile(targetPath, "movie");
+    await fs.symlink(targetPath, linkPath);
+    const realReadlink = fs.readlink.bind(fs);
+    const readlinkSpy = vi.spyOn(fs, "readlink").mockImplementation((async (candidate: unknown, options?: unknown) => {
+      if (String(candidate) === linkPath) throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+      return realReadlink(candidate as never, options as never);
+    }) as typeof fs.readlink);
+
+    try {
+      await expect(
+        scanLibrary(
+          { symlinkDir, localDir, remoteDir },
+          { sections: ["movies"] },
+          new Map(),
+          { scanSymlinks: true, scanLocal: false, scanRemote: false }
+        )
+      ).rejects.toMatchObject({ code: "EACCES" });
+    } finally {
+      readlinkSpy.mockRestore();
+    }
+  });
+
   it("marks disappeared symlinks and storage files missing instead of deleting rows", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");
@@ -392,6 +505,73 @@ describe("scanner", () => {
       expect(await listMediaLinks(database.db, undefined, "missing")).toHaveLength(0);
       expect((await listStorageFiles(database.db, "local")).map((file) => file.filePath).sort()).toEqual([movieFile, showFile].sort());
       expect(await listStorageFiles(database.db, "local", false, "missing")).toHaveLength(0);
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("persists disjoint per-folder symlink scans concurrently without invalidating sibling sections", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const movieTarget = path.join(remoteDir, "movies", "Movie One", "movie.mkv");
+    const showTarget = path.join(remoteDir, "shows", "Show One", "show.mkv");
+    const movieLink = path.join(symlinkDir, "movies", "Movie One", "movie.mkv");
+    const showLink = path.join(symlinkDir, "shows", "Show One", "show.mkv");
+    await Promise.all([
+      fs.mkdir(path.dirname(movieTarget), { recursive: true }),
+      fs.mkdir(path.dirname(showTarget), { recursive: true }),
+      fs.mkdir(path.dirname(movieLink), { recursive: true }),
+      fs.mkdir(path.dirname(showLink), { recursive: true }),
+      fs.mkdir(localDir, { recursive: true })
+    ]);
+    await Promise.all([fs.writeFile(movieTarget, "movie"), fs.writeFile(showTarget, "show")]);
+    await Promise.all([fs.symlink(movieTarget, movieLink), fs.symlink(showTarget, showLink)]);
+
+    const settings = {
+      sections: ["movies", "shows"],
+      sectionTypes: { movies: "movies" as const, shows: "shows" as const }
+    };
+    const policies = new Map([
+      ["movie one", "location_1" as const],
+      ["show one", "location_2" as const]
+    ]);
+    const database = await openTestDatabase();
+    try {
+      const initial = await scanLibrary(
+        { symlinkDir, localDir, remoteDir },
+        settings,
+        policies,
+        { scanSymlinks: true, scanLocal: false, scanRemote: true }
+      );
+      await persistScanResult(database.db, initial, 1);
+
+      const [movieScan, showScan] = await Promise.all(
+        ["movies", "shows"].map((section) =>
+          scanLibrary(
+            { symlinkDir, localDir, remoteDir },
+            settings,
+            policies,
+            { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: [section] }
+          )
+        )
+      );
+      await Promise.all([persistScanResult(database.db, movieScan, 2), persistScanResult(database.db, showScan, 3)]);
+
+      const links = await listMediaLinks(database.db);
+      expect(links.map((link) => [link.linkPath, link.missingSince, link.resolvedStorageFileId == null]).sort()).toEqual(
+        [
+          [movieLink, null, false],
+          [showLink, null, false]
+        ].sort()
+      );
+      expect((await listStorageFiles(database.db, "remote")).map((file) => [file.filePath, file.storagePolicy]).sort()).toEqual(
+        [
+          [movieTarget, "location_1"],
+          [showTarget, "location_2"]
+        ].sort()
+      );
+      expect(await listMediaLinks(database.db, undefined, "missing")).toHaveLength(0);
     } finally {
       await database.close();
     }

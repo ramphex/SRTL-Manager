@@ -100,6 +100,8 @@ export const defaultScanOptions: ScanOptions = {
   scanRemote: false
 };
 
+const maxSymlinkDiscoveryPasses = 2;
+
 function storagePolicyForTitle(storagePolicies: StoragePolicyLookup, title: string): StoragePolicyKind {
   const titleKey = canonicalTitleKey(title);
   return storagePolicies.get(titleKey) ?? "unassigned";
@@ -193,6 +195,24 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function isMissingPathError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+async function symlinkChangedSinceDiscovery(linkPath: string, error: unknown): Promise<boolean> {
+  if (isMissingPathError(error)) return true;
+  if ((error as NodeJS.ErrnoException | null)?.code !== "EINVAL") return false;
+
+  try {
+    const stat = await withFilesystemTimeout(fs.lstat(linkPath), `Rechecking changed symlink ${linkPath}`);
+    return !stat.isSymbolicLink();
+  } catch (inspectionError) {
+    if (isMissingPathError(inspectionError)) return true;
+    throw inspectionError;
+  }
+}
+
 type ScanCancellationCheck = () => Promise<boolean>;
 
 async function throwIfScanCancelled(isCancelled?: ScanCancellationCheck): Promise<void> {
@@ -202,25 +222,31 @@ async function throwIfScanCancelled(isCancelled?: ScanCancellationCheck): Promis
 async function walkSymlinks(
   root: string,
   isCancelled?: ScanCancellationCheck,
-  onSymlinkDiscovered?: () => Promise<void> | undefined
+  onSymlinkDiscovered?: (linkPath: string) => Promise<void> | undefined
 ): Promise<string[]> {
   const links: string[] = [];
-  async function walk(dir: string): Promise<void> {
+  async function walk(dir: string, required: boolean): Promise<void> {
     await throwIfScanCancelled(isCancelled);
-    const entries: Dirent[] = await withFilesystemTimeout(fs.readdir(dir, { withFileTypes: true }), `Reading symlink directory ${dir}`);
+    let entries: Dirent[];
+    try {
+      entries = await withFilesystemTimeout(fs.readdir(dir, { withFileTypes: true }), `Reading symlink directory ${dir}`);
+    } catch (error) {
+      if (!required && isMissingPathError(error)) return;
+      throw error;
+    }
     for (const entry of entries) {
       await throwIfScanCancelled(isCancelled);
       const fullPath = path.join(dir, entry.name);
       if (entry.isSymbolicLink()) {
         links.push(fullPath);
-        const progressUpdate = onSymlinkDiscovered?.();
+        const progressUpdate = onSymlinkDiscovered?.(fullPath);
         if (progressUpdate) await progressUpdate;
       } else if (entry.isDirectory()) {
-        await walk(fullPath);
+        await walk(fullPath, false);
       }
     }
   }
-  await walk(root);
+  await walk(root, true);
   return links;
 }
 
@@ -467,25 +493,44 @@ export async function scanLibrary(
         }
         const startingUpdate = reportSymlinkActivity("discovering_symlinks", section, `Discovering symlinks in ${scanLabel}`, true);
         if (startingUpdate) await startingUpdate;
-        const symlinks = await walkSymlinks(scanRoot, isCancelled, () => {
-          discoveredLinks += 1;
-          if (!shouldReportSymlinkActivity()) return undefined;
-          return reportSymlinkActivity("discovering_symlinks", section, `Found ${discoveredLinks.toLocaleString()} symlinks while reading ${scanLabel}`, true);
-        });
-        const checkingUpdate = reportSymlinkActivity("checking_symlinks", section, `Checking symlink targets in ${scanLabel}`, true);
-        if (checkingUpdate) await checkingUpdate;
-        for (const linkPath of symlinks) {
-          await throwIfScanCancelled(isCancelled);
-          links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection)));
-          checkedLinks += 1;
-          if (!shouldReportSymlinkActivity()) continue;
-          const progressUpdate = reportSymlinkActivity(
-            "checking_symlinks",
-            section,
-            `Checked ${checkedLinks.toLocaleString()} of ${discoveredLinks.toLocaleString()} discovered symlinks`,
-            true
-          );
-          if (progressUpdate) await progressUpdate;
+        const discoveredInRoot = new Set<string>();
+        const checkedInRoot = new Set<string>();
+        for (let discoveryPass = 0; discoveryPass < maxSymlinkDiscoveryPasses; discoveryPass += 1) {
+          let refreshNeeded = false;
+          const symlinks = await walkSymlinks(scanRoot, isCancelled, (linkPath) => {
+            if (discoveredInRoot.has(linkPath)) return undefined;
+            discoveredInRoot.add(linkPath);
+            discoveredLinks += 1;
+            if (!shouldReportSymlinkActivity()) return undefined;
+            return reportSymlinkActivity("discovering_symlinks", section, `Found ${discoveredLinks.toLocaleString()} symlinks while reading ${scanLabel}`, true);
+          });
+          const checkingUpdate = reportSymlinkActivity("checking_symlinks", section, `Checking symlink targets in ${scanLabel}`, true);
+          if (checkingUpdate) await checkingUpdate;
+          for (const linkPath of symlinks) {
+            if (checkedInRoot.has(linkPath)) continue;
+            await throwIfScanCancelled(isCancelled);
+            try {
+              links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection)));
+            } catch (error) {
+              if (!(await symlinkChangedSinceDiscovery(linkPath, error))) throw error;
+              if (discoveredInRoot.delete(linkPath)) discoveredLinks = Math.max(0, discoveredLinks - 1);
+              refreshNeeded = true;
+              continue;
+            }
+            checkedInRoot.add(linkPath);
+            checkedLinks += 1;
+            if (!shouldReportSymlinkActivity()) continue;
+            const progressUpdate = reportSymlinkActivity(
+              "checking_symlinks",
+              section,
+              `Checked ${checkedLinks.toLocaleString()} of ${discoveredLinks.toLocaleString()} discovered symlinks`,
+              true
+            );
+            if (progressUpdate) await progressUpdate;
+          }
+          if (!refreshNeeded || discoveryPass + 1 >= maxSymlinkDiscoveryPasses) break;
+          const refreshUpdate = reportSymlinkActivity("discovering_symlinks", section, `Refreshing ${scanLabel} after symlinks changed during the scan`, true);
+          if (refreshUpdate) await refreshUpdate;
         }
         completedWorkUnits += 1;
         const completedUpdate = reportSymlinkActivity("checking_symlinks", section, `Finished checking ${scanLabel}`, true);
@@ -717,6 +762,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     ? new Set(result.options.titleScopes.map((scope) => scanTitleScopeKey(scope.section, scope.itemName)))
     : null;
   const scannedLocalSections = scopedSectionSet(result.options.localSections ?? result.options.sections);
+  const affectedStorageFilePolicyIds = new Set<number>();
   let missingLinks = 0;
   let missingLocalFiles = 0;
   let missingRemoteFiles = 0;
@@ -767,6 +813,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       await throwIfPersistenceCancelled(isCancelled);
       const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
       const existing = existingMediaLinkByPath.get(link.linkPath);
+      if (existing?.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(existing.resolvedStorageFileId);
+      if (resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(resolvedStorageFileId);
       const firstSeenAt = existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp;
       const lastChangedAt = linkChanged(existing, link, resolvedStorageFileId) ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp;
       const values = {
@@ -802,6 +850,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       const scannedLinkScope = scannedSymlinkTitles
         ? scannedSymlinkTitles.has(scanTitleScopeKey(link.section, link.itemName))
         : !scannedSymlinkSections || scannedSymlinkSections.has(link.section);
+      if (scannedLinkScope && link.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(link.resolvedStorageFileId);
       if (!link.missingSince && scannedLinkScope && !seenLinkPaths.has(link.linkPath)) {
         await db.update(schema.mediaLinks).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
         missingLinks += 1;
@@ -820,11 +869,22 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     }
   }
 
-  await reconcileResolvedStorageFiles(db, timestamp, result.options.titleScopes?.length ? seenLinkPaths : undefined);
+  const symlinkOnlyReconciliation = result.options.scanSymlinks && !result.options.scanLocal && !result.options.scanRemote;
+  await reconcileResolvedStorageFiles(
+    db,
+    timestamp,
+    symlinkOnlyReconciliation
+      ? result.options.titleScopes?.length
+        ? { linkPaths: seenLinkPaths }
+        : scannedSymlinkSections
+          ? { sections: scannedSymlinkSections }
+          : undefined
+      : undefined
+  );
   await throwIfPersistenceCancelled(isCancelled);
   await applyPendingOnboardingPolicy(db, jobId);
   await throwIfPersistenceCancelled(isCancelled);
-  await reconcileStorageFilePolicies(db, timestamp);
+  await reconcileStorageFilePolicies(db, timestamp, symlinkOnlyReconciliation ? [...affectedStorageFilePolicyIds] : undefined);
   await throwIfPersistenceCancelled(isCancelled);
 
   const scannedLinks = (await db.select().from(schema.mediaLinks)).filter((link) => seenLinkPaths.has(link.linkPath) && !link.missingSince);
@@ -887,11 +947,16 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   };
 }
 
-async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scopedLinkPaths?: ReadonlySet<string>): Promise<void> {
+interface ResolvedStorageFileScope {
+  linkPaths?: ReadonlySet<string>;
+  sections?: ReadonlySet<string>;
+}
+
+async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scope?: ResolvedStorageFileScope): Promise<void> {
   const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
   const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
   for (const link of await db.select().from(schema.mediaLinks)) {
-    if (link.missingSince || (scopedLinkPaths && !scopedLinkPaths.has(link.linkPath))) continue;
+    if (link.missingSince || (scope?.linkPaths && !scope.linkPaths.has(link.linkPath)) || (scope?.sections && !scope.sections.has(link.section))) continue;
     const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
     if (link.resolvedStorageFileId !== resolvedStorageFileId) {
       await db.update(schema.mediaLinks).set({ resolvedStorageFileId, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));

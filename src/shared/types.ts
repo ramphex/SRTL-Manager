@@ -209,9 +209,21 @@ export interface AuditJobBehaviorSettings {
   byteCompareWhenSourceKnown: boolean;
 }
 
+export type SymlinkScanSchedulingMode = "single_job" | "per_folder";
+
+export interface ScanJobBehaviorSettings {
+  symlinkFolderScheduling: SymlinkScanSchedulingMode;
+}
+
 export interface AdvancedSettings {
+  scan: ScanJobBehaviorSettings;
   copy: CopyJobBehaviorSettings;
   audit: AuditJobBehaviorSettings;
+}
+
+export interface ScanStartResult {
+  jobId: number;
+  jobIds: number[];
 }
 
 export interface InventoryScanTimestamps {

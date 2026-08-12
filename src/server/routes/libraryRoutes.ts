@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { desc, eq, inArray } from "drizzle-orm";
-import { first, type Db } from "../db/database";
+import { first, getJsonSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
@@ -15,6 +15,7 @@ import {
   setStoragePolicyTitles
 } from "../lib/storagePolicies";
 import { getInventoryScanTimestamps, getInventorySummary, listMediaLinks, listMediaLinksByIds, listMediaLinksPage, listMediaLinkTree, listSectionSummaries, listStorageFileTree, listStorageFiles } from "../lib/scanner";
+import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import type { InventorySummary, JobStatus, LinkKind, MediaLinkTreeKindFilter, ScanOptions, ScanRunRecord, StoragePolicyKind, StorageRootType } from "../../shared/types";
 
 const scanOptionsSchema = z
@@ -167,7 +168,11 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
   app.post("/api/scans", async (request, reply) => {
     const options = scanOptionsSchema.parse(request.body ?? undefined);
     try {
-      return { jobId: await jobs.startScan(options) };
+      const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(db, "advancedSettings", {}));
+      const jobIds = await jobs.startScanJobs(options, advancedSettings.scan.symlinkFolderScheduling);
+      const jobId = jobIds[0];
+      if (!jobId) throw new Error("No scan jobs were queued");
+      return { jobId, jobIds };
     } catch (error: unknown) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }

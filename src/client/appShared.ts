@@ -39,6 +39,13 @@ export type ScanStatusPrompt = {
   jobId: number;
 };
 
+export type ScanBatchStatusPrompt = {
+  key: string;
+  title: string;
+  description: string;
+  jobIds: number[];
+};
+
 export type AuditStatusPrompt = {
   key: string;
   title: string;

@@ -4,6 +4,21 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.3-beta.1] - 2026-08-12
+
+### Added
+
+- Added a persisted inventory setting that can queue selected symlink folders as independent jobs, allowing disjoint folders to scan concurrently up to the configured scan-job capacity.
+
+### Fixed
+
+- Kept symlink scans running when external library tools remove or replace links during discovery, with one bounded refresh pass to capture replacements without hiding genuine filesystem errors.
+- Scoped symlink-only folder scans by library section so they can run with work in unrelated sections while still waiting behind overlapping copies, rescans, and audits.
+
+### Security
+
+- Updated the transitive `nanoid` dependency to its patched release.
+
 ## [0.1.2] - 2026-08-04
 
 ### Added
