@@ -914,7 +914,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.3-beta.1",
+      currentVersion: "0.1.3-beta.2",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: null,
@@ -981,7 +981,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.3-beta.1",
+      currentVersion: "0.1.3-beta.2",
       currentChannel: "beta",
       currentChannelLabel: "Beta",
       latestVersion: "0.2.0-beta.1",
