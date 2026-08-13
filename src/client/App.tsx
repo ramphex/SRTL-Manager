@@ -717,9 +717,7 @@ export function TerminateJobDialog({
   );
 }
 
-function LoginGate() {
-  const queryClient = useQueryClient();
-  const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+function useOnlineStatus(): boolean {
   const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
   useEffect(() => {
     const handleOnline = () => setOnline(true);
@@ -731,13 +729,22 @@ function LoginGate() {
       window.removeEventListener("offline", handleOffline);
     };
   }, []);
-  if (me.isPending && !online) {
-    return (
-      <AuthShell title="Offline" icon={<TriangleAlert size={22} />}>
-        <p className="error">Reconnect to verify your session. Jobs already running on the server will continue.</p>
-      </AuthShell>
-    );
-  }
+  return online;
+}
+
+function OfflineSessionGate() {
+  return (
+    <AuthShell title="Offline" icon={<TriangleAlert size={22} />}>
+      <p className="error">Reconnect to verify your session. Jobs already running on the server will continue.</p>
+    </AuthShell>
+  );
+}
+
+function LoginGate() {
+  const queryClient = useQueryClient();
+  const me = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const online = useOnlineStatus();
+  if (!online && !me.data) return <OfflineSessionGate />;
   if (me.isPending) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
   if (me.error) {
     return (
@@ -758,6 +765,7 @@ function LoginGate() {
 }
 
 function AuthenticatedApp() {
+  const online = useOnlineStatus();
   const pathConfiguration = useQuery({
     queryKey: ["path-configuration"],
     queryFn: api.pathConfiguration,
@@ -769,6 +777,8 @@ function AuthenticatedApp() {
     enabled: Boolean(pathConfiguration.data && !pathConfiguration.data.blocking),
     refetchInterval: (query) => (query.state.data?.phase === "queued" || query.state.data?.phase === "scanning" ? 1000 : false)
   });
+  const awaitingAuthenticatedState = !pathConfiguration.data || (!pathConfiguration.data.blocking && !onboarding.data);
+  if (!online && awaitingAuthenticatedState) return <OfflineSessionGate />;
   if (pathConfiguration.isLoading) return <AuthShell title="Checking storage paths" icon={<HardDrive size={22} />} />;
   if (pathConfiguration.error) {
     return (

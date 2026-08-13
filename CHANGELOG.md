@@ -21,6 +21,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Fixed
 
 - Prevented mobile dashboard tooltips, controls, and long labels from overflowing or being hidden behind persistent navigation.
+- Prevented authenticated offline startup from stalling on setup checks before the reconnect screen can render.
 - Prevented selected-title disclosures from reopening after dismissal and removed invalid nested interactive markup from job log entries.
 - Scoped concurrent inventory reconciliation by storage root, media kind, and local section so one scan job cannot mark another job's files missing or rewrite unrelated storage policy state.
 - Added durable inventory-scope claims so overlapping scans, copies, and audits remain serialized while disjoint symlink, local, and remote inventory jobs can run concurrently.

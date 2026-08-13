@@ -50,6 +50,21 @@ test("cold offline launch does not misrepresent the session as signed out", asyn
   await page.addInitScript(() => {
     Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get: () => false });
   });
+  await page.route("**/api/**", async (route) => route.abort("internetdisconnected"));
+  await page.route("**/api/system/path-migration", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null })
+    });
+  });
+  await page.route("**/api/auth/me", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } })
+    });
+  });
 
   await page.goto(baseUrl!);
   await expect(page.locator(".auth-header .brand h1")).toHaveText("Offline");
