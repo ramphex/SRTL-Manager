@@ -777,13 +777,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     const persistedFile: ClassifiedStorageFile = { ...file, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
     const firstSeenAt = existing?.firstSeenAt ?? timestamp;
     const lastChangedAt = storageFileChanged(existing, persistedFile) ? timestamp : existing?.lastChangedAt ?? timestamp;
-    await db
+    const persisted = await db
       .insert(schema.storageFiles)
       .values({ ...persistedFile, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
       .onConflictDoUpdate({
         target: schema.storageFiles.filePath,
         set: { ...persistedFile, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
-      });
+      })
+      .returning({ id: schema.storageFiles.id });
+    if (persisted[0]) affectedStorageFilePolicyIds.add(persisted[0].id);
   }
 
   for (const file of existingStorageFiles) {
@@ -798,6 +800,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       !isInsideUnscannedStorageDirectory(file, result.storageScanIssues)
     ) {
       await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
+      affectedStorageFilePolicyIds.add(file.id);
       if (file.rootType === "local") missingLocalFiles += 1;
       if (file.rootType === "remote") missingRemoteFiles += 1;
     }
@@ -870,6 +873,10 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   }
 
   const symlinkOnlyReconciliation = result.options.scanSymlinks && !result.options.scanLocal && !result.options.scanRemote;
+  const scannedStorageKinds = new Set<LinkKind>([
+    ...(result.options.scanLocal ? (["local"] as const) : []),
+    ...(result.options.scanRemote ? (["remote"] as const) : [])
+  ]);
   await reconcileResolvedStorageFiles(
     db,
     timestamp,
@@ -879,12 +886,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         : scannedSymlinkSections
           ? { sections: scannedSymlinkSections }
           : undefined
-      : undefined
+      : {
+          ...(result.options.scanLocal && !result.options.scanRemote && scannedLocalSections ? { sections: scannedLocalSections } : {}),
+          ...(scannedStorageKinds.size > 0 ? { kinds: scannedStorageKinds } : {})
+        }
   );
   await throwIfPersistenceCancelled(isCancelled);
   await applyPendingOnboardingPolicy(db, jobId);
   await throwIfPersistenceCancelled(isCancelled);
-  await reconcileStorageFilePolicies(db, timestamp, symlinkOnlyReconciliation ? [...affectedStorageFilePolicyIds] : undefined);
+  await reconcileStorageFilePolicies(db, timestamp, [...affectedStorageFilePolicyIds]);
   await throwIfPersistenceCancelled(isCancelled);
 
   const scannedLinks = (await db.select().from(schema.mediaLinks)).filter((link) => seenLinkPaths.has(link.linkPath) && !link.missingSince);
@@ -950,13 +960,19 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
 interface ResolvedStorageFileScope {
   linkPaths?: ReadonlySet<string>;
   sections?: ReadonlySet<string>;
+  kinds?: ReadonlySet<LinkKind>;
 }
 
 async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scope?: ResolvedStorageFileScope): Promise<void> {
   const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
   const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
   for (const link of await db.select().from(schema.mediaLinks)) {
-    if (link.missingSince || (scope?.linkPaths && !scope.linkPaths.has(link.linkPath)) || (scope?.sections && !scope.sections.has(link.section))) continue;
+    if (
+      link.missingSince ||
+      (scope?.linkPaths && !scope.linkPaths.has(link.linkPath)) ||
+      (scope?.sections && !scope.sections.has(link.section)) ||
+      (scope?.kinds && !scope.kinds.has(link.kind as LinkKind))
+    ) continue;
     const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
     if (link.resolvedStorageFileId !== resolvedStorageFileId) {
       await db.update(schema.mediaLinks).set({ resolvedStorageFileId, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));

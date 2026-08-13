@@ -342,6 +342,57 @@ describe("job scheduler", () => {
     );
   });
 
+  it("admits remote, symlink, and local scan scopes concurrently", async () => {
+    const jobIds = await ctx.jobs.startScanJobs(
+      {
+        scanSymlinks: true,
+        scanLocal: true,
+        scanRemote: true,
+        symlinkSections: ["movies"],
+        localSections: ["movies"]
+      },
+      "per_folder"
+    );
+    expect(jobIds).toHaveLength(3);
+
+    const worker = new JobWorker(ctx.database.db, {
+      workerId: "parallel-mixed-scan-worker",
+      logger: silentLogger,
+      concurrency: {
+        workerCount: 3,
+        maxRunningJobs: 3,
+        maxRunningScans: 3,
+        maxRunningAudits: 3,
+        maxRunningCopies: 3,
+        copyFileConcurrency: 1,
+        maxActiveCopyFiles: 3
+      }
+    }) as unknown as { claimNextJob(): Promise<{ job: { id: number } } | null> };
+
+    const claimed = await Promise.all([worker.claimNextJob(), worker.claimNextJob(), worker.claimNextJob()]);
+    expect(claimed.map((entry) => entry?.job.id).sort((left, right) => Number(left) - Number(right))).toEqual(jobIds);
+    await expect(Promise.all(jobIds.map((jobId) => ctx.jobs.getJob(jobId)))).resolves.toEqual(
+      jobIds.map(() => expect.objectContaining({ status: "running", exclusive: false, lockedBy: "parallel-mixed-scan-worker" }))
+    );
+  });
+
+  it("blocks a copy from entering storage scopes held by queued scans", async () => {
+    const linkId = await insertCopySymlink("Scan Claim Copy", "scan claim copy");
+    const scanJobIds = await ctx.jobs.startScanJobs(
+      {
+        scanSymlinks: false,
+        scanLocal: true,
+        scanRemote: true,
+        symlinkSections: [],
+        localSections: ["movies"]
+      },
+      "per_folder"
+    );
+    expect(scanJobIds).toHaveLength(2);
+
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [linkId] })).rejects.toThrow("already queued");
+  });
+
   it("rejects copy destinations that are distinct lexically but share a physical directory", async () => {
     const firstLinkId = await insertCopySymlink("Physical Alias One", "first alias", path.join("Physical Alias One", "shared.mkv"));
     const secondLinkId = await insertCopySymlink("Physical Alias Two", "second alias", path.join("Physical Alias Two", "shared.mkv"));
@@ -665,7 +716,7 @@ describe("job scheduler", () => {
     expect(await ctx.database.db.select({ jobId: schema.jobResourceClaims.jobId }).from(schema.jobResourceClaims)).toEqual([]);
   });
 
-  it("leaves exclusive scans and audits queued when their per-type limits are zero", async () => {
+  it("leaves root-scoped scans and exclusive audits queued when their per-type limits are zero", async () => {
     const scanJobId = await ctx.jobs.startScan({
       scanSymlinks: false,
       scanLocal: false,
@@ -690,7 +741,7 @@ describe("job scheduler", () => {
 
     expect(await worker.runOnce()).toBe(false);
     await expect(Promise.all([ctx.jobs.getJob(scanJobId), ctx.jobs.getJob(auditJobId)])).resolves.toEqual([
-      expect.objectContaining({ status: "queued", exclusive: true, startedAt: null, leaseVersion: 0 }),
+      expect.objectContaining({ status: "queued", exclusive: false, startedAt: null, leaseVersion: 0 }),
       expect.objectContaining({ status: "queued", exclusive: true, startedAt: null, leaseVersion: 0 })
     ]);
   });
@@ -1030,6 +1081,6 @@ describe("job scheduler", () => {
         .where(eq(schema.jobResourceClaims.jobId, jobId))
     );
     expect(Number(claimCount?.value ?? 0)).toBeGreaterThanOrEqual(linkCount * 4 + 1);
-    expect(Number(claimCount?.value ?? 0)).toBeLessThanOrEqual(linkCount * 6 + 1);
+    expect(Number(claimCount?.value ?? 0)).toBeLessThanOrEqual(linkCount * 6 + 2);
   }, 60_000);
 });

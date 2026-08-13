@@ -556,6 +556,30 @@ function sectionResourceClaims(sections: Iterable<string>, access: ResourceClaim
   }));
 }
 
+function inventoryScopeResourceClaims(
+  rootType: "local" | "remote",
+  sections: Iterable<string>,
+  access: ResourceClaimAccess
+): ResourceClaim[] {
+  if (rootType === "remote") {
+    return [{ resourceType: "inventory_scope", resourceKey: JSON.stringify(["remote", "*"]), access }];
+  }
+  return [...new Set([...sections].map((section) => section.trim()).filter(Boolean))].map((section) => ({
+    resourceType: "inventory_scope",
+    resourceKey: JSON.stringify(["local", section]),
+    access
+  }));
+}
+
+function mediaInventoryScopeResourceClaims(links: MediaLinkRow[], access: ResourceClaimAccess): ResourceClaim[] {
+  const localSections = links.filter((link) => link.kind === "local").map((link) => link.section);
+  const hasRemoteLinks = links.some((link) => link.kind === "remote");
+  return [
+    ...inventoryScopeResourceClaims("local", localSections, access),
+    ...(hasRemoteLinks ? inventoryScopeResourceClaims("remote", [], access) : [])
+  ];
+}
+
 async function managedPathResourceClaims(
   root: string | null,
   candidate: string,
@@ -619,6 +643,7 @@ async function auditResourceClaims(links: MediaLinkRow[], paths: PathsSettings):
       links.map((link) => link.section),
       "shared"
     ),
+    ...mediaInventoryScopeResourceClaims(links, "shared"),
     ...(await batchedMediaLinkResourceClaims(links, paths, "shared"))
   ]);
 }
@@ -755,6 +780,12 @@ async function copyResourceClaims(workLinks: MediaLinkRow[], claimedLinks: Media
       [...workLinks, ...claimedLinks].map((link) => link.section),
       "shared"
     ),
+    ...inventoryScopeResourceClaims(
+      "local",
+      [...workLinks, ...claimedLinks].map((link) => link.section),
+      "shared"
+    ),
+    ...inventoryScopeResourceClaims("remote", [], "shared"),
     ...(await batchedMediaLinkResourceClaims(claimedLinks, paths, "exclusive"))
   ];
   for (let offset = 0; offset < eligibleLinks.length; offset += 16) {
@@ -2038,17 +2069,44 @@ function isSectionScopedSymlinkScan(options: ScanOptions): boolean {
   return options.scanSymlinks === true && options.scanLocal !== true && options.scanRemote !== true && Boolean(options.symlinkSections?.length) && !options.titleScopes?.length;
 }
 
+function isSectionScopedLocalScan(options: ScanOptions): boolean {
+  return options.scanSymlinks !== true && options.scanLocal === true && options.scanRemote !== true && options.localSections?.length === 1;
+}
+
+function isRootScopedRemoteScan(options: ScanOptions): boolean {
+  return options.scanSymlinks !== true && options.scanLocal !== true && options.scanRemote === true;
+}
+
+function storageScanResourceClaims(options: ScanOptions, access: ResourceClaimAccess): ResourceClaim[] {
+  return [
+    ...(options.scanLocal ? inventoryScopeResourceClaims("local", options.localSections ?? [], access) : []),
+    ...(options.scanRemote ? inventoryScopeResourceClaims("remote", [], access) : [])
+  ];
+}
+
 async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions): Promise<PreparedJob> {
   const targeted = Boolean(normalizedOptions.titleScopes?.length);
-  if (!targeted && !isSectionScopedSymlinkScan(normalizedOptions)) {
+  const sectionScopedSymlink = isSectionScopedSymlinkScan(normalizedOptions);
+  const sectionScopedLocal = isSectionScopedLocalScan(normalizedOptions);
+  const rootScopedRemote = isRootScopedRemoteScan(normalizedOptions);
+  if (!targeted && !sectionScopedSymlink && !sectionScopedLocal && !rootScopedRemote) {
     return { progress: { options: normalizedOptions }, options: normalizedOptions, exclusive: true, claims: [] };
+  }
+  if (!targeted && sectionScopedSymlink) {
+    return {
+      progress: { options: normalizedOptions },
+      options: normalizedOptions,
+      exclusive: false,
+      claims: sectionResourceClaims(normalizedOptions.symlinkSections ?? [], "exclusive"),
+      queueBehindClaimConflicts: true
+    };
   }
   if (!targeted) {
     return {
       progress: { options: normalizedOptions },
       options: normalizedOptions,
       exclusive: false,
-      claims: sectionResourceClaims(normalizedOptions.symlinkSections ?? [], "exclusive"),
+      claims: storageScanResourceClaims(normalizedOptions, "exclusive"),
       queueBehindClaimConflicts: true
     };
   }
@@ -2089,6 +2147,30 @@ async function assertNoActiveSymlinkScanForSections(db: DbExecutor, sections: st
   `);
   if (!conflict) return;
   throw new Error(`Symlink folder "${conflict.section}" already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
+}
+
+async function assertNoActiveStorageScanForClaims(db: DbExecutor, claims: ResourceClaim[]): Promise<void> {
+  const storageClaims = claims.filter((claim) => claim.resourceType === "inventory_scope");
+  if (storageClaims.length === 0) return;
+  const conflict = await dbGet<{ jobId: number; resourceKey: string; status: string }>(db, sql`
+    WITH requested_claims AS (
+      SELECT value::text AS resource_key
+      FROM jsonb_array_elements_text(${JSON.stringify(storageClaims.map((claim) => claim.resourceKey))}::jsonb)
+    )
+    SELECT jobs.id AS "jobId", claims.resource_key AS "resourceKey", jobs.status
+    FROM job_resource_claims AS claims
+    JOIN jobs ON jobs.id = claims.job_id
+    JOIN requested_claims AS requested ON requested.resource_key = claims.resource_key
+    WHERE jobs.type = 'scan'
+      AND jobs.status IN ('queued', 'running')
+      AND claims.resource_type = 'inventory_scope'
+    ORDER BY jobs.id
+    LIMIT 1
+  `);
+  if (!conflict) return;
+  const [rootType, section] = JSON.parse(conflict.resourceKey) as ["local" | "remote", string];
+  const label = rootType === "remote" ? "Remote storage root" : `Local folder "${section}"`;
+  throw new Error(`${label} already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
 }
 
 export class JobRunner {
@@ -2374,40 +2456,34 @@ export class JobRunner {
       if (isSectionScopedSymlinkScan(normalizedOptions)) {
         await assertNoActiveSymlinkScanForSections(transaction, normalizedOptions.symlinkSections ?? []);
       }
+      await assertNoActiveStorageScanForClaims(transaction, storageScanResourceClaims(normalizedOptions, "exclusive"));
       return prepareScanJob(transaction, normalizedOptions);
     });
   }
 
   async startScanJobs(options: ScanOptions, scheduling: SymlinkScanSchedulingMode): Promise<number[]> {
     const normalizedOptions = await normalizeScanOptions(this.db, options);
-    const selectedSections = normalizedOptions.symlinkSections ?? [];
-    const shouldSplit =
-      scheduling === "per_folder" &&
-      normalizedOptions.scanSymlinks &&
-      !normalizedOptions.titleScopes?.length &&
-      selectedSections.length > 1;
-    if (!shouldSplit) return [await this.startScan(normalizedOptions)];
+    if (scheduling !== "per_folder" || normalizedOptions.titleScopes?.length) return [await this.startScan(normalizedOptions)];
 
-    const folderJobs = selectedSections.map<ScanOptions>((section) => ({
-      scanSymlinks: true,
-      scanLocal: false,
-      scanRemote: false,
-      symlinkSections: [section],
-      localSections: []
-    }));
-    const storageJob = normalizedOptions.scanLocal || normalizedOptions.scanRemote
-      ? [{
-          scanSymlinks: false,
-          scanLocal: normalizedOptions.scanLocal,
-          scanRemote: normalizedOptions.scanRemote,
-          symlinkSections: [],
-          localSections: normalizedOptions.localSections ?? []
-        } satisfies ScanOptions]
+    const selectedSymlinkSections = normalizedOptions.scanSymlinks ? normalizedOptions.symlinkSections ?? [] : [];
+    const selectedLocalSections = normalizedOptions.scanLocal ? normalizedOptions.localSections ?? [] : [];
+    const orderedSections = [...new Set([...selectedSymlinkSections, ...selectedLocalSections])];
+    const splitJobs: ScanOptions[] = normalizedOptions.scanRemote
+      ? [{ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] }]
       : [];
-    const splitJobs = [...folderJobs, ...storageJob];
+    for (const section of orderedSections) {
+      if (selectedSymlinkSections.includes(section)) {
+        splitJobs.push({ scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: [section], localSections: [] });
+      }
+      if (selectedLocalSections.includes(section)) {
+        splitJobs.push({ scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: [section] });
+      }
+    }
+    if (splitJobs.length <= 1) return [await this.startScan(normalizedOptions)];
 
     return this.enqueuePreparedJobs("scan", async (transaction) => {
-      await assertNoActiveSymlinkScanForSections(transaction, selectedSections);
+      await assertNoActiveSymlinkScanForSections(transaction, selectedSymlinkSections);
+      await assertNoActiveStorageScanForClaims(transaction, storageScanResourceClaims(normalizedOptions, "exclusive"));
       const prepared: PreparedJob[] = [];
       for (const scanOptions of splitJobs) prepared.push(await prepareScanJob(transaction, scanOptions));
       return prepared;

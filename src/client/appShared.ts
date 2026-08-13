@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { FolderCog, Gauge, ListChecks, Monitor, Moon, Search, Sun, UserCog } from "lucide-react";
 import { api } from "./api";
@@ -188,6 +188,85 @@ export function useStorageLocations() {
   return useContext(StorageLocationsContext);
 }
 
+const modalFocusableSelector = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "summary",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])'
+].join(",");
+
+export function useModalLifecycle(open: boolean, onClose: () => void) {
+  const dialogRef = useRef<HTMLElement>(null);
+  const onCloseRef = useRef(onClose);
+
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const dialog = dialogRef.current;
+    if (!dialog) return undefined;
+
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+
+    const isTopmostDialog = () => {
+      const dialogs = [...document.querySelectorAll<HTMLElement>('[role="dialog"][aria-modal="true"]')];
+      return dialogs.at(-1) === dialog;
+    };
+    const focusableElements = () => [...dialog.querySelectorAll<HTMLElement>(modalFocusableSelector)].filter((element) => {
+      const style = getComputedStyle(element);
+      return !element.hidden
+        && !element.closest('[aria-hidden="true"], [inert]')
+        && style.display !== "none"
+        && style.visibility !== "hidden"
+        && element.getClientRects().length > 0;
+    });
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!isTopmostDialog()) return;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab") return;
+
+      const focusable = focusableElements();
+      if (focusable.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+
+    document.addEventListener("keydown", handleKeyDown);
+    requestAnimationFrame(() => (focusableElements()[0] ?? dialog).focus());
+    return () => {
+      document.removeEventListener("keydown", handleKeyDown);
+      document.body.style.overflow = previousOverflow;
+      requestAnimationFrame(() => {
+        if (previouslyFocused?.isConnected) previouslyFocused.focus();
+      });
+    };
+  }, [open]);
+
+  return dialogRef;
+}
+
 export function storageLocationName(settings: StorageLocationsSettings, rootType: StorageRootType): string {
   return settings.locations.find((location) => location.rootType === rootType)?.displayName ?? (rootType === "local" ? "Local" : "Remote");
 }
@@ -352,8 +431,12 @@ export function isThemePreference(value: string | null): value is ThemePreferenc
 
 export function readThemePreference(): ThemePreference {
   if (typeof window === "undefined") return "system";
-  const stored = window.localStorage.getItem(themeStorageKey);
-  return isThemePreference(stored) ? stored : "system";
+  try {
+    const stored = window.localStorage.getItem(themeStorageKey);
+    return isThemePreference(stored) ? stored : "system";
+  } catch {
+    return "system";
+  }
 }
 
 export function systemPrefersDark(): boolean {
@@ -369,15 +452,21 @@ export function resolveTheme(preference: ThemePreference): "light" | "dark" {
 
 export function applyThemePreference(preference: ThemePreference): void {
   if (typeof document === "undefined") return;
-  document.documentElement.dataset.theme = resolveTheme(preference);
+  const theme = resolveTheme(preference);
+  document.documentElement.dataset.theme = theme;
   document.documentElement.dataset.themePreference = preference;
+  document.querySelector("#srtl-theme-color")?.setAttribute("content", theme === "dark" ? "#070b11" : "#c0c8d3");
 }
 
 export function useThemePreference() {
   const [preference, setPreference] = useState<ThemePreference>(() => readThemePreference());
 
   useEffect(() => {
-    window.localStorage.setItem(themeStorageKey, preference);
+    try {
+      window.localStorage.setItem(themeStorageKey, preference);
+    } catch {
+      // Theme selection still applies for the current session when storage is restricted.
+    }
     applyThemePreference(preference);
   }, [preference]);
 

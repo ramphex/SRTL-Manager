@@ -4,6 +4,27 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.3-beta.2] - 2026-08-12
+
+### Added
+
+- Added an installable progressive web app shell with manifest icons, revisioned static caching, offline-aware startup, and an explicit update prompt that never caches API responses or activates updates without confirmation.
+- Added a compact mobile application shell with safe-area-aware top and bottom navigation, an accessible navigation drawer, mobile card layouts for dense operational tables, and touch-sized controls.
+- Extended parallel inventory scheduling to queue each selected symlink folder, local folder, and the remote root as independent jobs up to the configured scan capacity.
+
+### Changed
+
+- Reworked the dashboard into clearer library-health, storage-overview, quick-action, section-summary, and recent-activity regions with consistent visual hierarchy and compact expandable scan and audit controls.
+- Adapted job history, logs, storage policies, library trees, bulk controls, progress views, and selected-title details for narrow screens instead of relying on desktop tables and hover-only interactions.
+- Made the mobile login, application dialogs, and long-running job views use dynamic viewport sizing, safe-area spacing, focus containment, scroll locking, and focus restoration.
+
+### Fixed
+
+- Prevented mobile dashboard tooltips, controls, and long labels from overflowing or being hidden behind persistent navigation.
+- Prevented selected-title disclosures from reopening after dismissal and removed invalid nested interactive markup from job log entries.
+- Scoped concurrent inventory reconciliation by storage root, media kind, and local section so one scan job cannot mark another job's files missing or rewrite unrelated storage policy state.
+- Added durable inventory-scope claims so overlapping scans, copies, and audits remain serialized while disjoint symlink, local, and remote inventory jobs can run concurrently.
+
 ## [0.1.3-beta.1] - 2026-08-12
 
 ### Added

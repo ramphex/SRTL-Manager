@@ -198,10 +198,11 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
         const relativePath = path.relative(config.webRoot, filePath);
         const isHashedAsset = relativePath.startsWith(`assets${path.sep}`);
         reply.header("Cache-Control", isHashedAsset ? "public, max-age=31536000, immutable" : "no-cache");
+        if (relativePath === "service-worker.js") reply.header("Service-Worker-Allowed", "/");
       }
     });
     app.setNotFoundHandler(async (request, reply) => {
-      if (request.url.startsWith("/api/") || request.url.startsWith("/documentation")) {
+      if (request.url.startsWith("/api/") || request.url.startsWith("/documentation") || request.url.startsWith("/assets/")) {
         return reply.code(404).send({ error: "Not found" });
       }
       return reply.type("text/html").sendFile("index.html", { maxAge: 0, immutable: false });

@@ -42,8 +42,19 @@ test("normal login starts with a blank username", async ({ page }) => {
   });
 
   await page.goto(baseUrl!);
-  await expect(page.locator(".auth-header .brand span")).toHaveText("Sign in");
+  await expect(page.locator(".auth-header .brand h1")).toHaveText("Sign in");
   await expect(page.getByLabel("Username", { exact: true })).toHaveValue("");
+});
+
+test("cold offline launch does not misrepresent the session as signed out", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(Navigator.prototype, "onLine", { configurable: true, get: () => false });
+  });
+
+  await page.goto(baseUrl!);
+  await expect(page.locator(".auth-header .brand h1")).toHaveText("Offline");
+  await expect(page.getByLabel("Username", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Reconnect to verify your session.")).toBeVisible();
 });
 
 test("keeps the login form compact across mobile and desktop viewports", async ({ page }) => {
@@ -56,6 +67,7 @@ test("keeps the login form compact across mobile and desktop viewports", async (
   });
 
   for (const viewport of [
+    { width: 320, height: 844 },
     { width: 390, height: 844 },
     { width: 1440, height: 1000 }
   ]) {
@@ -70,16 +82,28 @@ test("keeps the login form compact across mobile and desktop viewports", async (
     const inputBoxes = await page.locator(".auth-form input").evaluateAll((inputs) =>
       inputs.map((input) => {
         const box = input.getBoundingClientRect();
-        return { height: box.height, width: box.width };
+        return { fontSize: Number.parseFloat(getComputedStyle(input).fontSize), height: box.height, width: box.width };
       })
     );
     const buttonBox = await submitButton.boundingBox();
+    const themeTargets = await page.locator(".auth-panel .theme-option").evaluateAll((buttons) =>
+      buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+      })
+    );
 
     expect(panelBox).not.toBeNull();
     expect(buttonBox).not.toBeNull();
     expect(panelBox!.height).toBeLessThan(420);
     expect(inputBoxes).toHaveLength(2);
-    expect(inputBoxes.every((box) => box.height <= 48 && box.width <= viewport.width)).toBe(true);
+    if (viewport.width <= 820) {
+      expect(inputBoxes.every((box) => box.height >= 44 && box.height <= 48 && box.fontSize >= 16 && box.width <= viewport.width)).toBe(true);
+      expect(themeTargets.every((box) => box.width >= 44 && box.height >= 44 && box.left >= 0 && box.right <= viewport.width)).toBe(true);
+      expect(themeTargets.every((box, index) => index === 0 || box.left >= themeTargets[index - 1]!.right || box.top >= themeTargets[index - 1]!.bottom)).toBe(true);
+    } else {
+      expect(inputBoxes.every((box) => box.height <= 48 && box.width <= viewport.width)).toBe(true);
+    }
     expect(buttonBox!.height).toBeLessThanOrEqual(56);
     expect(panelBox!.y).toBeGreaterThanOrEqual(0);
     expect(panelBox!.y + panelBox!.height).toBeLessThanOrEqual(viewport.height);
@@ -882,7 +906,10 @@ test("advanced settings can disable copy verification and identify the recommend
 
   await page.goto(`${baseUrl}/settings/advanced`);
   const scanSection = page.locator(".advanced-settings-section").filter({ hasText: "Inventory scan scheduling" });
-  const parallelButton = scanSection.getByRole("button", { name: "Parallel by folder Queue one scan job per folder, up to the configured scan capacity.", exact: true });
+  const parallelButton = scanSection.getByRole("button", {
+    name: "Parallel by folder Queue each symlink folder, local folder, and remote root separately, up to the configured scan capacity.",
+    exact: true
+  });
   await expect(scanSection.getByText("Current: Single job", { exact: true })).toBeVisible();
   await parallelButton.click();
   await expect(parallelButton).toHaveClass(/selected/);
@@ -1238,18 +1265,21 @@ test("recent copy jobs show a single link title directly and retain title inspec
   await expect(singleSeriesRow.locator(".job-scope-detail-line > span:first-child")).toHaveText("2 selected links");
   const singleSeriesTrigger = singleSeriesRow.getByLabel("View selected titles");
   await expect(singleSeriesTrigger).toHaveCount(1);
-  await singleSeriesTrigger.hover();
-  await expect(singleSeriesTrigger.getByRole("tooltip")).toBeVisible();
-  await expect(singleSeriesTrigger.locator("li")).toHaveText([singleSeriesTitle]);
+  await singleSeriesTrigger.click();
+  const singleSeriesDetails = singleSeriesRow.getByRole("region", { name: "Selected titles", exact: true });
+  await expect(singleSeriesDetails).toBeVisible();
+  await expect(singleSeriesDetails.locator("li")).toHaveText([singleSeriesTitle]);
+  await singleSeriesDetails.getByRole("button", { name: "Close selected titles", exact: true }).click();
+  await expect(singleSeriesDetails).toBeHidden();
 
   await expect(multiTitleRow.locator(".job-scope-detail-line > span:first-child")).toHaveText("2 selected links");
   const multiTitleTrigger = multiTitleRow.getByLabel("View selected titles");
   await expect(multiTitleTrigger).toHaveCount(1);
-  await multiTitleTrigger.hover();
-  const multiTitleTooltip = multiTitleTrigger.getByRole("tooltip");
-  await expect(multiTitleTooltip).toBeVisible();
-  await expect(multiTitleTrigger.locator("li")).toHaveText(["Alpha Multi Title (2026)", "Zulu Multi Title (2026)"]);
-  const tooltipBox = await multiTitleTooltip.boundingBox();
+  await multiTitleTrigger.click();
+  const multiTitleDetails = multiTitleRow.getByRole("region", { name: "Selected titles", exact: true });
+  await expect(multiTitleDetails).toBeVisible();
+  await expect(multiTitleDetails.locator("li")).toHaveText(["Alpha Multi Title (2026)", "Zulu Multi Title (2026)"]);
+  const tooltipBox = await multiTitleDetails.boundingBox();
   const viewport = page.viewportSize();
   expect(tooltipBox).not.toBeNull();
   expect(viewport).not.toBeNull();

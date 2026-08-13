@@ -1,14 +1,15 @@
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
+import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdateReadyEvent, type PwaUpdateReadyDetail } from "./pwa";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
 import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
-import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
+import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useModalLifecycle, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
 export function SectionDraftList({ drafts, onChange, disabled = false }: { drafts: SectionDraft[]; onChange: (drafts: SectionDraft[]) => void; disabled?: boolean }) {
   const updateDraft = (id: string, patch: Partial<SectionDraft>) => {
     onChange(drafts.map((draft) => (draft.id === id ? { ...draft, ...patch } : draft)));
@@ -147,12 +148,32 @@ export function StatCard({ label, value, detail, tone = "neutral" }: { label: st
 }
 
 export function InfoTooltip({ label, children }: { label: string; children: ReactNode }) {
+  const [open, setOpen] = useState(false);
+  const tooltipId = useId();
+  const tooltipRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    if (!open) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!tooltipRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open]);
+
   return (
-    <span className="info-tooltip">
-      <button type="button" className="info-tooltip-trigger" aria-label={label}>
+    <span ref={tooltipRef} className={`info-tooltip${open ? " is-open" : ""}`}>
+      <button type="button" className="info-tooltip-trigger" aria-label={label} aria-expanded={open} aria-describedby={open ? tooltipId : undefined} onClick={() => setOpen((value) => !value)}>
         <Info size={14} />
       </button>
-      <span className="info-tooltip-panel" role="tooltip">
+      <span id={tooltipId} className="info-tooltip-panel" role="tooltip">
         {children}
       </span>
     </span>
@@ -252,6 +273,10 @@ function RootLayout() {
     onSuccess: (data) => queryClient.setQueryData(["app-version"], data)
   });
   const [expandedGroups, setExpandedGroups] = useState<Record<SidebarGroup, boolean>>({ history: false, settings: false });
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
+  const mobileDrawerRef = useRef<HTMLElement>(null);
+  const contentRef = useRef<HTMLElement>(null);
   const logout = useMutation({
     mutationFn: api.logout,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] })
@@ -260,6 +285,21 @@ function RootLayout() {
   const pathname = location.pathname;
   const isHistoryActive = pathname === "/scans" || pathname === "/audits";
   const isSettingsActive = pathname === "/settings" || pathname.startsWith("/settings/");
+  const pageTitle = pathname === "/"
+    ? "Dashboard"
+    : pathname === "/library"
+      ? "Library"
+      : pathname === "/logs"
+        ? "Activity"
+        : pathname === "/scans"
+          ? "Scan history"
+          : pathname === "/audits"
+            ? "Audit history"
+            : pathname === "/settings/advanced"
+              ? "Advanced settings"
+              : pathname === "/settings/user"
+                ? "User settings"
+                : "Library settings";
 
   const nav = [
     { to: "/", label: "Dashboard", icon: Gauge },
@@ -269,9 +309,124 @@ function RootLayout() {
   const toggleGroup = (group: SidebarGroup) => {
     setExpandedGroups((groups) => ({ ...groups, [group]: !groups[group] }));
   };
+  const closeMobileNavigationAfterRoute = () => {
+    setMobileNavigationOpen(false);
+    requestAnimationFrame(() => contentRef.current?.focus());
+  };
+
+  useEffect(() => {
+    if (isHistoryActive || isSettingsActive) {
+      setExpandedGroups((groups) => ({
+        ...groups,
+        ...(isHistoryActive ? { history: true } : {}),
+        ...(isSettingsActive ? { settings: true } : {})
+      }));
+    }
+  }, [isHistoryActive, isSettingsActive]);
+
+  useEffect(() => {
+    setMobileNavigationOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!mobileNavigationOpen) return undefined;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileNavigationOpen(false);
+        requestAnimationFrame(() => mobileNavigationTriggerRef.current?.focus());
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = [...(mobileDrawerRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') ?? [])];
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    requestAnimationFrame(() => mobileDrawerRef.current?.querySelector<HTMLElement>("button")?.focus());
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [mobileNavigationOpen]);
+
+  const renderNavigationGroups = (idPrefix: string) => (
+    <>
+      <div className="nav-group">
+        <button
+          type="button"
+          className={`nav-link nav-disclosure${isHistoryActive ? " active" : ""}`}
+          aria-expanded={expandedGroups.history}
+          aria-controls={`${idPrefix}-history-nav`}
+          onClick={() => toggleGroup("history")}
+        >
+          <Activity size={18} />
+          History
+          <ChevronRight className="nav-disclosure-icon" size={16} />
+        </button>
+        {expandedGroups.history ? (
+          <div id={`${idPrefix}-history-nav`} className="nav-sublinks">
+            {historySections.map((item) => (
+              <Link key={item.to} to={item.to} className="nav-sublink" activeProps={{ className: "nav-sublink active" }} activeOptions={{ exact: true }}>
+                <item.icon size={15} />
+                {item.label}
+              </Link>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className="nav-group">
+        <button
+          type="button"
+          className={`nav-link nav-disclosure${isSettingsActive ? " active" : ""}`}
+          aria-expanded={expandedGroups.settings}
+          aria-controls={`${idPrefix}-settings-nav`}
+          onClick={() => toggleGroup("settings")}
+        >
+          <Settings size={18} />
+          Settings
+          <ChevronRight className="nav-disclosure-icon" size={16} />
+        </button>
+        {expandedGroups.settings ? (
+          <div id={`${idPrefix}-settings-nav`} className="nav-sublinks">
+            {settingsSections.map((item) => (
+              <Link key={item.view} to={item.to} className="nav-sublink" activeProps={{ className: "nav-sublink active" }} activeOptions={{ exact: true }}>
+                <item.icon size={15} />
+                {item.label}
+              </Link>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </>
+  );
 
   return (
     <div className="app-shell">
+      <header className="mobile-app-bar">
+        <div className="mobile-app-bar-brand">
+          <HardDriveDownload size={20} />
+          <div>
+            <h1>{pageTitle}</h1>
+            <span>SRTL Manager</span>
+          </div>
+        </div>
+        <button type="button" className="mobile-app-bar-menu" aria-label="Open navigation" aria-expanded={mobileNavigationOpen} onClick={(event) => {
+          mobileNavigationTriggerRef.current = event.currentTarget;
+          setMobileNavigationOpen(true);
+        }}>
+          <Menu size={20} />
+        </button>
+      </header>
       <aside className="sidebar">
         <div className="brand">
           <HardDriveDownload size={24} />
@@ -299,52 +454,7 @@ function RootLayout() {
               {item.label}
             </Link>
           ))}
-          <div className="nav-group">
-            <button
-              type="button"
-              className={`nav-link nav-disclosure${isHistoryActive ? " active" : ""}`}
-              aria-expanded={expandedGroups.history}
-              aria-controls="history-nav"
-              onClick={() => toggleGroup("history")}
-            >
-              <Activity size={18} />
-              History
-              <ChevronRight className="nav-disclosure-icon" size={16} />
-            </button>
-            {expandedGroups.history ? (
-              <div id="history-nav" className="nav-sublinks">
-                {historySections.map((item) => (
-                  <Link key={item.to} to={item.to} className="nav-sublink" activeProps={{ className: "nav-sublink active" }} activeOptions={{ exact: true }}>
-                    <item.icon size={15} />
-                    {item.label}
-                  </Link>
-                ))}
-              </div>
-            ) : null}
-          </div>
-          <div className="nav-group">
-            <button
-              type="button"
-              className={`nav-link nav-disclosure${isSettingsActive ? " active" : ""}`}
-              aria-expanded={expandedGroups.settings}
-              aria-controls="settings-nav"
-              onClick={() => toggleGroup("settings")}
-            >
-              <Settings size={18} />
-              Settings
-              <ChevronRight className="nav-disclosure-icon" size={16} />
-            </button>
-            {expandedGroups.settings ? (
-              <div id="settings-nav" className="nav-sublinks">
-                {settingsSections.map((item) => (
-                  <Link key={item.view} to={item.to} className="nav-sublink" activeProps={{ className: "nav-sublink active" }} activeOptions={{ exact: true }}>
-                    <item.icon size={15} />
-                    {item.label}
-                  </Link>
-                ))}
-              </div>
-            ) : null}
-          </div>
+          {renderNavigationGroups("sidebar")}
         </nav>
         <div className="sidebar-footer">
           <VersionStatus
@@ -356,13 +466,85 @@ function RootLayout() {
           />
         </div>
       </aside>
-      <main className="content">
+      <main ref={contentRef} className="content" tabIndex={-1}>
         <StorageLocationsContext.Provider value={storageLocations.data ?? defaultStorageLocations}>
           <UserPreferencesContext.Provider value={userPreferences.data ?? defaultUserPreferences}>
             <Outlet />
           </UserPreferencesContext.Provider>
         </StorageLocationsContext.Provider>
       </main>
+      <nav className="mobile-bottom-nav" aria-label="Primary navigation">
+        <Link to="/" className="mobile-bottom-nav-link" activeProps={{ className: "mobile-bottom-nav-link active" }} activeOptions={{ exact: true }}>
+          <Gauge size={20} />
+          <span>Dashboard</span>
+        </Link>
+        <Link to="/library" className="mobile-bottom-nav-link" activeProps={{ className: "mobile-bottom-nav-link active" }}>
+          <Library size={20} />
+          <span>Library</span>
+        </Link>
+        <Link to="/logs" className="mobile-bottom-nav-link" activeProps={{ className: "mobile-bottom-nav-link active" }}>
+          <Activity size={20} />
+          <span>Activity</span>
+        </Link>
+        <button type="button" className={`mobile-bottom-nav-link${mobileNavigationOpen || isHistoryActive || isSettingsActive ? " active" : ""}`} aria-label="Open navigation" aria-expanded={mobileNavigationOpen} onClick={(event) => {
+          mobileNavigationTriggerRef.current = event.currentTarget;
+          setMobileNavigationOpen(true);
+        }}>
+          <Menu size={20} />
+          <span>More</span>
+        </button>
+      </nav>
+      {mobileNavigationOpen ? (
+        <div className="mobile-nav-backdrop" role="presentation" onMouseDown={(event) => {
+          if (event.target !== event.currentTarget) return;
+          setMobileNavigationOpen(false);
+          requestAnimationFrame(() => mobileNavigationTriggerRef.current?.focus());
+        }}>
+          <section ref={mobileDrawerRef} className="mobile-nav-drawer" role="dialog" aria-modal="true" aria-label="Navigation">
+            <div className="mobile-nav-drawer-header">
+              <div className="brand">
+                <HardDriveDownload size={22} />
+                <div><strong>SRTL Manager</strong></div>
+              </div>
+              <button type="button" className="icon-button" aria-label="Close navigation" onClick={() => {
+                setMobileNavigationOpen(false);
+                requestAnimationFrame(() => mobileNavigationTriggerRef.current?.focus());
+              }}>
+                <X size={20} />
+              </button>
+            </div>
+            <nav className="mobile-nav-drawer-links" aria-label="All navigation" onClick={(event) => {
+              if (event.target instanceof Element && event.target.closest("a[href]")) closeMobileNavigationAfterRoute();
+            }}>
+              {nav.map((item) => (
+                <Link key={item.to} to={item.to} className="nav-link" activeProps={{ className: "nav-link active" }}>
+                  <item.icon size={18} />
+                  {item.label}
+                </Link>
+              ))}
+              {renderNavigationGroups("mobile")}
+            </nav>
+            <div className="mobile-nav-account">
+              <div className="sidebar-user-chip" title={username} aria-label={`Signed in as ${username}`}>
+                <UserCog size={15} />
+                <span>{username}</span>
+              </div>
+              <ThemeSwitcher />
+              <button type="button" className="ghost-button sidebar-sign-out-button" onClick={() => logout.mutate()}>
+                <LogOut size={16} />
+                <span>Sign out</span>
+              </button>
+            </div>
+            <VersionStatus
+              info={version.data}
+              isLoading={version.isLoading}
+              isError={version.isError}
+              isRefreshing={version.isFetching || versionRefresh.isPending}
+              onRefresh={() => versionRefresh.mutate()}
+            />
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -497,11 +679,12 @@ export function TerminateJobDialog({
   onClose: () => void;
   onConfirm: (jobId: number) => void;
 }) {
+  const dialogRef = useModalLifecycle(Boolean(job), onClose);
   if (!job) return null;
   const pathMigration = job.type === "path_migration";
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog terminate-dialog" role="dialog" aria-modal="true" aria-labelledby="terminate-job-title">
+      <section ref={dialogRef} className="audit-dialog terminate-dialog" role="dialog" aria-modal="true" aria-labelledby="terminate-job-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <span className="audit-dialog-eyebrow">Terminate job</span>
@@ -537,7 +720,38 @@ export function TerminateJobDialog({
 function LoginGate() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
-  if (me.isLoading) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  useEffect(() => {
+    const handleOnline = () => setOnline(true);
+    const handleOffline = () => setOnline(false);
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+    };
+  }, []);
+  if (me.isPending && !online) {
+    return (
+      <AuthShell title="Offline" icon={<TriangleAlert size={22} />}>
+        <p className="error">Reconnect to verify your session. Jobs already running on the server will continue.</p>
+      </AuthShell>
+    );
+  }
+  if (me.isPending) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
+  if (me.error) {
+    return (
+      <AuthShell title="Server unavailable" icon={<TriangleAlert size={22} />}>
+        <div className="auth-recovery-message">
+          <p className="error">SRTL Manager could not reach the server. Check the connection and try again.</p>
+          <button type="button" className="secondary" onClick={() => void me.refetch()} disabled={me.isFetching}>
+            <RefreshCw size={16} />
+            {me.isFetching ? "Trying again..." : "Try again"}
+          </button>
+        </div>
+      </AuthShell>
+    );
+  }
   if (me.data?.setupRequired) return <SetupForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
   if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
   return <AuthenticatedApp />;
@@ -577,7 +791,103 @@ function AuthenticatedApp() {
     <>
       <InventoryJobDataRefresher />
       <RouterProvider router={router} />
+      <AppLifecycleStatus />
     </>
+  );
+}
+
+function AppLifecycleStatus() {
+  const queryClient = useQueryClient();
+  const [online, setOnline] = useState(() => (typeof navigator === "undefined" ? true : navigator.onLine));
+  const [updateRegistration, setUpdateRegistration] = useState<ServiceWorkerRegistration | null>(() => getPendingPwaUpdate());
+  const [applyingUpdate, setApplyingUpdate] = useState(false);
+  const [reloadRequired, setReloadRequired] = useState(false);
+  const updateRegistrationRef = useRef(updateRegistration);
+  const applyingUpdateRef = useRef(applyingUpdate);
+
+  useEffect(() => {
+    updateRegistrationRef.current = updateRegistration;
+  }, [updateRegistration]);
+
+  useEffect(() => {
+    applyingUpdateRef.current = applyingUpdate;
+  }, [applyingUpdate]);
+
+  useEffect(() => {
+    const handleOnline = () => {
+      setOnline(true);
+      void queryClient.refetchQueries({ type: "active" });
+    };
+    const handleOffline = () => setOnline(false);
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") void queryClient.refetchQueries({ type: "active" });
+    };
+    const handleUpdateReady = (event: Event) => {
+      const detail = (event as CustomEvent<PwaUpdateReadyDetail>).detail;
+      if (detail?.registration) {
+        updateRegistrationRef.current = detail.registration;
+        setUpdateRegistration(detail.registration);
+      }
+    };
+    const handleControllerChange = () => {
+      const activatedOutsideThisTab = Boolean(updateRegistrationRef.current) && !applyingUpdateRef.current;
+      clearPendingPwaUpdate();
+      setUpdateRegistration(null);
+      setApplyingUpdate(false);
+      if (activatedOutsideThisTab) setReloadRequired(true);
+    };
+
+    window.addEventListener("online", handleOnline);
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener(pwaUpdateReadyEvent, handleUpdateReady);
+    document.addEventListener("visibilitychange", handleVisibility);
+    navigator.serviceWorker?.addEventListener("controllerchange", handleControllerChange);
+    return () => {
+      window.removeEventListener("online", handleOnline);
+      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener(pwaUpdateReadyEvent, handleUpdateReady);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      navigator.serviceWorker?.removeEventListener("controllerchange", handleControllerChange);
+    };
+  }, [queryClient]);
+
+  const applyUpdate = () => {
+    if (!online || !updateRegistration) return;
+    if (!updateRegistration.waiting) {
+      clearPendingPwaUpdate(updateRegistration);
+      setUpdateRegistration(null);
+      return;
+    }
+    applyingUpdateRef.current = true;
+    setApplyingUpdate(true);
+    navigator.serviceWorker?.addEventListener("controllerchange", () => window.location.reload(), { once: true });
+    activatePwaUpdate(updateRegistration);
+  };
+
+  if (online && !updateRegistration && !reloadRequired) return null;
+  return (
+    <div className="app-status-stack" aria-live="polite">
+      {!online ? (
+        <div className="app-status-banner app-status-offline" role="status">
+          <TriangleAlert size={17} />
+          <span><strong>Offline</strong> Jobs already running on the server will continue. New actions require this device to reconnect.</span>
+        </div>
+      ) : null}
+      {updateRegistration ? (
+        <div className="app-status-banner app-status-update" role="status">
+          <RefreshCw size={17} />
+          <span><strong>Update ready</strong> {online ? "Reload when you are ready to use the new interface." : "Reconnect before reloading so your session can be verified."}</span>
+          <button type="button" onClick={applyUpdate} disabled={applyingUpdate || !online}>{applyingUpdate ? "Updating..." : "Reload"}</button>
+        </div>
+      ) : null}
+      {reloadRequired ? (
+        <div className="app-status-banner app-status-update" role="status">
+          <RefreshCw size={17} />
+          <span><strong>Update activated</strong> {online ? "Another tab activated the new interface. Reload this tab when you are ready." : "Reconnect before reloading this tab."}</span>
+          <button type="button" onClick={() => window.location.reload()} disabled={!online}>Reload</button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -1138,7 +1448,7 @@ function AuthShell({ title, icon, children, wide = false }: { title: string; ico
             {icon}
             <div>
               <strong>SRTL Manager</strong>
-              <span>{title}</span>
+              <h1>{title}</h1>
             </div>
           </div>
           <ThemeSwitcher />
@@ -1149,11 +1459,23 @@ function AuthShell({ title, icon, children, wide = false }: { title: string; ico
   );
 }
 
-export function Page({ title, subtitle, children, hideHeader = false }: { title: string; subtitle: string; children: ReactNode; hideHeader?: boolean }) {
+export function Page({
+  title,
+  subtitle,
+  children,
+  hideHeader = false,
+  headerClassName
+}: {
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+  hideHeader?: boolean;
+  headerClassName?: string;
+}) {
   return (
     <>
       {hideHeader ? null : (
-        <header className="page-header">
+        <header className={`page-header${headerClassName ? ` ${headerClassName}` : ""}`}>
           <div>
             <h1>{title}</h1>
             <p>{subtitle}</p>

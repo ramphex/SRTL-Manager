@@ -78,13 +78,13 @@ function ScanRunsList({
   if (runs.length === 0) return <p className="panel-message">No scan history yet.</p>;
 
   return (
-    <div className="scan-run-list">
+    <div className="scan-run-list mobile-history-list" role="list" aria-label="Scan history">
       {runs.map((run) => {
         const options = run.options ?? null;
         const metricGroups = scanHistoryMetricGroups(run, options, storageLocations);
         const scopeItems = scanHistoryScopeItems(options, availableSections, storageLocations);
         return (
-          <article className="scan-run-card" key={run.id ?? `job-${run.jobId}`}>
+          <article className="scan-run-card mobile-history-card" key={run.id ?? `job-${run.jobId}`} role="listitem">
             <div className="scan-run-main">
               <div className="scan-run-title">
                 <strong>{run.id == null ? `Scan job #${run.jobId}` : `Scan #${run.id}`}</strong>
@@ -97,10 +97,10 @@ function ScanRunsList({
                 </button>
               </div>
             </div>
-            <div className="scan-run-meta">
-              <span>Started {formatDate(run.startedAt, timeFormat)}</span>
-              <span>Finished {formatDate(run.finishedAt, timeFormat)}</span>
-              <span>{formatDuration(run.startedAt, run.finishedAt)}</span>
+            <div className="scan-run-meta mobile-detail-list">
+              <span data-label="Started">Started {formatDate(run.startedAt, timeFormat)}</span>
+              <span data-label="Finished">Finished {formatDate(run.finishedAt, timeFormat)}</span>
+              <span data-label="Duration">{formatDuration(run.startedAt, run.finishedAt)}</span>
             </div>
             <div className="scan-run-scope" aria-label="Scanned scope">
               <span className="scan-run-scope-label">Scanned</span>
@@ -276,13 +276,13 @@ function AuditRunsList({
   if (runs.length === 0) return <p className="panel-message">No audit history yet.</p>;
 
   return (
-    <div className="scan-run-list">
+    <div className="scan-run-list mobile-history-list" role="list" aria-label="Audit history">
       {runs.map((run) => {
         const options = run.options ?? null;
         const scopeItems = auditHistoryScopeItems(run, options, availableSections);
         const metricGroups = auditHistoryMetricGroups(run, options);
         return (
-          <article className="scan-run-card" key={run.id}>
+          <article className="scan-run-card mobile-history-card" key={run.id} role="listitem">
             <div className="scan-run-main">
               <div className="scan-run-title">
                 <strong>Audit #{run.id}</strong>
@@ -297,10 +297,10 @@ function AuditRunsList({
                 </button>
               </div>
             </div>
-            <div className="scan-run-meta">
-              <span>Started {formatDate(run.startedAt, timeFormat)}</span>
-              <span>Finished {formatDate(run.finishedAt, timeFormat)}</span>
-              <span>{formatDuration(run.startedAt, run.finishedAt)}</span>
+            <div className="scan-run-meta mobile-detail-list">
+              <span data-label="Started">Started {formatDate(run.startedAt, timeFormat)}</span>
+              <span data-label="Finished">Finished {formatDate(run.finishedAt, timeFormat)}</span>
+              <span data-label="Duration">{formatDuration(run.startedAt, run.finishedAt)}</span>
             </div>
             <div className="scan-run-scope" aria-label="Audited scope">
               <span className="scan-run-scope-label">Audited</span>
@@ -658,7 +658,7 @@ function AdvancedSettingsPanel() {
           <div className="advanced-settings-heading">
             <div>
               <h3>Inventory scan scheduling</h3>
-              <p>Controls whether selected symlink folders share one scan job or use separate concurrent job slots.</p>
+              <p>Controls whether selected inventory scopes share one scan job or use separate concurrent job slots.</p>
             </div>
             <span className="pill pill-info">Current: {savedScanSchedulingLabel}</span>
           </div>
@@ -669,7 +669,7 @@ function AdvancedSettingsPanel() {
               onClick={() => updateScanScheduling("single_job")}
             >
               <strong>Single job</strong>
-              <small>Scan selected symlink folders in sequence.</small>
+              <small>Scan selected symlink, local, and remote scopes in one job.</small>
             </button>
             <button
               type="button"
@@ -677,10 +677,10 @@ function AdvancedSettingsPanel() {
               onClick={() => updateScanScheduling("per_folder")}
             >
               <strong>Parallel by folder</strong>
-              <small>Queue one scan job per folder, up to the configured scan capacity.</small>
+              <small>Queue each symlink folder, local folder, and remote root separately, up to the configured scan capacity.</small>
             </button>
           </div>
-          <p className="section-settings-help">Parallel scans finish independent folders sooner but increase filesystem and mounted-storage activity.</p>
+          <p className="section-settings-help">Parallel scans finish independent scopes sooner but increase filesystem and mounted-storage activity.</p>
         </section>
 
         <section className="advanced-settings-section">
@@ -1027,6 +1027,11 @@ export function LogsPage() {
     () => eventRows.filter((event) => matchesEventFilters(event, { search: eventSearch, level: levelFilter })),
     [eventRows, eventSearch, levelFilter]
   );
+  const selectMobileLogJob = (jobId: number) => {
+    setSelectedJob(jobId);
+    if (typeof window === "undefined" || !window.matchMedia("(max-width: 820px)").matches) return;
+    window.requestAnimationFrame(() => document.getElementById("log-job-detail")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+  };
 
   return (
     <Page title="Logs" subtitle="Job activity, warnings, errors, and details.">
@@ -1041,91 +1046,99 @@ export function LogsPage() {
         <LogSummaryCard label="Failed" value={countJobsByStatus(jobRows, "failed")} tone={countJobsByStatus(jobRows, "failed") > 0 ? "bad" : undefined} />
         <LogSummaryCard label="Completed" value={countJobsByStatus(jobRows, "completed")} />
       </div>
-      <div className="logs-layout">
-        <Panel title="Jobs" icon={<Activity size={18} />}>
-          <div className="log-toolbar">
-            <label className="log-search">
-              <span>Search jobs</span>
-              <span className="search-input">
-                <Search size={15} />
-                <input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="ID, type, folder" />
-              </span>
-            </label>
-            <LogFilterGroup
-              label="Status"
-              options={logStatusFilters.map((filter) => ({
-                ...filter,
-                count: filter.value === "all" ? jobRows.length : countJobsByStatus(jobRows, filter.value)
-              }))}
-              value={statusFilter}
-              onChange={setStatusFilter}
-            />
-            <LogFilterGroup
-              label="Type"
-              options={logTypeFilters.map((filter) => ({
-                ...filter,
-                count: filter.value === "all" ? jobRows.length : countJobsByType(jobRows, filter.value)
-              }))}
-              value={typeFilter}
-              onChange={setTypeFilter}
-            />
-          </div>
-          {jobs.isLoading ? <p className="panel-message">Loading jobs...</p> : null}
-          {jobs.error ? <p className="panel-message action-error">{jobs.error.message}</p> : null}
-          {linkedJob.error ? <p className="panel-message action-error">{linkedJob.error.message}</p> : null}
-          {!jobs.isLoading && !jobs.error && filteredJobs.length === 0 ? <p className="panel-message">No jobs match the current filters.</p> : null}
-          {filteredJobs.length > 0 ? (
-            <div className="log-job-list">
-              {filteredJobs.map((job) => (
-                <LogJobButton key={job.id} job={job} selected={effectiveJob?.id === job.id} sections={sectionRows} timeFormat={timeFormat} onSelect={() => setSelectedJob(job.id)} />
-              ))}
-            </div>
-          ) : null}
-        </Panel>
-        <Panel title={effectiveJob ? `Job #${effectiveJob.id} events` : "Events"} icon={<FileText size={18} />}>
-          {effectiveJob ? <SelectedLogJobSummary job={effectiveJob} sections={sectionRows} timeFormat={timeFormat} /> : <p className="panel-message">No job selected.</p>}
-          {effectiveJob ? (
-            <div className="log-toolbar event-toolbar">
+      <div className="logs-layout mobile-list-detail" data-selected-job-id={effectiveJob?.id ?? undefined}>
+        <div className="logs-master-pane" id="log-job-picker" role="region" aria-label="Job picker">
+          <Panel title="Jobs" icon={<Activity size={18} />}>
+            <div className="log-toolbar">
               <label className="log-search">
-                <span>Search events</span>
+                <span>Search jobs</span>
                 <span className="search-input">
                   <Search size={15} />
-                  <input value={eventSearch} onChange={(event) => setEventSearch(event.target.value)} placeholder="Message or path" />
+                  <input value={jobSearch} onChange={(event) => setJobSearch(event.target.value)} placeholder="ID, type, folder" />
                 </span>
               </label>
               <LogFilterGroup
-                label="Level"
-                options={logLevelFilters.map((filter) => ({
+                label="Status"
+                options={logStatusFilters.map((filter) => ({
                   ...filter,
-                  count: filter.value === "all" ? eventRows.length : countEventsByLevel(eventRows, filter.value)
+                  count: filter.value === "all" ? jobRows.length : countJobsByStatus(jobRows, filter.value)
                 }))}
-                value={levelFilter}
-                onChange={setLevelFilter}
+                value={statusFilter}
+                onChange={setStatusFilter}
+              />
+              <LogFilterGroup
+                label="Type"
+                options={logTypeFilters.map((filter) => ({
+                  ...filter,
+                  count: filter.value === "all" ? jobRows.length : countJobsByType(jobRows, filter.value)
+                }))}
+                value={typeFilter}
+                onChange={setTypeFilter}
               />
             </div>
-          ) : null}
-          {effectiveJob ? (
-            <div className="log-event-pagination">
-              <span>{events.isLoading ? "Loading events..." : jobEventCountLabel(eventRows.length, events.total)}</span>
-              {events.hasNextPage ? (
-                <button type="button" className="secondary" disabled={events.isFetchingNextPage} onClick={() => void events.fetchNextPage()}>
-                  <ArrowUp size={14} />
-                  {events.isFetchingNextPage ? "Loading older events..." : "Load older events"}
-                </button>
-              ) : null}
-            </div>
-          ) : null}
-          {events.isLoading ? <p className="panel-message">Loading events...</p> : null}
-          {events.error ? <p className="panel-message action-error">{events.error.message}</p> : null}
-          {effectiveJob && !events.isLoading && !events.error && filteredEvents.length === 0 ? <p className="panel-message">No events match the current filters.</p> : null}
-          {filteredEvents.length > 0 ? (
-            <div className="events">
-              {filteredEvents.map((event) => (
-                <LogEventRow key={event.id} event={event} timeFormat={timeFormat} job={effectiveJob} />
-              ))}
-            </div>
-          ) : null}
-        </Panel>
+            {jobs.isLoading ? <p className="panel-message">Loading jobs...</p> : null}
+            {jobs.error ? <p className="panel-message action-error">{jobs.error.message}</p> : null}
+            {linkedJob.error ? <p className="panel-message action-error">{linkedJob.error.message}</p> : null}
+            {!jobs.isLoading && !jobs.error && filteredJobs.length === 0 ? <p className="panel-message">No jobs match the current filters.</p> : null}
+            {filteredJobs.length > 0 ? (
+              <div className="log-job-list" role="group" aria-label="Jobs">
+                {filteredJobs.map((job) => (
+                  <LogJobButton key={job.id} job={job} selected={effectiveJob?.id === job.id} sections={sectionRows} timeFormat={timeFormat} onSelect={() => selectMobileLogJob(job.id)} />
+                ))}
+              </div>
+            ) : null}
+          </Panel>
+        </div>
+        <div className="logs-detail-pane" id="log-job-detail" role="region" aria-label={effectiveJob ? `Job #${effectiveJob.id} details` : "Job details"}>
+          <Panel
+            title={effectiveJob ? `Job #${effectiveJob.id} events` : "Events"}
+            icon={<FileText size={18} />}
+            actions={effectiveJob ? <a className="mobile-change-job secondary" href="#log-job-picker">Change job</a> : undefined}
+          >
+            {effectiveJob ? <SelectedLogJobSummary job={effectiveJob} sections={sectionRows} timeFormat={timeFormat} /> : <p className="panel-message">No job selected.</p>}
+            {effectiveJob ? (
+              <div className="log-toolbar event-toolbar">
+                <label className="log-search">
+                  <span>Search events</span>
+                  <span className="search-input">
+                    <Search size={15} />
+                    <input value={eventSearch} onChange={(event) => setEventSearch(event.target.value)} placeholder="Message or path" />
+                  </span>
+                </label>
+                <LogFilterGroup
+                  label="Level"
+                  options={logLevelFilters.map((filter) => ({
+                    ...filter,
+                    count: filter.value === "all" ? eventRows.length : countEventsByLevel(eventRows, filter.value)
+                  }))}
+                  value={levelFilter}
+                  onChange={setLevelFilter}
+                />
+              </div>
+            ) : null}
+            {effectiveJob ? (
+              <div className="log-event-pagination">
+                <span>{events.isLoading ? "Loading events..." : jobEventCountLabel(eventRows.length, events.total)}</span>
+                {events.hasNextPage ? (
+                  <button type="button" className="secondary" disabled={events.isFetchingNextPage} onClick={() => void events.fetchNextPage()}>
+                    <ArrowUp size={14} />
+                    {events.isFetchingNextPage ? "Loading older events..." : "Load older events"}
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {events.isLoading ? <p className="panel-message">Loading events...</p> : null}
+            {events.error ? <p className="panel-message action-error">{events.error.message}</p> : null}
+            {effectiveJob && !events.isLoading && !events.error && filteredEvents.length === 0 ? <p className="panel-message">No events match the current filters.</p> : null}
+            {filteredEvents.length > 0 ? (
+              <div className="events" role="log" aria-label={effectiveJob ? `Job #${effectiveJob.id} events` : "Job events"}>
+                {filteredEvents.map((event) => (
+                  <LogEventRow key={event.id} event={event} timeFormat={timeFormat} job={effectiveJob} />
+                ))}
+              </div>
+            ) : null}
+          </Panel>
+        </div>
       </div>
     </Page>
   );
@@ -1181,7 +1194,7 @@ function LogFilterGroup<T extends string>({
       <span>{label}</span>
       <div className="segmented compact">
         {options.map((option) => (
-          <button key={option.value} type="button" className={value === option.value ? "selected" : ""} onClick={() => onChange(option.value)}>
+          <button key={option.value} type="button" className={value === option.value ? "selected" : ""} aria-pressed={value === option.value} onClick={() => onChange(option.value)}>
             {option.label}
             <small>{formatNumber(option.count)}</small>
           </button>
@@ -1205,21 +1218,33 @@ function LogJobButton({
   onSelect: () => void;
 }) {
   return (
-    <button type="button" className={`log-job-card${selected ? " selected" : ""}`} onClick={onSelect}>
-      <span className="log-job-card-main">
-        <span>
-          <strong>#{job.id}</strong>
-          <span>{formatJobType(job.type)}</span>
+    <div
+      className={`log-job-card${selected ? " selected" : ""}`}
+    >
+      <button
+        type="button"
+        className="log-job-card-select"
+        aria-pressed={selected}
+        aria-controls="log-job-detail"
+        onClick={onSelect}
+      >
+        <span className="log-job-card-main">
+          <span>
+            <strong>#{job.id}</strong>
+            <span>{formatJobType(job.type)}</span>
+          </span>
+          <StatusPill value={job.status} />
         </span>
-        <StatusPill value={job.status} />
-      </span>
-      <span className="log-job-card-meta">
-        <span>{formatDate(job.startedAt ?? job.createdAt, timeFormat)}</span>
-        <span>{jobDurationLabel(job)}</span>
-      </span>
-      <JobScope job={job} sections={sections} />
-      <LogChipList chips={jobProgressChips(job, 4)} />
-    </button>
+        <span className="log-job-card-meta">
+          <span>{formatDate(job.startedAt ?? job.createdAt, timeFormat)}</span>
+          <span>{jobDurationLabel(job)}</span>
+        </span>
+      </button>
+      <div className="log-job-card-details">
+        <JobScope job={job} sections={sections} />
+        <LogChipList chips={jobProgressChips(job, 4)} />
+      </div>
+    </div>
   );
 }
 

@@ -10,7 +10,7 @@ import { jobEventCountLabel } from "./jobEvents";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
-import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
+import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
 import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
@@ -99,6 +99,8 @@ export function AuditDialog({
     setSelectedMode(null);
   }, [prompt]);
 
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
   if (!prompt) return null;
 
   const displayedEvents = [...events.events].reverse();
@@ -112,7 +114,7 @@ export function AuditDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-dialog-title">
+      <section ref={dialogRef} className="audit-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <span className="audit-dialog-eyebrow">Audit</span>
@@ -231,6 +233,8 @@ export function CopyDialog({
     invalidateCopyJobData(queryClient);
   }, [currentJobId, currentJobStatus, queryClient]);
 
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
   if (!prompt) return null;
 
   const displayedEvents = [...events.events].reverse();
@@ -239,7 +243,7 @@ export function CopyDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="copy-dialog-title">{prompt.title}</h2>
@@ -401,6 +405,7 @@ export function ScanStatusDialog({
   const currentJob = jobQuery.data ?? null;
   const jobActive = currentJob ? currentJob.status === "queued" || currentJob.status === "running" : Boolean(jobId);
   const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 500 : 2500, loadAll: true });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
 
   if (!prompt) return null;
 
@@ -408,7 +413,7 @@ export function ScanStatusDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-status-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-status-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="scan-status-dialog-title">{prompt.title}</h2>
@@ -471,6 +476,7 @@ export function ScanBatchStatusDialog({
       }
     }))
   });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
 
   if (!prompt) return null;
 
@@ -480,7 +486,7 @@ export function ScanBatchStatusDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog scan-batch-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-batch-dialog-title">
+      <section ref={dialogRef} className="audit-dialog scan-batch-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-batch-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="scan-batch-dialog-title">{prompt.title}</h2>
@@ -554,6 +560,7 @@ export function AuditStatusDialog({
     refetchInterval: jobActive ? 1500 : false
   });
   const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 500 : 2500, loadAll: true });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
 
   if (!prompt) return null;
 
@@ -562,7 +569,7 @@ export function AuditStatusDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-status-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-status-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="audit-status-dialog-title">{prompt.title}</h2>
@@ -760,7 +767,7 @@ export function CopyProgressPanel({
   const transferSpeedSecondary = copyTransferSpeedSecondaryLabel(progress);
   const throughputLabel = copyThroughputLabel(progress);
   return (
-    <div className={`audit-progress-panel copy-progress-panel${compact ? " compact" : ""}`}>
+    <div className={`audit-progress-panel copy-progress-panel mobile-progress-panel${compact ? " compact" : ""}`} role="group" aria-label="Copy progress">
       <div className="audit-progress-header copy-progress-header">
         <span>
           <strong>{statusLabel}</strong>
@@ -797,7 +804,7 @@ export function CopyProgressPanel({
           <small>{currentItem.detail}</small>
         </span>
       </div>
-      <div className="audit-progress-stats copy-progress-stats">
+      <div className="audit-progress-stats copy-progress-stats mobile-progress-stats">
         <span>
           <strong>{formatNumber(progress.copied)}</strong>
           Copied
@@ -1249,22 +1256,101 @@ function SelectedLinkTitlesTooltip({
   isLoading?: boolean;
   error?: string | null;
 }) {
+  const detailsId = useId();
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const open = pinned || (!dismissed && (hovered || focusWithin));
   const summaries = suppliedSummaries ?? selectedLinkTitleSummaries(linkIds ?? [], linkRowsById);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setPinned(false);
+        setDismissed(true);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPinned(false);
+        setDismissed(true);
+        requestAnimationFrame(() => triggerRef.current?.focus());
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <span className="job-link-title-tooltip" tabIndex={0} aria-label="View selected titles">
-      <Info size={12} />
-      <span className="job-link-title-tooltip-panel" role="tooltip">
-        <strong>Selected titles</strong>
-        {isLoading ? <span>Loading titles...</span> : null}
-        {!isLoading && error ? <span>{error}</span> : null}
-        {!isLoading && !error && summaries.length === 0 ? <span>No matching titles found in the current inventory.</span> : null}
-        {!isLoading && !error && summaries.length > 0 ? (
-          <ul>
-            {summaries.map((title, index) => (
-              <li key={`${index}:${title}`}>{title}</li>
-            ))}
-          </ul>
-        ) : null}
+    <span
+      ref={rootRef}
+      className={`job-link-title-tooltip${open ? " is-open" : ""}`}
+      onMouseEnter={() => {
+        setHovered(true);
+        if (!rootRef.current?.contains(document.activeElement)) setDismissed(false);
+      }}
+      onMouseLeave={() => setHovered(false)}
+      onFocusCapture={(event) => {
+        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+          setFocusWithin(true);
+          setDismissed(false);
+        }
+      }}
+      onBlurCapture={(event) => {
+        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+          setFocusWithin(false);
+          setDismissed(false);
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="job-link-title-tooltip-trigger"
+        aria-label="View selected titles"
+        aria-controls={detailsId}
+        aria-expanded={open}
+        onClick={() => {
+          if (pinned) {
+            setPinned(false);
+            setDismissed(true);
+          } else {
+            setPinned(true);
+            setDismissed(false);
+          }
+        }}
+      >
+        <Info size={12} />
+      </button>
+      <span id={detailsId} className="job-link-title-tooltip-panel" role="region" aria-label="Selected titles" aria-hidden={!open}>
+          <span className="job-link-title-tooltip-heading">
+            <strong>Selected titles</strong>
+            <button type="button" className="job-link-title-tooltip-close" aria-label="Close selected titles" tabIndex={open ? 0 : -1} onClick={() => {
+              setPinned(false);
+              setDismissed(true);
+              requestAnimationFrame(() => triggerRef.current?.focus());
+            }}>
+              <X size={13} />
+            </button>
+          </span>
+          {isLoading ? <span>Loading titles...</span> : null}
+          {!isLoading && error ? <span>{error}</span> : null}
+          {!isLoading && !error && summaries.length === 0 ? <span>No matching titles found in the current inventory.</span> : null}
+          {!isLoading && !error && summaries.length > 0 ? (
+            <ul>
+              {summaries.map((title, index) => (
+                <li key={`${index}:${title}`}>{title}</li>
+              ))}
+            </ul>
+          ) : null}
       </span>
     </span>
   );
@@ -1333,7 +1419,7 @@ export function JobsTable({
       {visibleJobs.length === 0 ? <p className="panel-message">No active jobs or finished jobs in the selected window.</p> : null}
       {saveRecentJobsFilter.error ? <p className="panel-message action-error">{saveRecentJobsFilter.error.message}</p> : null}
       {visibleJobs.length > 0 ? (
-        <table className="responsive-table">
+        <table className="responsive-table mobile-card-table recent-jobs-table" aria-label="Recent jobs">
           <thead>
             <tr>
               <th>ID</th>
@@ -1353,24 +1439,24 @@ export function JobsTable({
               const canTerminate = canTerminateJob(job);
               const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
               return (
-                <tr key={job.id}>
-                  <td>#{job.id}</td>
-                  <td>{formatJobType(job.type)}</td>
-	                  <td>
-	                    <JobScope
-	                      job={job}
-	                      sections={sections}
-	                      linkRowsById={selectedJobLinkRowsById}
-	                      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
-	                      linkRowsError={selectedJobLinkRows.error?.message ?? null}
-	                    />
-	                  </td>
-                  <td>
+                <tr key={job.id} className="mobile-card-row">
+                  <td className="mobile-card-primary" data-label="ID">#{job.id}</td>
+                  <td className="mobile-card-detail" data-label="Type">{formatJobType(job.type)}</td>
+                  <td className="mobile-card-detail" data-label="Scope">
+                    <JobScope
+                      job={job}
+                      sections={sections}
+                      linkRowsById={selectedJobLinkRowsById}
+                      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
+                      linkRowsError={selectedJobLinkRows.error?.message ?? null}
+                    />
+                  </td>
+                  <td className="mobile-card-status" data-label="Status">
                     <StatusPill value={job.status} />
                   </td>
-                  <td>{formatDate(job.startedAt, timeFormat)}</td>
-                  <td>{formatDate(job.finishedAt, timeFormat)}</td>
-                  <td className="actions-cell">
+                  <td className="mobile-card-detail" data-label="Started">{formatDate(job.startedAt, timeFormat)}</td>
+                  <td className="mobile-card-detail" data-label="Finished">{formatDate(job.finishedAt, timeFormat)}</td>
+                  <td className="actions-cell mobile-card-actions" data-label="Actions">
                     <span className="table-action-buttons">
                       {canViewScanJob && onScanJobSelect ? (
                         <button type="button" className="icon-button" title={`View scan status for job #${job.id}`} aria-label={`View scan status for job #${job.id}`} onClick={() => onScanJobSelect(job)}>

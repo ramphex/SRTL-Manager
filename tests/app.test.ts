@@ -395,6 +395,7 @@ describe("api app", () => {
     await fs.mkdir(assetsRoot, { recursive: true });
     await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
     await fs.writeFile(path.join(webRoot, "theme-init.js"), "document.documentElement.dataset.theme = 'dark';");
+    await fs.writeFile(path.join(webRoot, "service-worker.js"), "self.addEventListener('fetch', () => undefined);");
     await fs.writeFile(path.join(assetsRoot, "index-a1b2c3.js"), `const payload = ${JSON.stringify("compressible payload ".repeat(300))};`);
 
     await ctx.app.close();
@@ -418,6 +419,15 @@ describe("api app", () => {
     const entryScript = await ctx.app.inject({ method: "GET", url: "/theme-init.js" });
     expect(entryScript.statusCode).toBe(200);
     expect(entryScript.headers["cache-control"]).toBe("no-cache");
+
+    const missingAsset = await ctx.app.inject({ method: "GET", url: "/assets/missing-bundle.js" });
+    expect(missingAsset.statusCode).toBe(404);
+    expect(missingAsset.json()).toEqual({ error: "Not found" });
+
+    const serviceWorker = await ctx.app.inject({ method: "GET", url: "/service-worker.js" });
+    expect(serviceWorker.statusCode).toBe(200);
+    expect(serviceWorker.headers["cache-control"]).toBe("no-cache");
+    expect(serviceWorker.headers["service-worker-allowed"]).toBe("/");
 
     const index = await ctx.app.inject({ method: "GET", url: "/" });
     expect(index.statusCode).toBe(200);
@@ -1126,7 +1136,7 @@ describe("api app", () => {
     expect((await ctx.jobs.listJobs()).filter((job) => job.type === "scan")).toHaveLength(2);
   });
 
-  it("keeps selected storage scopes in one exclusive job beside parallel folder scans", async () => {
+  it("queues every selected symlink folder, local folder, and remote root as an independent scan job", async () => {
     const cookie = await createAdminSession();
     await setSetting(ctx.database.db, "advancedSettings", {
       scan: { symlinkFolderScheduling: "per_folder" },
@@ -1148,26 +1158,45 @@ describe("api app", () => {
     });
     expect(scan.statusCode).toBe(200);
     const { jobIds } = scan.json<{ jobIds: number[] }>();
-    expect(jobIds).toHaveLength(3);
+    expect(jobIds).toHaveLength(5);
 
     const jobs = await Promise.all(jobIds.map((id) => ctx.jobs.getJob(id)));
-    expect(jobs.slice(0, 2)).toEqual([
-      expect.objectContaining({ status: "queued", exclusive: false }),
-      expect.objectContaining({ status: "queued", exclusive: false })
+    expect(jobs).toEqual([
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: ["movies"] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: ["shows"] } }
+      })
     ]);
-    expect(jobs[2]).toMatchObject({
-      status: "queued",
-      exclusive: true,
-      progress: {
-        options: {
-          scanSymlinks: false,
-          scanLocal: true,
-          scanRemote: true,
-          symlinkSections: [],
-          localSections: ["movies", "shows"]
-        }
-      }
-    });
+
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
+    expect(claims.map((claim) => [claim.resourceType, claim.resourceKey, claim.access]).sort()).toEqual([
+      ["inventory_scope", JSON.stringify(["local", "movies"]), "exclusive"],
+      ["inventory_scope", JSON.stringify(["local", "shows"]), "exclusive"],
+      ["inventory_scope", JSON.stringify(["remote", "*"]), "exclusive"],
+      ["section", "movies", "exclusive"],
+      ["section", "shows", "exclusive"]
+    ]);
   });
 
   it("returns inventory scan timestamps for empty scanned scopes", async () => {
@@ -3361,9 +3390,9 @@ describe("api app", () => {
   it("terminates queued scan, audit, and copy jobs", async () => {
     const cookie = await createAdminSession();
     const copyFixture = await insertCopySymlink({ itemName: "Queued Terminate Movie", kind: "remote", storagePolicy: "location_1" });
-    const scanJobId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
     const auditJobId = await ctx.jobs.startAudit({ mode: "fast", targets: ["local"], sections: ["movies"] });
     const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
 
     for (const jobId of [scanJobId, auditJobId, copyJobId]) {
       const response = await ctx.app.inject({ method: "POST", url: `/api/jobs/${jobId}/terminate`, headers: { cookie } });
@@ -4157,7 +4186,7 @@ describe("api app", () => {
       insertCopySymlink({ itemName: "After Barrier Copy", kind: "remote", storagePolicy: "location_1", content: "after barrier" })
     ]);
     const firstCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[0].id] });
-    const barrierId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
+    const barrierId = await ctx.jobs.createJob("scan");
     const secondCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[1].id] });
     const concurrency = {
       workerCount: 3,
