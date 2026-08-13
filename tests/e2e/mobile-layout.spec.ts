@@ -134,7 +134,7 @@ async function mockPopulatedDashboard(
         sectionTypes: { shows: "shows", movies: "movies", anime: "shows" }
       };
     } else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
-    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows", "movies", "anime"], localSections: [] };
+    else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: false, scanLocal: false, scanRemote: false, symlinkSections: [], localSections: ["shows", "movies", "anime"] };
     else if (url.pathname === "/api/settings/audit") body = { sections: ["shows", "movies", "anime"], targets: ["local", "remote"] };
     else if (url.pathname === "/api/settings/advanced") {
       body = {
@@ -337,6 +337,7 @@ test("fits the redesigned dashboard summary and collapsed actions in the first v
 
   await expect(actionGroups).toHaveCount(2);
   await expect(disclosures).toHaveCount(2);
+  await expect(actionGroups.first().locator(".action-group-heading p")).toHaveText("0 of 3 sources · 0 of 6 folders");
   for (let index = 0; index < 2; index += 1) {
     await expect(disclosures.nth(index)).toHaveAccessibleName("Customize");
     await expect(disclosures.nth(index)).toHaveAttribute("aria-expanded", "false");
@@ -364,6 +365,9 @@ test("fits the redesigned dashboard summary and collapsed actions in the first v
   await expect(disclosures.first()).toHaveAttribute("aria-expanded", "true");
   const expandedOptions = actionGroups.first().locator(".dashboard-action-options");
   await expect(expandedOptions).toBeVisible();
+  const localScope = expandedOptions.getByRole("region", { name: "Local files", exact: true });
+  await expect(localScope.getByRole("checkbox")).not.toBeChecked();
+  await expect(localScope).toContainText("0/3 folders");
   const expandedOptionsBox = await expandedOptions.boundingBox();
   expect(expandedOptionsBox).not.toBeNull();
   expect(expandedOptionsBox!.x, "expanded options should stay inside the left viewport edge").toBeGreaterThanOrEqual(0);

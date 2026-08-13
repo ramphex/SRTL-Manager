@@ -182,7 +182,9 @@ export function DashboardPage() {
   const auditLocalSelected = selectedAuditTargets.includes("local");
   const auditRemoteSelected = selectedAuditTargets.includes("remote");
   const selectedInventoryScopeCount = [scanOptions.scanSymlinks, scanOptions.scanLocal, scanOptions.scanRemote].filter(Boolean).length;
-  const selectedInventoryFolderCount = selectedSymlinkSections.length + selectedLocalSections.length;
+  const selectedSymlinkFolderCount = scanOptions.scanSymlinks ? selectedSymlinkSections.length : 0;
+  const selectedLocalFolderCount = scanOptions.scanLocal ? selectedLocalSections.length : 0;
+  const selectedInventoryFolderCount = selectedSymlinkFolderCount + selectedLocalFolderCount;
   const totalInventoryFolderCount = availableScanSectionNames.length * 2;
   const selectedAuditScopeCount = selectedAuditTargets.length;
   const allInventorySelected =
@@ -191,10 +193,10 @@ export function DashboardPage() {
     scanOptions.scanRemote &&
     selectedSymlinkSections.length === availableScanSectionNames.length &&
     selectedLocalSections.length === availableScanSectionNames.length;
-  const noInventorySelected = selectedInventoryScopeCount === 0 && selectedInventoryFolderCount === 0;
+  const noInventorySelected = selectedInventoryScopeCount === 0;
   const hasScanScope = scanOptions.scanSymlinks || scanOptions.scanLocal || scanOptions.scanRemote;
-  const selectedActiveScanSections = selectedSymlinkSections.filter((section) => activeSymlinkScanSections.has(section));
-  const selectedActiveLocalScanSections = selectedLocalSections.filter((section) => activeLocalScanSections.has(section));
+  const selectedActiveScanSections = scanOptions.scanSymlinks ? selectedSymlinkSections.filter((section) => activeSymlinkScanSections.has(section)) : [];
+  const selectedActiveLocalScanSections = scanOptions.scanLocal ? selectedLocalSections.filter((section) => activeLocalScanSections.has(section)) : [];
   const canRunScan =
     hasScanScope &&
     (!scanOptions.scanSymlinks || selectedSymlinkSections.length > 0) &&
@@ -511,7 +513,7 @@ export function DashboardPage() {
                   checked={scanOptions.scanSymlinks}
                   icon={<Link2 size={15} />}
                   title="Symlinks"
-                  detail={`${selectedSymlinkSections.length}/${availableScanSections.length} folders - ${selectedSymlinkScanAge}`}
+                  detail={`${selectedSymlinkFolderCount}/${availableScanSections.length} folders - ${selectedSymlinkScanAge}`}
                   onChange={(checked) => updateScanOptions({ ...scanOptions, scanSymlinks: checked })}
                 >
                   <FolderScopePicker
@@ -528,7 +530,7 @@ export function DashboardPage() {
                   checked={scanOptions.scanLocal}
                   icon={<HardDrive size={15} />}
                   title={`${localName} files`}
-                  detail={`${selectedLocalSections.length}/${availableScanSections.length} folders - ${selectedLocalScanAge}`}
+                  detail={`${selectedLocalFolderCount}/${availableScanSections.length} folders - ${selectedLocalScanAge}`}
                   onChange={(checked) => updateScanOptions({ ...scanOptions, scanLocal: checked })}
                 >
                   <FolderScopePicker
