@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
@@ -8,7 +9,7 @@ import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogD
 import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./jobScopeLocks";
 import { jobEventCountLabel } from "./jobEvents";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
+import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
 import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
@@ -829,7 +830,14 @@ export function CopyProgressPanel({
         </span>
         <div className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
           {progress.failed > 0 && copyEvents ? (
-            <CopyFailedItemsTooltip count={progress.failed} events={copyEvents} loading={copyEventsLoading} error={copyEventsError} />
+            <CopyFailedItemsTooltip
+              jobId={job?.id ?? null}
+              reviewReady={Boolean(job && job.status !== "queued" && job.status !== "running")}
+              count={progress.failed}
+              events={copyEvents}
+              loading={copyEventsLoading}
+              error={copyEventsError}
+            />
           ) : (
             <>
               <strong>{formatNumber(progress.failed)}</strong>
@@ -864,6 +872,9 @@ type CopyItemDetail = {
   title: string;
   fileName: string | null;
   detail: string;
+  statusDetail?: string;
+  mediaLinkId?: number | null;
+  removable?: boolean;
 };
 
 function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
@@ -874,12 +885,315 @@ function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: n
   return <CopyItemDetailsTooltip count={count} kind="completed" items={items} loading={loading} error={error} />;
 }
 
-function CopyFailedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
-  const items = useMemo(
+function CopyFailedItemsTooltip({
+  jobId,
+  reviewReady,
+  count,
+  events,
+  loading,
+  error
+}: {
+  jobId: number | null;
+  reviewReady: boolean;
+  count: number;
+  events: JobEventRecord[];
+  loading: boolean;
+  error?: string | null;
+}) {
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  const [cleanupSelection, setCleanupSelection] = useState<number[] | null>(null);
+  const failures = useQuery({
+    queryKey: ["copy-failures", jobId],
+    queryFn: () => api.copyFailures(jobId!),
+    enabled: Boolean(jobId) && reviewReady,
+    staleTime: 2_000
+  });
+  const fallbackItems = useMemo(
     () => copyFailedItemSummaries(events).map((item) => ({ ...item, detail: item.reason })),
     [events]
   );
-  return <CopyItemDetailsTooltip count={count} kind="failed" items={items} loading={loading} error={error} />;
+  const items = failures.data
+    ? failures.data.items.map((item) => ({
+        key: item.key,
+        title: item.itemName,
+        fileName: item.fileName,
+        detail: item.reason,
+        statusDetail: item.symlinkStatusDetail,
+        mediaLinkId: item.mediaLinkId,
+        removable: item.symlinkStatus === "eligible" && item.mediaLinkId != null
+      }))
+    : fallbackItems;
+  const eligibleIds = useMemo(
+    () => failures.data?.items.flatMap((item) => (item.symlinkStatus === "eligible" && item.mediaLinkId ? [item.mediaLinkId] : [])) ?? [],
+    [failures.data]
+  );
+  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selectedIds.has(id));
+
+  useEffect(() => {
+    const eligible = new Set(eligibleIds);
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => eligible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [eligibleIds]);
+
+  function toggleSelected(mediaLinkId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(mediaLinkId)) next.delete(mediaLinkId);
+      else next.add(mediaLinkId);
+      return next;
+    });
+  }
+
+  function reviewSelection(mediaLinkIds: number[]) {
+    if (mediaLinkIds.length > 0) setCleanupSelection(mediaLinkIds);
+  }
+
+  return (
+    <>
+      <CopyItemDetailsTooltip
+        count={count}
+        kind="failed"
+        items={items}
+        loading={loading || (reviewReady && failures.isLoading)}
+        error={error ?? failures.error?.message}
+        toolbar={
+          jobId && failures.data && eligibleIds.length > 0 ? (
+            <div className="failed-symlink-inline-toolbar">
+              <strong>{formatNumber(selectedIds.size)} selected</strong>
+              <button type="button" onClick={() => setSelectedIds(allSelected ? new Set() : new Set(eligibleIds))}>
+                {allSelected ? "Clear" : "Select all"}
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                aria-label={`Remove ${formatNumber(selectedIds.size)} selected symlink${selectedIds.size === 1 ? "" : "s"}`}
+                onClick={() => reviewSelection([...selectedIds])}
+                disabled={selectedIds.size === 0}
+              >
+                <Trash2 size={14} />
+                Remove selected
+              </button>
+            </div>
+          ) : null
+        }
+        itemControls={
+          failures.data
+            ? (item) => {
+                const removable = Boolean(item.removable && item.mediaLinkId);
+                const itemLabel = item.fileName ? `${item.title}, ${item.fileName}` : item.title;
+                return (
+                  <div className="copy-item-details-item-actions">
+                    <label className="copy-item-details-select-control" title={removable ? `Select symlink for ${itemLabel}` : item.statusDetail}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select symlink for ${itemLabel}`}
+                        checked={removable && selectedIds.has(item.mediaLinkId!)}
+                        disabled={!removable}
+                        onChange={() => removable && toggleSelected(item.mediaLinkId!)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="copy-item-details-remove-button"
+                      aria-label={`Remove symlink for ${itemLabel}`}
+                      title={removable ? `Review removal of symlink for ${itemLabel}` : item.statusDetail}
+                      disabled={!removable}
+                      onClick={() => removable && reviewSelection([item.mediaLinkId!])}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                );
+              }
+            : undefined
+        }
+      />
+      {cleanupSelection && jobId && failures.data
+        ? createPortal(
+            <FailedSymlinkCleanupDialog
+              sourceJobId={jobId}
+              failures={failures.data.items}
+              initialSelectedIds={cleanupSelection}
+              onClose={() => setCleanupSelection(null)}
+            />,
+            document.body
+          )
+        : null}
+    </>
+  );
+}
+
+function failedSymlinkStatusLabel(item: CopyFailureItem): string {
+  if (item.symlinkStatus === "eligible") return "Ready to remove";
+  if (item.symlinkStatus === "already_missing") return "Already missing";
+  if (item.symlinkStatus === "superseded") return "Later copy succeeded";
+  if (item.symlinkStatus === "reconciliation_required") return "Reconciliation required";
+  if (item.symlinkStatus === "unavailable") return "Cannot verify mount";
+  if (item.symlinkStatus === "changed") return "Symlink changed";
+  return "Not safely identifiable";
+}
+
+function FailedSymlinkCleanupDialog({
+  sourceJobId,
+  failures,
+  initialSelectedIds,
+  onClose
+}: {
+  sourceJobId: number;
+  failures: CopyFailureItem[];
+  initialSelectedIds: number[];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const eligibleIds = useMemo(
+    () => failures.flatMap((item) => (item.symlinkStatus === "eligible" && item.mediaLinkId ? [item.mediaLinkId] : [])),
+    [failures]
+  );
+  const [selectedIds, setSelectedIds] = useState(
+    () => new Set(initialSelectedIds.filter((id) => eligibleIds.includes(id)))
+  );
+  const [cleanupJobId, setCleanupJobId] = useState<number | null>(null);
+  const cleanup = useMutation({
+    mutationFn: (mediaLinkIds: number[]) => api.removeFailedCopySymlinks(sourceJobId, mediaLinkIds),
+    onSuccess: (result) => {
+      setCleanupJobId(result.jobId);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+  const cleanupJob = useQuery({
+    queryKey: ["job", cleanupJobId],
+    queryFn: () => api.job(cleanupJobId!),
+    enabled: Boolean(cleanupJobId),
+    refetchInterval: (query: { state: { data?: JobRecord } }) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? 1_000 : false;
+    }
+  });
+  const cleanupTerminal = cleanupJob.data && cleanupJob.data.status !== "queued" && cleanupJob.data.status !== "running";
+  useEffect(() => {
+    if (!cleanupTerminal) return;
+    queryClient.invalidateQueries({ queryKey: ["copy-failures", sourceJobId] });
+    queryClient.invalidateQueries({ queryKey: ["job-events", sourceJobId] });
+    invalidateCopyJobData(queryClient);
+  }, [cleanupTerminal, queryClient, sourceJobId]);
+  const dialogRef = useModalLifecycle(true, onClose);
+  const selectedCount = selectedIds.size;
+  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selectedIds.has(id));
+  const progress = recordFromUnknown(cleanupJob.data?.progress);
+
+  function toggleItem(mediaLinkId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(mediaLinkId)) next.delete(mediaLinkId);
+      else next.add(mediaLinkId);
+      return next;
+    });
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget && !cleanup.isPending) onClose();
+      }}
+    >
+      <section ref={dialogRef} className="audit-dialog failed-symlink-cleanup-dialog" role="dialog" aria-modal="true" aria-labelledby="failed-symlink-cleanup-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <span className="audit-dialog-eyebrow">Copy job #{sourceJobId}</span>
+            <h2 id="failed-symlink-cleanup-title">Remove failed-copy symlinks</h2>
+            <p>Review the exact managed links before queuing a cleanup worker.</p>
+          </div>
+          <button type="button" className="icon-button" aria-label="Close failed symlink cleanup" onClick={onClose} disabled={cleanup.isPending}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {cleanupJobId ? (
+          <div className="failed-symlink-cleanup-status" role="status">
+            <div>
+              <strong>Cleanup job #{cleanupJobId}</strong>
+              <StatusPill value={cleanupJob.data?.status ?? "queued"} />
+            </div>
+            <p>{typeof progress?.message === "string" ? progress.message : cleanupJob.isLoading ? "Loading cleanup status..." : "Cleanup is queued."}</p>
+            {progress ? (
+              <dl>
+                <div><dt>Removed</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.removed))}</dd></div>
+                <div><dt>Already missing</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.alreadyMissing))}</dd></div>
+                <div><dt>Failed</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.failed))}</dd></div>
+              </dl>
+            ) : null}
+            {cleanupJob.error ? <p className="action-error">{cleanupJob.error.message}</p> : null}
+          </div>
+        ) : (
+          <>
+            <div className="terminate-dialog-warning">
+              <TriangleAlert size={18} />
+              <div>
+                <strong>Only the selected symlinks will be unlinked.</strong>
+                <span>Source media, copied media, title folders, and parent directories will not be deleted. Plex may need its normal library scan before entries disappear.</span>
+              </div>
+            </div>
+            <div className="failed-symlink-cleanup-toolbar">
+              <strong>{formatNumber(selectedCount)} of {formatNumber(eligibleIds.length)} removable selected</strong>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(allSelected ? new Set() : new Set(eligibleIds))}
+                disabled={eligibleIds.length === 0}
+              >
+                {allSelected ? "Clear all" : "Select all removable"}
+              </button>
+            </div>
+            <ul className="failed-symlink-cleanup-list">
+              {failures.map((item) => {
+                const eligible = item.symlinkStatus === "eligible" && item.mediaLinkId != null;
+                return (
+                  <li key={item.key} className={eligible ? "is-eligible" : "is-blocked"}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={eligible && selectedIds.has(item.mediaLinkId!)}
+                        disabled={!eligible}
+                        onChange={() => eligible && toggleItem(item.mediaLinkId!)}
+                      />
+                      <span>
+                        <strong>{item.itemName}</strong>
+                        {item.fileName ? <small>{item.fileName}</small> : null}
+                      </span>
+                    </label>
+                    <div>
+                      <StatusPill value={failedSymlinkStatusLabel(item)} />
+                      <small>{item.symlinkStatusDetail}</small>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {cleanup.error ? <p className="panel-message action-error">{cleanup.error.message}</p> : null}
+          </>
+        )}
+
+        <div className="terminate-dialog-actions">
+          <button type="button" onClick={onClose} disabled={cleanup.isPending}>{cleanupJobId ? "Close" : "Cancel"}</button>
+          {!cleanupJobId ? (
+            <button
+              type="button"
+              className="danger-button"
+              onClick={() => cleanup.mutate([...selectedIds])}
+              disabled={cleanup.isPending || selectedCount === 0}
+            >
+              <Trash2 size={15} />
+              {cleanup.isPending ? "Queuing cleanup..." : `Remove ${formatNumber(selectedCount)} symlink${selectedCount === 1 ? "" : "s"}`}
+            </button>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function CopyItemDetailsTooltip({
@@ -887,13 +1201,17 @@ function CopyItemDetailsTooltip({
   kind,
   items,
   loading,
-  error
+  error,
+  toolbar,
+  itemControls
 }: {
   count: number;
   kind: "completed" | "failed";
   items: CopyItemDetail[];
   loading: boolean;
   error?: string | null;
+  toolbar?: ReactNode;
+  itemControls?: (item: CopyItemDetail) => ReactNode;
 }) {
   const tooltipId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -968,13 +1286,18 @@ function CopyItemDetailsTooltip({
             <X size={14} />
           </button>
         </div>
+        {toolbar}
         {items.length > 0 ? (
           <ul className="copy-item-details-tooltip-list">
             {items.map((item) => (
-              <li key={item.key}>
-                <strong>{item.title}</strong>
-                {item.fileName ? <span>{item.fileName}</span> : null}
-                <small>{item.detail}</small>
+              <li key={item.key} className={itemControls ? "has-actions" : undefined}>
+                <div className="copy-item-details-copy">
+                  <strong>{item.title}</strong>
+                  {item.fileName ? <span>{item.fileName}</span> : null}
+                  <small>{item.detail}</small>
+                  {item.statusDetail ? <small className="copy-item-details-status">{item.statusDetail}</small> : null}
+                </div>
+                {itemControls?.(item)}
               </li>
             ))}
           </ul>
@@ -1182,6 +1505,21 @@ export function JobScope({
       <span className="job-scope-cell" title={selectedCount > 0 ? undefined : sectionText}>
         <span>{directionText}</span>
         <JobScopeDetail text={sectionText} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
+      </span>
+    );
+  }
+
+  if (job.type === "symlink_cleanup") {
+    const progress = recordFromUnknown(job.progress);
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;
+    const sourceJobId = finiteNumberFromUnknown(options?.sourceJobId);
+    const selectedLinkIds = job.selection?.linkIds ?? [];
+    const selectedCount = job.selection?.total ?? selectedLinkIds.length;
+    const detail = sourceJobId > 0 ? `Failed items from copy job #${sourceJobId}` : "Failed copy items";
+    return (
+      <span className="job-scope-cell">
+        <span>{selectedCount === 1 ? "1 failed-copy symlink" : `${formatNumber(selectedCount)} failed-copy symlinks`}</span>
+        <JobScopeDetail text={detail} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
       </span>
     );
   }

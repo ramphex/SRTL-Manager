@@ -306,6 +306,7 @@ export function useJobEventTimeline({
 export function invalidateCopyJobData(queryClient: QueryClient) {
   queryClient.invalidateQueries({ queryKey: ["jobs"] });
   queryClient.invalidateQueries({ queryKey: ["job"] });
+  queryClient.invalidateQueries({ queryKey: ["copy-failures"] });
   queryClient.invalidateQueries({ queryKey: ["dashboard-remote-work-links"] });
   queryClient.invalidateQueries({ queryKey: ["media-links"] });
   queryClient.invalidateQueries({ queryKey: ["media-links-page"] });

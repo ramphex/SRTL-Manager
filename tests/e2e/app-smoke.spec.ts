@@ -1516,6 +1516,114 @@ test("copy progress exposes details for a single failed item", async ({ page }) 
   await expect(details).toContainText("Media validation failed: moov atom not found");
 });
 
+test("failed copy items require explicit review before symlink cleanup is queued", async ({ page }) => {
+  test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
+  const jobId = 999994;
+  const cleanupJobId = 999993;
+  const timestamp = new Date(Date.now() - 60_000).toISOString();
+  const job = {
+    id: jobId,
+    type: "copy",
+    status: "failed",
+    createdAt: timestamp,
+    startedAt: timestamp,
+    finishedAt: timestamp,
+    progress: {
+      options: { direction: "to_local", itemName: "Cleanup review" },
+      stage: "failed",
+      message: "Copy job failed",
+      total: 3,
+      current: 3,
+      copied: 0,
+      repointed: 0,
+      conflicts: 0,
+      failed: 3
+    }
+  };
+  const events = [
+    { id: 9100, jobId, timestamp, level: "error", message: "transfer failed", data: { mediaLinkId: 101, itemName: "Alpha Show", linkPath: "/links/alpha.mkv", sourcePath: "/remote/alpha.mkv" } },
+    { id: 9101, jobId, timestamp, level: "error", message: "validation failed", data: { mediaLinkId: 102, itemName: "Bravo Show", linkPath: "/links/bravo.mkv", sourcePath: "/remote/bravo.mkv" } },
+    { id: 9102, jobId, timestamp, level: "error", message: "old failure", data: { mediaLinkId: 103, itemName: "Changed Show", linkPath: "/links/changed.mkv", sourcePath: "/remote/changed.mkv" } }
+  ];
+  const failureItems = [
+    { key: "media:101", mediaLinkId: 101, copyOperationId: 1, section: "shows", itemName: "Alpha Show", relativePath: "Alpha Show/alpha.mkv", fileName: "alpha.mkv", reason: "transfer failed", symlinkStatus: "eligible", symlinkStatusDetail: "The symlink still matches the failed copy and can be removed without deleting its media target." },
+    { key: "media:102", mediaLinkId: 102, copyOperationId: 2, section: "shows", itemName: "Bravo Show", relativePath: "Bravo Show/bravo.mkv", fileName: "bravo.mkv", reason: "validation failed", symlinkStatus: "eligible", symlinkStatusDetail: "The symlink still matches the failed copy and can be removed without deleting its media target." },
+    { key: "media:103", mediaLinkId: 103, copyOperationId: 3, section: "shows", itemName: "Changed Show", relativePath: "Changed Show/changed.mkv", fileName: "changed.mkv", reason: "old failure", symlinkStatus: "changed", symlinkStatusDetail: "The symlink target changed after this copy failed. Rescan before taking action." }
+  ];
+  let queuedMediaLinkIds: number[] | null = null;
+
+  await page.route(`**/api/jobs/${jobId}/events/page*`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ events, total: events.length, hasOlder: false }) });
+  });
+  await page.route(`**/api/jobs/${jobId}/copy-failures`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ jobId, totalFailures: 3, eligibleCount: 2, unidentifiedCount: 0, items: failureItems })
+    });
+  });
+  await page.route(`**/api/jobs/${jobId}/copy-failures/remove-symlinks`, async (route) => {
+    queuedMediaLinkIds = (route.request().postDataJSON() as { mediaLinkIds: number[] }).mediaLinkIds;
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobId: cleanupJobId }) });
+  });
+  await page.route(`**/api/jobs/${cleanupJobId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        id: cleanupJobId,
+        type: "symlink_cleanup",
+        status: "completed",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+        progress: { removed: 2, alreadyMissing: 0, failed: 0, stage: "completed", message: "Symlink cleanup finished: 2 removed" }
+      })
+    });
+  });
+  await page.route(`**/api/jobs/${jobId}`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(job) });
+  });
+  await page.route("**/api/jobs?*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+
+  await page.goto(baseUrl!);
+  await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
+  const copyDialog = page.locator(".copy-dialog");
+  await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
+  const failedDetails = copyDialog.getByRole("region", { name: "Failed item details", exact: true });
+  const alphaCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Alpha Show, alpha.mkv", exact: true });
+  const bravoCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Bravo Show, bravo.mkv", exact: true });
+  const changedCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Changed Show, changed.mkv", exact: true });
+  await expect(alphaCheckbox).toBeEnabled();
+  await expect(bravoCheckbox).toBeEnabled();
+  await expect(changedCheckbox).toBeDisabled();
+
+  await failedDetails.getByRole("button", { name: "Remove symlink for Alpha Show, alpha.mkv", exact: true }).click();
+
+  const cleanupDialog = page.getByRole("dialog", { name: "Remove failed-copy symlinks", exact: true });
+  await expect(cleanupDialog).toBeVisible();
+  await expect(cleanupDialog).toContainText("Source media, copied media, title folders, and parent directories will not be deleted.");
+  await expect(cleanupDialog).toContainText("1 of 2 removable selected");
+  await cleanupDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+
+  await expect(copyDialog).toBeVisible();
+  await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
+  const reopenedFailedDetails = copyDialog.getByRole("region", { name: "Failed item details", exact: true });
+  await reopenedFailedDetails.getByRole("checkbox", { name: "Select symlink for Alpha Show, alpha.mkv", exact: true }).check();
+  await reopenedFailedDetails.getByRole("checkbox", { name: "Select symlink for Bravo Show, bravo.mkv", exact: true }).check();
+  await reopenedFailedDetails.getByRole("button", { name: "Remove 2 selected symlinks", exact: true }).click();
+  await expect(cleanupDialog).toBeVisible();
+  await expect(cleanupDialog.getByLabel(/Changed Show/)).toBeDisabled();
+  await cleanupDialog.getByRole("button", { name: "Remove 2 symlinks", exact: true }).click();
+
+  await expect.poll(() => queuedMediaLinkIds).toEqual([101, 102]);
+  await expect(cleanupDialog).toContainText(`Cleanup job #${cleanupJobId}`);
+  await expect(cleanupDialog).toContainText("Symlink cleanup finished: 2 removed");
+  await expect(cleanupDialog.locator("dd").first()).toHaveText("2");
+});
+
 test("copy progress opens a persistent, scrollable completed item summary", async ({ page }) => {
   test.setTimeout(15_000);
   const jobId = 999997;

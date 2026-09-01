@@ -6,6 +6,7 @@ import type {
   AdvancedSettings,
   AppVersionInfo,
   CopyConflictPreview,
+  CopyFailureList,
   CopyReconciliationState,
   InventorySummary,
   InventoryScanTimestamps,
@@ -160,6 +161,12 @@ export const api = {
     return request<JobRecord[]>(`/api/jobs${search.size > 0 ? `?${search.toString()}` : ""}`);
   },
   job: (id: number) => request<JobRecord>(`/api/jobs/${id}`),
+  copyFailures: (id: number) => request<CopyFailureList>(`/api/jobs/${id}/copy-failures`),
+  removeFailedCopySymlinks: (id: number, mediaLinkIds: number[]) =>
+    request<{ jobId: number }>(`/api/jobs/${id}/copy-failures/remove-symlinks`, {
+      method: "POST",
+      body: JSON.stringify({ mediaLinkIds })
+    }),
   terminateJob: (id: number) => request<{ ok: true; jobId: number }>(`/api/jobs/${id}/terminate`, { method: "POST" }),
   jobEvents: (id: number, limit = 100) => request<JobEventRecord[]>(`/api/jobs/${id}/events?limit=${limit}`),
   jobEventPage: (id: number, options: { beforeId?: number; limit?: number } = {}) => {

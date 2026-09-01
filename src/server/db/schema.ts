@@ -257,6 +257,31 @@ export const copyOperations = pgTable(
   (table) => [uniqueIndex("copy_operations_job_link_idx").on(table.jobId, table.mediaLinkId)]
 );
 
+export const symlinkCleanupOperations = pgTable(
+  "symlink_cleanup_operations",
+  {
+    id: serial("id").primaryKey(),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    sourceJobId: integer("source_job_id").references(() => jobs.id, { onDelete: "set null" }),
+    mediaLinkId: integer("media_link_id")
+      .notNull()
+      .references(() => mediaLinks.id, { onDelete: "restrict" }),
+    linkPath: text("link_path").notNull(),
+    expectedTargetPath: text("expected_target_path").notNull(),
+    stage: text("stage").notNull(),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at")
+  },
+  (table) => [
+    uniqueIndex("symlink_cleanup_operations_job_link_idx").on(table.jobId, table.mediaLinkId),
+    index("symlink_cleanup_operations_source_job_idx").on(table.sourceJobId, table.mediaLinkId)
+  ]
+);
+
 export const jobEvents = pgTable("job_events", {
   id: serial("id").primaryKey(),
   jobId: integer("job_id").notNull(),

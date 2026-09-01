@@ -3366,6 +3366,206 @@ describe("api app", () => {
     await expect(fs.stat(missingFixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("queues a guarded job that removes only selected symlinks from failed copy items", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Cleanup Failed Copy", kind: "remote", storagePolicy: "location_1", content: "preserve this source" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("simulated transfer failure");
+      }
+    };
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(copyJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+
+    const unauthenticated = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures` });
+    expect(unauthenticated.statusCode).toBe(401);
+    const failures = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures`, headers: { cookie } });
+    expect(failures.statusCode).toBe(200);
+    expect(failures.json()).toMatchObject({
+      jobId: copyJobId,
+      totalFailures: 1,
+      eligibleCount: 1,
+      unidentifiedCount: 0,
+      items: [
+        expect.objectContaining({
+          mediaLinkId: fixture.id,
+          copyOperationId: expect.any(Number),
+          itemName: "Cleanup Failed Copy",
+          fileName: path.basename(fixture.sourcePath),
+          symlinkStatus: "eligible"
+        })
+      ]
+    });
+
+    const cleanup = await ctx.app.inject({
+      method: "POST",
+      url: `/api/jobs/${copyJobId}/copy-failures/remove-symlinks`,
+      headers: { cookie },
+      payload: { mediaLinkIds: [fixture.id] }
+    });
+    expect(cleanup.statusCode).toBe(200);
+    const cleanupJobId = cleanup.json<{ jobId: number }>().jobId;
+    await expect(ctx.jobs.getJob(cleanupJobId)).resolves.toMatchObject({ type: "symlink_cleanup", status: "queued", selection: { total: 1 } });
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(eq(schema.jobResourceClaims.jobId, cleanupJobId));
+    expect(claims).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ resourceType: "media", resourceKey: String(fixture.id), access: "exclusive" }),
+        expect.objectContaining({ resourceType: "section", resourceKey: "movies", access: "shared" }),
+        expect.objectContaining({ resourceType: "title", resourceKey: JSON.stringify(["movies", "Cleanup Failed Copy"]), access: "shared" }),
+        expect.objectContaining({ resourceType: "path", resourceKey: path.resolve(fixture.linkPath), access: "exclusive" })
+      ])
+    );
+
+    await expect(ctx.jobs.startAudit({ mode: "fast", linkIds: [fixture.id], byteCompare: false })).rejects.toThrow(
+      `Job #${cleanupJobId} is already queued`
+    );
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ removed: 1, alreadyMissing: 0, failed: 0, stage: "completed" })
+    });
+
+    await expect(fs.lstat(fixture.linkPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("preserve this source");
+    await expect(fs.stat(path.dirname(fixture.linkPath))).resolves.toMatchObject({});
+    await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: expect.any(String)
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      sourceJobId: copyJobId,
+      mediaLinkId: fixture.id,
+      stage: "removed",
+      errorMessage: null,
+      completedAt: expect.any(String)
+    });
+    const refreshed = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures`, headers: { cookie } });
+    expect(refreshed.json()).toMatchObject({ eligibleCount: 0, items: [expect.objectContaining({ symlinkStatus: "already_missing" })] });
+  });
+
+  it("does not remove an old failed symlink after a later copy succeeds", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Superseded Failed Copy", kind: "remote", storagePolicy: "location_1", content: "retry succeeds" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("first attempt failed");
+      }
+    };
+    const failedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(failedJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const retryJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(retryJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({ status: "completed" });
+
+    const failures = await ctx.app.inject({ method: "GET", url: `/api/jobs/${failedJobId}/copy-failures`, headers: { cookie } });
+    expect(failures.statusCode).toBe(200);
+    expect(failures.json()).toMatchObject({ eligibleCount: 0, items: [expect.objectContaining({ mediaLinkId: fixture.id, symlinkStatus: "superseded" })] });
+    const cleanup = await ctx.app.inject({
+      method: "POST",
+      url: `/api/jobs/${failedJobId}/copy-failures/remove-symlinks`,
+      headers: { cookie },
+      payload: { mediaLinkIds: [fixture.id] }
+    });
+    expect(cleanup.statusCode).toBe(409);
+    expect(cleanup.json()).toMatchObject({ error: expect.stringContaining("later successful copy") });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("retry succeeds");
+  });
+
+  it("finishes cleanup idempotently when a selected symlink is already absent at execution", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Interrupted Cleanup", kind: "remote", storagePolicy: "location_1" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("cleanup recovery fixture");
+      }
+    };
+    const failedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(failedJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const cleanupJobId = await ctx.jobs.startSymlinkCleanup(failedJobId, [fixture.id]);
+    await fs.unlink(fixture.linkPath);
+
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ removed: 0, alreadyMissing: 1, failed: 0 })
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      stage: "already_missing"
+    });
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: expect.any(String)
+    });
+  });
+
+  it("blocks failed-symlink cleanup while the same media has unresolved copy reconciliation", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Cleanup Reconciliation Block", kind: "remote", storagePolicy: "location_1" });
+    const sourceJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", startedAt: timestamp, finishedAt: timestamp }).where(eq(schema.jobs.id, sourceJobId));
+    const operationId = await insertCopyOperationFixture({
+      jobId: sourceJobId,
+      fixture,
+      stage: "reconciliation_required",
+      errorMessage: "simulated uncertain filesystem state"
+    });
+    const tempPath = `${fixture.destinationPath}.srtl-copy-unresolved`;
+    await fs.mkdir(path.dirname(tempPath), { recursive: true });
+    await fs.writeFile(tempPath, "unresolved temporary copy");
+    await ctx.database.db.update(schema.copyOperations).set({ tempPath }).where(eq(schema.copyOperations.id, operationId));
+    await ctx.database.db.insert(schema.jobEvents).values({
+      jobId: sourceJobId,
+      timestamp,
+      level: "error",
+      message: "copy promotion state is uncertain",
+      data: JSON.stringify({
+        mediaLinkId: fixture.id,
+        copyOperationId: operationId,
+        itemName: "Cleanup Reconciliation Block",
+        linkPath: fixture.linkPath,
+        sourcePath: fixture.sourcePath
+      })
+    });
+
+    await expect(ctx.jobs.copyFailures(sourceJobId)).resolves.toMatchObject({
+      eligibleCount: 0,
+      items: [expect.objectContaining({ mediaLinkId: fixture.id, symlinkStatus: "reconciliation_required" })]
+    });
+    await expect(ctx.jobs.startSymlinkCleanup(sourceJobId, [fixture.id])).rejects.toThrow("unresolved filesystem state");
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("media content");
+  });
+
+  it("fails closed when a selected symlink changes after cleanup admission", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Changed Cleanup Link", kind: "remote", storagePolicy: "location_1" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("queue cleanup before link change");
+      }
+    };
+    const sourceJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(sourceJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const cleanupJobId = await ctx.jobs.startSymlinkCleanup(sourceJobId, [fixture.id]);
+    const replacementTarget = path.join(tmpDir, "remote", "movies", "Changed Cleanup Link", "replacement.mkv");
+    await fs.writeFile(replacementTarget, "replacement media");
+    await fs.unlink(fixture.linkPath);
+    await fs.symlink(replacementTarget, fixture.linkPath);
+
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "failed",
+      progress: expect.objectContaining({ removed: 0, alreadyMissing: 0, failed: 1 })
+    });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(replacementTarget);
+    await expect(fs.readFile(replacementTarget, "utf8")).resolves.toBe("replacement media");
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: null
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      stage: "failed",
+      errorMessage: expect.stringContaining("target changed")
+    });
+  });
+
   it("normalizes legacy mixed failed copy jobs as partially failed", async () => {
     const timestamp = new Date().toISOString();
     const row = await first(ctx.database.db

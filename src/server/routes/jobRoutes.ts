@@ -22,6 +22,31 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
     return row;
   });
 
+  app.get("/api/jobs/:id/copy-failures", async (request, reply) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const job = await jobs.getJob(params.id);
+    if (!job) return reply.code(404).send({ error: "Copy job not found" });
+    if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be reviewed for copy jobs" });
+    try {
+      return await jobs.copyFailures(params.id);
+    } catch (error: unknown) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post("/api/jobs/:id/copy-failures/remove-symlinks", async (request, reply) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const body = z.object({ mediaLinkIds: z.array(z.number().int().positive()).min(1).max(10_000) }).parse(request.body);
+    const job = await jobs.getJob(params.id);
+    if (!job) return reply.code(404).send({ error: "Copy job not found" });
+    if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be removed for copy jobs" });
+    try {
+      return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds) };
+    } catch (error: unknown) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
   app.get("/api/job-reconciliation", async () => jobs.copyReconciliationState());
 
   app.post("/api/job-reconciliation/recheck", async () => jobs.recheckCopyReconciliation());

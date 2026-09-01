@@ -50,7 +50,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -78,6 +78,12 @@ describe("database bootstrap", () => {
       for (const columnName of ["temp_identity", "destination_identity", "displaced_identity", "reconciliation_resolved_at"]) {
         expect(copyOperationColumns.rows).toContainEqual({ column_name: columnName, is_nullable: "YES" });
       }
+      const cleanupColumns = await database.pool.query<{ column_name: string }>(`
+        SELECT column_name FROM information_schema.columns WHERE table_name = 'symlink_cleanup_operations'
+      `);
+      expect(cleanupColumns.rows.map((column) => column.column_name)).toEqual(
+        expect.arrayContaining(["job_id", "source_job_id", "media_link_id", "link_path", "expected_target_path", "stage", "error_message"])
+      );
       const pathMigrationColumns = await database.pool.query<{ column_name: string; is_nullable: string }>(`
         SELECT column_name, is_nullable FROM information_schema.columns WHERE table_name = 'path_migration_items'
       `);
@@ -237,7 +243,8 @@ describe("database bootstrap", () => {
         { version: 9 },
         { version: 10 },
         { version: 11 },
-        { version: 12 }
+        { version: 12 },
+        { version: 13 }
       ]);
     } finally {
       await database.close();
@@ -424,7 +431,8 @@ describe("database bootstrap", () => {
         { version: 9, name: "immutable_job_inputs_and_selections" },
         { version: 10, name: "retention_and_history_indexes" },
         { version: 11, name: "validate_integrity_constraints" },
-        { version: 12, name: "durable_copy_reconciliation_resolution" }
+        { version: 12, name: "durable_copy_reconciliation_resolution" },
+        { version: 13, name: "failed_copy_symlink_cleanup" }
       ]);
     } finally {
       await database.close();

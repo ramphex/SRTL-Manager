@@ -28,7 +28,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "path_migration";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "path_migration";
 
 export type AuditMode = "fast" | "deep";
 
@@ -286,6 +286,41 @@ export interface CopyOptions {
   relativePathPrefix?: string;
   localConflictStrategy?: CopyLocalConflictStrategy;
   allowSourceTitleMismatch?: boolean;
+}
+
+export type CopyFailureSymlinkStatus =
+  | "eligible"
+  | "already_missing"
+  | "changed"
+  | "superseded"
+  | "unavailable"
+  | "reconciliation_required"
+  | "unidentified";
+
+export interface CopyFailureItem {
+  key: string;
+  mediaLinkId: number | null;
+  copyOperationId: number | null;
+  section: string | null;
+  itemName: string;
+  relativePath: string | null;
+  fileName: string | null;
+  reason: string;
+  symlinkStatus: CopyFailureSymlinkStatus;
+  symlinkStatusDetail: string;
+}
+
+export interface CopyFailureList {
+  jobId: number;
+  totalFailures: number;
+  eligibleCount: number;
+  unidentifiedCount: number;
+  items: CopyFailureItem[];
+}
+
+export interface SymlinkCleanupOptions {
+  sourceJobId: number;
+  linkIds: number[];
 }
 
 export interface SectionSummary {

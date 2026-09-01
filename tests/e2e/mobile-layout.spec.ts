@@ -180,6 +180,24 @@ async function mockPopulatedDashboard(
             ]
           },
           progress: { stage: "completed", total: 2, current: 2, copied: 2, options: { direction: "to_local" } }
+        },
+        {
+          id: 704,
+          type: "copy",
+          status: "partially_failed",
+          createdAt: timestamp,
+          startedAt: timestamp,
+          finishedAt: timestamp,
+          selection: {
+            total: 3,
+            unavailable: 0,
+            titles: [
+              { section: "shows", itemName: "Alpha Failed Show", count: 1 },
+              { section: "shows", itemName: "Bravo Failed Show", count: 1 },
+              { section: "shows", itemName: "Changed Failed Show", count: 1 }
+            ]
+          },
+          progress: { stage: "partially_failed", total: 3, current: 3, copied: 0, repointed: 0, conflicts: 0, failed: 3, options: { direction: "to_local" } }
         }
       ];
     } else if (url.pathname === "/api/jobs/702/events/page") {
@@ -187,6 +205,50 @@ async function mockPopulatedDashboard(
         events: [{ id: 9001, jobId: 702, timestamp, level: "info", message: "Mobile layout scan completed", data: null }],
         total: 1,
         hasOlder: false
+      };
+    } else if (url.pathname === "/api/jobs/704") {
+      body = {
+        id: 704,
+        type: "copy",
+        status: "partially_failed",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+        progress: { stage: "partially_failed", total: 3, current: 3, copied: 0, repointed: 0, conflicts: 0, failed: 3, options: { direction: "to_local" } }
+      };
+    } else if (url.pathname === "/api/jobs/704/events/page") {
+      body = {
+        events: [
+          { id: 9100, jobId: 704, timestamp, level: "error", message: "transfer failed", data: { mediaLinkId: 101, itemName: "Alpha Failed Show", linkPath: "/links/alpha.mkv", sourcePath: "/remote/alpha.mkv" } },
+          { id: 9101, jobId: 704, timestamp, level: "error", message: "validation failed", data: { mediaLinkId: 102, itemName: "Bravo Failed Show", linkPath: "/links/bravo.mkv", sourcePath: "/remote/bravo.mkv" } },
+          { id: 9102, jobId: 704, timestamp, level: "error", message: "old failure", data: { mediaLinkId: 103, itemName: "Changed Failed Show", linkPath: "/links/changed.mkv", sourcePath: "/remote/changed.mkv" } }
+        ],
+        total: 3,
+        hasOlder: false
+      };
+    } else if (url.pathname === "/api/jobs/704/copy-failures") {
+      body = {
+        jobId: 704,
+        totalFailures: 3,
+        eligibleCount: 2,
+        unidentifiedCount: 0,
+        items: [
+          { key: "media:101", mediaLinkId: 101, copyOperationId: 1, section: "shows", itemName: "Alpha Failed Show", relativePath: "Alpha Failed Show/alpha.mkv", fileName: "alpha.mkv", reason: "transfer failed", symlinkStatus: "eligible", symlinkStatusDetail: "The symlink still matches the failed copy and can be removed without deleting its media target." },
+          { key: "media:102", mediaLinkId: 102, copyOperationId: 2, section: "shows", itemName: "Bravo Failed Show", relativePath: "Bravo Failed Show/bravo.mkv", fileName: "bravo.mkv", reason: "validation failed", symlinkStatus: "eligible", symlinkStatusDetail: "The symlink still matches the failed copy and can be removed without deleting its media target." },
+          { key: "media:103", mediaLinkId: 103, copyOperationId: 3, section: "shows", itemName: "Changed Failed Show", relativePath: "Changed Failed Show/changed.mkv", fileName: "changed.mkv", reason: "old failure", symlinkStatus: "changed", symlinkStatusDetail: "The symlink target changed after this copy failed. Rescan before taking action." }
+        ]
+      };
+    } else if (url.pathname === "/api/jobs/704/copy-failures/remove-symlinks") {
+      body = { jobId: 705 };
+    } else if (url.pathname === "/api/jobs/705") {
+      body = {
+        id: 705,
+        type: "symlink_cleanup",
+        status: "completed",
+        createdAt: timestamp,
+        startedAt: timestamp,
+        finishedAt: timestamp,
+        progress: { removed: 2, alreadyMissing: 0, failed: 0, stage: "completed", message: "Symlink cleanup finished: 2 removed" }
       };
     } else {
       await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: `Unhandled mobile-layout mock: ${url.pathname}` }) });
@@ -260,6 +322,28 @@ test("uses compact mobile navigation without delaying page content", async ({ pa
   await expect(drawer).toBeVisible();
   const closeNavigation = drawer.getByRole("button", { name: "Close navigation", exact: true });
   await expectTouchTarget(closeNavigation, "close-navigation button", true);
+  const drawerBox = await drawer.boundingBox();
+  const drawerLinksBox = await drawer.locator(".mobile-nav-drawer-links").boundingBox();
+  const drawerAccountBox = await drawer.locator(".mobile-nav-account").boundingBox();
+  expect(drawerBox, "navigation drawer should have a measurable size").not.toBeNull();
+  expect(drawerLinksBox, "navigation links should have a measurable size").not.toBeNull();
+  expect(drawerAccountBox, "navigation account controls should have a measurable size").not.toBeNull();
+  expect(drawerBox!.width, "navigation drawer should remain a compact mobile sheet").toBeLessThanOrEqual(320);
+  expect(drawerBox!.height, "navigation drawer should end after its content instead of filling the screen").toBeLessThanOrEqual(mobileViewport.height - 120);
+  expect(
+    drawerAccountBox!.y - (drawerLinksBox!.y + drawerLinksBox!.height),
+    "navigation account controls should follow the links without a flexible dead-space gap"
+  ).toBeLessThanOrEqual(24);
+  const drawerTypography = await drawer.evaluate((element) => {
+    const navigationLink = element.querySelector<HTMLElement>(".nav-link");
+    const accountChip = element.querySelector<HTMLElement>(".sidebar-user-chip");
+    return {
+      navigation: navigationLink ? Number.parseFloat(getComputedStyle(navigationLink).fontSize) : Number.NaN,
+      account: accountChip ? Number.parseFloat(getComputedStyle(accountChip).fontSize) : Number.NaN
+    };
+  });
+  expect(drawerTypography.navigation, "drawer navigation labels should use compact mobile type").toBeLessThanOrEqual(13);
+  expect(drawerTypography.account, "drawer account text should use compact mobile type").toBeLessThanOrEqual(12);
   await expectNoGlobalOverflow(page);
 
   await closeNavigation.click();
@@ -515,14 +599,14 @@ test("presents the library summary as readable mobile cards", async ({ page }) =
 
 test("shows selected job details before the mobile job picker", async ({ page }) => {
   await page.locator(".mobile-bottom-nav").getByRole("link", { name: "Activity", exact: true }).click();
-  const detail = page.getByRole("region", { name: "Job #702 details", exact: true });
+  const detail = page.getByRole("region", { name: "Job #704 details", exact: true });
   const picker = page.getByRole("region", { name: "Job picker", exact: true });
   await expect(detail).toBeVisible();
   await expect(picker).toBeVisible();
-  await expect(detail.getByText("Mobile layout scan completed", { exact: true })).toBeVisible();
+  await expect(detail.getByText("transfer failed", { exact: true })).toBeVisible();
   await expectTouchTarget(detail.getByRole("link", { name: "Change job", exact: true }), "Change job link");
   const jobCards = picker.locator(".log-job-card");
-  await expect(jobCards).toHaveCount(2);
+  await expect(jobCards).toHaveCount(3);
   expect(
     await jobCards.evaluateAll((cards) => cards.every((card) => [...card.querySelectorAll("button")].every((button) => !button.querySelector("button")))),
     "job cards should not nest title-detail buttons inside the job-selection button"
@@ -533,6 +617,24 @@ test("shows selected job details before the mobile job picker", async ({ page })
   expect(detailBox).not.toBeNull();
   expect(pickerBox).not.toBeNull();
   expect(detailBox!.y, "selected events should lead the mobile list/detail view").toBeLessThan(pickerBox!.y);
+  await expectNoGlobalOverflow(page);
+});
+
+test("keeps failed-copy symlink selection touch friendly", async ({ page }) => {
+  await page.getByRole("button", { name: "View copy progress for job #704", exact: true }).click();
+  const copyDialog = page.locator(".copy-dialog");
+  await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
+  const failedDetails = copyDialog.getByRole("region", { name: "Failed item details", exact: true });
+  const alphaRow = failedDetails.locator("li").filter({ hasText: "Alpha Failed Show" });
+  const alphaCheckbox = alphaRow.getByRole("checkbox", { name: "Select symlink for Alpha Failed Show, alpha.mkv", exact: true });
+  const alphaTrash = alphaRow.getByRole("button", { name: "Remove symlink for Alpha Failed Show, alpha.mkv", exact: true });
+
+  await expectTouchTarget(alphaRow.locator(".copy-item-details-select-control"), "failed-symlink selection control", true);
+  await expectTouchTarget(alphaTrash, "failed-symlink trash button", true);
+  await alphaCheckbox.check();
+  await failedDetails.getByRole("checkbox", { name: "Select symlink for Bravo Failed Show, bravo.mkv", exact: true }).check();
+  const removeSelected = failedDetails.getByRole("button", { name: "Remove 2 selected symlinks", exact: true });
+  await expectTouchTarget(removeSelected, "remove-selected symlinks button");
   await expectNoGlobalOverflow(page);
 });
 
@@ -553,5 +655,36 @@ test.describe("desktop disclosure compatibility", () => {
     await page.mouse.move(10, 10);
     await expect(details).toBeHidden();
     await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  });
+
+  test("offers individual and multi-select removal for failed-copy symlinks", async ({ page }) => {
+    await page.getByRole("button", { name: "View copy progress for job #704", exact: true }).click();
+    const copyDialog = page.locator(".copy-dialog");
+    await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
+    const failedDetails = copyDialog.getByRole("region", { name: "Failed item details", exact: true });
+    const alphaCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Alpha Failed Show, alpha.mkv", exact: true });
+    const bravoCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Bravo Failed Show, bravo.mkv", exact: true });
+    const changedCheckbox = failedDetails.getByRole("checkbox", { name: "Select symlink for Changed Failed Show, changed.mkv", exact: true });
+
+    await expect(alphaCheckbox).toBeEnabled();
+    await expect(bravoCheckbox).toBeEnabled();
+    await expect(changedCheckbox).toBeDisabled();
+    await failedDetails.getByRole("button", { name: "Remove symlink for Alpha Failed Show, alpha.mkv", exact: true }).click();
+
+    const cleanupDialog = page.getByRole("dialog", { name: "Remove failed-copy symlinks", exact: true });
+    await expect(cleanupDialog).toContainText("1 of 2 removable selected");
+    await cleanupDialog.getByRole("button", { name: "Cancel", exact: true }).click();
+    await expect(copyDialog).toBeVisible();
+    await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
+    await expect(failedDetails).toBeVisible();
+    await alphaCheckbox.check();
+    await bravoCheckbox.check();
+    const cleanupRequest = page.waitForRequest(
+      (request) => request.method() === "POST" && new URL(request.url()).pathname === "/api/jobs/704/copy-failures/remove-symlinks"
+    );
+    await failedDetails.getByRole("button", { name: "Remove 2 selected symlinks", exact: true }).click();
+    await cleanupDialog.getByRole("button", { name: "Remove 2 symlinks", exact: true }).click();
+    expect((await cleanupRequest).postDataJSON()).toEqual({ mediaLinkIds: [101, 102] });
+    await expect(cleanupDialog).toContainText("Symlink cleanup finished: 2 removed");
   });
 });

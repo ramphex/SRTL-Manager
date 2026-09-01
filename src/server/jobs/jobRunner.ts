@@ -30,6 +30,7 @@ import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
+import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
 import type {
   AuditMode,
   AuditOptions,
@@ -45,6 +46,7 @@ import type {
   JobEventRecord,
   JobRecord,
   CopyReconciliationState,
+  CopyFailureList,
   JobSelectionSummary,
   JobStatus,
   MediaLinkRow,
@@ -53,6 +55,7 @@ import type {
   ScanTitleScope,
   StoragePolicyKind,
   StorageRootType,
+  SymlinkCleanupOptions,
   SymlinkScanSchedulingMode
 } from "../../shared/types";
 
@@ -109,6 +112,12 @@ interface PreparedJob {
   exclusive: boolean;
   claims: ResourceClaim[];
   queueBehindClaimConflicts?: boolean;
+  symlinkCleanupOperations?: Array<{
+    sourceJobId: number;
+    mediaLinkId: number;
+    linkPath: string;
+    expectedTargetPath: string;
+  }>;
 }
 
 type LeasedJob = JobRecord & { leaseVersion: number; exclusive: boolean };
@@ -399,6 +408,15 @@ function readCopyOptions(job: JobRecord, frozenLinkIds?: number[]): StoredCopyOp
   return normalizeCopyOptionsFromProgress({ ...options, ...(frozenLinkIds !== undefined ? { linkIds: frozenLinkIds } : {}) });
 }
 
+function readSymlinkCleanupOptions(job: JobRecord, frozenLinkIds?: number[]): SymlinkCleanupOptions {
+  const options = jobProgressOptions<Partial<SymlinkCleanupOptions>>(job);
+  const sourceJobId = options?.sourceJobId;
+  if (!Number.isInteger(sourceJobId) || Number(sourceJobId) < 1 || !frozenLinkIds?.length) {
+    throw new Error("Symlink cleanup job is missing its immutable source job or selected links");
+  }
+  return { sourceJobId: Number(sourceJobId), linkIds: frozenLinkIds };
+}
+
 function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCopyOptions {
   if (options.direction !== "to_local" && options.direction !== "to_remote") throw new Error("Copy job has invalid direction");
   const behavior = options.behavior ? normalizeAdvancedSettings({ copy: options.behavior }).copy : undefined;
@@ -623,6 +641,27 @@ async function batchedMediaLinkResourceClaims(
     claims.push(...batch.flat());
   }
   return claims;
+}
+
+async function symlinkCleanupResourceClaims(links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
+  const claims: ResourceClaim[] = sectionResourceClaims(
+    links.map((link) => link.section),
+    "shared"
+  );
+  for (let offset = 0; offset < links.length; offset += 16) {
+    const batch = links.slice(offset, offset + 16);
+    const pathClaims = await Promise.all(
+      batch.map((link) => managedPathResourceClaims(paths.symlinkDir, link.linkPath, "Failed-copy symlink claim", "exclusive", true))
+    );
+    claims.push(...pathClaims.flat());
+    for (const link of batch) {
+      claims.push(
+        { resourceType: "media", resourceKey: String(link.id), access: "exclusive" },
+        { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]), access: "shared" }
+      );
+    }
+  }
+  return normalizeResourceClaims(claims);
 }
 
 async function titleScanResourceClaims(options: ScanOptions, links: MediaLinkRow[], paths: PathsSettings): Promise<ResourceClaim[]> {
@@ -2310,6 +2349,23 @@ export class JobRunner {
             }))
           );
         }
+        const cleanupOperations = prepared.symlinkCleanupOperations ?? [];
+        for (let offset = 0; offset < cleanupOperations.length; offset += 500) {
+          await transaction.insert(schema.symlinkCleanupOperations).values(
+            cleanupOperations.slice(offset, offset + 500).map((operation) => ({
+              jobId: row.id,
+              sourceJobId: operation.sourceJobId,
+              mediaLinkId: operation.mediaLinkId,
+              linkPath: operation.linkPath,
+              expectedTargetPath: operation.expectedTargetPath,
+              stage: "planned",
+              errorMessage: null,
+              createdAt: timestamp,
+              updatedAt: timestamp,
+              completedAt: null
+            }))
+          );
+        }
         for (let offset = 0; offset < claims.length; offset += 500) {
           await transaction.insert(schema.jobResourceClaims).values(
             claims.slice(offset, offset + 500).map((claim) => ({
@@ -2550,6 +2606,69 @@ export class JobRunner {
         selectionFrozen: true,
         exclusive: false,
         claims: [...(await copyResourceClaims(orderedSelectedLinks, claimedLinks, paths, normalizedOptions)), ...replacementClaims]
+      };
+    });
+  }
+
+  async copyFailures(jobId: number): Promise<CopyFailureList> {
+    return (await resolveCopyFailures(this.db, jobId)).list;
+  }
+
+  async startSymlinkCleanup(sourceJobId: number, linkIds: number[]): Promise<number> {
+    const requestedLinkIds = [...new Set(linkIds)];
+    if (requestedLinkIds.length === 0 || requestedLinkIds.some((id) => !Number.isInteger(id) || id < 1)) {
+      throw new Error("Choose at least one identifiable failed symlink to remove");
+    }
+    return this.enqueuePreparedJob("symlink_cleanup", async (transaction) => {
+      const resolved = await resolveCopyFailures(transaction, sourceJobId);
+      const failuresByLinkId = new Map(
+        resolved.failures
+          .filter((failure) => failure.item.mediaLinkId != null)
+          .map((failure) => [failure.item.mediaLinkId!, failure])
+      );
+      const selectedFailures = requestedLinkIds.map((linkId) => failuresByLinkId.get(linkId));
+      const invalid = selectedFailures
+        .map((failure, index) => ({ failure, linkId: requestedLinkIds[index]! }))
+        .filter(({ failure }) => !failure || failure.item.symlinkStatus !== "eligible");
+      if (invalid.length > 0) {
+        const details = invalid
+          .map(({ failure, linkId }) => `media #${linkId}: ${failure?.item.symlinkStatusDetail ?? "not identified as a failed item"}`)
+          .join("; ");
+        throw new Error(`Failed symlink selection is no longer eligible. ${details}`);
+      }
+      const eligibleFailures = selectedFailures.filter(
+        (failure): failure is NonNullable<typeof failure> =>
+          Boolean(failure?.link && failure.linkPath && failure.expectedTargetPath && failure.item.mediaLinkId)
+      );
+      if (eligibleFailures.length !== requestedLinkIds.length) {
+        throw new Error("Failed symlink selection could not be resolved to current managed links");
+      }
+      const links = eligibleFailures.map((failure) => failure.link!);
+      const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+      if (!paths.symlinkDir) throw new Error("Symlink path setting is incomplete");
+      const options: SymlinkCleanupOptions = { sourceJobId, linkIds: requestedLinkIds };
+      return {
+        progress: {
+          options,
+          current: 0,
+          total: requestedLinkIds.length,
+          removed: 0,
+          alreadyMissing: 0,
+          failed: 0,
+          stage: "queued",
+          message: "Waiting to remove failed-copy symlinks"
+        },
+        options,
+        selection: links,
+        selectionFrozen: true,
+        exclusive: false,
+        claims: await symlinkCleanupResourceClaims(links, paths),
+        symlinkCleanupOperations: eligibleFailures.map((failure) => ({
+          sourceJobId,
+          mediaLinkId: failure.item.mediaLinkId!,
+          linkPath: failure.linkPath!,
+          expectedTargetPath: failure.expectedTargetPath!
+        }))
       };
     });
   }
@@ -2916,7 +3035,7 @@ export class JobWorker {
   private limitForType(type: JobRecord["type"]): number {
     if (type === "scan") return this.concurrency.maxRunningScans;
     if (type === "audit") return this.concurrency.maxRunningAudits;
-    if (type === "copy") return this.concurrency.maxRunningCopies;
+    if (type === "copy" || type === "symlink_cleanup") return this.concurrency.maxRunningCopies;
     return this.concurrency.maxRunningJobs;
   }
 
@@ -3186,6 +3305,10 @@ export class JobWorker {
     }
     if (job.type === "copy") {
       await this.runCopyJob(readCopyOptions(job, frozenLinkIds), ctx);
+      return;
+    }
+    if (job.type === "symlink_cleanup") {
+      await this.runSymlinkCleanupJob(readSymlinkCleanupOptions(job, frozenLinkIds), ctx);
       return;
     }
     if (job.type === "path_migration") {
@@ -3727,6 +3850,148 @@ export class JobWorker {
     }
   }
 
+  private async runSymlinkCleanupJob(options: SymlinkCleanupOptions, ctx: JobContext): Promise<void> {
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (!paths.symlinkDir) throw new Error("Symlink path setting is incomplete");
+    const operations = await this.db
+      .select()
+      .from(schema.symlinkCleanupOperations)
+      .where(eq(schema.symlinkCleanupOperations.jobId, ctx.jobId))
+      .orderBy(asc(schema.symlinkCleanupOperations.id));
+    if (operations.length === 0 || operations.length !== options.linkIds.length) {
+      throw new Error("Symlink cleanup journal does not match the immutable job selection");
+    }
+
+    let removed = operations.filter((operation) => operation.stage === "removed").length;
+    let alreadyMissing = operations.filter((operation) => operation.stage === "already_missing").length;
+    let failed = operations.filter((operation) => operation.stage === "failed").length;
+    let current = removed + alreadyMissing + failed;
+    const total = operations.length;
+    const setProgress = (stage: string, message: string) =>
+      ctx.setProgress({
+        current,
+        total,
+        removed,
+        alreadyMissing,
+        failed,
+        remaining: Math.max(0, total - current),
+        stage,
+        message,
+        sourceJobId: options.sourceJobId
+      });
+
+    await setProgress("preparing", "Preparing failed-copy symlink cleanup");
+    await ctx.event("info", "Failed-copy symlink cleanup started", { sourceJobId: options.sourceJobId, total });
+
+    for (const operation of operations) {
+      if (operation.stage !== "planned") continue;
+      if (await ctx.isCancelled()) break;
+      await setProgress("removing", "Verifying the next failed-copy symlink");
+      try {
+        const outcome = await ctx.withLeaseDb(async (leaseDb) => {
+          const journal = await first(
+            leaseDb
+              .select()
+              .from(schema.symlinkCleanupOperations)
+              .where(and(eq(schema.symlinkCleanupOperations.id, operation.id), eq(schema.symlinkCleanupOperations.stage, "planned")))
+              .for("update")
+              .limit(1)
+          );
+          if (!journal) throw new Error(`Symlink cleanup operation #${operation.id} changed before execution`);
+          const link = await first(
+            leaseDb
+              .select()
+              .from(schema.mediaLinks)
+              .where(eq(schema.mediaLinks.id, journal.mediaLinkId))
+              .for("update")
+              .limit(1)
+          );
+          if (!link) throw new Error("Managed media link no longer exists in inventory");
+          if (path.resolve(link.linkPath) !== path.resolve(journal.linkPath)) {
+            throw new Error("Managed symlink path changed after cleanup was queued; rescan before taking action");
+          }
+          if (path.resolve(link.targetPath) !== path.resolve(journal.expectedTargetPath)) {
+            throw new Error("Managed symlink target changed after cleanup was queued; rescan before taking action");
+          }
+          if (link.missingSince) {
+            const stat = await withFilesystemTimeout(fs.lstat(journal.linkPath), `Inspection of inventoried missing symlink ${journal.linkPath}`).catch(
+              (error: unknown) => {
+                if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return null;
+                throw error;
+              }
+            );
+            if (stat) throw new Error("Inventory marks this link as missing, but a path now exists there; rescan before taking action");
+          }
+          const result = await removeExpectedSymlink(paths.symlinkDir, journal.linkPath, journal.expectedTargetPath);
+          const timestamp = nowIso();
+          const updatedLink = await first(
+            leaseDb
+              .update(schema.mediaLinks)
+              .set({ missingSince: link.missingSince ?? timestamp, updatedAt: timestamp })
+              .where(and(eq(schema.mediaLinks.id, journal.mediaLinkId), eq(schema.mediaLinks.linkPath, journal.linkPath)))
+              .returning({ id: schema.mediaLinks.id })
+          );
+          if (!updatedLink) throw new Error("Managed media link changed before cleanup could update inventory");
+          const completed = await first(
+            leaseDb
+              .update(schema.symlinkCleanupOperations)
+              .set({ stage: result, errorMessage: null, updatedAt: timestamp, completedAt: timestamp })
+              .where(and(eq(schema.symlinkCleanupOperations.id, journal.id), eq(schema.symlinkCleanupOperations.stage, "planned")))
+              .returning({ id: schema.symlinkCleanupOperations.id })
+          );
+          if (!completed) throw new Error(`Symlink cleanup operation #${journal.id} changed before completion`);
+          return { result, link };
+        });
+        current += 1;
+        if (outcome.result === "removed") removed += 1;
+        else alreadyMissing += 1;
+        await ctx.event(outcome.result === "removed" ? "info" : "warn", outcome.result === "removed" ? "Failed-copy symlink removed" : "Failed-copy symlink was already missing", {
+          sourceJobId: options.sourceJobId,
+          mediaLinkId: operation.mediaLinkId,
+          itemName: outcome.link.itemName,
+          linkPath: operation.linkPath
+        });
+        await setProgress("removing", outcome.result === "removed" ? "Removed failed-copy symlink" : "Recorded already-missing failed-copy symlink");
+      } catch (error: unknown) {
+        if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+        current += 1;
+        failed += 1;
+        const message = errorMessage(error);
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb
+            .update(schema.symlinkCleanupOperations)
+            .set({ stage: "failed", errorMessage: message, updatedAt: nowIso(), completedAt: nowIso() })
+            .where(and(eq(schema.symlinkCleanupOperations.id, operation.id), eq(schema.symlinkCleanupOperations.stage, "planned")));
+        });
+        await ctx.event("error", "Failed-copy symlink was not removed", {
+          sourceJobId: options.sourceJobId,
+          mediaLinkId: operation.mediaLinkId,
+          linkPath: operation.linkPath,
+          reason: message
+        });
+        await setProgress("removing", message);
+      }
+    }
+
+    if (await ctx.isCancelled()) {
+      await setProgress("cancelled", "Symlink cleanup stopped; completed removals were retained");
+      await ctx.event("warn", "Failed-copy symlink cleanup stopped; completed removals were retained", { removed, alreadyMissing, failed, total });
+      return;
+    }
+    if (failed > 0) {
+      const partial = removed + alreadyMissing > 0;
+      const message = partial
+        ? `Symlink cleanup partially failed: ${failed} of ${total} symlinks were not removed`
+        : `Symlink cleanup failed: ${failed} of ${total} symlinks were not removed`;
+      await setProgress(partial ? "partially_failed" : "failed", message);
+      await ctx.event(partial ? "warn" : "error", message, { sourceJobId: options.sourceJobId, removed, alreadyMissing, failed, total });
+      if (partial) throw new PartialJobFailureError(message);
+      throw new Error(message);
+    }
+    await setProgress("completed", `Symlink cleanup finished: ${removed} removed${alreadyMissing > 0 ? `, ${alreadyMissing} already missing` : ""}`);
+    await ctx.event("info", "Failed-copy symlink cleanup finished", { sourceJobId: options.sourceJobId, removed, alreadyMissing, failed, total });
+  }
+
   private async runCopyJob(normalizedOptions: StoredCopyOptions, ctx: JobContext): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
@@ -4130,6 +4395,8 @@ export class JobWorker {
         await setCopyProgress("failed", errorMessage(error), link);
         await ctx.event("error", errorMessage(error), {
           direction: normalizedOptions.direction,
+          mediaLinkId: link.id,
+          copyOperationId: activeOperationId,
           itemName: link.itemName,
           linkPath: link.linkPath,
           sourcePath: link.targetPath

@@ -1159,6 +1159,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "scan", label: "Scans" },
   { value: "audit", label: "Audits" },
   { value: "copy", label: "Copies" },
+  { value: "symlink_cleanup", label: "Symlink cleanups" },
   { value: "path_migration", label: "Path migrations" },
 ];
 

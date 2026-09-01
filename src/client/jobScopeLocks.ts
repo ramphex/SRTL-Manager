@@ -162,6 +162,10 @@ function auditJobMatchesLink(job: JobRecord, link: MediaLinkRow): boolean {
   return (link.kind === "local" || link.kind === "remote") && requestedTargets.has(link.kind) && (link.kind !== "local" || selectedSections.has(link.section)) && link.isMedia && !link.missingSince;
 }
 
+function symlinkCleanupJobMatchesLink(job: JobRecord, link: MediaLinkRow): boolean {
+  return Boolean(isActiveQueueJob(job) && job.type === "symlink_cleanup" && job.selection?.linkIds?.includes(link.id));
+}
+
 function copyJobMatchesStoragePolicyTitle(job: JobRecord, item: StoragePolicyTitle): boolean {
   if (!isActiveQueueJob(job) || job.type !== "copy") return false;
   const options = copyOptionsFromJob(job);
@@ -200,12 +204,27 @@ function scanJobMatchesStoragePolicyTitle(job: JobRecord, item: StoragePolicyTit
   return !sections || item.sections.some((section) => sections.includes(section));
 }
 
+function symlinkCleanupJobMatchesStoragePolicyTitle(job: JobRecord, item: StoragePolicyTitle): boolean {
+  if (!isActiveQueueJob(job) || job.type !== "symlink_cleanup") return false;
+  return Boolean(
+    job.selection?.titles.some(
+      (title) => item.sections.includes(title.section) && canonicalTitleKey(title.itemName) === canonicalTitleKey(item.normalizedTitle || item.title)
+    )
+  );
+}
+
 export function activeJobForLink(link: MediaLinkRow, jobs: JobRecord[]): JobRecord | null {
-  return jobs.find((job) => scanJobMatchesLink(job, link) || copyJobMatchesLink(job, link) || auditJobMatchesLink(job, link)) ?? null;
+  return jobs.find((job) => scanJobMatchesLink(job, link) || copyJobMatchesLink(job, link) || auditJobMatchesLink(job, link) || symlinkCleanupJobMatchesLink(job, link)) ?? null;
 }
 
 export function activeJobsForStoragePolicyTitle(item: StoragePolicyTitle, jobs: JobRecord[]): JobRecord[] {
-  return jobs.filter((job) => scanJobMatchesStoragePolicyTitle(job, item) || copyJobMatchesStoragePolicyTitle(job, item) || auditJobMatchesStoragePolicyTitle(job, item));
+  return jobs.filter(
+    (job) =>
+      scanJobMatchesStoragePolicyTitle(job, item) ||
+      copyJobMatchesStoragePolicyTitle(job, item) ||
+      auditJobMatchesStoragePolicyTitle(job, item) ||
+      symlinkCleanupJobMatchesStoragePolicyTitle(job, item)
+  );
 }
 
 export function activeJobsForLinks(links: MediaLinkRow[], jobByLinkId: Map<number, JobRecord>): JobRecord[] {

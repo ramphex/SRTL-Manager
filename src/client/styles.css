@@ -5016,6 +5016,57 @@ button.danger-button:hover:not(:disabled) {
   padding-top: 7px;
 }
 
+.copy-item-details-tooltip-list li.has-actions {
+  align-items: start;
+  gap: 8px;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.copy-item-details-copy {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.copy-item-details-item-actions {
+  align-items: center;
+  display: flex;
+  gap: 5px;
+}
+
+.copy-item-details-select-control {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  height: 30px;
+  justify-content: center;
+  width: 30px;
+}
+
+.copy-item-details-select-control:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.copy-item-details-select-control input {
+  margin: 0;
+}
+
+.copy-item-details-remove-button {
+  background: color-mix(in srgb, var(--bad), transparent 90%);
+  border-color: color-mix(in srgb, var(--bad), var(--border) 55%);
+  color: var(--bad);
+  justify-content: center;
+  min-height: 30px;
+  min-width: 30px;
+  padding: 0;
+  width: 30px;
+}
+
+.copy-item-details-remove-button:hover:not(:disabled),
+.copy-item-details-remove-button:focus-visible {
+  background: color-mix(in srgb, var(--bad), transparent 80%);
+}
+
 .copy-item-details-tooltip-list strong,
 .copy-item-details-tooltip-list span,
 .copy-item-details-tooltip-list small {
@@ -5041,6 +5092,173 @@ button.danger-button:hover:not(:disabled) {
 
 .copy-item-details-tooltip-panel .copy-item-details-tooltip-error {
   color: var(--bad);
+}
+
+.copy-item-details-status {
+  color: var(--muted-strong) !important;
+}
+
+.failed-symlink-inline-toolbar {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  display: flex;
+  font-size: 11px;
+  gap: 6px;
+  justify-content: flex-end;
+  padding: 6px;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
+.failed-symlink-inline-toolbar > strong {
+  color: var(--text-strong);
+  margin-right: auto;
+}
+
+.failed-symlink-inline-toolbar button {
+  font-size: 11px;
+  gap: 5px;
+  min-height: 30px;
+  padding: 0 8px;
+}
+
+.failed-symlink-cleanup-dialog {
+  max-width: 780px;
+}
+
+.failed-symlink-cleanup-toolbar {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.failed-symlink-cleanup-toolbar strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.failed-symlink-cleanup-list {
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  display: grid;
+  list-style: none;
+  margin: 0;
+  max-height: min(46vh, 440px);
+  overflow: auto;
+  padding: 0;
+}
+
+.failed-symlink-cleanup-list li {
+  align-items: center;
+  background: var(--bg-subtle);
+  display: grid;
+  gap: 14px;
+  grid-template-columns: minmax(0, 1fr) minmax(200px, 0.9fr);
+  min-width: 0;
+  padding: 10px 12px;
+}
+
+.failed-symlink-cleanup-list li + li {
+  border-top: 1px solid var(--border-soft);
+}
+
+.failed-symlink-cleanup-list li.is-blocked {
+  opacity: 0.76;
+}
+
+.failed-symlink-cleanup-list label {
+  align-items: center;
+  cursor: pointer;
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.failed-symlink-cleanup-list li.is-blocked label {
+  cursor: default;
+}
+
+.failed-symlink-cleanup-list label > span,
+.failed-symlink-cleanup-list li > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.failed-symlink-cleanup-list li > div {
+  justify-items: start;
+}
+
+.failed-symlink-cleanup-list strong,
+.failed-symlink-cleanup-list small {
+  overflow-wrap: anywhere;
+}
+
+.failed-symlink-cleanup-list strong {
+  color: var(--text-strong);
+  font-size: 13px;
+}
+
+.failed-symlink-cleanup-list small {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.failed-symlink-cleanup-status {
+  background: var(--bg-subtle);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.failed-symlink-cleanup-status > div:first-child {
+  align-items: center;
+  display: flex;
+  gap: 10px;
+  justify-content: space-between;
+}
+
+.failed-symlink-cleanup-status p {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+}
+
+.failed-symlink-cleanup-status dl {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+}
+
+.failed-symlink-cleanup-status dl > div {
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  display: grid;
+  gap: 3px;
+  padding: 9px;
+}
+
+.failed-symlink-cleanup-status dt {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.failed-symlink-cleanup-status dd {
+  color: var(--text-strong);
+  font-size: 18px;
+  font-weight: 800;
+  margin: 0;
 }
 
 .copy-conflict-panel {
@@ -6205,20 +6423,23 @@ button.danger-button:hover:not(:disabled) {
   }
 
   .mobile-nav-drawer {
+    align-self: flex-start;
     background: var(--sidebar-bg);
     border-left: 1px solid var(--sidebar-border);
+    border-bottom-left-radius: 12px;
     box-shadow: -24px 0 60px rgb(0 0 0 / 0.4);
     box-sizing: border-box;
     color: var(--sidebar-text);
     display: flex;
     flex-direction: column;
-    gap: 16px;
-    height: 100vh;
-    height: 100dvh;
-    max-width: 360px;
+    gap: 10px;
+    height: auto;
+    max-height: 100vh;
+    max-height: 100dvh;
+    max-width: 320px;
     overflow-y: auto;
-    padding: max(14px, env(safe-area-inset-top)) max(14px, env(safe-area-inset-right)) max(18px, env(safe-area-inset-bottom)) 14px;
-    width: min(90vw, 360px);
+    padding: max(10px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) 12px;
+    width: min(84vw, 320px);
   }
 
   .mobile-nav-drawer-header {
@@ -6228,7 +6449,12 @@ button.danger-button:hover:not(:disabled) {
   }
 
   .mobile-nav-drawer-header .brand {
+    gap: 8px;
     padding: 0;
+  }
+
+  .mobile-nav-drawer-header .brand strong {
+    font-size: 14px;
   }
 
   .mobile-nav-drawer-header .icon-button {
@@ -6241,30 +6467,42 @@ button.danger-button:hover:not(:disabled) {
 
   .mobile-nav-drawer-links {
     display: grid;
-    gap: 6px;
+    gap: 2px;
   }
 
   .mobile-nav-drawer .nav-link,
   .mobile-nav-drawer .nav-sublink {
+    font-size: 13px;
+    gap: 8px;
     min-height: 44px;
+    padding-left: 9px;
+    padding-right: 9px;
+  }
+
+  .mobile-nav-drawer .nav-group {
+    gap: 2px;
   }
 
   .mobile-nav-drawer .nav-sublinks {
     display: grid;
+    gap: 1px;
     grid-template-columns: 1fr;
-    margin-left: 18px;
+    margin-left: 14px;
+    padding-left: 7px;
   }
 
   .mobile-nav-account {
     border-top: 1px solid var(--sidebar-border);
     display: grid;
-    gap: 8px;
-    margin-top: auto;
-    padding-top: 16px;
+    gap: 6px;
+    grid-template-columns: minmax(0, 1fr) minmax(92px, 0.55fr);
+    margin-top: 2px;
+    padding-top: 10px;
   }
 
-  .mobile-nav-account .sidebar-user-chip,
-  .mobile-nav-account .sidebar-sign-out-button {
+  .mobile-nav-account .sidebar-user-chip {
+    font-size: 12px;
+    grid-column: 1 / -1;
     min-height: 44px;
   }
 
@@ -6276,6 +6514,27 @@ button.danger-button:hover:not(:disabled) {
   .mobile-nav-account .theme-option {
     min-height: 44px;
     width: auto;
+  }
+
+  .mobile-nav-account .sidebar-sign-out-button {
+    font-size: 12px;
+    min-height: 44px;
+  }
+
+  .mobile-nav-drawer > .version-status {
+    gap: 4px;
+    padding: 7px 8px;
+  }
+
+  .mobile-nav-drawer .current-version-number,
+  .mobile-nav-drawer .version-status small,
+  .mobile-nav-drawer .version-channel-version {
+    font-size: 11px;
+  }
+
+  .mobile-nav-drawer .version-channel-label,
+  .mobile-nav-drawer .current-version-channel {
+    font-size: 10px;
   }
 
   .mobile-nav-drawer .version-refresh-button,
@@ -7279,5 +7538,54 @@ button.danger-button:hover:not(:disabled) {
 
   .auth-panel .theme-switcher {
     justify-self: end;
+  }
+}
+
+@media (max-width: 820px) {
+  .failed-symlink-cleanup-dialog .audit-dialog-header {
+    align-items: start;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 44px;
+  }
+
+  .failed-symlink-cleanup-dialog .audit-dialog-header > .icon-button {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .failed-symlink-cleanup-dialog .audit-dialog-title-block {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .failed-symlink-cleanup-list li {
+    align-items: stretch;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .failed-symlink-cleanup-list li > div {
+    padding-left: 34px;
+  }
+
+  .failed-symlink-cleanup-list label,
+  .failed-symlink-cleanup-toolbar button,
+  .failed-symlink-inline-toolbar button,
+  .copy-item-details-select-control,
+  .copy-item-details-remove-button {
+    min-height: 44px;
+  }
+
+  .copy-item-details-select-control {
+    height: 44px;
+    width: 44px;
+  }
+
+  .copy-item-details-remove-button {
+    min-width: 44px;
+    width: 44px;
+  }
+
+  .failed-symlink-cleanup-status dl {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
