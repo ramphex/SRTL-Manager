@@ -1427,7 +1427,7 @@ test("copy progress opens a persistent, scrollable failed item summary", async (
   await expect(trigger).toContainText("View failed items");
   await trigger.hover();
   await expect(tooltip).toBeVisible();
-  await expect(tooltip.locator("li > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+  await expect(tooltip.locator("li .copy-item-details-copy > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
   await expect(tooltip).toContainText("Media validation failed: moov atom not found");
   await expect(tooltip).toContainText("Media validation failed: invalid media data");
   expect(await tooltip.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
@@ -1701,6 +1701,26 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
       const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
       body = { currentVersion: "0.1.3-beta.3", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
     } else if (url.pathname === `/api/jobs/${jobId}/events/page`) body = { events, total: events.length, hasOlder: false };
+    else if (url.pathname === `/api/jobs/${jobId}/copy-failures`) {
+      body = {
+        jobId,
+        totalFailures: 1,
+        eligibleCount: 0,
+        unidentifiedCount: 1,
+        items: [{
+          key: "failed-title",
+          mediaLinkId: null,
+          copyOperationId: null,
+          section: null,
+          itemName: "Failed Title (2026)",
+          relativePath: null,
+          fileName: "failed.mkv",
+          reason: "Media validation failed: moov atom not found",
+          symlinkStatus: "unidentified",
+          symlinkStatusDetail: "No safely identifiable managed symlink is available for cleanup."
+        }]
+      };
+    }
     else if (url.pathname === `/api/jobs/${jobId}`) body = job;
     else if (url.pathname === "/api/jobs") body = [job];
     else if (url.pathname === "/api/settings/sections") body = { sections: [], sectionTitles: {}, sectionTypes: {} };
@@ -1723,7 +1743,7 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
   await expect(trigger).toContainText("View completed items");
   await trigger.hover();
   await expect(details).toBeVisible();
-  await expect(details.locator("li > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
+  await expect(details.locator("li .copy-item-details-copy > strong")).toHaveText([...titles].sort((left, right) => left.localeCompare(right, undefined, { sensitivity: "base" })));
   await expect(details).toContainText("Copied and symlinked");
   await expect(details).toContainText("Matched existing and symlinked");
   expect(await details.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
