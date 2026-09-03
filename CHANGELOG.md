@@ -4,6 +4,33 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-09-03
+
+### Added
+
+- Added an installable progressive web app shell with revisioned static caching, offline-aware startup, explicit update prompts, and mobile-safe application icons.
+- Added a compact mobile interface with safe-area-aware navigation, an accessible drawer, touch-sized controls, card layouts for dense operational views, and responsive dialogs and progress screens.
+- Added safe failed-copy symlink cleanup with per-link deletion, multi-selection, confirmation, server-side path revalidation, durable cleanup jobs, and audit events.
+
+### Changed
+
+- Extended parallel inventory scheduling across selected symlink folders, local folders, and the remote root so disjoint sources can run on separate worker slots up to the configured scan capacity.
+- Reworked the dashboard and mobile navigation with clearer visual hierarchy, more compact controls, and responsive treatments for storage, jobs, logs, libraries, and settings.
+- Updated supported application dependencies, Fastify, the pinned Node.js image, CodeQL, and the container build action.
+
+### Fixed
+
+- Scoped concurrent inventory reconciliation and durable resource claims by storage root, media kind, and local section so disjoint jobs can run together without marking one another's files missing or rewriting unrelated policy state.
+- Prevented symlink discovery from failing when external library tools replace links during a scan, while retaining bounded refreshes and real filesystem error reporting.
+- Prevented authenticated offline startup from stalling before the reconnect screen can render.
+- Corrected inventory selection summaries so disabled or cleared sources do not contribute stale folder counts.
+- Kept copy-progress fixtures, selected-title disclosures, mobile tooltips, long labels, and interactive job entries aligned with the real job scope and accessible UI behavior.
+
+### Security
+
+- Patched the newly disclosed `fast-uri` vulnerabilities by resolving the runtime dependency to 3.1.7 and 4.1.4, and updated Fastify to 5.12.1.
+- Passed npm audit, dependency review, CodeQL, the full test/build/browser suite, and container vulnerability scanning before stable promotion.
+
 ## [0.1.3-beta.2] - 2026-08-12
 
 ### Added
