@@ -45,7 +45,30 @@ describe("log display helpers", () => {
   it("uses friendlier names for job types", () => {
     expect(formatJobType("scan")).toBe("Inventory scan");
     expect(formatJobType("audit")).toBe("Audit");
+    expect(formatJobType("symlink_cleanup")).toBe("Symlink cleanup");
     expect(formatJobType("path_migration")).toBe("Path migration");
+  });
+
+  it("summarizes failed-copy symlink cleanup progress", () => {
+    expect(
+      jobProgressChips(
+        job({
+          type: "symlink_cleanup",
+          progress: {
+            options: { sourceJobId: 200 },
+            removed: 2,
+            alreadyMissing: 1,
+            failed: 0
+          }
+        }),
+        4
+      )
+    ).toEqual([
+      { label: "Source copy job", value: "#200" },
+      { label: "Removed symlinks", value: "2" },
+      { label: "Already missing", value: "1" },
+      { label: "Failed", value: "0" }
+    ]);
   });
 
   it("matches jobs by friendly text and structured progress", () => {

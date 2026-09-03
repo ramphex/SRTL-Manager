@@ -78,6 +78,8 @@ The API receives read-only root mounts. The worker alone receives writable roots
 
 The single Compose worker service can host any positive number of independent job slots. Set `SRTL_WORKER_COUNT` to the desired slot count; there is no fixed two-worker ceiling. Jobs still pass database-backed admission, resource-claim, and lease checks, so adding slots does not allow two jobs to mutate the same managed resources.
 
+Settings > Advanced can keep selected symlink folders in one sequential scan job, the default, or queue one job per folder so independent folders use the available scan slots concurrently.
+
 The optional `SRTL_MAX_RUNNING_JOBS` setting limits total simultaneous jobs and must not exceed `SRTL_WORKER_COUNT`. `SRTL_MAX_RUNNING_SCANS`, `SRTL_MAX_RUNNING_AUDITS`, and `SRTL_MAX_RUNNING_COPIES` apply per-type limits, may be zero to pause that job type, and must not exceed the total-job limit. When omitted, the total limit follows the configured worker count and the per-type limits follow that total limit.
 
 `SRTL_COPY_FILE_CONCURRENCY` controls how many files one copy job may transfer at once. `SRTL_MAX_ACTIVE_COPY_FILES` is the independent worker process-wide copy-file ceiling and must be at least the per-job value. Their defaults keep one file active per copy job while allowing separate copy jobs to use separate slots. Setting both values above the worker count is supported, including parallel file transfers from one copy job in a one-slot worker; start conservatively and raise copy limits only when the storage endpoints and network can sustain the additional I/O.

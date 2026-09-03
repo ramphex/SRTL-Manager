@@ -1,0 +1,33 @@
+{
+  "id": "/",
+  "name": "SRTL Manager",
+  "short_name": "SRTL",
+  "description": "Manage SRTL storage inventory, jobs, and library operations.",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#090f16",
+  "theme_color": "#070b11",
+  "icons": [
+    {
+      "src": "/icons/srtl-icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/srtl-icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/icons/srtl-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}

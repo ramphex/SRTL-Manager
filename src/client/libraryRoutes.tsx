@@ -1,16 +1,17 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, CheckCircle2, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
+import { Activity, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
+import { normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/sourceTitleRisk";
-import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets } from "./jobScopeLocks";
+import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount, mediaLinkTreeStatusCounts, orderSectionSummaries, sectionActionUnit, sectionCompositionParts, type LinkStatusWorkKind } from "./sectionSummaryDisplay";
 import { inferSectionContentType } from "../shared/sections";
 import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyKind, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
-import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
-import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
+import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
+import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
 
 function stripLegacyScanSections(options: ScanOptions): ScanOptions {
@@ -76,11 +77,15 @@ export function DashboardPage() {
   const [auditStatusPrompt, setAuditStatusPrompt] = useState<AuditStatusPrompt | null>(null);
   const [copyPrompt, setCopyPrompt] = useState<CopyPrompt | null>(null);
   const [scanStatusPrompt, setScanStatusPrompt] = useState<ScanStatusPrompt | null>(null);
+  const [scanBatchStatusPrompt, setScanBatchStatusPrompt] = useState<ScanBatchStatusPrompt | null>(null);
+  const [scanOptionsExpanded, setScanOptionsExpanded] = useState(false);
+  const [auditOptionsExpanded, setAuditOptionsExpanded] = useState(false);
   const sectionSummaries = useQuery({ queryKey: ["sections"], queryFn: api.sections, refetchInterval: 5000 });
   const sectionSettings = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths });
   const scanSettings = useQuery({ queryKey: ["scan-settings"], queryFn: api.getScanSettings });
   const auditSettings = useQuery({ queryKey: ["audit-settings"], queryFn: api.getAuditSettings });
+  const advancedSettings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
   const inventory = useQuery({ queryKey: ["inventory-summary"], queryFn: api.inventorySummary, refetchInterval: 5000 });
   const scanTimestamps = useQuery({ queryKey: ["inventory-scan-timestamps"], queryFn: api.inventoryScanTimestamps, refetchInterval: 60000 });
   const jobs = useQuery({
@@ -127,12 +132,22 @@ export function DashboardPage() {
       queryClient.invalidateQueries({ queryKey: ["storage-files"] });
       await queryClient.refetchQueries({ queryKey: ["jobs"] });
       if (autoOpenTaskStatus) {
-        setScanStatusPrompt({
-          key: `scan-job-${result.jobId}`,
-          title: "Inventory scan",
-          description: formatScanScope(submittedOptions, availableScanSections),
-          jobId: result.jobId
-        });
+        const jobIds = result.jobIds?.length ? result.jobIds : [result.jobId];
+        if (jobIds.length > 1) {
+          setScanBatchStatusPrompt({
+            key: `scan-batch-${jobIds.join("-")}`,
+            title: "Folder scans",
+            description: `${jobIds.length} inventory scan jobs queued`,
+            jobIds
+          });
+        } else {
+          setScanStatusPrompt({
+            key: `scan-job-${result.jobId}`,
+            title: "Inventory scan",
+            description: formatScanScope(submittedOptions, availableScanSections),
+            jobId: result.jobId
+          });
+        }
       }
     }
   });
@@ -142,6 +157,19 @@ export function DashboardPage() {
     title: sectionSettings.data?.sectionTitles?.[section] ?? sectionSummaries.data?.find((summary) => summary.section === section)?.title ?? section
   }));
   const availableScanSectionNames = availableScanSections.map((section) => section.section);
+  const activeSymlinkScanSections = new Set(
+    (jobs.data ?? [])
+      .filter((job) => job.type === "scan" && isActiveQueueJob(job))
+      .flatMap((job) => scanOptionsFromJob(job)?.symlinkSections ?? [])
+  );
+  const activeLocalScanSections = new Set(
+    (jobs.data ?? [])
+      .filter((job) => job.type === "scan" && isActiveQueueJob(job))
+      .flatMap((job) => scanOptionsFromJob(job)?.localSections ?? [])
+  );
+  const activeRemoteScan = (jobs.data ?? []).some(
+    (job) => job.type === "scan" && isActiveQueueJob(job) && scanOptionsFromJob(job)?.scanRemote
+  );
   const selectedSymlinkSections = (scanOptions.symlinkSections ?? scanOptions.sections ?? availableScanSectionNames).filter((section) => availableScanSectionNames.includes(section));
   const selectedLocalSections = (scanOptions.localSections ?? scanOptions.sections ?? availableScanSectionNames).filter((section) => availableScanSectionNames.includes(section));
   const selectedSymlinkScanAge =
@@ -154,7 +182,9 @@ export function DashboardPage() {
   const auditLocalSelected = selectedAuditTargets.includes("local");
   const auditRemoteSelected = selectedAuditTargets.includes("remote");
   const selectedInventoryScopeCount = [scanOptions.scanSymlinks, scanOptions.scanLocal, scanOptions.scanRemote].filter(Boolean).length;
-  const selectedInventoryFolderCount = selectedSymlinkSections.length + selectedLocalSections.length;
+  const selectedSymlinkFolderCount = scanOptions.scanSymlinks ? selectedSymlinkSections.length : 0;
+  const selectedLocalFolderCount = scanOptions.scanLocal ? selectedLocalSections.length : 0;
+  const selectedInventoryFolderCount = selectedSymlinkFolderCount + selectedLocalFolderCount;
   const totalInventoryFolderCount = availableScanSectionNames.length * 2;
   const selectedAuditScopeCount = selectedAuditTargets.length;
   const allInventorySelected =
@@ -163,13 +193,27 @@ export function DashboardPage() {
     scanOptions.scanRemote &&
     selectedSymlinkSections.length === availableScanSectionNames.length &&
     selectedLocalSections.length === availableScanSectionNames.length;
-  const noInventorySelected = selectedInventoryScopeCount === 0 && selectedInventoryFolderCount === 0;
+  const noInventorySelected = selectedInventoryScopeCount === 0;
   const hasScanScope = scanOptions.scanSymlinks || scanOptions.scanLocal || scanOptions.scanRemote;
+  const selectedActiveScanSections = scanOptions.scanSymlinks ? selectedSymlinkSections.filter((section) => activeSymlinkScanSections.has(section)) : [];
+  const selectedActiveLocalScanSections = scanOptions.scanLocal ? selectedLocalSections.filter((section) => activeLocalScanSections.has(section)) : [];
   const canRunScan =
     hasScanScope &&
     (!scanOptions.scanSymlinks || selectedSymlinkSections.length > 0) &&
     (!scanOptions.scanLocal || selectedLocalSections.length > 0) &&
-    (!scanOptions.scanRemote || Boolean(paths.data?.remoteDir));
+    (!scanOptions.scanRemote || Boolean(paths.data?.remoteDir)) &&
+    selectedActiveScanSections.length === 0 &&
+    selectedActiveLocalScanSections.length === 0 &&
+    (!scanOptions.scanRemote || !activeRemoteScan);
+  const parallelFolderScans = normalizeAdvancedSettings(advancedSettings.data).scan.symlinkFolderScheduling === "per_folder";
+  const plannedScanJobCount =
+    parallelFolderScans
+      ? (scanOptions.scanSymlinks ? selectedSymlinkSections.length : 0) +
+        (scanOptions.scanLocal ? selectedLocalSections.length : 0) +
+        (scanOptions.scanRemote ? 1 : 0)
+      : hasScanScope
+        ? 1
+        : 0;
   const canRunAudit = auditRemoteSelected || (auditLocalSelected && selectedAuditSections.length > 0);
   const sectionTotals = (sectionSummaries.data ?? []).reduce(
     (acc, section) => ({
@@ -219,12 +263,18 @@ export function DashboardPage() {
   const policyNeededTotal = inventoryPolicyNeededCount(totals);
   const copyToLocalTotal = inventoryCopyToLocalCount(totals);
   const copyToRemoteTotal = inventoryCopyToRemoteCount(totals);
+  const dashboardInventoryLoading = inventory.isLoading;
+  const dashboardAttentionCount = policyNeededTotal + copyToLocalTotal + copyToRemoteTotal + totals.brokenLinks;
+  const dashboardAttentionState = dashboardInventoryLoading ? "loading" : dashboardAttentionCount > 0 ? "attention" : "clear";
+  const dashboardMetric = (value: number) => (dashboardInventoryLoading ? "..." : formatNumber(value));
   const actionError =
-    startScan.error ?? copyConflictCheck.error ?? startCopySilently.error ?? paths.error ?? sectionSettings.error ?? scanSettings.error ?? auditSettings.error ?? saveScanSettings.error ?? saveAuditSettings.error;
+    startScan.error ?? copyConflictCheck.error ?? startCopySilently.error ?? paths.error ?? sectionSettings.error ?? scanSettings.error ?? auditSettings.error ?? advancedSettings.error ?? saveScanSettings.error ?? saveAuditSettings.error;
   const actionMessage = startCopySilently.data
     ? `Copy job #${startCopySilently.data.jobId} queued. View progress from Recent Jobs.`
     : startScan.data
-      ? `Inventory scan job #${startScan.data.jobId} queued.`
+      ? (startScan.data.jobIds?.length ?? 1) > 1
+        ? `${startScan.data.jobIds.length} inventory scan jobs queued.`
+        : `Inventory scan job #${startScan.data.jobId} queued.`
       : null;
   const actionToastMessage = actionError?.message ?? actionMessage;
 
@@ -324,180 +374,272 @@ export function DashboardPage() {
   }
 
   return (
-    <Page title="Dashboard" subtitle="Manual read-only inventory of symlinks, storage files, and orphans." hideHeader>
-      <div className="dashboard-actions">
-        <section className="action-group action-group-primary" aria-labelledby="inventory-actions-title">
-          <div className="action-group-header">
-            <RefreshCw size={17} />
-            <h2 id="inventory-actions-title">Inventory Scan</h2>
-            <InfoTooltip label="About inventory scans">
-              Reads the selected symlink folders and optional storage folders, then updates SRTL Manager's inventory database without changing media files.
-            </InfoTooltip>
-          </div>
-          <div className="inventory-scope-toolbar">
-            <span>
-              {selectedInventoryScopeCount}/3 categories - {selectedInventoryFolderCount}/{totalInventoryFolderCount} folders
+    <Page
+      title="Dashboard"
+      subtitle="Current library health, storage distribution, and maintenance controls."
+      headerClassName="dashboard-page-header"
+    >
+      <div className="dashboard-summary" aria-busy={dashboardInventoryLoading}>
+        <section className={`dashboard-overview-panel dashboard-attention-panel state-${dashboardAttentionState}`} aria-labelledby="attention-summary-title">
+          <div className="dashboard-overview-header">
+            <span className="dashboard-overview-icon dashboard-attention-icon" aria-hidden="true">
+              {dashboardAttentionState === "clear" ? <CheckCircle2 size={18} /> : <TriangleAlert size={18} />}
             </span>
-            <div className="inventory-scope-actions">
-              <button type="button" className="secondary inventory-scope-action" onClick={selectAllInventoryScanOptions} disabled={allInventorySelected}>
-                Select all
-              </button>
-              <button type="button" className="secondary inventory-scope-action" onClick={clearAllInventoryScanOptions} disabled={noInventorySelected}>
-                Clear all
-              </button>
+            <div>
+              <h2 id="attention-summary-title">
+                {dashboardAttentionState === "loading" ? "Checking library health" : dashboardAttentionState === "clear" ? "All clear" : "Needs attention"}
+              </h2>
+              <p>
+                {dashboardAttentionState === "loading"
+                  ? "Loading current storage and link status."
+                  : dashboardAttentionState === "clear"
+                    ? "No storage decisions or link repairs are waiting."
+                    : "Items waiting for a storage decision or repair."}
+              </p>
             </div>
           </div>
-          <div className="inventory-scope-list" role="group" aria-label="Inventory scan scopes">
-            <ScanScopeBlock
-              checked={scanOptions.scanSymlinks}
-              icon={<Link2 size={15} />}
-              title="Symlinks"
-              detail={`${selectedSymlinkSections.length}/${availableScanSections.length} folders - ${selectedSymlinkScanAge}`}
-              onChange={(checked) => updateScanOptions({ ...scanOptions, scanSymlinks: checked })}
-            >
-              <FolderScopePicker
-                ariaLabel="Symlink folders"
-                emptyMessage="No library sections configured."
-                sections={availableScanSections}
-                lastScannedBySection={scanTimestamps.data?.symlinkSections ?? {}}
-                selectedSections={selectedSymlinkSections}
-                onToggle={(section, checked) => toggleScanSection("symlinkSections", section, checked)}
-              />
-            </ScanScopeBlock>
-            <ScanScopeBlock
-              checked={scanOptions.scanLocal}
-              icon={<HardDrive size={15} />}
-              title={`${localName} files`}
-              detail={`${selectedLocalSections.length}/${availableScanSections.length} folders - ${selectedLocalScanAge}`}
-              onChange={(checked) => updateScanOptions({ ...scanOptions, scanLocal: checked })}
-            >
-              <FolderScopePicker
-                ariaLabel={`${localName} file folders`}
-                emptyMessage="No library sections configured."
-                sections={availableScanSections}
-                lastScannedBySection={scanTimestamps.data?.localSections ?? {}}
-                selectedSections={selectedLocalSections}
-                onToggle={(section, checked) => toggleScanSection("localSections", section, checked)}
-              />
-            </ScanScopeBlock>
-            <ScanScopeBlock
-              checked={scanOptions.scanRemote}
-              icon={<HardDriveDownload size={15} />}
-              title={`${remoteName} files`}
-              detail={remoteScanAge}
-              onChange={(checked) => updateScanOptions({ ...scanOptions, scanRemote: checked })}
-            />
+          <div className="dashboard-attention-grid">
+            <StatCard label="Unassigned" value={dashboardMetric(policyNeededTotal)} detail={`${localName} + ${remoteName} media`} tone={!dashboardInventoryLoading && policyNeededTotal > 0 ? "warn" : "neutral"} />
+            <StatCard label={`Copy to ${localName}`} value={dashboardMetric(copyToLocalTotal)} detail={`${remoteName} media`} tone={!dashboardInventoryLoading && copyToLocalTotal > 0 ? "bad" : "neutral"} />
+            <StatCard label={`Copy to ${remoteName}`} value={dashboardMetric(copyToRemoteTotal)} detail={`${localName} media`} tone={!dashboardInventoryLoading && copyToRemoteTotal > 0 ? "bad" : "neutral"} />
+            <StatCard label="Broken symlinks" value={dashboardMetric(totals.brokenLinks)} detail="Library links" tone={!dashboardInventoryLoading && totals.brokenLinks > 0 ? "bad" : "neutral"} />
           </div>
-          <button className="run-scan-button" onClick={runInventoryScan} disabled={startScan.isPending || !canRunScan}>
-            <RefreshCw size={16} />
-            Run Inventory Scan
-          </button>
         </section>
-        <section className="action-group action-group-audits" aria-labelledby="audit-actions-title">
-          <div className="action-group-header">
-            <Activity size={17} />
-            <h2 id="audit-actions-title">Audits</h2>
-            <InfoTooltip label="About audits">
-              Verifies media in the selected storage locations as a read-only job. Fast audit checks container reads; deep audit fully decodes for heavier validation.
-            </InfoTooltip>
-          </div>
-          <div className="inventory-scope-toolbar">
-            <span>
-              {selectedAuditScopeCount}/2 categories - {selectedAuditSections.length}/{availableScanSections.length} {localName} folders
+        <section className="dashboard-overview-panel dashboard-storage-panel" aria-labelledby="storage-summary-title">
+          <div className="dashboard-overview-header">
+            <span className="dashboard-overview-icon" aria-hidden="true">
+              <Database size={18} />
             </span>
-            <div className="inventory-scope-actions">
-              <button type="button" className="secondary inventory-scope-action" onClick={() => {
-                updateAuditSettings({ ...auditSettingsDraft, targets: ["local", "remote"], sections: availableScanSectionNames });
-              }} disabled={auditLocalSelected && auditRemoteSelected && selectedAuditSections.length === availableScanSections.length}>
-                Select all
-              </button>
-              <button type="button" className="secondary inventory-scope-action" onClick={() => {
-                updateAuditSettings({ ...auditSettingsDraft, targets: [], sections: [] });
-              }} disabled={selectedAuditScopeCount === 0 && selectedAuditSections.length === 0}>
-                Clear all
-              </button>
+            <div>
+              <h2 id="storage-summary-title">Storage overview</h2>
+              <p>Current links, files, and unlinked media by location.</p>
             </div>
           </div>
-          <div className="inventory-scope-list" role="group" aria-label="Audit targets">
-            <ScanScopeBlock
-              checked={auditLocalSelected}
-              icon={<HardDrive size={15} />}
-              title={`${localName} targets`}
-              detail={`${selectedAuditSections.length}/${availableScanSections.length} folders`}
-              onChange={(checked) => toggleAuditTarget("local", checked)}
-            >
-              <FolderScopePicker
-                ariaLabel={`${localName} audit folders`}
-                emptyMessage="No library sections configured."
-                sections={availableScanSections}
-                lastScannedBySection={scanTimestamps.data?.symlinkSections ?? {}}
-                selectedSections={selectedAuditSections}
-                onToggle={toggleAuditSection}
-              />
-            </ScanScopeBlock>
-            <ScanScopeBlock
-              checked={auditRemoteSelected}
-              icon={<HardDriveDownload size={15} />}
-              title={`${remoteName} targets`}
-              detail={`${remoteName} root`}
-              onChange={(checked) => toggleAuditTarget("remote", checked)}
-            />
-          </div>
-          <button className="run-scan-button" onClick={openDashboardAuditPrompt} disabled={!canRunAudit}>
-            <Activity size={16} />
-            Run Audit
-          </button>
+          <table className="storage-overview-table" aria-label="Storage totals by location">
+            <thead>
+              <tr>
+                <th scope="col">Location</th>
+                <th scope="col">Symlinks</th>
+                <th scope="col">Files</th>
+                <th scope="col">Orphans</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">
+                  <HardDrive size={15} aria-hidden="true" />
+                  <span id="local-summary-title">{localName}</span>
+                </th>
+                <td>{dashboardMetric(totals.localLinks)}</td>
+                <td>{dashboardMetric(totals.localFiles)}</td>
+                <td>{dashboardMetric(totals.localOrphanFiles)}</td>
+              </tr>
+              <tr>
+                <th scope="row">
+                  <HardDriveDownload size={15} aria-hidden="true" />
+                  <span id="remote-summary-title">{remoteName}</span>
+                </th>
+                <td>{dashboardMetric(totals.remoteLinks)}</td>
+                <td>{dashboardMetric(totals.remoteFiles)}</td>
+                <td>{dashboardMetric(totals.remoteOrphanFiles)}</td>
+              </tr>
+              <tr className="storage-overview-total">
+                <th scope="row">
+                  <Database size={15} aria-hidden="true" />
+                  <span>Total</span>
+                </th>
+                <td>{dashboardMetric(totalDestinationSymlinks)}</td>
+                <td>{dashboardMetric(totalStorageFiles)}</td>
+                <td>{dashboardMetric(totalOrphanFiles)}</td>
+              </tr>
+            </tbody>
+          </table>
         </section>
       </div>
       <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
-      <div className="dashboard-summary">
-        <section className="summary-group summary-group-attention" aria-labelledby="attention-summary-title">
-          <div className="summary-group-title">
-            <TriangleAlert size={15} />
-            <h2 id="attention-summary-title">Needs Attention</h2>
+      <section className="dashboard-task-section" aria-labelledby="dashboard-task-section-title">
+        <div className="dashboard-region-heading">
+          <div>
+            <span>Operations</span>
+            <h2 id="dashboard-task-section-title">Quick actions</h2>
           </div>
-          <div className="stats-grid">
-            <StatCard label="Unassigned" value={formatNumber(policyNeededTotal)} detail={`${localName} + ${remoteName} media`} tone={policyNeededTotal > 0 ? "warn" : "neutral"} />
-            <StatCard label={`Copy to ${localName}`} value={formatNumber(copyToLocalTotal)} detail={`${remoteName} media`} tone={copyToLocalTotal > 0 ? "bad" : "neutral"} />
-            <StatCard label={`Copy to ${remoteName}`} value={formatNumber(copyToRemoteTotal)} detail={`${localName} media`} tone={copyToRemoteTotal > 0 ? "bad" : "neutral"} />
-            <StatCard label="Broken symlinks" value={formatNumber(totals.brokenLinks)} tone={totals.brokenLinks > 0 ? "bad" : "neutral"} />
-          </div>
-        </section>
-        <section className="summary-group summary-group-separated" aria-labelledby="local-summary-title">
-          <div className="summary-group-title">
-            <HardDrive size={15} />
-            <h2 id="local-summary-title">{localName}</h2>
-          </div>
-          <div className="stats-grid">
-            <StatCard label="Symlinks" value={formatNumber(totals.localLinks)} />
-            <StatCard label="Files" value={formatNumber(totals.localFiles)} />
-            <StatCard label="Orphan files" value={formatNumber(totals.localOrphanFiles)} />
-          </div>
-        </section>
-        <section className="summary-group summary-group-separated" aria-labelledby="remote-summary-title">
-          <div className="summary-group-title">
-            <HardDriveDownload size={15} />
-            <h2 id="remote-summary-title">{remoteName}</h2>
-          </div>
-          <div className="stats-grid">
-            <StatCard label="Symlinks" value={formatNumber(totals.remoteLinks)} />
-            <StatCard label="Files" value={formatNumber(totals.remoteFiles)} />
-            <StatCard label="Orphan files" value={formatNumber(totals.remoteOrphanFiles)} />
-          </div>
-        </section>
-        <section className="summary-group summary-group-separated summary-group-totals" aria-labelledby="totals-summary-title">
-          <div className="summary-group-title">
-            <Database size={15} />
-            <h2 id="totals-summary-title">Totals</h2>
-          </div>
-          <div className="stats-grid">
-            <StatCard label="Symlinks" value={formatNumber(totalDestinationSymlinks)} />
-            <StatCard label="Files" value={formatNumber(totalStorageFiles)} />
-            <StatCard label="Orphan files" value={formatNumber(totalOrphanFiles)} />
-          </div>
-        </section>
+          <p>Run maintenance with the current saved selections, or customize the scope first.</p>
+        </div>
+        <div className="dashboard-actions">
+          <section className="action-group action-group-primary" aria-labelledby="inventory-actions-title">
+            <div className="action-group-header">
+              <div className="action-group-heading">
+                <span className="action-group-icon" aria-hidden="true">
+                  <RefreshCw size={18} />
+                </span>
+                <div>
+                  <h3 id="inventory-actions-title">Inventory Scan</h3>
+                  <p>
+                    {selectedInventoryScopeCount} of 3 sources · {selectedInventoryFolderCount} of {totalInventoryFolderCount} folders
+                    {parallelFolderScans && plannedScanJobCount > 1 ? ` · ${plannedScanJobCount} jobs` : ""}
+                  </p>
+                </div>
+              </div>
+              <div className="action-group-controls">
+                <InfoTooltip label="About inventory scans">
+                  Reads the selected symlink folders and optional storage folders, then updates SRTL Manager's inventory database without changing media files.
+                </InfoTooltip>
+                <button
+                  type="button"
+                  className="dashboard-action-disclosure secondary"
+                  aria-expanded={scanOptionsExpanded}
+                  aria-controls="inventory-scan-options"
+                  onClick={() => setScanOptionsExpanded((value) => !value)}
+                >
+                  <span>{scanOptionsExpanded ? "Hide options" : "Customize"}</span>
+                  <ChevronDown size={16} />
+                </button>
+              </div>
+            </div>
+            <div id="inventory-scan-options" className={`dashboard-action-options${scanOptionsExpanded ? " is-expanded" : ""}`}>
+              <div className="inventory-scope-toolbar">
+                <span>Inventory scope</span>
+                <div className="inventory-scope-actions">
+                  <button type="button" className="secondary inventory-scope-action" onClick={selectAllInventoryScanOptions} disabled={allInventorySelected}>
+                    Select all
+                  </button>
+                  <button type="button" className="secondary inventory-scope-action" onClick={clearAllInventoryScanOptions} disabled={noInventorySelected}>
+                    Clear all
+                  </button>
+                </div>
+              </div>
+              <div className="inventory-scope-list" role="group" aria-label="Inventory scan scopes">
+                <ScanScopeBlock
+                  checked={scanOptions.scanSymlinks}
+                  icon={<Link2 size={15} />}
+                  title="Symlinks"
+                  detail={`${selectedSymlinkFolderCount}/${availableScanSections.length} folders - ${selectedSymlinkScanAge}`}
+                  onChange={(checked) => updateScanOptions({ ...scanOptions, scanSymlinks: checked })}
+                >
+                  <FolderScopePicker
+                    ariaLabel="Symlink folders"
+                    emptyMessage="No library sections configured."
+                    sections={availableScanSections}
+                    lastScannedBySection={scanTimestamps.data?.symlinkSections ?? {}}
+                    activeSections={activeSymlinkScanSections}
+                    selectedSections={selectedSymlinkSections}
+                    onToggle={(section, checked) => toggleScanSection("symlinkSections", section, checked)}
+                  />
+                </ScanScopeBlock>
+                <ScanScopeBlock
+                  checked={scanOptions.scanLocal}
+                  icon={<HardDrive size={15} />}
+                  title={`${localName} files`}
+                  detail={`${selectedLocalFolderCount}/${availableScanSections.length} folders - ${selectedLocalScanAge}`}
+                  onChange={(checked) => updateScanOptions({ ...scanOptions, scanLocal: checked })}
+                >
+                  <FolderScopePicker
+                    ariaLabel={`${localName} file folders`}
+                    emptyMessage="No library sections configured."
+                    sections={availableScanSections}
+                    lastScannedBySection={scanTimestamps.data?.localSections ?? {}}
+                    selectedSections={selectedLocalSections}
+                    onToggle={(section, checked) => toggleScanSection("localSections", section, checked)}
+                  />
+                </ScanScopeBlock>
+                <ScanScopeBlock
+                  checked={scanOptions.scanRemote}
+                  icon={<HardDriveDownload size={15} />}
+                  title={`${remoteName} files`}
+                  detail={remoteScanAge}
+                  onChange={(checked) => updateScanOptions({ ...scanOptions, scanRemote: checked })}
+                />
+              </div>
+            </div>
+            <button className="run-scan-button" onClick={runInventoryScan} disabled={startScan.isPending || !canRunScan}>
+              <RefreshCw size={16} />
+              Run Inventory Scan
+            </button>
+            {selectedActiveScanSections.length > 0 ? (
+              <p className="scan-scope-warning" role="status">Wait for the active scan in {selectedActiveScanSections.map((section) => sectionDisplayTitle(availableScanSections.find((item) => item.section === section) ?? { section })).join(", ")} or clear that folder before starting another scan.</p>
+            ) : null}
+          </section>
+          <section className="action-group action-group-audits" aria-labelledby="audit-actions-title">
+            <div className="action-group-header">
+              <div className="action-group-heading">
+                <span className="action-group-icon" aria-hidden="true">
+                  <Activity size={18} />
+                </span>
+                <div>
+                  <h3 id="audit-actions-title">Audits</h3>
+                  <p>
+                    {selectedAuditScopeCount} of 2 storage locations · {selectedAuditSections.length} {localName} folders
+                  </p>
+                </div>
+              </div>
+              <div className="action-group-controls">
+                <InfoTooltip label="About audits">
+                  Verifies media in the selected storage locations as a read-only job. Fast audit checks container reads; deep audit fully decodes for heavier validation.
+                </InfoTooltip>
+                <button
+                  type="button"
+                  className="dashboard-action-disclosure secondary"
+                  aria-expanded={auditOptionsExpanded}
+                  aria-controls="audit-options"
+                  onClick={() => setAuditOptionsExpanded((value) => !value)}
+                >
+                  <span>{auditOptionsExpanded ? "Hide options" : "Customize"}</span>
+                  <ChevronDown size={16} />
+                </button>
+              </div>
+            </div>
+            <div id="audit-options" className={`dashboard-action-options${auditOptionsExpanded ? " is-expanded" : ""}`}>
+              <div className="inventory-scope-toolbar">
+                <span>Audit scope</span>
+                <div className="inventory-scope-actions">
+                  <button type="button" className="secondary inventory-scope-action" onClick={() => {
+                    updateAuditSettings({ ...auditSettingsDraft, targets: ["local", "remote"], sections: availableScanSectionNames });
+                  }} disabled={auditLocalSelected && auditRemoteSelected && selectedAuditSections.length === availableScanSections.length}>
+                    Select all
+                  </button>
+                  <button type="button" className="secondary inventory-scope-action" onClick={() => {
+                    updateAuditSettings({ ...auditSettingsDraft, targets: [], sections: [] });
+                  }} disabled={selectedAuditScopeCount === 0 && selectedAuditSections.length === 0}>
+                    Clear all
+                  </button>
+                </div>
+              </div>
+              <div className="inventory-scope-list" role="group" aria-label="Audit targets">
+                <ScanScopeBlock
+                  checked={auditLocalSelected}
+                  icon={<HardDrive size={15} />}
+                  title={`${localName} targets`}
+                  detail={`${selectedAuditSections.length}/${availableScanSections.length} folders`}
+                  onChange={(checked) => toggleAuditTarget("local", checked)}
+                >
+                  <FolderScopePicker
+                    ariaLabel={`${localName} audit folders`}
+                    emptyMessage="No library sections configured."
+                    sections={availableScanSections}
+                    lastScannedBySection={scanTimestamps.data?.symlinkSections ?? {}}
+                    selectedSections={selectedAuditSections}
+                    onToggle={toggleAuditSection}
+                  />
+                </ScanScopeBlock>
+                <ScanScopeBlock
+                  checked={auditRemoteSelected}
+                  icon={<HardDriveDownload size={15} />}
+                  title={`${remoteName} targets`}
+                  detail={`${remoteName} root`}
+                  onChange={(checked) => toggleAuditTarget("remote", checked)}
+                />
+              </div>
+            </div>
+            <button className="run-scan-button" onClick={openDashboardAuditPrompt} disabled={!canRunAudit}>
+              <Activity size={16} />
+              Run Audit
+            </button>
+          </section>
+        </div>
+      </section>
+      <div className="dashboard-detail-region">
+        <SectionTable sections={orderedSectionSummaries} selectedRemoteWork={selectedRemoteWork} onRemoteWorkSelect={setSelectedRemoteWork} />
       </div>
-      <SectionTable sections={orderedSectionSummaries} selectedRemoteWork={selectedRemoteWork} onRemoteWorkSelect={setSelectedRemoteWork} />
       <RemoteWorkLinksTable
         selection={selectedRemoteWork}
         sections={orderedSectionSummaries}
@@ -507,16 +649,27 @@ export function DashboardPage() {
         onCopyRequest={handleCopyRequest}
         onRescanTitle={(section, itemName) => startScan.mutate(titleRescanOptions([{ section, itemName }]))}
       />
-      <JobsTable
-        jobs={jobs.data ?? []}
-        sections={availableScanSections}
-        onScanJobSelect={(job) => setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections))}
-        onAuditJobSelect={(job) => setAuditStatusPrompt(auditStatusPromptFromJob(job, availableScanSections))}
-        onCopyJobSelect={(job) => setCopyPrompt(copyPromptFromJob(job, availableScanSections, storageLocations))}
-      />
+      <div className="dashboard-detail-region">
+        <JobsTable
+          jobs={jobs.data ?? []}
+          sections={availableScanSections}
+          onScanJobSelect={(job) => setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections))}
+          onAuditJobSelect={(job) => setAuditStatusPrompt(auditStatusPromptFromJob(job, availableScanSections))}
+          onCopyJobSelect={(job) => setCopyPrompt(copyPromptFromJob(job, availableScanSections, storageLocations))}
+        />
+      </div>
       <AuditDialog prompt={auditPrompt} onClose={() => setAuditPrompt(null)} />
       <AuditStatusDialog prompt={auditStatusPrompt} onClose={() => setAuditStatusPrompt(null)} />
       <CopyDialog prompt={copyPrompt} onClose={() => setCopyPrompt(null)} />
+      <ScanBatchStatusDialog
+        prompt={scanBatchStatusPrompt}
+        sections={availableScanSections}
+        onClose={() => setScanBatchStatusPrompt(null)}
+        onJobSelect={(job) => {
+          setScanBatchStatusPrompt(null);
+          setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections));
+        }}
+      />
       <ScanStatusDialog prompt={scanStatusPrompt} onClose={() => setScanStatusPrompt(null)} />
     </Page>
   );
@@ -546,7 +699,7 @@ function SectionTable({
   const remoteName = storageLocationName(storageLocations, "remote");
   return (
     <Panel title="Library Summary" icon={<Database size={18} />}>
-      <table className="responsive-table library-summary-table">
+      <table className="responsive-table library-summary-table mobile-card-table" aria-label="Library summary by section">
         <thead>
           <tr>
             <th>Section</th>
@@ -584,14 +737,14 @@ function SectionTable({
             const copyToLocalUnit = sectionActionUnit(section, copyToLocal);
             const copyToRemoteUnit = sectionActionUnit(section, copyToRemote);
             return (
-              <tr key={section.section}>
-                <td>
+              <tr key={section.section} className="mobile-card-row">
+                <td className="mobile-card-primary" data-label="Section">
                   <span className="section-name-cell">
                     <strong>{title}</strong>
                     <small>{sectionCompositionParts(section).map(formatSectionCompositionPart).join(" / ")}</small>
                   </span>
                 </td>
-                <td>
+                <td className="mobile-card-metric" data-label="Unassigned">
                   {policyNeeded > 0 ? (
                     <button
                       type="button"
@@ -611,7 +764,7 @@ function SectionTable({
                     <SummaryCount value={policyNeeded} unit={policyUnit} muted />
                   )}
                 </td>
-                <td>
+                <td className="mobile-card-metric" data-label={`Copy to ${localName}`}>
                   {copyToLocal > 0 ? (
                     <button
                       type="button"
@@ -627,7 +780,7 @@ function SectionTable({
                     <SummaryCount value={copyToLocal} unit={copyToLocalUnit} muted />
                   )}
                 </td>
-                <td>
+                <td className="mobile-card-metric" data-label={`Copy to ${remoteName}`}>
                   {copyToRemote > 0 ? (
                     <button
                       type="button"
@@ -643,10 +796,10 @@ function SectionTable({
                     <SummaryCount value={copyToRemote} unit={copyToRemoteUnit} muted />
                   )}
                 </td>
-                <td>{formatNumber(section.brokenLinks)}</td>
-                <td>{formatNumber(section.localLinks)}</td>
-                <td>{formatNumber(section.remoteLinks)}</td>
-                <td>{formatNumber(section.totalLinks)}</td>
+                <td className="mobile-card-metric" data-label="Broken symlinks">{formatNumber(section.brokenLinks)}</td>
+                <td className="mobile-card-metric" data-label={`${localName} symlinks`}>{formatNumber(section.localLinks)}</td>
+                <td className="mobile-card-metric" data-label={`${remoteName} symlinks`}>{formatNumber(section.remoteLinks)}</td>
+                <td className="mobile-card-metric" data-label="Total symlinks">{formatNumber(section.totalLinks)}</td>
               </tr>
             );
           })}
@@ -773,13 +926,13 @@ function BulkActionBar({
   children: ReactNode;
 }) {
   return (
-    <div className="bulk-action-bar">
-      <div className="bulk-selection-summary">
+    <div className="bulk-action-bar mobile-stack-toolbar" role="region" aria-label={`Bulk actions for ${formatNumber(totalCount)} visible items`}>
+      <div className="bulk-selection-summary" aria-live="polite">
         <strong>{formatNumber(selectedCount)}</strong>
         <span>selected</span>
         <small>of {formatNumber(totalCount)} visible</small>
       </div>
-      <div className="bulk-selection-actions">
+      <div className="bulk-selection-actions mobile-stack-controls">
         <button type="button" className="secondary future-action-button" onClick={onSelectAll} disabled={disabled || totalCount === 0 || allSelected}>
           Select all
         </button>
@@ -787,7 +940,7 @@ function BulkActionBar({
           Select none
         </button>
       </div>
-      <div className="future-actions bulk-primary-actions">{children}</div>
+      <div className="future-actions bulk-primary-actions mobile-stack-actions">{children}</div>
     </div>
   );
 }
@@ -1017,11 +1170,11 @@ function RemoteWorkLinksTable({
       }
     >
       <div className="actionable-panel-body">
-        <div className="actionable-panel-meta">
+        <div className="actionable-panel-meta mobile-stack-toolbar">
           <span>
             {detail.descriptionPrefix} <strong>{title}</strong>. {detail.descriptionSuffix}
           </span>
-          <div className="actionable-panel-tools">
+          <div className="actionable-panel-tools mobile-stack-controls">
             <label className="work-search">
               <Search size={14} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search work" />
@@ -1228,7 +1381,7 @@ function RemoteWorkLinksTable({
             })}
           </div>
         ) : (
-          <table className="responsive-table actionable-links-table">
+          <table className="responsive-table actionable-links-table mobile-card-table" aria-label={`${detail.title} items in ${title}`}>
             <thead>
               <tr>
                 <th>
@@ -1243,8 +1396,8 @@ function RemoteWorkLinksTable({
                 const sourceRisk = sourceTitleRiskForLink(link);
                 const rescanPending = titleScopeIsPending(pendingTitleScopes, selectedSection, link.itemName);
                 return (
-                  <tr key={link.id}>
-                    <td>
+                  <tr key={link.id} className="mobile-card-row">
+                    <td className="mobile-card-select" data-label="Select">
                       <label className="bulk-row-select">
                         <input
                           type="checkbox"
@@ -1255,13 +1408,13 @@ function RemoteWorkLinksTable({
                         <span className="sr-only">Select {link.itemName}</span>
                       </label>
                     </td>
-                    <td>
+                    <td className="mobile-card-primary" data-label="Title">
                       <span className="actionable-title-with-risk">
                         <strong className="actionable-title-text">{link.itemName}</strong>
                         <SourceTitleRiskBadge risk={sourceRisk} />
                       </span>
                     </td>
-                    <td>
+                    <td className="mobile-card-actions" data-label="Actions">
                       <FutureActions
                         link={link}
                         mode={selection.kind}
@@ -2053,7 +2206,7 @@ function SymlinkBrowser({
       </Panel>
 
       <Panel title={selectedSectionTitle ? `Symlinks: ${selectedSectionTitle}` : "Symlink Browser"} icon={<Library size={18} />}>
-        <div className="table-toolbar symlink-toolbar">
+        <div className="table-toolbar symlink-toolbar mobile-stack-toolbar">
           <div className="breadcrumb">
             <button className="secondary" type="button" onClick={() => onPrefixChange(tree?.parentPrefix ?? "")} disabled={!canGoBack}>
               <ArrowLeft size={14} />
@@ -2080,14 +2233,14 @@ function SymlinkBrowser({
               <span>Select a section</span>
             )}
           </div>
-          <div className="symlink-controls">
+          <div className="symlink-controls mobile-stack-controls">
             <label className="tree-search">
               <Search size={14} />
               <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search current folder" />
             </label>
-            <div className="segmented compact">
+            <div className="segmented compact" role="group" aria-label="Symlink status filter">
               {(["all", "mixed", "remote", "local", "broken"] as const).map((value) => (
-                <button key={value} className={kind === value ? "selected" : ""} type="button" onClick={() => onKindChange(value)}>
+                <button key={value} className={kind === value ? "selected" : ""} type="button" aria-pressed={kind === value} onClick={() => onKindChange(value)}>
                   {value === "local" ? localName : value === "remote" ? remoteName : symlinkKindFilterLabels[value]}
                 </button>
               ))}
@@ -2108,7 +2261,7 @@ function SymlinkBrowser({
             </div>
           </div>
         </div>
-        <table className="responsive-table">
+        <table className="responsive-table mobile-card-table mobile-tree-table" aria-label={selectedSectionTitle ? `Symlinks in ${selectedSectionTitle}` : "Symlinks"}>
           <thead>
             <tr>
               <th>Name</th>
@@ -2198,8 +2351,8 @@ function SymlinkTreeRow({
   const seasonValue = showRootSeasonCounts && node.type === "folder" ? formatNumber(node.childFolderCount) : "-";
   if (node.type === "folder") {
     return (
-      <tr className="tree-row tree-folder">
-        <td>
+      <tr className="tree-row tree-folder mobile-card-row mobile-tree-row">
+        <td className="mobile-card-primary" data-label="Name">
           <button className="tree-name-button" type="button" onClick={() => onOpen(node.path)}>
             <Folder size={15} />
             <span>{node.name}</span>
@@ -2208,40 +2361,40 @@ function SymlinkTreeRow({
         </td>
         {isShowSection ? (
           <>
-            <td>{seasonValue}</td>
-            <td>{formatNumber(node.totalLinks)}</td>
+            <td className="mobile-card-metric" data-label="Seasons">{seasonValue}</td>
+            <td className="mobile-card-metric" data-label="Episodes">{formatNumber(node.totalLinks)}</td>
           </>
         ) : (
-          <td>{formatNumber(node.totalLinks)}</td>
+          <td className="mobile-card-metric" data-label="Links">{formatNumber(node.totalLinks)}</td>
         )}
-        <td>
+        <td className="mobile-card-status" data-label="Status">
           <LinkCountPills node={node} section={section} onWorkSelect={onWorkSelect} />
         </td>
-        {showTargetPath ? <td className="mono narrow muted-path">{node.path}/</td> : null}
+        {showTargetPath ? <td className="mono narrow muted-path mobile-card-detail" data-label="Target / path">{node.path}/</td> : null}
       </tr>
     );
   }
 
   return (
-    <tr className="tree-row">
-      <td>
+    <tr className="tree-row mobile-card-row mobile-tree-row">
+      <td className="mobile-card-primary" data-label="Name">
         <span className="tree-file-name">
           <File size={15} />
-          {node.name}
+          <span className="tree-file-label">{node.name}</span>
         </span>
       </td>
       {isShowSection ? (
         <>
-          <td>-</td>
-          <td>{formatNumber(node.totalLinks)}</td>
+          <td className="mobile-card-metric" data-label="Seasons">-</td>
+          <td className="mobile-card-metric" data-label="Episodes">{formatNumber(node.totalLinks)}</td>
         </>
       ) : (
-        <td>{formatNumber(node.totalLinks)}</td>
+        <td className="mobile-card-metric" data-label="Links">{formatNumber(node.totalLinks)}</td>
       )}
-      <td>
+      <td className="mobile-card-status" data-label="Status">
         <LinkCountPills node={node} section={section} onWorkSelect={onWorkSelect} />
       </td>
-      {showTargetPath ? <td className="mono narrow">{node.link?.targetPath ?? node.path}</td> : null}
+      {showTargetPath ? <td className="mono narrow mobile-card-detail" data-label="Target / path">{node.link?.targetPath ?? node.path}</td> : null}
     </tr>
   );
 }
@@ -2315,7 +2468,7 @@ function StorageFileBrowser({
   return (
     <Panel title={title} icon={<Icon size={18} />}>
       {error ? <p className="panel-message error">{error}</p> : null}
-      <div className="table-toolbar symlink-toolbar">
+      <div className="table-toolbar symlink-toolbar mobile-stack-toolbar">
         <div className="breadcrumb">
           <button className="secondary" type="button" onClick={() => onPrefixChange(tree?.parentPrefix ?? "")} disabled={!canGoBack}>
             <ArrowLeft size={14} />
@@ -2336,7 +2489,7 @@ function StorageFileBrowser({
             );
           })}
         </div>
-        <div className="symlink-controls">
+        <div className="symlink-controls mobile-stack-controls">
           <div className="field-options" role="group" aria-label="Visible fields">
             <span>
               <Settings size={14} />
@@ -2353,7 +2506,7 @@ function StorageFileBrowser({
           </div>
         </div>
       </div>
-      <table className="responsive-table storage-tree-table">
+      <table className="responsive-table storage-tree-table mobile-card-table mobile-tree-table" aria-label={title}>
         <thead>
           <tr>
             <th>Name</th>
@@ -2393,8 +2546,8 @@ function StorageFileTreeRow({ node, showFullPath, onOpen }: { node: StorageFileT
   const { timeFormat } = useUserPreferences();
   if (node.type === "folder") {
     return (
-      <tr className="tree-row tree-folder">
-        <td>
+      <tr className="tree-row tree-folder mobile-card-row mobile-tree-row">
+        <td className="mobile-card-primary" data-label="Name">
           <button className="tree-name-button" type="button" onClick={() => onOpen(node.path)}>
             <Folder size={15} />
             <span>{node.name}</span>
@@ -2404,14 +2557,14 @@ function StorageFileTreeRow({ node, showFullPath, onOpen }: { node: StorageFileT
             <StorageStatusCounts node={node} />
           </div>
         </td>
-        <td>{formatNumber(node.totalFiles)}</td>
-        <td>{formatNumber(node.linkedFiles)}</td>
-        <td>{formatBytes(node.sizeBytes)}</td>
-        <td>{formatStorageModified(node.mtimeMs, timeFormat)}</td>
-        <td>
+        <td className="mobile-card-metric" data-label="Files">{formatNumber(node.totalFiles)}</td>
+        <td className="mobile-card-metric" data-label="Links">{formatNumber(node.linkedFiles)}</td>
+        <td className="mobile-card-metric" data-label="Size">{formatBytes(node.sizeBytes)}</td>
+        <td className="mobile-card-detail" data-label="Modified">{formatStorageModified(node.mtimeMs, timeFormat)}</td>
+        <td className="mobile-card-status" data-label="Status">
           <StorageStatusCounts node={node} />
         </td>
-        {showFullPath ? <td className="mono narrow muted-path">{node.path}/</td> : null}
+        {showFullPath ? <td className="mono narrow muted-path mobile-card-detail" data-label="Full path">{node.path}/</td> : null}
       </tr>
     );
   }
@@ -2419,24 +2572,24 @@ function StorageFileTreeRow({ node, showFullPath, onOpen }: { node: StorageFileT
   const file = node.file;
   const linkCount = file?.linkCount ?? node.linkedFiles;
   return (
-    <tr className="tree-row">
-      <td>
+    <tr className="tree-row mobile-card-row mobile-tree-row">
+      <td className="mobile-card-primary" data-label="Name">
         <span className="tree-file-name">
           <File size={15} />
-          {node.name}
+          <span className="tree-file-label">{node.name}</span>
         </span>
         <div className="storage-mobile-status">
           <StorageFileStatus file={file ?? null} fallbackLinked={node.linkedFiles > 0} />
         </div>
       </td>
-      <td>{formatNumber(node.totalFiles)}</td>
-      <td>{formatNumber(linkCount)}</td>
-      <td>{formatBytes(node.sizeBytes)}</td>
-      <td>{formatStorageModified(node.mtimeMs, timeFormat)}</td>
-      <td>
+      <td className="mobile-card-metric" data-label="Files">{formatNumber(node.totalFiles)}</td>
+      <td className="mobile-card-metric" data-label="Links">{formatNumber(linkCount)}</td>
+      <td className="mobile-card-metric" data-label="Size">{formatBytes(node.sizeBytes)}</td>
+      <td className="mobile-card-detail" data-label="Modified">{formatStorageModified(node.mtimeMs, timeFormat)}</td>
+      <td className="mobile-card-status" data-label="Status">
         <StorageFileStatus file={file ?? null} fallbackLinked={node.linkedFiles > 0} />
       </td>
-      {showFullPath ? <td className="mono narrow">{file?.filePath ?? node.path}</td> : null}
+      {showFullPath ? <td className="mono narrow mobile-card-detail" data-label="Full path">{file?.filePath ?? node.path}</td> : null}
     </tr>
   );
 }
@@ -2606,10 +2759,10 @@ function StoragePoliciesPanel({
 
   return (
     <Panel title={`Storage Policies (${items.length})`} icon={<Shield size={18} />}>
-      <div className="policy-toolbar">
-        <div className="policy-tabs" role="tablist" aria-label="Storage policy groups">
+      <div className="policy-toolbar mobile-stack-toolbar">
+        <div className="policy-tabs" role="group" aria-label="Storage policy groups">
           {storagePolicyTabs.map((tab) => (
-            <button key={tab.value} type="button" className={policy === tab.value ? "selected" : ""} aria-selected={policy === tab.value} onClick={() => onPolicyChange(tab.value)}>
+            <button key={tab.value} type="button" className={policy === tab.value ? "selected" : ""} aria-pressed={policy === tab.value} onClick={() => onPolicyChange(tab.value)}>
               <strong>{tab.label}</strong>
               <small>{tab.detail}</small>
             </button>
@@ -2656,7 +2809,7 @@ function StoragePoliciesPanel({
       ) : null}
       {error ? <p className="panel-message error">{error}</p> : null}
       {copyJobId ? <p className="panel-message">Copy job #{copyJobId} queued.</p> : null}
-      <table className="responsive-table">
+      <table className="responsive-table mobile-card-table storage-policy-table" aria-label={`${storagePolicyLabel(policy, storageLocations)} storage policies`}>
         <thead>
           <tr>
             <th>
@@ -2685,8 +2838,8 @@ function StoragePoliciesPanel({
             </tr>
           ) : (
             filteredItems.map((item) => (
-              <tr key={`${item.policy}-${item.normalizedTitle}`}>
-                <td>
+              <tr key={`${item.policy}-${item.normalizedTitle}`} className="mobile-card-row">
+                <td className="mobile-card-select" data-label="Select">
                   <label className="bulk-row-select">
                     <input
                       type="checkbox"
@@ -2697,26 +2850,26 @@ function StoragePoliciesPanel({
                     <span className="sr-only">Select {item.title}</span>
                   </label>
                 </td>
-                <td>{item.title}</td>
-                <td>
+                <td className="mobile-card-primary" data-label="Title">{item.title}</td>
+                <td className="mobile-card-detail" data-label="Category">
                   <span className={`category-badge category-${item.category}`}>
                     {storagePolicyCategoryLabels[item.category]}
                   </span>
                 </td>
-                <td>
+                <td className="mobile-card-detail" data-label="Media">
                   {formatNumber(item.linkCount)} links / {formatNumber(item.fileCount)} files
                   <small className="table-cell-detail">
                     {formatNumber(item.remoteLinkCount + item.remoteFileCount)} {remoteName} / {formatNumber(item.localLinkCount + item.localFileCount)} {localName}
                   </small>
                 </td>
-                <td>
+                <td className="mobile-card-status" data-label="Policy">
                   <StatusPill
                     value={storagePolicyLabel(item.policy, storageLocations)}
                     toneValue={item.policy}
                   />
                 </td>
-                <td>{formatDate(item.updatedAt, timeFormat)}</td>
-                <td className="actions-cell">
+                <td className="mobile-card-detail" data-label="Updated">{formatDate(item.updatedAt, timeFormat)}</td>
+                <td className="actions-cell mobile-card-actions" data-label="Actions">
                   <PolicyActions
                     item={item}
                     mutatingTitleSet={mutatingTitleSet}

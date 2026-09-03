@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 12;
+export const currentSchemaVersion = 13;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -474,6 +474,49 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END $$
         `);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (12, 'durable_copy_reconciliation_resolution', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    if (!applied.has(13)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`
+          DO $$
+          BEGIN
+            IF to_regclass('public.jobs') IS NOT NULL AND to_regclass('public.media_links') IS NOT NULL THEN
+              EXECUTE $create_cleanup$
+                CREATE TABLE IF NOT EXISTS symlink_cleanup_operations (
+                  id SERIAL PRIMARY KEY,
+                  job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+                  source_job_id INTEGER REFERENCES jobs(id) ON DELETE SET NULL,
+                  media_link_id INTEGER NOT NULL REFERENCES media_links(id) ON DELETE RESTRICT,
+                  link_path TEXT NOT NULL,
+                  expected_target_path TEXT NOT NULL,
+                  stage TEXT NOT NULL,
+                  error_message TEXT,
+                  created_at TEXT NOT NULL,
+                  updated_at TEXT NOT NULL,
+                  completed_at TEXT,
+                  CONSTRAINT symlink_cleanup_operations_job_link_idx UNIQUE (job_id, media_link_id),
+                  CONSTRAINT symlink_cleanup_operations_stage_check CHECK (stage IN ('planned', 'removed', 'already_missing', 'failed'))
+                )
+              $create_cleanup$;
+              EXECUTE 'CREATE INDEX IF NOT EXISTS symlink_cleanup_operations_source_job_idx ON symlink_cleanup_operations(source_job_id, media_link_id)';
+            END IF;
+            IF to_regclass('public.jobs') IS NOT NULL AND EXISTS (
+              SELECT 1 FROM information_schema.columns
+              WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'type'
+            ) THEN
+              ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_type_check;
+              ALTER TABLE jobs ADD CONSTRAINT jobs_type_check CHECK (type IN ('scan', 'audit', 'copy', 'symlink_cleanup', 'path_migration'));
+            END IF;
+          END $$
+        `);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'failed_copy_symlink_cleanup', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

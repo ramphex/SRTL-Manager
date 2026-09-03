@@ -395,6 +395,7 @@ describe("api app", () => {
     await fs.mkdir(assetsRoot, { recursive: true });
     await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
     await fs.writeFile(path.join(webRoot, "theme-init.js"), "document.documentElement.dataset.theme = 'dark';");
+    await fs.writeFile(path.join(webRoot, "service-worker.js"), "self.addEventListener('fetch', () => undefined);");
     await fs.writeFile(path.join(assetsRoot, "index-a1b2c3.js"), `const payload = ${JSON.stringify("compressible payload ".repeat(300))};`);
 
     await ctx.app.close();
@@ -418,6 +419,15 @@ describe("api app", () => {
     const entryScript = await ctx.app.inject({ method: "GET", url: "/theme-init.js" });
     expect(entryScript.statusCode).toBe(200);
     expect(entryScript.headers["cache-control"]).toBe("no-cache");
+
+    const missingAsset = await ctx.app.inject({ method: "GET", url: "/assets/missing-bundle.js" });
+    expect(missingAsset.statusCode).toBe(404);
+    expect(missingAsset.json()).toEqual({ error: "Not found" });
+
+    const serviceWorker = await ctx.app.inject({ method: "GET", url: "/service-worker.js" });
+    expect(serviceWorker.statusCode).toBe(200);
+    expect(serviceWorker.headers["cache-control"]).toBe("no-cache");
+    expect(serviceWorker.headers["service-worker-allowed"]).toBe("/");
 
     const index = await ctx.app.inject({ method: "GET", url: "/" });
     expect(index.statusCode).toBe(200);
@@ -506,6 +516,7 @@ describe("api app", () => {
     const defaultAdvancedSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/advanced", headers: { cookie: String(setupCookie) } });
     expect(defaultAdvancedSettings.statusCode).toBe(200);
     expect(defaultAdvancedSettings.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
     });
@@ -521,6 +532,7 @@ describe("api app", () => {
     });
     expect(saveAdvancedSettings.statusCode).toBe(200);
     expect(saveAdvancedSettings.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
       audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false }
     });
@@ -536,6 +548,7 @@ describe("api app", () => {
     });
     expect(disableCopyVerification.statusCode).toBe(200);
     expect(disableCopyVerification.json()).toEqual({
+      scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
     });
@@ -554,7 +567,8 @@ describe("api app", () => {
 
     const scan = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie: String(setupCookie) } });
     expect(scan.statusCode).toBe(200);
-    expect(scan.json()).toEqual({ jobId: expect.any(Number) });
+    expect(scan.json()).toEqual({ jobId: expect.any(Number), jobIds: [expect.any(Number)] });
+    expect(await ctx.jobs.terminate(scan.json<{ jobId: number }>().jobId)).toBe(true);
 
     const scopedScan = await ctx.app.inject({
       method: "POST",
@@ -910,7 +924,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2",
+      currentVersion: "0.1.3",
       currentChannel: "stable",
       currentChannelLabel: "Stable",
       latestVersion: null,
@@ -977,7 +991,7 @@ describe("api app", () => {
 
     expect(version.statusCode).toBe(200);
     expect(version.json()).toMatchObject({
-      currentVersion: "0.1.2",
+      currentVersion: "0.1.3",
       currentChannel: "stable",
       currentChannelLabel: "Stable",
       latestVersion: "0.1.1",
@@ -1068,6 +1082,121 @@ describe("api app", () => {
       localSections: { movies: expect.any(String) },
       remoteRoot: expect.any(String)
     });
+  });
+
+  it("queues one symlink scan job per selected folder when parallel scheduling is enabled", async () => {
+    const cookie = await createAdminSession();
+    const advanced = await ctx.app.inject({
+      method: "PUT",
+      url: "/api/settings/advanced",
+      headers: { cookie },
+      payload: {
+        scan: { symlinkFolderScheduling: "per_folder" },
+        copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+      }
+    });
+    expect(advanced.statusCode).toBe(200);
+
+    const scanPayload = {
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies", "shows"],
+      localSections: []
+    };
+    const scan = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie }, payload: scanPayload });
+    expect(scan.statusCode).toBe(200);
+    const { jobId, jobIds } = scan.json<{ jobId: number; jobIds: number[] }>();
+    expect(jobIds).toHaveLength(2);
+    expect(jobId).toBe(jobIds[0]);
+
+    const jobs = await Promise.all(jobIds.map((id) => ctx.jobs.getJob(id)));
+    expect(jobs).toEqual([
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] } }
+      })
+    ]);
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
+    expect(claims.map((claim) => [claim.resourceKey, claim.access]).sort()).toEqual([
+      ["movies", "exclusive"],
+      ["shows", "exclusive"]
+    ]);
+
+    const duplicate = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie }, payload: scanPayload });
+    expect(duplicate.statusCode).toBe(400);
+    expect(duplicate.json()).toMatchObject({ error: expect.stringContaining("already has scan job") });
+    expect((await ctx.jobs.listJobs()).filter((job) => job.type === "scan")).toHaveLength(2);
+  });
+
+  it("queues every selected symlink folder, local folder, and remote root as an independent scan job", async () => {
+    const cookie = await createAdminSession();
+    await setSetting(ctx.database.db, "advancedSettings", {
+      scan: { symlinkFolderScheduling: "per_folder" },
+      copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+    });
+
+    const scan = await ctx.app.inject({
+      method: "POST",
+      url: "/api/scans",
+      headers: { cookie },
+      payload: {
+        scanSymlinks: true,
+        scanLocal: true,
+        scanRemote: true,
+        symlinkSections: ["movies", "shows"],
+        localSections: ["movies", "shows"]
+      }
+    });
+    expect(scan.statusCode).toBe(200);
+    const { jobIds } = scan.json<{ jobIds: number[] }>();
+    expect(jobIds).toHaveLength(5);
+
+    const jobs = await Promise.all(jobIds.map((id) => ctx.jobs.getJob(id)));
+    expect(jobs).toEqual([
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: ["movies"] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["shows"], localSections: [] } }
+      }),
+      expect.objectContaining({
+        status: "queued",
+        exclusive: false,
+        progress: { options: { scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: ["shows"] } }
+      })
+    ]);
+
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
+    expect(claims.map((claim) => [claim.resourceType, claim.resourceKey, claim.access]).sort()).toEqual([
+      ["inventory_scope", JSON.stringify(["local", "movies"]), "exclusive"],
+      ["inventory_scope", JSON.stringify(["local", "shows"]), "exclusive"],
+      ["inventory_scope", JSON.stringify(["remote", "*"]), "exclusive"],
+      ["section", "movies", "exclusive"],
+      ["section", "shows", "exclusive"]
+    ]);
   });
 
   it("returns inventory scan timestamps for empty scanned scopes", async () => {
@@ -1926,7 +2055,7 @@ describe("api app", () => {
     });
     expect(scanResponse.statusCode).toBe(200);
     const scanJobId = Number(scanResponse.json().jobId);
-    await expect(ctx.jobs.getJob(scanJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
+    await expect(ctx.jobs.getJob(scanJobId)).resolves.toMatchObject({ status: "queued", exclusive: false });
     await expect(ctx.jobs.terminate(scanJobId)).resolves.toBe(true);
     const auditJobId = await ctx.jobs.startAudit("fast");
     await expect(ctx.jobs.getJob(auditJobId)).resolves.toMatchObject({ status: "queued", exclusive: true });
@@ -3237,6 +3366,206 @@ describe("api app", () => {
     await expect(fs.stat(missingFixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("queues a guarded job that removes only selected symlinks from failed copy items", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Cleanup Failed Copy", kind: "remote", storagePolicy: "location_1", content: "preserve this source" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("simulated transfer failure");
+      }
+    };
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(copyJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+
+    const unauthenticated = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures` });
+    expect(unauthenticated.statusCode).toBe(401);
+    const failures = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures`, headers: { cookie } });
+    expect(failures.statusCode).toBe(200);
+    expect(failures.json()).toMatchObject({
+      jobId: copyJobId,
+      totalFailures: 1,
+      eligibleCount: 1,
+      unidentifiedCount: 0,
+      items: [
+        expect.objectContaining({
+          mediaLinkId: fixture.id,
+          copyOperationId: expect.any(Number),
+          itemName: "Cleanup Failed Copy",
+          fileName: path.basename(fixture.sourcePath),
+          symlinkStatus: "eligible"
+        })
+      ]
+    });
+
+    const cleanup = await ctx.app.inject({
+      method: "POST",
+      url: `/api/jobs/${copyJobId}/copy-failures/remove-symlinks`,
+      headers: { cookie },
+      payload: { mediaLinkIds: [fixture.id] }
+    });
+    expect(cleanup.statusCode).toBe(200);
+    const cleanupJobId = cleanup.json<{ jobId: number }>().jobId;
+    await expect(ctx.jobs.getJob(cleanupJobId)).resolves.toMatchObject({ type: "symlink_cleanup", status: "queued", selection: { total: 1 } });
+    const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(eq(schema.jobResourceClaims.jobId, cleanupJobId));
+    expect(claims).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ resourceType: "media", resourceKey: String(fixture.id), access: "exclusive" }),
+        expect.objectContaining({ resourceType: "section", resourceKey: "movies", access: "shared" }),
+        expect.objectContaining({ resourceType: "title", resourceKey: JSON.stringify(["movies", "Cleanup Failed Copy"]), access: "shared" }),
+        expect.objectContaining({ resourceType: "path", resourceKey: path.resolve(fixture.linkPath), access: "exclusive" })
+      ])
+    );
+
+    await expect(ctx.jobs.startAudit({ mode: "fast", linkIds: [fixture.id], byteCompare: false })).rejects.toThrow(
+      `Job #${cleanupJobId} is already queued`
+    );
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ removed: 1, alreadyMissing: 0, failed: 0, stage: "completed" })
+    });
+
+    await expect(fs.lstat(fixture.linkPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("preserve this source");
+    await expect(fs.stat(path.dirname(fixture.linkPath))).resolves.toMatchObject({});
+    await expect(fs.stat(fixture.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: expect.any(String)
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      sourceJobId: copyJobId,
+      mediaLinkId: fixture.id,
+      stage: "removed",
+      errorMessage: null,
+      completedAt: expect.any(String)
+    });
+    const refreshed = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures`, headers: { cookie } });
+    expect(refreshed.json()).toMatchObject({ eligibleCount: 0, items: [expect.objectContaining({ symlinkStatus: "already_missing" })] });
+  });
+
+  it("does not remove an old failed symlink after a later copy succeeds", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Superseded Failed Copy", kind: "remote", storagePolicy: "location_1", content: "retry succeeds" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("first attempt failed");
+      }
+    };
+    const failedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(failedJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const retryJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(retryJobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({ status: "completed" });
+
+    const failures = await ctx.app.inject({ method: "GET", url: `/api/jobs/${failedJobId}/copy-failures`, headers: { cookie } });
+    expect(failures.statusCode).toBe(200);
+    expect(failures.json()).toMatchObject({ eligibleCount: 0, items: [expect.objectContaining({ mediaLinkId: fixture.id, symlinkStatus: "superseded" })] });
+    const cleanup = await ctx.app.inject({
+      method: "POST",
+      url: `/api/jobs/${failedJobId}/copy-failures/remove-symlinks`,
+      headers: { cookie },
+      payload: { mediaLinkIds: [fixture.id] }
+    });
+    expect(cleanup.statusCode).toBe(409);
+    expect(cleanup.json()).toMatchObject({ error: expect.stringContaining("later successful copy") });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.destinationPath);
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("retry succeeds");
+  });
+
+  it("finishes cleanup idempotently when a selected symlink is already absent at execution", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Interrupted Cleanup", kind: "remote", storagePolicy: "location_1" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("cleanup recovery fixture");
+      }
+    };
+    const failedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(failedJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const cleanupJobId = await ctx.jobs.startSymlinkCleanup(failedJobId, [fixture.id]);
+    await fs.unlink(fixture.linkPath);
+
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ removed: 0, alreadyMissing: 1, failed: 0 })
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      stage: "already_missing"
+    });
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: expect.any(String)
+    });
+  });
+
+  it("blocks failed-symlink cleanup while the same media has unresolved copy reconciliation", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Cleanup Reconciliation Block", kind: "remote", storagePolicy: "location_1" });
+    const sourceJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    const timestamp = new Date().toISOString();
+    await ctx.database.db.update(schema.jobs).set({ status: "failed", startedAt: timestamp, finishedAt: timestamp }).where(eq(schema.jobs.id, sourceJobId));
+    const operationId = await insertCopyOperationFixture({
+      jobId: sourceJobId,
+      fixture,
+      stage: "reconciliation_required",
+      errorMessage: "simulated uncertain filesystem state"
+    });
+    const tempPath = `${fixture.destinationPath}.srtl-copy-unresolved`;
+    await fs.mkdir(path.dirname(tempPath), { recursive: true });
+    await fs.writeFile(tempPath, "unresolved temporary copy");
+    await ctx.database.db.update(schema.copyOperations).set({ tempPath }).where(eq(schema.copyOperations.id, operationId));
+    await ctx.database.db.insert(schema.jobEvents).values({
+      jobId: sourceJobId,
+      timestamp,
+      level: "error",
+      message: "copy promotion state is uncertain",
+      data: JSON.stringify({
+        mediaLinkId: fixture.id,
+        copyOperationId: operationId,
+        itemName: "Cleanup Reconciliation Block",
+        linkPath: fixture.linkPath,
+        sourcePath: fixture.sourcePath
+      })
+    });
+
+    await expect(ctx.jobs.copyFailures(sourceJobId)).resolves.toMatchObject({
+      eligibleCount: 0,
+      items: [expect.objectContaining({ mediaLinkId: fixture.id, symlinkStatus: "reconciliation_required" })]
+    });
+    await expect(ctx.jobs.startSymlinkCleanup(sourceJobId, [fixture.id])).rejects.toThrow("unresolved filesystem state");
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("media content");
+  });
+
+  it("fails closed when a selected symlink changes after cleanup admission", async () => {
+    const fixture = await insertCopySymlink({ itemName: "Changed Cleanup Link", kind: "remote", storagePolicy: "location_1" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("queue cleanup before link change");
+      }
+    };
+    const sourceJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(runQueuedJob(sourceJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    const cleanupJobId = await ctx.jobs.startSymlinkCleanup(sourceJobId, [fixture.id]);
+    const replacementTarget = path.join(tmpDir, "remote", "movies", "Changed Cleanup Link", "replacement.mkv");
+    await fs.writeFile(replacementTarget, "replacement media");
+    await fs.unlink(fixture.linkPath);
+    await fs.symlink(replacementTarget, fixture.linkPath);
+
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "failed",
+      progress: expect.objectContaining({ removed: 0, alreadyMissing: 0, failed: 1 })
+    });
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(replacementTarget);
+    await expect(fs.readFile(replacementTarget, "utf8")).resolves.toBe("replacement media");
+    await expect(first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1))).resolves.toMatchObject({
+      missingSince: null
+    });
+    await expect(first(ctx.database.db.select().from(schema.symlinkCleanupOperations).where(eq(schema.symlinkCleanupOperations.jobId, cleanupJobId)).limit(1))).resolves.toMatchObject({
+      stage: "failed",
+      errorMessage: expect.stringContaining("target changed")
+    });
+  });
+
   it("normalizes legacy mixed failed copy jobs as partially failed", async () => {
     const timestamp = new Date().toISOString();
     const row = await first(ctx.database.db
@@ -3261,9 +3590,9 @@ describe("api app", () => {
   it("terminates queued scan, audit, and copy jobs", async () => {
     const cookie = await createAdminSession();
     const copyFixture = await insertCopySymlink({ itemName: "Queued Terminate Movie", kind: "remote", storagePolicy: "location_1" });
-    const scanJobId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
     const auditJobId = await ctx.jobs.startAudit({ mode: "fast", targets: ["local"], sections: ["movies"] });
     const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
 
     for (const jobId of [scanJobId, auditJobId, copyJobId]) {
       const response = await ctx.app.inject({ method: "POST", url: `/api/jobs/${jobId}/terminate`, headers: { cookie } });
@@ -3556,6 +3885,125 @@ describe("api app", () => {
       await Promise.allSettled(runs);
     }
     await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+  });
+
+  it("completes a symlink-only section scan while a copy in another section is still transferring", async () => {
+    const copyFixture = await insertCopySymlink({
+      itemName: "Show Copy During Movie Scan",
+      kind: "remote",
+      storagePolicy: "location_1",
+      section: "shows",
+      content: "show copy stays active"
+    });
+    await insertCopySymlink({ itemName: "Movie Scan During Show Copy", kind: "remote", storagePolicy: "location_2", section: "movies", content: "scan independently" });
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies"],
+      localSections: []
+    });
+    let releaseCopy!: () => void;
+    let markCopyStarted!: () => void;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const copyStarted = new Promise<void>((resolve) => {
+      markCopyStarted = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        markCopyStarted();
+        await copyReleased;
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 1,
+      maxRunningAudits: 1,
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
+    };
+    const workers = ["section-copy-worker", "section-scan-worker"].map(
+      (workerId) => new JobWorker(ctx.database.db, { workerId, pollIntervalMs: 1, heartbeatIntervalMs: 10, logger: silentLogger, copyRunner: blockingRunner, concurrency })
+    );
+    const runs = workers.map((worker) => worker.runOnce());
+
+    try {
+      await copyStarted;
+      let scanStatus: string | undefined;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        scanStatus = (await ctx.jobs.getJob(scanJobId))?.status;
+        if (scanStatus === "completed") break;
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      expect(scanStatus).toBe("completed");
+      expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ exclusive: false });
+      expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "running" });
+    } finally {
+      releaseCopy();
+      await Promise.allSettled(runs);
+    }
+    await expect(Promise.all(runs)).resolves.toEqual([true, true]);
+  });
+
+  it("keeps a symlink-only section scan queued behind a copy in the same section", async () => {
+    const copyFixture = await insertCopySymlink({ itemName: "Movie Copy Before Movie Scan", kind: "remote", storagePolicy: "location_1", section: "movies", content: "same section" });
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [copyFixture.id] });
+    const scanJobId = await ctx.jobs.startScan({
+      scanSymlinks: true,
+      scanLocal: false,
+      scanRemote: false,
+      symlinkSections: ["movies"],
+      localSections: []
+    });
+    let releaseCopy!: () => void;
+    let markCopyStarted!: () => void;
+    const copyReleased = new Promise<void>((resolve) => {
+      releaseCopy = resolve;
+    });
+    const copyStarted = new Promise<void>((resolve) => {
+      markCopyStarted = resolve;
+    });
+    const blockingRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile(sourcePath, tempPath, reportProgress, signal) {
+        markCopyStarted();
+        await copyReleased;
+        await testCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+      }
+    };
+    const concurrency = {
+      workerCount: 2,
+      maxRunningJobs: 2,
+      maxRunningScans: 1,
+      maxRunningAudits: 1,
+      maxRunningCopies: 1,
+      copyFileConcurrency: 1,
+      maxActiveCopyFiles: 1
+    };
+    const copyWorker = new JobWorker(ctx.database.db, { workerId: "same-section-copy-worker", logger: silentLogger, copyRunner: blockingRunner, concurrency });
+    const scanWorker = new JobWorker(ctx.database.db, { workerId: "same-section-scan-worker", logger: silentLogger, copyRunner: blockingRunner, concurrency });
+    const copyRun = copyWorker.runOnce();
+
+    try {
+      await copyStarted;
+      await expect(scanWorker.runOnce()).resolves.toBe(false);
+      expect(await ctx.jobs.getJob(copyJobId)).toMatchObject({ status: "running" });
+      expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ status: "queued", exclusive: false, startedAt: null });
+    } finally {
+      releaseCopy();
+      await copyRun;
+    }
+
+    const finishingWorker = new JobWorker(ctx.database.db, { workerId: "same-section-finishing-worker", logger: silentLogger, concurrency });
+    await expect(finishingWorker.runOnce()).resolves.toBe(true);
+    expect(await ctx.jobs.getJob(scanJobId)).toMatchObject({ status: "completed" });
   });
 
   it("completes a targeted rescan while a disjoint copy is still transferring", async () => {
@@ -3938,7 +4386,7 @@ describe("api app", () => {
       insertCopySymlink({ itemName: "After Barrier Copy", kind: "remote", storagePolicy: "location_1", content: "after barrier" })
     ]);
     const firstCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[0].id] });
-    const barrierId = await ctx.jobs.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] });
+    const barrierId = await ctx.jobs.createJob("scan");
     const secondCopyId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixtures[1].id] });
     const concurrency = {
       workerCount: 3,

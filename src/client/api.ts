@@ -6,6 +6,7 @@ import type {
   AdvancedSettings,
   AppVersionInfo,
   CopyConflictPreview,
+  CopyFailureList,
   CopyReconciliationState,
   InventorySummary,
   InventoryScanTimestamps,
@@ -24,6 +25,7 @@ import type {
   PathConfigurationState,
   ScanRunRecord,
   ScanOptions,
+  ScanStartResult,
   SectionSettings,
   SectionSummary,
   StoragePolicyKind,
@@ -104,7 +106,7 @@ export const api = {
   saveAdvancedSettings: (body: AdvancedSettings) => request<AdvancedSettings>("/api/settings/advanced", { method: "PUT", body: JSON.stringify(body) }),
   getUserPreferences: () => request<UserPreferences>("/api/settings/user-preferences"),
   saveUserPreferences: (body: UserPreferences) => request<UserPreferences>("/api/settings/user-preferences", { method: "PUT", body: JSON.stringify(body) }),
-  startScan: (body?: ScanOptions) => request<{ jobId: number }>("/api/scans", { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  startScan: (body?: ScanOptions) => request<ScanStartResult>("/api/scans", { method: "POST", body: body ? JSON.stringify(body) : undefined }),
   scans: () => request<ScanRunRecord[]>("/api/scans"),
   sections: () => request<SectionSummary[]>("/api/sections"),
   inventorySummary: () => request<InventorySummary>("/api/inventory/summary"),
@@ -159,6 +161,12 @@ export const api = {
     return request<JobRecord[]>(`/api/jobs${search.size > 0 ? `?${search.toString()}` : ""}`);
   },
   job: (id: number) => request<JobRecord>(`/api/jobs/${id}`),
+  copyFailures: (id: number) => request<CopyFailureList>(`/api/jobs/${id}/copy-failures`),
+  removeFailedCopySymlinks: (id: number, mediaLinkIds: number[]) =>
+    request<{ jobId: number }>(`/api/jobs/${id}/copy-failures/remove-symlinks`, {
+      method: "POST",
+      body: JSON.stringify({ mediaLinkIds })
+    }),
   terminateJob: (id: number) => request<{ ok: true; jobId: number }>(`/api/jobs/${id}/terminate`, { method: "POST" }),
   jobEvents: (id: number, limit = 100) => request<JobEventRecord[]>(`/api/jobs/${id}/events?limit=${limit}`),
   jobEventPage: (id: number, options: { beforeId?: number; limit?: number } = {}) => {

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title">
+  <title id="title">SRTL Manager</title>
+  <rect width="512" height="512" fill="#070b11" />
+  <rect x="116" y="132" width="280" height="248" rx="48" fill="#121b26" stroke="#45b990" stroke-width="20" />
+  <path d="M176 218h160M176 286h160" fill="none" stroke="#dbe4ee" stroke-linecap="round" stroke-width="24" />
+  <circle cx="190" cy="336" r="14" fill="#45b990" />
+  <circle cx="238" cy="336" r="14" fill="#8795a6" />
+</svg>

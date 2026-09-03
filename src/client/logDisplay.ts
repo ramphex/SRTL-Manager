@@ -11,6 +11,7 @@ export interface LogDataChip {
 
 const dataLabels: Record<string, string> = {
   action: "Action",
+  alreadyMissing: "Already missing",
   actionableLocalFiles: "Copy to remote files",
   actionableLocalLinks: "Copy to remote links",
   actionableRemoteFiles: "Copy to local files",
@@ -47,6 +48,7 @@ const dataLabels: Record<string, string> = {
   remoteLinks: "Remote links",
   remoteOrphanFiles: "Remote orphans",
   repointed: "Repointed",
+  removed: "Removed symlinks",
   relativePathPrefix: "Path scope",
   scanLocal: "Local files",
   scanRemote: "Remote files",
@@ -57,6 +59,7 @@ const dataLabels: Record<string, string> = {
   sourceCompareErrors: "Source compare errors",
   sourceMissing: "Recorded source missing",
   sourcePath: "Source",
+  sourceJobId: "Source copy job",
   sourceUnknown: "No recorded source",
   stage: "Stage",
   symlinkSections: "Symlink folders",
@@ -89,6 +92,8 @@ const chipPriority = [
   "total",
   "copied",
   "repointed",
+  "removed",
+  "alreadyMissing",
   "skipped",
   "conflicts",
   "passed",
@@ -121,6 +126,7 @@ const chipPriority = [
   "sections",
   "targetPath",
   "sourcePath",
+  "sourceJobId",
   "destinationPath",
   "sizeBytes",
   "direction",
@@ -138,6 +144,7 @@ export function formatJobType(type: JobType): string {
   if (type === "scan") return "Inventory scan";
   if (type === "audit") return "Audit";
   if (type === "copy") return "Copy";
+  if (type === "symlink_cleanup") return "Symlink cleanup";
   if (type === "path_migration") return "Path migration";
   return "Integration sync";
 }
@@ -190,7 +197,20 @@ export function jobProgressChips(job: JobRecord, maxChips = 6): LogDataChip[] {
     if (typeof options.itemName === "string") chips.push({ label: "Title", value: options.itemName });
   }
 
-  return [...chips, ...dataChipsFromRecord(progress, maxChips, new Set(["options", ...(job.type === "scan" ? ["stage", "message"] : [])]), allowedKeys)].slice(0, maxChips);
+  const cleanupOptions = job.type === "symlink_cleanup" ? recordFromUnknown(job.options) ?? options : null;
+  if (cleanupOptions && typeof cleanupOptions.sourceJobId === "number") {
+    chips.push({ label: "Source copy job", value: `#${cleanupOptions.sourceJobId}` });
+  }
+
+  return [
+    ...chips,
+    ...dataChipsFromRecord(
+      progress,
+      maxChips,
+      new Set(["options", ...(job.type === "scan" ? ["stage", "message"] : []), ...(job.type === "symlink_cleanup" ? ["sourceJobId"] : [])]),
+      allowedKeys
+    )
+  ].slice(0, maxChips);
 }
 
 export function eventDataChips(data: unknown, maxChips = 6, fallbackOptions?: unknown): LogDataChip[] {

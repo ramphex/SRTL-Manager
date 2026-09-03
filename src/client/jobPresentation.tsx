@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
-import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -8,10 +9,10 @@ import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogD
 import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./jobScopeLocks";
 import { jobEventCountLabel } from "./jobEvents";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
+import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
-import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
+import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -99,6 +100,8 @@ export function AuditDialog({
     setSelectedMode(null);
   }, [prompt]);
 
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
   if (!prompt) return null;
 
   const displayedEvents = [...events.events].reverse();
@@ -112,7 +115,7 @@ export function AuditDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-dialog-title">
+      <section ref={dialogRef} className="audit-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <span className="audit-dialog-eyebrow">Audit</span>
@@ -231,6 +234,8 @@ export function CopyDialog({
     invalidateCopyJobData(queryClient);
   }, [currentJobId, currentJobStatus, queryClient]);
 
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
   if (!prompt) return null;
 
   const displayedEvents = [...events.events].reverse();
@@ -239,7 +244,7 @@ export function CopyDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="copy-dialog-title">{prompt.title}</h2>
@@ -401,6 +406,7 @@ export function ScanStatusDialog({
   const currentJob = jobQuery.data ?? null;
   const jobActive = currentJob ? currentJob.status === "queued" || currentJob.status === "running" : Boolean(jobId);
   const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 500 : 2500, loadAll: true });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
 
   if (!prompt) return null;
 
@@ -408,7 +414,7 @@ export function ScanStatusDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-status-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-status-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="scan-status-dialog-title">{prompt.title}</h2>
@@ -443,6 +449,77 @@ export function ScanStatusDialog({
           onClose={() => !terminateJob.isPending && setTerminatePrompt(null)}
           onConfirm={(targetJobId) => terminateJob.mutate(targetJobId)}
         />
+      </section>
+    </div>
+  );
+}
+
+export function ScanBatchStatusDialog({
+  prompt,
+  sections,
+  onClose,
+  onJobSelect
+}: {
+  prompt: ScanBatchStatusPrompt | null;
+  sections: Array<{ section: string; title?: string | null }>;
+  onClose: () => void;
+  onJobSelect: (job: JobRecord) => void;
+}) {
+  const jobIds = prompt?.jobIds ?? [];
+  const jobQueries = useQueries({
+    queries: jobIds.map((jobId) => ({
+      queryKey: ["job", jobId],
+      queryFn: () => api.job(jobId),
+      enabled: Boolean(prompt),
+      refetchInterval: (query: { state: { data?: JobRecord } }) => {
+        const status = query.state.data?.status;
+        return status === "queued" || status === "running" || !status ? 500 : false;
+      }
+    }))
+  });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
+  if (!prompt) return null;
+
+  const jobs = jobQueries.map((query) => query.data).filter((job): job is JobRecord => Boolean(job));
+  const finishedCount = jobs.filter((job) => job.status !== "queued" && job.status !== "running").length;
+  const error = jobQueries.find((query) => query.error)?.error;
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section ref={dialogRef} className="audit-dialog scan-batch-dialog" role="dialog" aria-modal="true" aria-labelledby="scan-batch-dialog-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <h2 id="scan-batch-dialog-title">{prompt.title}</h2>
+            <p>{prompt.description}</p>
+          </div>
+          <JobStatusHeaderActions closeLabel="Close folder scan status window" onClose={onClose} />
+        </div>
+        <div className="scan-batch-summary">
+          <strong>{finishedCount} of {jobIds.length} folder jobs finished</strong>
+          <span>Each folder runs independently up to the configured scan capacity.</span>
+        </div>
+        {error ? <p className="panel-message action-error">{error.message}</p> : null}
+        <div className="scan-batch-list" aria-label="Folder scan jobs">
+          {jobIds.map((jobId, index) => {
+            const job = jobQueries[index]?.data;
+            const options = job ? scanOptionsFromJob(job) : null;
+            return (
+              <div className="scan-batch-row" key={jobId}>
+                <div>
+                  <strong>{options ? formatScanScope(options, sections) : `Job #${jobId}`}</strong>
+                  <span>Job #{jobId}</span>
+                </div>
+                {job ? <StatusPill value={job.status} /> : <span className="pill pill-info">Loading</span>}
+                <button type="button" className="secondary" disabled={!job} onClick={() => job && onJobSelect(job)}>
+                  <Search size={15} />
+                  View status
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <p className="panel-message">Closing this window leaves all folder scans running in the background.</p>
       </section>
     </div>
   );
@@ -484,6 +561,7 @@ export function AuditStatusDialog({
     refetchInterval: jobActive ? 1500 : false
   });
   const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 500 : 2500, loadAll: true });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
 
   if (!prompt) return null;
 
@@ -492,7 +570,7 @@ export function AuditStatusDialog({
 
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-status-dialog-title">
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="audit-status-dialog-title" tabIndex={-1}>
         <div className="audit-dialog-header">
           <div className="audit-dialog-title-block">
             <h2 id="audit-status-dialog-title">{prompt.title}</h2>
@@ -598,6 +676,7 @@ export function ScanScopeBlock({
 }
 
 export function FolderScopePicker({
+  activeSections,
   ariaLabel,
   emptyMessage,
   lastScannedBySection,
@@ -605,6 +684,7 @@ export function FolderScopePicker({
   selectedSections,
   onToggle
 }: {
+  activeSections?: ReadonlySet<string>;
   ariaLabel: string;
   emptyMessage: string;
   lastScannedBySection: Record<string, string | null>;
@@ -620,9 +700,10 @@ export function FolderScopePicker({
         <ScopeToggle
           key={section.section}
           checked={selectedSections.includes(section.section)}
+          busy={activeSections?.has(section.section)}
           icon={<Folder size={15} />}
           label={sectionDisplayTitle(section)}
-          detail={scanAgeLabel(lastScannedBySection[section.section] ?? null)}
+          detail={activeSections?.has(section.section) ? "Scan active" : scanAgeLabel(lastScannedBySection[section.section] ?? null)}
           onChange={(checked) => onToggle(section.section, checked)}
         />
       ))}
@@ -631,12 +712,14 @@ export function FolderScopePicker({
 }
 
 function ScopeToggle({
+  busy = false,
   checked,
   detail,
   icon,
   label,
   onChange
 }: {
+  busy?: boolean;
   checked: boolean;
   detail?: string;
   icon: ReactNode;
@@ -644,7 +727,7 @@ function ScopeToggle({
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <label className={checked ? "scope-toggle selected" : "scope-toggle"}>
+    <label className={`scope-toggle${checked ? " selected" : ""}${busy ? " busy" : ""}`}>
       <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
       {icon}
       <span className="scope-toggle-copy">
@@ -685,7 +768,7 @@ export function CopyProgressPanel({
   const transferSpeedSecondary = copyTransferSpeedSecondaryLabel(progress);
   const throughputLabel = copyThroughputLabel(progress);
   return (
-    <div className={`audit-progress-panel copy-progress-panel${compact ? " compact" : ""}`}>
+    <div className={`audit-progress-panel copy-progress-panel mobile-progress-panel${compact ? " compact" : ""}`} role="group" aria-label="Copy progress">
       <div className="audit-progress-header copy-progress-header">
         <span>
           <strong>{statusLabel}</strong>
@@ -722,7 +805,7 @@ export function CopyProgressPanel({
           <small>{currentItem.detail}</small>
         </span>
       </div>
-      <div className="audit-progress-stats copy-progress-stats">
+      <div className="audit-progress-stats copy-progress-stats mobile-progress-stats">
         <span>
           <strong>{formatNumber(progress.copied)}</strong>
           Copied
@@ -747,7 +830,14 @@ export function CopyProgressPanel({
         </span>
         <div className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
           {progress.failed > 0 && copyEvents ? (
-            <CopyFailedItemsTooltip count={progress.failed} events={copyEvents} loading={copyEventsLoading} error={copyEventsError} />
+            <CopyFailedItemsTooltip
+              jobId={job?.id ?? null}
+              reviewReady={Boolean(job && job.status !== "queued" && job.status !== "running")}
+              count={progress.failed}
+              events={copyEvents}
+              loading={copyEventsLoading}
+              error={copyEventsError}
+            />
           ) : (
             <>
               <strong>{formatNumber(progress.failed)}</strong>
@@ -782,6 +872,9 @@ type CopyItemDetail = {
   title: string;
   fileName: string | null;
   detail: string;
+  statusDetail?: string;
+  mediaLinkId?: number | null;
+  removable?: boolean;
 };
 
 function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
@@ -792,12 +885,315 @@ function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: n
   return <CopyItemDetailsTooltip count={count} kind="completed" items={items} loading={loading} error={error} />;
 }
 
-function CopyFailedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
-  const items = useMemo(
+function CopyFailedItemsTooltip({
+  jobId,
+  reviewReady,
+  count,
+  events,
+  loading,
+  error
+}: {
+  jobId: number | null;
+  reviewReady: boolean;
+  count: number;
+  events: JobEventRecord[];
+  loading: boolean;
+  error?: string | null;
+}) {
+  const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
+  const [cleanupSelection, setCleanupSelection] = useState<number[] | null>(null);
+  const failures = useQuery({
+    queryKey: ["copy-failures", jobId],
+    queryFn: () => api.copyFailures(jobId!),
+    enabled: Boolean(jobId) && reviewReady,
+    staleTime: 2_000
+  });
+  const fallbackItems = useMemo(
     () => copyFailedItemSummaries(events).map((item) => ({ ...item, detail: item.reason })),
     [events]
   );
-  return <CopyItemDetailsTooltip count={count} kind="failed" items={items} loading={loading} error={error} />;
+  const items = failures.data
+    ? failures.data.items.map((item) => ({
+        key: item.key,
+        title: item.itemName,
+        fileName: item.fileName,
+        detail: item.reason,
+        statusDetail: item.symlinkStatusDetail,
+        mediaLinkId: item.mediaLinkId,
+        removable: item.symlinkStatus === "eligible" && item.mediaLinkId != null
+      }))
+    : fallbackItems;
+  const eligibleIds = useMemo(
+    () => failures.data?.items.flatMap((item) => (item.symlinkStatus === "eligible" && item.mediaLinkId ? [item.mediaLinkId] : [])) ?? [],
+    [failures.data]
+  );
+  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selectedIds.has(id));
+
+  useEffect(() => {
+    const eligible = new Set(eligibleIds);
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => eligible.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [eligibleIds]);
+
+  function toggleSelected(mediaLinkId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(mediaLinkId)) next.delete(mediaLinkId);
+      else next.add(mediaLinkId);
+      return next;
+    });
+  }
+
+  function reviewSelection(mediaLinkIds: number[]) {
+    if (mediaLinkIds.length > 0) setCleanupSelection(mediaLinkIds);
+  }
+
+  return (
+    <>
+      <CopyItemDetailsTooltip
+        count={count}
+        kind="failed"
+        items={items}
+        loading={loading || (reviewReady && failures.isLoading)}
+        error={error ?? failures.error?.message}
+        toolbar={
+          jobId && failures.data && eligibleIds.length > 0 ? (
+            <div className="failed-symlink-inline-toolbar">
+              <strong>{formatNumber(selectedIds.size)} selected</strong>
+              <button type="button" onClick={() => setSelectedIds(allSelected ? new Set() : new Set(eligibleIds))}>
+                {allSelected ? "Clear" : "Select all"}
+              </button>
+              <button
+                type="button"
+                className="danger-button"
+                aria-label={`Remove ${formatNumber(selectedIds.size)} selected symlink${selectedIds.size === 1 ? "" : "s"}`}
+                onClick={() => reviewSelection([...selectedIds])}
+                disabled={selectedIds.size === 0}
+              >
+                <Trash2 size={14} />
+                Remove selected
+              </button>
+            </div>
+          ) : null
+        }
+        itemControls={
+          failures.data
+            ? (item) => {
+                const removable = Boolean(item.removable && item.mediaLinkId);
+                const itemLabel = item.fileName ? `${item.title}, ${item.fileName}` : item.title;
+                return (
+                  <div className="copy-item-details-item-actions">
+                    <label className="copy-item-details-select-control" title={removable ? `Select symlink for ${itemLabel}` : item.statusDetail}>
+                      <input
+                        type="checkbox"
+                        aria-label={`Select symlink for ${itemLabel}`}
+                        checked={removable && selectedIds.has(item.mediaLinkId!)}
+                        disabled={!removable}
+                        onChange={() => removable && toggleSelected(item.mediaLinkId!)}
+                      />
+                    </label>
+                    <button
+                      type="button"
+                      className="copy-item-details-remove-button"
+                      aria-label={`Remove symlink for ${itemLabel}`}
+                      title={removable ? `Review removal of symlink for ${itemLabel}` : item.statusDetail}
+                      disabled={!removable}
+                      onClick={() => removable && reviewSelection([item.mediaLinkId!])}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                );
+              }
+            : undefined
+        }
+      />
+      {cleanupSelection && jobId && failures.data
+        ? createPortal(
+            <FailedSymlinkCleanupDialog
+              sourceJobId={jobId}
+              failures={failures.data.items}
+              initialSelectedIds={cleanupSelection}
+              onClose={() => setCleanupSelection(null)}
+            />,
+            document.body
+          )
+        : null}
+    </>
+  );
+}
+
+function failedSymlinkStatusLabel(item: CopyFailureItem): string {
+  if (item.symlinkStatus === "eligible") return "Ready to remove";
+  if (item.symlinkStatus === "already_missing") return "Already missing";
+  if (item.symlinkStatus === "superseded") return "Later copy succeeded";
+  if (item.symlinkStatus === "reconciliation_required") return "Reconciliation required";
+  if (item.symlinkStatus === "unavailable") return "Cannot verify mount";
+  if (item.symlinkStatus === "changed") return "Symlink changed";
+  return "Not safely identifiable";
+}
+
+function FailedSymlinkCleanupDialog({
+  sourceJobId,
+  failures,
+  initialSelectedIds,
+  onClose
+}: {
+  sourceJobId: number;
+  failures: CopyFailureItem[];
+  initialSelectedIds: number[];
+  onClose: () => void;
+}) {
+  const queryClient = useQueryClient();
+  const eligibleIds = useMemo(
+    () => failures.flatMap((item) => (item.symlinkStatus === "eligible" && item.mediaLinkId ? [item.mediaLinkId] : [])),
+    [failures]
+  );
+  const [selectedIds, setSelectedIds] = useState(
+    () => new Set(initialSelectedIds.filter((id) => eligibleIds.includes(id)))
+  );
+  const [cleanupJobId, setCleanupJobId] = useState<number | null>(null);
+  const cleanup = useMutation({
+    mutationFn: (mediaLinkIds: number[]) => api.removeFailedCopySymlinks(sourceJobId, mediaLinkIds),
+    onSuccess: (result) => {
+      setCleanupJobId(result.jobId);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+    }
+  });
+  const cleanupJob = useQuery({
+    queryKey: ["job", cleanupJobId],
+    queryFn: () => api.job(cleanupJobId!),
+    enabled: Boolean(cleanupJobId),
+    refetchInterval: (query: { state: { data?: JobRecord } }) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" ? 1_000 : false;
+    }
+  });
+  const cleanupTerminal = cleanupJob.data && cleanupJob.data.status !== "queued" && cleanupJob.data.status !== "running";
+  useEffect(() => {
+    if (!cleanupTerminal) return;
+    queryClient.invalidateQueries({ queryKey: ["copy-failures", sourceJobId] });
+    queryClient.invalidateQueries({ queryKey: ["job-events", sourceJobId] });
+    invalidateCopyJobData(queryClient);
+  }, [cleanupTerminal, queryClient, sourceJobId]);
+  const dialogRef = useModalLifecycle(true, onClose);
+  const selectedCount = selectedIds.size;
+  const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selectedIds.has(id));
+  const progress = recordFromUnknown(cleanupJob.data?.progress);
+
+  function toggleItem(mediaLinkId: number) {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (next.has(mediaLinkId)) next.delete(mediaLinkId);
+      else next.add(mediaLinkId);
+      return next;
+    });
+  }
+
+  return (
+    <div
+      className="modal-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        event.stopPropagation();
+        if (event.target === event.currentTarget && !cleanup.isPending) onClose();
+      }}
+    >
+      <section ref={dialogRef} className="audit-dialog failed-symlink-cleanup-dialog" role="dialog" aria-modal="true" aria-labelledby="failed-symlink-cleanup-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <span className="audit-dialog-eyebrow">Copy job #{sourceJobId}</span>
+            <h2 id="failed-symlink-cleanup-title">Remove failed-copy symlinks</h2>
+            <p>Review the exact managed links before queuing a cleanup worker.</p>
+          </div>
+          <button type="button" className="icon-button" aria-label="Close failed symlink cleanup" onClick={onClose} disabled={cleanup.isPending}>
+            <X size={18} />
+          </button>
+        </div>
+
+        {cleanupJobId ? (
+          <div className="failed-symlink-cleanup-status" role="status">
+            <div>
+              <strong>Cleanup job #{cleanupJobId}</strong>
+              <StatusPill value={cleanupJob.data?.status ?? "queued"} />
+            </div>
+            <p>{typeof progress?.message === "string" ? progress.message : cleanupJob.isLoading ? "Loading cleanup status..." : "Cleanup is queued."}</p>
+            {progress ? (
+              <dl>
+                <div><dt>Removed</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.removed))}</dd></div>
+                <div><dt>Already missing</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.alreadyMissing))}</dd></div>
+                <div><dt>Failed</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.failed))}</dd></div>
+              </dl>
+            ) : null}
+            {cleanupJob.error ? <p className="action-error">{cleanupJob.error.message}</p> : null}
+          </div>
+        ) : (
+          <>
+            <div className="terminate-dialog-warning">
+              <TriangleAlert size={18} />
+              <div>
+                <strong>Only the selected symlinks will be unlinked.</strong>
+                <span>Source media, copied media, title folders, and parent directories will not be deleted. Plex may need its normal library scan before entries disappear.</span>
+              </div>
+            </div>
+            <div className="failed-symlink-cleanup-toolbar">
+              <strong>{formatNumber(selectedCount)} of {formatNumber(eligibleIds.length)} removable selected</strong>
+              <button
+                type="button"
+                onClick={() => setSelectedIds(allSelected ? new Set() : new Set(eligibleIds))}
+                disabled={eligibleIds.length === 0}
+              >
+                {allSelected ? "Clear all" : "Select all removable"}
+              </button>
+            </div>
+            <ul className="failed-symlink-cleanup-list">
+              {failures.map((item) => {
+                const eligible = item.symlinkStatus === "eligible" && item.mediaLinkId != null;
+                return (
+                  <li key={item.key} className={eligible ? "is-eligible" : "is-blocked"}>
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={eligible && selectedIds.has(item.mediaLinkId!)}
+                        disabled={!eligible}
+                        onChange={() => eligible && toggleItem(item.mediaLinkId!)}
+                      />
+                      <span>
+                        <strong>{item.itemName}</strong>
+                        {item.fileName ? <small>{item.fileName}</small> : null}
+                      </span>
+                    </label>
+                    <div>
+                      <StatusPill value={failedSymlinkStatusLabel(item)} />
+                      <small>{item.symlinkStatusDetail}</small>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+            {cleanup.error ? <p className="panel-message action-error">{cleanup.error.message}</p> : null}
+          </>
+        )}
+
+        <div className="terminate-dialog-actions">
+          <button type="button" onClick={onClose} disabled={cleanup.isPending}>{cleanupJobId ? "Close" : "Cancel"}</button>
+          {!cleanupJobId ? (
+            <button
+              type="button"
+              className="danger-button"
+              onClick={() => cleanup.mutate([...selectedIds])}
+              disabled={cleanup.isPending || selectedCount === 0}
+            >
+              <Trash2 size={15} />
+              {cleanup.isPending ? "Queuing cleanup..." : `Remove ${formatNumber(selectedCount)} symlink${selectedCount === 1 ? "" : "s"}`}
+            </button>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function CopyItemDetailsTooltip({
@@ -805,13 +1201,17 @@ function CopyItemDetailsTooltip({
   kind,
   items,
   loading,
-  error
+  error,
+  toolbar,
+  itemControls
 }: {
   count: number;
   kind: "completed" | "failed";
   items: CopyItemDetail[];
   loading: boolean;
   error?: string | null;
+  toolbar?: ReactNode;
+  itemControls?: (item: CopyItemDetail) => ReactNode;
 }) {
   const tooltipId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -886,13 +1286,18 @@ function CopyItemDetailsTooltip({
             <X size={14} />
           </button>
         </div>
+        {toolbar}
         {items.length > 0 ? (
           <ul className="copy-item-details-tooltip-list">
             {items.map((item) => (
-              <li key={item.key}>
-                <strong>{item.title}</strong>
-                {item.fileName ? <span>{item.fileName}</span> : null}
-                <small>{item.detail}</small>
+              <li key={item.key} className={itemControls ? "has-actions" : undefined}>
+                <div className="copy-item-details-copy">
+                  <strong>{item.title}</strong>
+                  {item.fileName ? <span>{item.fileName}</span> : null}
+                  <small>{item.detail}</small>
+                  {item.statusDetail ? <small className="copy-item-details-status">{item.statusDetail}</small> : null}
+                </div>
+                {itemControls?.(item)}
               </li>
             ))}
           </ul>
@@ -1104,6 +1509,21 @@ export function JobScope({
     );
   }
 
+  if (job.type === "symlink_cleanup") {
+    const progress = recordFromUnknown(job.progress);
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;
+    const sourceJobId = finiteNumberFromUnknown(options?.sourceJobId);
+    const selectedLinkIds = job.selection?.linkIds ?? [];
+    const selectedCount = job.selection?.total ?? selectedLinkIds.length;
+    const detail = sourceJobId > 0 ? `Failed items from copy job #${sourceJobId}` : "Failed copy items";
+    return (
+      <span className="job-scope-cell">
+        <span>{selectedCount === 1 ? "1 failed-copy symlink" : `${formatNumber(selectedCount)} failed-copy symlinks`}</span>
+        <JobScopeDetail text={detail} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
+      </span>
+    );
+  }
+
   if (job.type === "path_migration") {
     const progress = recordFromUnknown(job.progress);
     const migrationId = finiteNumberFromUnknown(progress?.migrationId);
@@ -1174,22 +1594,101 @@ function SelectedLinkTitlesTooltip({
   isLoading?: boolean;
   error?: string | null;
 }) {
+  const detailsId = useId();
+  const rootRef = useRef<HTMLSpanElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const [hovered, setHovered] = useState(false);
+  const [focusWithin, setFocusWithin] = useState(false);
+  const [pinned, setPinned] = useState(false);
+  const [dismissed, setDismissed] = useState(false);
+  const open = pinned || (!dismissed && (hovered || focusWithin));
   const summaries = suppliedSummaries ?? selectedLinkTitleSummaries(linkIds ?? [], linkRowsById);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setPinned(false);
+        setDismissed(true);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setPinned(false);
+        setDismissed(true);
+        requestAnimationFrame(() => triggerRef.current?.focus());
+      }
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <span className="job-link-title-tooltip" tabIndex={0} aria-label="View selected titles">
-      <Info size={12} />
-      <span className="job-link-title-tooltip-panel" role="tooltip">
-        <strong>Selected titles</strong>
-        {isLoading ? <span>Loading titles...</span> : null}
-        {!isLoading && error ? <span>{error}</span> : null}
-        {!isLoading && !error && summaries.length === 0 ? <span>No matching titles found in the current inventory.</span> : null}
-        {!isLoading && !error && summaries.length > 0 ? (
-          <ul>
-            {summaries.map((title, index) => (
-              <li key={`${index}:${title}`}>{title}</li>
-            ))}
-          </ul>
-        ) : null}
+    <span
+      ref={rootRef}
+      className={`job-link-title-tooltip${open ? " is-open" : ""}`}
+      onMouseEnter={() => {
+        setHovered(true);
+        if (!rootRef.current?.contains(document.activeElement)) setDismissed(false);
+      }}
+      onMouseLeave={() => setHovered(false)}
+      onFocusCapture={(event) => {
+        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+          setFocusWithin(true);
+          setDismissed(false);
+        }
+      }}
+      onBlurCapture={(event) => {
+        if (!rootRef.current?.contains(event.relatedTarget as Node | null)) {
+          setFocusWithin(false);
+          setDismissed(false);
+        }
+      }}
+    >
+      <button
+        ref={triggerRef}
+        type="button"
+        className="job-link-title-tooltip-trigger"
+        aria-label="View selected titles"
+        aria-controls={detailsId}
+        aria-expanded={open}
+        onClick={() => {
+          if (pinned) {
+            setPinned(false);
+            setDismissed(true);
+          } else {
+            setPinned(true);
+            setDismissed(false);
+          }
+        }}
+      >
+        <Info size={12} />
+      </button>
+      <span id={detailsId} className="job-link-title-tooltip-panel" role="region" aria-label="Selected titles" aria-hidden={!open}>
+          <span className="job-link-title-tooltip-heading">
+            <strong>Selected titles</strong>
+            <button type="button" className="job-link-title-tooltip-close" aria-label="Close selected titles" tabIndex={open ? 0 : -1} onClick={() => {
+              setPinned(false);
+              setDismissed(true);
+              requestAnimationFrame(() => triggerRef.current?.focus());
+            }}>
+              <X size={13} />
+            </button>
+          </span>
+          {isLoading ? <span>Loading titles...</span> : null}
+          {!isLoading && error ? <span>{error}</span> : null}
+          {!isLoading && !error && summaries.length === 0 ? <span>No matching titles found in the current inventory.</span> : null}
+          {!isLoading && !error && summaries.length > 0 ? (
+            <ul>
+              {summaries.map((title, index) => (
+                <li key={`${index}:${title}`}>{title}</li>
+              ))}
+            </ul>
+          ) : null}
       </span>
     </span>
   );
@@ -1258,7 +1757,7 @@ export function JobsTable({
       {visibleJobs.length === 0 ? <p className="panel-message">No active jobs or finished jobs in the selected window.</p> : null}
       {saveRecentJobsFilter.error ? <p className="panel-message action-error">{saveRecentJobsFilter.error.message}</p> : null}
       {visibleJobs.length > 0 ? (
-        <table className="responsive-table">
+        <table className="responsive-table mobile-card-table recent-jobs-table" aria-label="Recent jobs">
           <thead>
             <tr>
               <th>ID</th>
@@ -1278,24 +1777,24 @@ export function JobsTable({
               const canTerminate = canTerminateJob(job);
               const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
               return (
-                <tr key={job.id}>
-                  <td>#{job.id}</td>
-                  <td>{formatJobType(job.type)}</td>
-	                  <td>
-	                    <JobScope
-	                      job={job}
-	                      sections={sections}
-	                      linkRowsById={selectedJobLinkRowsById}
-	                      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
-	                      linkRowsError={selectedJobLinkRows.error?.message ?? null}
-	                    />
-	                  </td>
-                  <td>
+                <tr key={job.id} className="mobile-card-row">
+                  <td className="mobile-card-primary" data-label="ID">#{job.id}</td>
+                  <td className="mobile-card-detail" data-label="Type">{formatJobType(job.type)}</td>
+                  <td className="mobile-card-detail" data-label="Scope">
+                    <JobScope
+                      job={job}
+                      sections={sections}
+                      linkRowsById={selectedJobLinkRowsById}
+                      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
+                      linkRowsError={selectedJobLinkRows.error?.message ?? null}
+                    />
+                  </td>
+                  <td className="mobile-card-status" data-label="Status">
                     <StatusPill value={job.status} />
                   </td>
-                  <td>{formatDate(job.startedAt, timeFormat)}</td>
-                  <td>{formatDate(job.finishedAt, timeFormat)}</td>
-                  <td className="actions-cell">
+                  <td className="mobile-card-detail" data-label="Started">{formatDate(job.startedAt, timeFormat)}</td>
+                  <td className="mobile-card-detail" data-label="Finished">{formatDate(job.finishedAt, timeFormat)}</td>
+                  <td className="actions-cell mobile-card-actions" data-label="Actions">
                     <span className="table-action-buttons">
                       {canViewScanJob && onScanJobSelect ? (
                         <button type="button" className="icon-button" title={`View scan status for job #${job.id}`} aria-label={`View scan status for job #${job.id}`} onClick={() => onScanJobSelect(job)}>

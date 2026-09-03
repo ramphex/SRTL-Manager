@@ -69,6 +69,22 @@ describe("job scope locks", () => {
     expect(activeJobForLink(link, [completed])).toBeNull();
   });
 
+  it("advises link and title locks for active failed-symlink cleanup jobs", () => {
+    const cleanup = {
+      ...job("symlink_cleanup", "queued", { sourceJobId: 4 }),
+      selection: {
+        total: 1,
+        unavailable: 0,
+        linkIds: [7],
+        titles: [{ section: "movies", itemName: "Example Title", count: 1 }]
+      }
+    };
+
+    expect(activeJobForLink(mediaLink({ id: 7 }), [cleanup])?.id).toBe(10);
+    expect(activeJobForLink(mediaLink({ id: 8 }), [cleanup])).toBeNull();
+    expect(activeJobsForStoragePolicyTitle(storagePolicyTitle(), [cleanup]).map((activeJob) => activeJob.id)).toEqual([10]);
+  });
+
   it("locks copy jobs scoped by title and path prefix", () => {
     const link = mediaLink({
       id: 20,
