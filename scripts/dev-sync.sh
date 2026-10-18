@@ -78,7 +78,12 @@ rsync_args=(
     --exclude verification_logs
     --exclude '*.log'
     --exclude .srtl-dev-workspace
+    --exclude .DS_Store
 )
+# Files a developer excludes locally from Git stay on this machine.
+if [[ -f "$ROOT_DIR/.git/info/exclude" ]]; then
+    rsync_args+=(--exclude-from "$ROOT_DIR/.git/info/exclude")
+fi
 if [[ "$SYNC_DRY_RUN" == "1" ]]; then
     rsync_args+=(--dry-run --itemize-changes)
 fi
