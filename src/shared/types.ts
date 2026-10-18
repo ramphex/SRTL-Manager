@@ -286,6 +286,7 @@ export interface CopyOptions {
   relativePathPrefix?: string;
   localConflictStrategy?: CopyLocalConflictStrategy;
   allowSourceTitleMismatch?: boolean;
+  radarrMonitoring?: boolean;
 }
 
 export type CopyFailureSymlinkStatus =

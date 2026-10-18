@@ -396,7 +396,8 @@ async function normalizeCopyOptions(db: Db, options: CopyOptions): Promise<CopyO
     ...(options.itemName?.trim() ? { itemName: options.itemName.trim() } : {}),
     ...(normalizeRelativePrefix(options.relativePathPrefix) ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
     ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
-    ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {})
+    ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
+    ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {})
   };
   if (!normalized.linkIds?.length && !normalized.section && !normalized.itemName) throw new Error("Copy requires link IDs, a folder scope, or a title");
   return normalized;
@@ -428,6 +429,7 @@ function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCop
     ...(typeof options.relativePathPrefix === "string" && options.relativePathPrefix.trim() ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
     ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
     ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
+    ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {}),
     ...(behavior ? { behavior } : {})
   };
 }
@@ -2123,7 +2125,7 @@ function storageScanResourceClaims(options: ScanOptions, access: ResourceClaimAc
   ];
 }
 
-async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions): Promise<PreparedJob> {
+async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions, allowNewTitles = false): Promise<PreparedJob> {
   const targeted = Boolean(normalizedOptions.titleScopes?.length);
   const sectionScopedSymlink = isSectionScopedSymlinkScan(normalizedOptions);
   const sectionScopedLocal = isSectionScopedLocalScan(normalizedOptions);
@@ -2157,7 +2159,7 @@ async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions): P
   const unavailableScopes = (normalizedOptions.titleScopes ?? []).filter(
     (scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`)
   );
-  if (unavailableScopes.length > 0) {
+  if (!allowNewTitles && unavailableScopes.length > 0) {
     throw new Error(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
   }
   return {
@@ -2214,6 +2216,15 @@ async function assertNoActiveStorageScanForClaims(db: DbExecutor, claims: Resour
 
 export class JobRunner {
   constructor(private readonly db: Db) {}
+
+  async startExternalTitleScan(titleScopes: ScanTitleScope[]): Promise<number> {
+    if (!titleScopes.length) throw new Error("An external refresh requires a title scope");
+    const options = await normalizeScanOptions(this.db, { scanSymlinks: true, scanLocal: false, scanRemote: false, titleScopes });
+    return this.enqueuePreparedJob("scan", async (transaction) => ({
+      ...await prepareScanJob(transaction, options, true),
+      queueBehindClaimConflicts: true
+    }));
+  }
 
   async createJob(type: JobRecord["type"], progress: unknown = {}): Promise<number> {
     return this.enqueueJob(type, progress, true, []);

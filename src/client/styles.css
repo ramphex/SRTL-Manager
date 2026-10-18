@@ -3396,6 +3396,96 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   gap: 16px;
 }
 
+.integration-settings { min-width: 0; }
+.integration-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
+.integration-tabs button { min-height: 44px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 16px; }
+.integration-tabs button[aria-selected="true"] { color: var(--text-strong); border-bottom-color: var(--good); }
+.integration-tabs small { font-size: 11px; font-weight: 400; }
+.integration-settings > [role="tabpanel"] > h2 { font-size: 17px; }
+.radarr-settings { display: grid; gap: 28px; min-width: 0; }
+.radarr-integration-header h2 { display: flex; align-items: center; gap: 8px; font-size: 18px; margin: 0; }
+.radarr-heading-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+.radarr-integration-header .radarr-setup { margin-bottom: 0; }
+.radarr-section { min-width: 0; border-top: 1px solid var(--border); padding-top: 20px; }
+.radarr-section h2 { display: flex; align-items: center; gap: 8px; font-size: 17px; margin: 0; }
+.radarr-section h3 { font-size: 14px; margin: 4px 0 0; }
+.radarr-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.radarr-state { color: var(--muted); font-size: 13px; }
+.radarr-fields { display: grid; min-width: 0; padding: 0; margin: 0; border: 0; gap: 16px; }
+.radarr-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.radarr-fields label { display: grid; min-width: 0; gap: 7px; font-size: 13px; }
+.radarr-field { display: grid; gap: 7px; min-width: 0; }
+.radarr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
+.radarr-fields .radarr-field-label label { display: block; }
+.radarr-help-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.radarr-settings .info-tooltip-trigger { height: 28px; min-height: 28px; width: 28px; background: transparent; border-color: transparent; }
+.radarr-settings .info-tooltip-panel { font-weight: 400; }
+.radarr-field-label .info-tooltip-panel,
+.radarr-integration-header .info-tooltip-panel { left: auto; right: 0; }
+.radarr-setup { margin-bottom: 20px; font-size: 13px; line-height: 1.6; color: var(--muted-strong); }
+.radarr-setup summary { cursor: pointer; color: var(--text-strong); width: fit-content; }
+.radarr-setup ol { padding-left: 20px; max-width: 85ch; }
+.radarr-setup li + li { margin-top: 8px; }
+.radarr-setup code { overflow-wrap: anywhere; }
+.radarr-fields input:not([type="checkbox"]), .radarr-fields select { width: 100%; min-width: 0; height: 40px; }
+.radarr-toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.radarr-toggle input { flex: 0 0 auto; }
+.radarr-copy-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
+.radarr-copy-toggle input { flex: 0 0 auto; margin: 0; }
+.radarr-mappings { display: grid; gap: 12px; }
+.radarr-mapping { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 40px; align-items: end; gap: 12px; }
+.radarr-mapping button { height: 40px; width: 40px; }
+.radarr-mapping-mode { width: fit-content; }
+.radarr-auto-mappings { min-width: 0; font-size: 13px; }
+.radarr-auto-mappings p { margin: 0 0 8px; }
+.radarr-auto-mappings dl { margin: 0; }
+.radarr-auto-mappings dl > div { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; border-bottom: 1px solid var(--border); padding: 10px 0; }
+.radarr-auto-mappings dt, .radarr-auto-mappings li { overflow-wrap: anywhere; }
+.radarr-auto-mappings dd { margin: 0; overflow-wrap: anywhere; }
+.radarr-unmatched { margin-top: 16px; }
+.radarr-unmatched ul { margin: 0 0 10px; padding-left: 20px; }
+.radarr-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.radarr-toolbar input, .radarr-toolbar select { min-width: 0; max-width: 100%; height: 38px; }
+.radarr-search { flex: 1 1 220px; }
+.radarr-table-scroll { overflow: auto; max-height: 580px; margin-top: 14px; scrollbar-gutter: stable; }
+.radarr-table-scroll table { width: 100%; border-collapse: collapse; }
+.radarr-table-scroll th { text-align: left; color: var(--muted); font-size: 12px; }
+.radarr-table-scroll td, .radarr-table-scroll th { padding: 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.radarr-table-scroll td { font-size: 13px; }
+.radarr-table-scroll td:first-child { width: 40px; }
+.radarr-path { display: block; color: var(--muted); font-size: 12px; margin-top: 5px; overflow-wrap: anywhere; max-width: 540px; }
+.radarr-status { white-space: nowrap; font-weight: 600; }
+.radarr-status-synced { color: var(--good); }
+.radarr-status-error, .radarr-status-review { color: var(--warn); }
+.radarr-status-unmapped { color: var(--muted); }
+.radarr-nowrap { white-space: nowrap; }
+.radarr-pagination { margin: 14px 0; font-size: 13px; color: var(--muted); }
+.radarr-pagination span:first-child { margin-right: auto; }
+.radarr-pagination-controls { display: flex; flex: 0 0 auto; gap: 8px; margin-left: auto; }
+.radarr-confirmation { border-left: 3px solid var(--border); padding: 0 14px; margin-top: 16px; }
+.radarr-confirmation p { font-size: 14px; line-height: 1.5; }
+.radarr-policy-fields { margin-bottom: 16px; }
+.radarr-draft-notice { border-left: 2px solid var(--warn); padding-left: 10px; font-size: 13px; color: var(--muted-strong); }
+.radarr-webhook-setup { margin: 16px 0; }
+.radarr-webhook-setup p { max-width: 85ch; }
+.radarr-webhook-activity { margin-top: 24px; }
+.radarr-save-area { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; border-top: 1px solid var(--border); padding-top: 20px; }
+.radarr-save-status { font-size: 13px; color: var(--muted-strong); }
+.radarr-save-area .error { flex-basis: 100%; margin: 0; }
+
+@media (max-width: 700px) {
+  .radarr-grid { grid-template-columns: minmax(0, 1fr); }
+  .radarr-mapping { grid-template-columns: minmax(0, 1fr) 40px; }
+  .radarr-mapping label:first-child { grid-column: 1 / -1; }
+  .radarr-table-scroll table { min-width: 650px; }
+  .radarr-fields input:not([type="checkbox"]), .radarr-fields select, .radarr-toolbar input, .radarr-toolbar select { height: 44px; font-size: 16px; }
+}
+
+@media (max-width: 820px) {
+  .radarr-settings .info-tooltip-trigger { height: 44px; min-height: 44px; width: 44px; }
+  .radarr-settings .info-tooltip-panel { left: auto; right: 16px; }
+}
+
 .advanced-settings-section {
   background: color-mix(in srgb, var(--surface), var(--bg-subtle) 8%);
   border: 1px solid var(--border);

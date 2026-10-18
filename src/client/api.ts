@@ -39,6 +39,8 @@ import type {
   UserPreferences
 } from "../shared/types";
 
+import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrSettingsInput, RadarrState } from "../shared/radarr";
+
 type ApiErrorPayload = {
   error?: string;
   issues?: Array<{ message?: string }>;
@@ -103,6 +105,12 @@ export const api = {
   getAuditSettings: () => request<AuditSettings>("/api/settings/audit"),
   saveAuditSettings: (body: AuditSettings) => request<AuditSettings>("/api/settings/audit", { method: "PUT", body: JSON.stringify(body) }),
   getAdvancedSettings: () => request<AdvancedSettings>("/api/settings/advanced"),
+  getRadarr: () => request<RadarrState>("/api/settings/radarr"),
+  getRadarrCopyDefaults: () => request<RadarrCopyDefaults>("/api/settings/radarr/copy-defaults"),
+  saveRadarr: (body: RadarrSettingsInput) => request<RadarrState>("/api/settings/radarr", { method: "PUT", body: JSON.stringify(body) }),
+  testRadarr: (body: RadarrSettingsInput) => request<RadarrConnectionTest>("/api/settings/radarr/test", { method: "POST", body: JSON.stringify(body) }),
+  refreshRadarr: () => request<RadarrState>("/api/settings/radarr/refresh", { method: "POST" }),
+  reconcileRadarr: (movieIds: number[], action: "use_srtl" | "import_tags") => request<RadarrState>("/api/settings/radarr/reconcile", { method: "POST", body: JSON.stringify({ movieIds, action }) }),
   saveAdvancedSettings: (body: AdvancedSettings) => request<AdvancedSettings>("/api/settings/advanced", { method: "PUT", body: JSON.stringify(body) }),
   getUserPreferences: () => request<UserPreferences>("/api/settings/user-preferences"),
   saveUserPreferences: (body: UserPreferences) => request<UserPreferences>("/api/settings/user-preferences", { method: "PUT", body: JSON.stringify(body) }),

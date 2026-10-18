@@ -3,6 +3,7 @@ import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, TriangleAlert, UserCog } from "lucide-react";
 import { api } from "./api";
+import { IntegrationSettings } from "./integrationSettings";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
 import { normalizeAuditTargets } from "./jobScopeLocks";
@@ -453,8 +454,8 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
       ? "Name storage locations, review mounted paths, and manage library sections."
       : activeView === "advanced"
         ? "Tune job behavior and verification defaults."
-        : "Manage display preferences and account access.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : "User settings";
+        : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences and account access.";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -479,6 +480,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
         </>
       ) : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
+      {activeView === "integrations" ? <IntegrationSettings /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
     </Page>
   );

@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional Radarr integration: two configurable policy tags follow SRTL storage policies (only those tags are added or removed), automatic or manual folder mapping, a policy preview with review and import actions, and optional webhook-triggered title rescans. See the [integration guide](docs/radarr.md).
+- Added Radarr copy monitoring: copies to Location 1 can unmonitor movies in Radarr and copies back to Location 2 can monitor them again, once every file of the movie reaches the destination. A checkbox beside copy buttons defaults to a setting in Settings > Integrations.
+
 ## [0.1.3] - 2026-09-03
 
 ### Added

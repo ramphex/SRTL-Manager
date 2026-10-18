@@ -297,9 +297,11 @@ function RootLayout() {
             ? "Audit history"
             : pathname === "/settings/advanced"
               ? "Advanced settings"
-              : pathname === "/settings/user"
-                ? "User settings"
-                : "Library settings";
+              : pathname === "/settings/integrations"
+                ? "Integration settings"
+                : pathname === "/settings/user"
+                  ? "User settings"
+                  : "Library settings";
 
   const nav = [
     { to: "/", label: "Dashboard", icon: Gauge },
@@ -1543,6 +1545,7 @@ const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audit
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });
 const settingsSectionsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/sections", component: () => <SettingsPage activeView="library" /> });
 const settingsAdvancedRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/advanced", component: () => <SettingsPage activeView="advanced" /> });
+const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
 const routeTree = rootRoute.addChildren([
@@ -1552,6 +1555,7 @@ const routeTree = rootRoute.addChildren([
   auditsRoute,
   settingsRoute,
   settingsSectionsRoute,
+  settingsIntegrationsRoute,
   settingsAdvancedRoute,
   settingsUserRoute,
   logsRoute

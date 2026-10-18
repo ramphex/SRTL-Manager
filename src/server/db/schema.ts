@@ -7,6 +7,56 @@ export const appSettings = pgTable("app_settings", {
   updatedAt: text("updated_at").notNull()
 });
 
+export const radarrMovies = pgTable("radarr_movies", {
+  movieId: integer("movie_id").primaryKey(),
+  tmdbId: integer("tmdb_id").notNull(),
+  title: text("title").notNull(),
+  folderPath: text("folder_path").notNull(),
+  section: text("section"),
+  itemName: text("item_name"),
+  tags: text("tags").notNull(),
+  managed: boolean("managed").notNull().default(false),
+  syncedPolicy: text("synced_policy"),
+  syncedAt: text("synced_at"),
+  lastError: text("last_error"),
+  nextAttemptAt: text("next_attempt_at"),
+  attempts: integer("attempts").notNull().default(0),
+  observedPolicyMarker: text("observed_policy_marker"),
+  monitored: boolean("monitored")
+});
+
+export const radarrCopyJobs = pgTable("radarr_copy_jobs", {
+  jobId: integer("job_id").primaryKey().references(() => jobs.id, { onDelete: "cascade" }),
+  handledAt: text("handled_at").notNull()
+});
+
+export const radarrMonitorUpdates = pgTable("radarr_monitor_updates", {
+  id: serial("id").primaryKey(),
+  copyJobId: integer("copy_job_id").references(() => jobs.id, { onDelete: "set null" }),
+  movieId: integer("movie_id").notNull(),
+  title: text("title").notNull(),
+  monitored: boolean("monitored").notNull(),
+  createdAt: text("created_at").notNull(),
+  processedAt: text("processed_at"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error")
+});
+
+export const radarrEvents = pgTable("radarr_events", {
+  id: serial("id").primaryKey(),
+  fingerprint: text("fingerprint").notNull().unique(),
+  movieId: integer("movie_id").notNull(),
+  title: text("title").notNull(),
+  eventType: text("event_type").notNull(),
+  receivedAt: text("received_at").notNull(),
+  processedAt: text("processed_at"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
+  jobId: integer("job_id").references(() => jobs.id, { onDelete: "set null" })
+});
+
 export const pathConfigurations = pgTable("path_configurations", {
   id: serial("id").primaryKey(),
   status: text("status").notNull(),

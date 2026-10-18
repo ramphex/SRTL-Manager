@@ -28,6 +28,8 @@ import { registerJobRoutes } from "./routes/jobRoutes";
 import { registerSystemRoutes } from "./routes/systemRoutes";
 import { registerPathConfigurationRoutes } from "./routes/pathConfigurationRoutes";
 import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
+import { radarrWebhookPath, registerRadarrRoutes } from "./routes/radarrRoutes";
+import { authenticateRadarrWebhook } from "./lib/radarr";
 
 export interface AppContext {
   app: FastifyInstance;
@@ -163,7 +165,15 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     const documentationRequest = config.apiDocsEnabled && request.url.startsWith("/documentation");
     if (!request.url.startsWith("/api/") && !documentationRequest) return;
     if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
-    await requireAuth(database.db, config.sessionCookieName)(request, reply);
+    const radarrWebhook = request.method === "POST" && request.routeOptions.url === radarrWebhookPath;
+    if (radarrWebhook) {
+      const token = request.headers["x-srtl-webhook-secret"];
+      if (!(await authenticateRadarrWebhook(database.db, typeof token === "string" ? token : undefined))) {
+        await reply.code(401).send({ error: "Invalid webhook credentials" });
+      }
+    } else {
+      await requireAuth(database.db, config.sessionCookieName)(request, reply);
+    }
     if (reply.sent) return;
     if (documentationRequest) return;
     if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
@@ -180,6 +190,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
 
   registerOnboardingRoutes(app, database.db);
   registerSettingsRoutes(app, database.db);
+  registerRadarrRoutes(app, database.db);
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
   registerJobRoutes(app, jobs);

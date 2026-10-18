@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 13;
+export const currentSchemaVersion = 15;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -517,6 +517,59 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END $$
         `);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (13, 'failed_copy_symlink_cleanup', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(14)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`CREATE TABLE IF NOT EXISTS radarr_movies (
+          movie_id INTEGER PRIMARY KEY, tmdb_id INTEGER NOT NULL, title TEXT NOT NULL,
+          folder_path TEXT NOT NULL, section TEXT, item_name TEXT, tags TEXT NOT NULL,
+          managed BOOLEAN NOT NULL DEFAULT false, synced_policy TEXT, synced_at TEXT,
+          last_error TEXT, next_attempt_at TEXT, attempts INTEGER NOT NULL DEFAULT 0
+        )`);
+        await client.query(`CREATE TABLE IF NOT EXISTS radarr_events (
+          id SERIAL PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, movie_id INTEGER NOT NULL,
+          title TEXT NOT NULL, event_type TEXT NOT NULL, received_at TEXT NOT NULL,
+          processed_at TEXT, next_attempt_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0,
+          error TEXT, job_id INTEGER
+        )`);
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.jobs') IS NOT NULL THEN
+            ALTER TABLE radarr_events ADD CONSTRAINT radarr_events_job_fk FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL;
+          END IF;
+        END $$`);
+        await client.query(`CREATE INDEX IF NOT EXISTS radarr_events_pending_idx ON radarr_events(next_attempt_at, id) WHERE processed_at IS NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (14, 'radarr_policy_and_refresh', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(15)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`ALTER TABLE radarr_movies ADD COLUMN IF NOT EXISTS observed_policy_marker TEXT`);
+        await client.query(`ALTER TABLE radarr_movies ADD COLUMN IF NOT EXISTS monitored BOOLEAN`);
+        await client.query(`CREATE TABLE IF NOT EXISTS radarr_copy_jobs (job_id INTEGER PRIMARY KEY, handled_at TEXT NOT NULL)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS radarr_monitor_updates (
+          id SERIAL PRIMARY KEY, copy_job_id INTEGER, movie_id INTEGER NOT NULL,
+          title TEXT NOT NULL, monitored BOOLEAN NOT NULL, created_at TEXT NOT NULL, processed_at TEXT,
+          next_attempt_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT
+        )`);
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.jobs') IS NOT NULL THEN
+            ALTER TABLE radarr_copy_jobs ADD CONSTRAINT radarr_copy_jobs_job_fk FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE;
+            ALTER TABLE radarr_monitor_updates ADD CONSTRAINT radarr_monitor_updates_job_fk FOREIGN KEY(copy_job_id) REFERENCES jobs(id) ON DELETE SET NULL;
+          END IF;
+        END $$`);
+        await client.query(`CREATE INDEX IF NOT EXISTS radarr_monitor_updates_pending_idx ON radarr_monitor_updates(next_attempt_at, id) WHERE processed_at IS NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (15, 'radarr_copy_monitoring', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

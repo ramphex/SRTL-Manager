@@ -8,6 +8,7 @@ import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
+import { processRadarrWork } from "./lib/radarr";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
@@ -75,11 +76,20 @@ let heartbeatRun: Promise<void> | null = null;
 let maintenanceTimer: NodeJS.Timeout | null = null;
 let maintenanceRun: Promise<void> | null = null;
 let workerRun: Promise<void> | null = null;
+let radarrTimer: NodeJS.Timeout | null = null;
+let radarrRun: Promise<void> | null = null;
 try {
   await recordHeartbeat("running");
   // A shutdown signal may arrive while the initial database write is in flight.
   // Starting afterward would clear JobWorker's stopped state and resume claims.
   if (!shuttingDown) {
+    radarrTimer = setInterval(() => {
+      if (shuttingDown || radarrRun) return;
+      radarrRun = processRadarrWork(database.db)
+        .catch(() => { console.error("Radarr synchronization could not finish; pending work will be retried."); })
+        .finally(() => { radarrRun = null; });
+    }, 5000);
+    radarrTimer.unref();
     heartbeatTimer = setInterval(() => {
       if (shuttingDown || heartbeatRun) return;
       heartbeatRun = recordHeartbeat("running")
@@ -109,9 +119,11 @@ try {
   shutdown();
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (maintenanceTimer) clearInterval(maintenanceTimer);
+  if (radarrTimer) clearInterval(radarrTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
   await maintenanceRun;
+  await radarrRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);
   });
