@@ -6,6 +6,7 @@ import { nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
+import { isHollowAllocation } from "../lib/mediaIntegrity";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
 
@@ -26,6 +27,7 @@ type OrphanRow = {
   item_name: string;
   size_bytes: number | string;
   mtime_ms: number | string;
+  allocated_bytes: number | string | null;
   copy_leftover: boolean;
   active_copy: boolean;
 };
@@ -57,7 +59,7 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
         from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
         where ${unfinishedCopyCondition} and p is not null
       )
-      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms,
+      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes,
         cs.path is not null as copy_leftover,
         ap.path is not null as active_copy
       from storage_files sf
@@ -136,7 +138,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     sizeBytes: Number(row.size_bytes),
     mtimeMs: Number(row.mtime_ms),
     category: classify(row, keys),
-    protectedReason: protectedReason(row, now)
+    protectedReason: protectedReason(row, now),
+    hollow: isHollowAllocation(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes))
   }));
   const categories: OrphanCategory[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "unlinked"];
   const summary = categories
@@ -150,7 +153,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
       };
     })
     .filter((entry) => entry.count > 0);
-  return { rootType, items, summary, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, holdDays };
+  const hollowCount = items.filter((item) => item.hollow).length;
+  return { rootType, items, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, holdDays };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.

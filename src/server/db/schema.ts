@@ -167,6 +167,8 @@ export const storageFiles = pgTable(
     storagePolicy: text("storage_policy").notNull().default("unassigned"),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
     mtimeMs: bigint("mtime_ms", { mode: "number" }).notNull(),
+    // Bytes actually stored on disk (stat blocks * 512); null until a scan records it.
+    allocatedBytes: bigint("allocated_bytes", { mode: "number" }),
     firstSeenAt: text("first_seen_at").notNull(),
     lastSeenAt: text("last_seen_at").notNull(),
     lastChangedAt: text("last_changed_at").notNull(),

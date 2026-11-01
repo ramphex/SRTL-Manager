@@ -7,6 +7,7 @@ const defaultFilesystemTimeoutMs = 15_000;
 export interface ReadableFileSnapshot {
   size: number;
   mtimeMs: number;
+  blocks: number;
 }
 
 export interface ReadableFileOptions {
@@ -78,7 +79,7 @@ export async function assertReadableRegularFile(filePath: string, label: string,
         const read = await withFilesystemTimeout(fileHandle.read(buffer, 0, 1, 0), `${label} first-byte read`, options.timeoutMs);
         if (read.bytesRead !== 1) throw new Error(`${label} returned no data during its read check`);
       }
-      return { size: stat.size, mtimeMs: stat.mtimeMs };
+      return { size: stat.size, mtimeMs: stat.mtimeMs, blocks: stat.blocks };
     } catch (error) {
       lastError = error;
     } finally {

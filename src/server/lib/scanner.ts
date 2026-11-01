@@ -12,6 +12,7 @@ import { applyPendingOnboardingPolicy } from "./onboarding";
 import { holdingFolderName, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
+import { isHollowAllocation } from "./mediaIntegrity";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -49,6 +50,7 @@ export interface ClassifiedLink {
   resolvedStorageFileId?: number | null;
   sizeBytes: number | null;
   targetMtimeMs: number | null;
+  targetAllocatedBytes?: number | null;
   targetReadError: string | null;
 }
 
@@ -62,6 +64,7 @@ export interface ClassifiedStorageFile {
   storagePolicy: StoragePolicyKind;
   sizeBytes: number;
   mtimeMs: number;
+  allocatedBytes: number | null;
 }
 
 export interface StorageScanIssue {
@@ -134,6 +137,7 @@ export async function classifySymlink(
   let targetExists = false;
   let sizeBytes: number | null = null;
   let targetMtimeMs: number | null = null;
+  let targetAllocatedBytes: number | null = null;
   let targetReadError: string | null = null;
 
   const attempts = targetRootType === "remote" ? (verifyTargetReadability ? 3 : 2) : 1;
@@ -143,10 +147,12 @@ export async function classifySymlink(
         const snapshot = await assertReadableRegularFile(targetPath, `Symlink target ${targetPath}`, { attempts: 1, timeoutMs: 5_000 });
         sizeBytes = snapshot.size;
         targetMtimeMs = Math.trunc(snapshot.mtimeMs);
+        targetAllocatedBytes = snapshot.blocks * 512;
       } else {
         const stat = await withFilesystemTimeout(fs.stat(targetPath), `Target check for ${targetPath}`);
         sizeBytes = stat.isFile() ? stat.size : null;
         targetMtimeMs = Math.trunc(stat.mtimeMs);
+        targetAllocatedBytes = stat.isFile() ? stat.blocks * 512 : null;
       }
       targetExists = true;
       targetReadError = null;
@@ -184,6 +190,7 @@ export async function classifySymlink(
     storagePolicy,
     sizeBytes,
     targetMtimeMs,
+    targetAllocatedBytes,
     targetReadError
   };
 }
@@ -303,7 +310,8 @@ async function walkStorageFilesCollecting(root: string, rootType: StorageRootTyp
             filePath: fullPath,
             storagePolicy: "unassigned",
             sizeBytes: stat.size,
-            mtimeMs: Math.trunc(stat.mtimeMs)
+            mtimeMs: Math.trunc(stat.mtimeMs),
+            allocatedBytes: stat.blocks * 512
           });
         } catch (error) {
               failedDirectories.push({ directoryPath: dir, error });
@@ -739,7 +747,8 @@ function storageFileFromTargetedLink(link: ClassifiedLink, paths: PathsSettings)
     filePath: link.targetPath,
     storagePolicy: link.storagePolicy,
     sizeBytes: link.sizeBytes,
-    mtimeMs: link.targetMtimeMs
+    mtimeMs: link.targetMtimeMs,
+    allocatedBytes: link.targetAllocatedBytes ?? null
   };
 }
 
@@ -876,9 +885,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     const existing = existingStorageFileByPath.get(file.filePath);
     // Keeping an existing row's section and title stops storage and symlink scans from flipping them back and forth.
     const metadata = existing && !seenStorageFilePaths.has(file.filePath) ? { section: existing.section, itemName: existing.itemName } : {};
-    const persistedFile: ClassifiedStorageFile = { ...file, ...metadata, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
+    const persistedFile: ClassifiedStorageFile = {
+      ...file,
+      ...metadata,
+      storagePolicy: normalizeStoragePolicy(existing?.storagePolicy),
+      allocatedBytes: file.allocatedBytes ?? existing?.allocatedBytes ?? null
+    };
     const changed = storageFileChanged(existing, persistedFile);
-    if (existing && !changed && !existing.missingSince) {
+    // Allocation is refreshed without counting as a content change.
+    if (existing && !changed && !existing.missingSince && existing.allocatedBytes === persistedFile.allocatedBytes) {
       unchangedStorageFileIds.push(existing.id);
       affectedStorageFilePolicyIds.add(existing.id);
       continue;
@@ -1510,6 +1525,8 @@ export async function listStorageFiles(db: Db, rootType?: StorageRootType, orpha
         storagePolicy: normalizeStoragePolicy(row.storagePolicy),
         sizeBytes: row.sizeBytes,
         mtimeMs: row.mtimeMs,
+        allocatedBytes: row.allocatedBytes,
+        hollow: isHollowAllocation(row.sizeBytes, row.allocatedBytes),
         firstSeenAt: row.firstSeenAt,
         lastSeenAt: row.lastSeenAt,
         lastChangedAt: row.lastChangedAt,
@@ -1549,6 +1566,7 @@ type RawStorageFileRow = {
   storagePolicy: string | null;
   sizeBytes: number;
   mtimeMs: number;
+  allocatedBytes: number | string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -1559,6 +1577,7 @@ type RawStorageFileRow = {
 
 function serializeRawStorageFile(row: RawStorageFileRow): StorageFileRow {
   const linkCount = Number(row.linkCount ?? 0);
+  const allocatedBytes = row.allocatedBytes == null ? null : Number(row.allocatedBytes);
   return {
     id: row.id,
     rootType: row.rootType as StorageRootType,
@@ -1570,6 +1589,8 @@ function serializeRawStorageFile(row: RawStorageFileRow): StorageFileRow {
     storagePolicy: normalizeStoragePolicy(row.storagePolicy),
     sizeBytes: row.sizeBytes,
     mtimeMs: row.mtimeMs,
+    allocatedBytes: allocatedBytes,
+    hollow: isHollowAllocation(Number(row.sizeBytes), allocatedBytes),
     firstSeenAt: row.firstSeenAt,
     lastSeenAt: row.lastSeenAt,
     lastChangedAt: row.lastChangedAt,
@@ -1672,6 +1693,7 @@ async function listStorageFileTreeRows(
       sf.storage_policy as "storagePolicy",
       sf.size_bytes as "sizeBytes",
       sf.mtime_ms as "mtimeMs",
+      sf.allocated_bytes as "allocatedBytes",
       sf.first_seen_at as "firstSeenAt",
       sf.last_seen_at as "lastSeenAt",
       sf.last_changed_at as "lastChangedAt",

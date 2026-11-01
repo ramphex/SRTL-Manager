@@ -356,6 +356,47 @@ describe("scanner", () => {
     }
   });
 
+  it("records allocated bytes and flags hollow storage files", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(path.join(symlinkDir, "movies", "Linked"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Hollow"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Small"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Linked"), { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    const hollowFile = path.join(localDir, "movies", "Hollow", "hollow.mkv");
+    const smallFile = path.join(localDir, "movies", "Small", "small.mkv");
+    const linkedHollow = path.join(localDir, "movies", "Linked", "linked.mkv");
+    for (const file of [hollowFile, linkedHollow]) {
+      await fs.writeFile(file, Buffer.alloc(4096, 1));
+      await fs.truncate(file, 200 * 1024 * 1024);
+    }
+    await fs.writeFile(smallFile, "small");
+    await fs.symlink(linkedHollow, path.join(symlinkDir, "movies", "Linked", "linked.mkv"));
+    const sparse = await fs.stat(hollowFile);
+    if (sparse.blocks * 512 >= sparse.size * 0.01) return;
+
+    const database = await openTestDatabase();
+    try {
+      const symlinkScan = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: false });
+      expect(symlinkScan.reconciledStorageFiles).toEqual([expect.objectContaining({ filePath: linkedHollow, allocatedBytes: sparse.blocks * 512 })]);
+      await persistScanResult(database.db, symlinkScan, 1);
+      await persistScanResult(database.db, await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: false }), 2);
+
+      const files = await listStorageFiles(database.db, "local");
+      expect(Object.fromEntries(files.map((file) => [path.basename(file.filePath), [file.hollow, file.allocatedBytes !== null]]))).toEqual({
+        "hollow.mkv": [true, true],
+        "linked.mkv": [true, true],
+        "small.mkv": [false, true]
+      });
+      const tree = await listStorageFileTree(database.db, { rootType: "local", prefix: "movies/Hollow" });
+      expect(tree.nodes[0]?.file).toMatchObject({ hollow: true, allocatedBytes: sparse.blocks * 512 });
+    } finally {
+      await database.close();
+    }
+  });
+
   it("marks disappeared symlinks and storage files missing instead of deleting rows", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");

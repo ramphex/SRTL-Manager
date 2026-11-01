@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runFfmpegWithProgress } from "../src/server/lib/copier";
-import { containerSignatureMatches, evaluateFfmpegValidation, inspectMediaContent, probeMedia, type MediaProber } from "../src/server/lib/mediaIntegrity";
+import { containerSignatureMatches, evaluateFfmpegValidation, inspectMediaContent, isHollowAllocation, probeMedia, type MediaProber } from "../src/server/lib/mediaIntegrity";
 
 const mkvHeader = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
 const healthyProbe: MediaProber = async () => ({ ok: true, error: "", durationSeconds: 60, streamTypes: ["video", "audio"] });
@@ -154,5 +154,17 @@ describe.runIf(hasFfmpeg)("real ffmpeg media", () => {
       expect((await runFfmpegWithProgress("deep", filePath)).status).toBe("fail");
     }
     expect((await inspectMediaContent(halfZero)).problems.join()).toContain("incomplete download");
+  });
+});
+
+describe("hollow allocation rule", () => {
+  it("flags only large files with a small non-zero allocation", () => {
+    const size = 100 * 1024 * 1024;
+    expect(isHollowAllocation(size, 4096)).toBe(true);
+    expect(isHollowAllocation(size, size)).toBe(false);
+    // Remote FUSE mounts report zero blocks for real files.
+    expect(isHollowAllocation(size, 0)).toBe(false);
+    expect(isHollowAllocation(size, null)).toBe(false);
+    expect(isHollowAllocation(10 * 1024 * 1024, 4096)).toBe(false);
   });
 });

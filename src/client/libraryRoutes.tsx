@@ -2656,6 +2656,11 @@ function StorageFileStatus({ file, fallbackLinked }: { file: StorageFileRow | nu
           <StatusPill value={storageStatusDisplayLabel(policyLabel, storageLocations)} toneValue={policyLabel} />
         </span>
       ) : null}
+      {file?.hollow ? (
+        <span className="status-count" title="Almost none of this file is stored on disk; it may be a placeholder or an interrupted copy">
+          <StatusPill value="Hollow" />
+        </span>
+      ) : null}
     </div>
   );
 }

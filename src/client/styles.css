@@ -2613,6 +2613,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .pill-needs-copy,
 .pill-failed,
 .pill-orphan,
+.pill-hollow,
 .pill-error {
   background: var(--pill-bad-bg);
   color: var(--pill-bad-text);

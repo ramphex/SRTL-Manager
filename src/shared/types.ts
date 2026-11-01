@@ -514,6 +514,10 @@ export interface StorageFileRow {
   storagePolicy: StoragePolicyKind;
   sizeBytes: number;
   mtimeMs: number;
+  // Bytes stored on disk; null when no scan has recorded it yet.
+  allocatedBytes: number | null;
+  // Large file with almost nothing stored on disk, usually a sparse placeholder or an interrupted copy.
+  hollow: boolean;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -536,12 +540,14 @@ export interface OrphanReviewItem {
   mtimeMs: number;
   category: OrphanCategory;
   protectedReason: string | null;
+  hollow: boolean;
 }
 
 export interface OrphanReview {
   rootType: StorageRootType;
   items: OrphanReviewItem[];
   summary: Array<{ category: OrphanCategory; count: number; sizeBytes: number; purgeableCount: number }>;
+  hollowCount: number;
   symlinkInventoryAt: string | null;
   storageInventoryAt: string | null;
   staleWarning: string | null;

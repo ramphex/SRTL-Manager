@@ -6,8 +6,8 @@ import { appendBoundedOutput, terminateChildProcess } from "./processSafety";
 
 const sampleBytes = 64 * 1024;
 const middleSampleCount = 6;
-const hollowMinimumBytes = 50 * 1024 * 1024;
-const hollowAllocationRatio = 0.01;
+export const hollowMinimumBytes = 50 * 1024 * 1024;
+export const hollowAllocationRatio = 0.01;
 const minimumVideoBitsPerSecond = 64_000;
 const probeTimeoutMs = 120_000;
 // ffmpeg reports the last processed timestamp; anything short of this fraction of the stated duration is a truncated stream.
@@ -16,6 +16,11 @@ const reachedSlackSeconds = 2;
 const runtimeShortfallRatio = 0.5;
 // A recorded size this small cannot be a movie; it means the size of a symlink was recorded instead of its target.
 const minimumTrustedExpectedBytes = 1024 * 1024;
+
+// Some network filesystems report zero blocks for real files, so only a small non-zero allocation is trusted.
+export function isHollowAllocation(sizeBytes: number, allocatedBytes: number | null | undefined): boolean {
+  return allocatedBytes != null && sizeBytes >= hollowMinimumBytes && allocatedBytes > 0 && allocatedBytes < sizeBytes * hollowAllocationRatio;
+}
 
 export interface MediaExpectation {
   source: string;
@@ -187,9 +192,8 @@ export async function inspectMediaContent(
   const stat = await withFilesystemTimeout(fs.stat(filePath), `Media inspection stat for ${filePath}`);
   if (stat.size === 0) return { status: "fail", problems: ["File is empty"], warnings, durationSeconds: null };
 
-  // Some network filesystems report zero blocks for real files, so only a small non-zero allocation is trusted.
   const allocated = stat.blocks * 512;
-  if (stat.size >= hollowMinimumBytes && stat.blocks > 0 && allocated < stat.size * hollowAllocationRatio) {
+  if (isHollowAllocation(stat.size, allocated)) {
     problems.push(`File is hollow: only ${bytesLabel(allocated)} of ${bytesLabel(stat.size)} is stored on disk`);
   }
 

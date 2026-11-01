@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 17;
+export const currentSchemaVersion = 18;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -619,6 +619,21 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END IF;
         END $$`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (17, 'orphan_path_indexes', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(18)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.storage_files') IS NOT NULL THEN
+            ALTER TABLE storage_files ADD COLUMN IF NOT EXISTS allocated_bytes BIGINT;
+          END IF;
+        END $$`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (18, 'scan_inventory_health', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

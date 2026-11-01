@@ -102,7 +102,10 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
             <div className="orphan-categories" role="group" aria-label="Orphan categories">
               <button type="button" className={category === "all" ? "orphan-category selected" : "orphan-category"} aria-pressed={category === "all"} onClick={() => { setCategory("all"); setPage(0); }}>
                 <strong>All orphans</strong>
-                <small>{files(items.length)}, {formatBytes(items.reduce((total, item) => total + item.sizeBytes, 0))}</small>
+                <small>
+                  {files(items.length)}, {formatBytes(items.reduce((total, item) => total + item.sizeBytes, 0))}
+                  {review.data.hollowCount ? `, ${formatNumber(review.data.hollowCount)} hollow` : ""}
+                </small>
               </button>
               {review.data.summary.map((entry) => (
                 <button key={entry.category} type="button" className={category === entry.category ? "orphan-category selected" : "orphan-category"} aria-pressed={category === entry.category} title={orphanCategoryLabels[entry.category].detail} onClick={() => { setCategory(entry.category); setPage(0); }}>
@@ -141,6 +144,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
                       <td>
                         <strong>{fileName(item)}</strong>
                         <span className="orphan-path">{item.relativePath}</span>
+                        {item.hollow ? <span className="orphan-protected">Hollow: almost none of this file is stored on disk</span> : null}
                         {item.protectedReason ? <span className="orphan-protected">Protected: {item.protectedReason}</span> : null}
                       </td>
                       <td>{orphanCategoryLabels[item.category].label}</td>
