@@ -7,7 +7,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Added
 
 - Added an optional Radarr integration: two configurable policy tags follow SRTL storage policies (only those tags are added or removed), automatic or manual folder mapping, a policy preview with review and import actions, and optional webhook-triggered title rescans. See the [integration guide](docs/radarr.md).
+- Added source media checks before every copy, in every verification profile: header and container signature, zero-filled start, end, and sampled regions, hollow (sparse placeholder) files, and a bounded ffprobe that requires a video stream, a duration, and a plausible bitrate. Junk sources fail before any bytes are transferred.
+- Added Radarr size and runtime checks for mapped movies: a source smaller than Radarr's recorded file or under half of the movie's runtime is rejected as incomplete or a sample.
 - Added Radarr copy monitoring: copies to Location 1 can unmonitor movies in Radarr and copies back to Location 2 can monitor them again, once every file of the movie reaches the destination. A checkbox beside copy buttons defaults to a setting in Settings > Integrations.
+
+### Changed
+
+- Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
+- Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
 
 ## [0.1.3] - 2026-09-03
 

@@ -28,6 +28,21 @@ describe("auditor", () => {
     expect(result).toMatchObject({ status: "pass", ffmpegStatus: "pass", cmpStatus: "source_unknown" });
   });
 
+  it("reports content check failures without running ffmpeg or byte compare", async () => {
+    const targetPath = path.join(tmpDir, "hollow.mkv");
+    await fs.writeFile(targetPath, "placeholder");
+    let commands = 0;
+    const runner: AuditCommandRunner = {
+      runFfmpeg: async () => { commands += 1; return { status: "pass", output: "" }; },
+      runCmp: async () => { commands += 1; return { status: "pass", output: "" }; },
+      inspectMedia: async () => ({ status: "fail", problems: ["File is hollow: only 512 bytes of 20.5 GB is stored on disk"], warnings: [], durationSeconds: null })
+    };
+
+    const result = await auditMediaLink(link(targetPath), path.join(tmpDir, "source.mkv"), "fast", runner);
+    expect(result).toMatchObject({ status: "fail", ffmpegStatus: "fail", cmpStatus: "skipped", message: "Media content check failed: File is hollow: only 512 bytes of 20.5 GB is stored on disk" });
+    expect(commands).toBe(0);
+  });
+
   it("fails when byte compare fails", async () => {
     const targetPath = path.join(tmpDir, "local.mkv");
     const sourcePath = path.join(tmpDir, "source.mkv");

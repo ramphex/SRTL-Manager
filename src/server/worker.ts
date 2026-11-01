@@ -8,7 +8,7 @@ import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
-import { processRadarrWork } from "./lib/radarr";
+import { processRadarrWork, radarrMediaExpectation } from "./lib/radarr";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
@@ -48,7 +48,8 @@ const worker = new JobWorker(database.db, {
   workerId,
   concurrency: config.jobConcurrency,
   copyTransferLimiter,
-  dispatchConcurrency: config.jobConcurrency.maxRunningJobs
+  dispatchConcurrency: config.jobConcurrency.maxRunningJobs,
+  mediaExpectations: (link) => radarrMediaExpectation(database.db, link)
 });
 
 async function recordHeartbeat(status: "running" | "stopped"): Promise<void> {

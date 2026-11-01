@@ -4,7 +4,7 @@ import path from "node:path";
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrMovieStatus, RadarrPathMapping, RadarrSettingsInput, RadarrState } from "../../shared/radarr";
-import type { JobStatus, PathsSettings, ScanTitleScope, StoragePolicyKind } from "../../shared/types";
+import type { JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind } from "../../shared/types";
 import { first, getJsonSetting, getSectionSettings, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
@@ -14,6 +14,7 @@ import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { RadarrClient, RadarrError, normalizeRadarrUrl, type RadarrMovie } from "./radarrClient";
 import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
 import { assertPathParentInside, withFilesystemTimeout } from "./filesystemSafety";
+import type { MediaExpectation } from "./mediaIntegrity";
 
 const radarrLock = 781_889_451;
 const settingKey = "radarr";
@@ -271,6 +272,24 @@ export async function refreshRadarr(db: Db): Promise<RadarrState> {
 export async function getRadarrCopyDefaults(db: Db): Promise<RadarrCopyDefaults> {
   const config = await settings(db);
   return { available: config.enabled, monitorOnCopy: config.monitorOnCopy, sections: config.enabled ? config.mappings.map((mapping) => mapping.section) : [] };
+}
+
+// Radarr's recorded size and runtime for the exact file a link points to, used to reject partial or sample files before copying.
+export async function radarrMediaExpectation(db: Db, link: Pick<MediaLinkRow, "section" | "itemName" | "relativePath">): Promise<MediaExpectation | undefined> {
+  const config = await settings(db);
+  if (!config.enabled || !config.apiKey) return undefined;
+  const row = await first(db.select().from(schema.radarrMovies).where(and(eq(schema.radarrMovies.section, link.section), eq(schema.radarrMovies.itemName, link.itemName))).limit(1));
+  if (!row) return undefined;
+  const movie = await client(config).movie(row.movieId);
+  const scope = mapRadarrMovie(movie, config);
+  if (movie.tmdbId !== row.tmdbId || scope?.section !== link.section || scope.itemName !== link.itemName) return undefined;
+  // Extras and samples share the title folder; only Radarr's own movie file has a known size and runtime.
+  if (!movie.movieFile || path.posix.basename(movie.movieFile.relativePath) !== path.posix.basename(link.relativePath)) return undefined;
+  return {
+    source: "Radarr",
+    ...(movie.movieFile.size ? { sizeBytes: movie.movieFile.size } : {}),
+    ...(movie.runtime ? { runtimeSeconds: movie.runtime * 60 } : {})
+  };
 }
 
 export async function getRadarrState(db: Db): Promise<RadarrState> {

@@ -642,8 +642,9 @@ function AdvancedSettingsPanel() {
 
   const copyVerificationDisabled = !draft.copy.byteCompare && draft.copy.mediaValidation === "off";
   const effectiveCopyPipeline = copyVerificationDisabled
-    ? ["Transfer to temporary destination", "Confirm transferred file size", "Copy verification skipped", "Promote transferred file", "Repoint symlink"]
+    ? ["Check source media content", "Transfer to temporary destination", "Confirm transferred file size", "Copy verification skipped", "Promote transferred file", "Repoint symlink"]
     : [
+        "Check source media content",
         "Transfer to temporary destination",
         ...(draft.copy.byteCompare ? ["Byte compare source and destination"] : ["Byte compare skipped"]),
         copyPipelineLabels[draft.copy.mediaValidation],
@@ -752,7 +753,7 @@ function AdvancedSettingsPanel() {
           </div>
           {copyVerificationDisabled ? (
             <p className="panel-message verification-disabled-warning" role="alert">
-              Verification is disabled. Copies still use a temporary file and guarded promotion, but source bytes and media integrity are not checked before the symlink is repointed.
+              Verification is disabled. Copies still check the source's media content before transferring and use a temporary file and guarded promotion, but source bytes and full media integrity are not checked before the symlink is repointed.
             </p>
           ) : null}
           {validationError ? <p className="panel-message action-error">{validationError}</p> : null}

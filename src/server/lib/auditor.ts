@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import type { AuditMode, MediaLinkRow } from "../../shared/types";
 import { appendBoundedOutput, commandTimeoutMs, terminateChildProcess } from "./processSafety";
 import { withFilesystemTimeout } from "./filesystemSafety";
+import { runFfmpegWithProgress } from "./copier";
+import { describeInspectionFailure, inspectMediaContent, type MediaInspection } from "./mediaIntegrity";
 
 export interface CommandResult {
   status: "pass" | "fail";
@@ -12,6 +14,8 @@ export interface CommandResult {
 export interface AuditCommandRunner {
   runFfmpeg(mode: AuditMode, targetPath: string, signal?: AbortSignal): Promise<CommandResult>;
   runCmp(sourcePath: string, targetPath: string, signal?: AbortSignal): Promise<CommandResult>;
+  // Header, zero-region, and hollow-file checks; runners without it skip straight to ffmpeg.
+  inspectMedia?(targetPath: string, signal?: AbortSignal): Promise<MediaInspection>;
 }
 
 export interface AuditLinkResult {
@@ -82,14 +86,13 @@ function runCommand(command: string, args: string[], signal?: AbortSignal): Prom
 
 export const defaultAuditRunner: AuditCommandRunner = {
   runFfmpeg(mode, targetPath, signal) {
-    const args =
-      mode === "fast"
-        ? ["-v", "error", "-i", targetPath, "-map", "0", "-c", "copy", "-f", "null", "-"]
-        : ["-v", "error", "-i", targetPath, "-f", "null", "-"];
-    return runCommand("ffmpeg", args, signal);
+    return runFfmpegWithProgress(mode, targetPath, undefined, signal);
   },
   runCmp(sourcePath, targetPath, signal) {
     return runCommand("cmp", ["-b", sourcePath, targetPath], signal);
+  },
+  inspectMedia(targetPath, signal) {
+    return inspectMediaContent(targetPath, { signal });
   }
 };
 
@@ -112,6 +115,21 @@ export async function auditMediaLink(
       cmpStatus: sourcePath ? "skipped" : "source_unknown",
       message: "Media target is missing or unreadable"
     };
+  }
+
+  if (runner.inspectMedia) {
+    const inspection = await runner.inspectMedia(link.targetPath, options.signal);
+    if (inspection.status === "fail") {
+      return {
+        linkPath: link.linkPath,
+        targetPath: link.targetPath,
+        sourcePath,
+        status: "fail",
+        ffmpegStatus: "fail",
+        cmpStatus: sourcePath ? "skipped" : "source_unknown",
+        message: `Media content check failed: ${describeInspectionFailure(inspection)}`
+      };
+    }
   }
 
   let cmpStatus: AuditLinkResult["cmpStatus"] = "source_unknown";

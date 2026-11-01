@@ -19,6 +19,7 @@ import {
   type CopyOperationUpdate,
   type CopyProgressUpdate
 } from "../lib/copier";
+import type { MediaExpectation } from "../lib/mediaIntegrity";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -158,6 +159,8 @@ export interface JobWorkerOptions {
   concurrency?: JobConcurrencySettings;
   copyTransferLimiter?: CopyTransferLimiter;
   dispatchConcurrency?: number;
+  // Optional external facts about a source file (for example Radarr's recorded size and runtime).
+  mediaExpectations?: (link: MediaLinkRow) => Promise<MediaExpectation | undefined>;
 }
 
 function normalizeSelectedSections(selectedSections: string[] | undefined, configuredSections: string[], label: string): string[] {
@@ -2754,6 +2757,7 @@ export class JobWorker {
   private readonly auditRunner: AuditCommandRunner;
   private readonly concurrency: JobConcurrencySettings;
   private readonly copyTransferLimiter: CopyTransferLimiter;
+  private readonly mediaExpectations: JobWorkerOptions["mediaExpectations"];
   private readonly activeAbortControllers = new Map<number, AbortController>();
   private readonly activeRuns = new Set<Promise<void>>();
   private stopRequested = false;
@@ -2774,6 +2778,7 @@ export class JobWorker {
     this.auditRunner = options.auditRunner ?? defaultAuditRunner;
     this.concurrency = options.concurrency ?? defaultJobConcurrency;
     this.copyTransferLimiter = options.copyTransferLimiter ?? new CopyTransferLimiter(this.concurrency.maxActiveCopyFiles);
+    this.mediaExpectations = options.mediaExpectations;
   }
 
   async start(): Promise<void> {
@@ -4287,6 +4292,14 @@ export class JobWorker {
           )
         );
         activeOperationId = operation.id;
+        let sourceExpectation: MediaExpectation | undefined;
+        if (this.mediaExpectations) {
+          try {
+            sourceExpectation = await this.mediaExpectations(link);
+          } catch (error) {
+            await ctx.event("warn", "External media details were unavailable; size and runtime checks skipped", { itemName: link.itemName, error: errorMessage(error) });
+          }
+        }
         const releaseTransfer = await this.copyTransferLimiter.acquire(ctx.signal);
         let result: CopyMediaResult;
         try {
@@ -4327,7 +4340,8 @@ export class JobWorker {
             ctx.signal,
             normalizedOptions.localConflictStrategy,
             (update) => ctx.withLeaseDb((leaseDb) => updateCopyOperation(leaseDb, operation.id, update)),
-            (mutation) => withCopyMutationLease(link, destinationPath, mutation)
+            (mutation) => withCopyMutationLease(link, destinationPath, mutation),
+            sourceExpectation
           );
         } finally {
           releaseTransfer();

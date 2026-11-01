@@ -16,7 +16,8 @@ export const radarrMovieSchema = z.object({
   path: z.string().min(1).max(4096),
   tags: z.array(z.number().int().positive()).max(1000),
   monitored: z.boolean().optional(),
-  movieFile: z.object({ relativePath: z.string().max(4096) }).nullish()
+  runtime: z.number().nonnegative().optional(),
+  movieFile: z.object({ relativePath: z.string().max(4096), size: z.number().nonnegative().optional() }).nullish()
 });
 export type RadarrMovie = z.infer<typeof radarrMovieSchema>;
 const tagsSchema = z.array(z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) })).max(10000);

@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from "vitest";
 import { CopyReconciliationRequiredError, copyMediaLink, defaultCopyRunner, type CopyFileProgress, type CopyOperationUpdate } from "../src/server/lib/copier";
 import type { MediaLinkRow } from "../src/shared/types";
 
+// These tests exercise filesystem safety with placeholder bytes, so the media content preflight is left out.
+const fileRunner = { copyFile: defaultCopyRunner.copyFile, runCmp: defaultCopyRunner.runCmp, runFfmpeg: defaultCopyRunner.runFfmpeg };
+
 function remoteCopyLink(itemName: string, relativePath: string, linkPath: string, sourcePath: string, sizeBytes: number): MediaLinkRow {
   const timestamp = new Date().toISOString();
   return {
@@ -110,7 +113,7 @@ describe("copy runner", () => {
           },
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" }
         )
@@ -141,7 +144,7 @@ describe("copy runner", () => {
       const timestamp = new Date().toISOString();
       let copyAttempts = 0;
       const runner = {
-        ...defaultCopyRunner,
+        ...fileRunner,
         async copyFile(source: string, destination: string, reportProgress: Parameters<typeof defaultCopyRunner.copyFile>[2], signal: AbortSignal | undefined) {
           copyAttempts += 1;
           if (copyAttempts === 1) throw Object.assign(new Error("temporary remote read failure"), { code: "EIO" });
@@ -180,6 +183,52 @@ describe("copy runner", () => {
       expect(result).toMatchObject({ status: "copied", destinationPath });
       await expect(fs.readFile(destinationPath, "utf8")).resolves.toBe("retry source");
       await expect(fs.readlink(linkPath)).resolves.toBe(destinationPath);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a junk source before transferring any bytes, with external expectations passed through", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-preflight-"));
+    try {
+      const symlinkDir = path.join(directory, "symlinks");
+      const localDir = path.join(directory, "local");
+      const remoteDir = path.join(directory, "remote");
+      const relativePath = path.join("Junk Title", "junk.mkv");
+      const sourcePath = path.join(remoteDir, "items", relativePath);
+      const linkPath = path.join(symlinkDir, "items", relativePath);
+      await Promise.all([fs.mkdir(path.dirname(sourcePath), { recursive: true }), fs.mkdir(path.dirname(linkPath), { recursive: true }), fs.mkdir(path.join(localDir, "items"), { recursive: true })]);
+      await fs.writeFile(sourcePath, Buffer.alloc(4096));
+      await fs.symlink(sourcePath, linkPath);
+      const timestamp = new Date().toISOString();
+      let transfers = 0;
+      let receivedExpectation: unknown;
+      const runner = {
+        ...fileRunner,
+        async copyFile() { transfers += 1; },
+        async inspectSource(inspectedPath: string, expectation: unknown) {
+          receivedExpectation = expectation;
+          return { status: "fail" as const, problems: [`${path.basename(inspectedPath)} starts with zero-filled data`], warnings: [], durationSeconds: null };
+        }
+      };
+      const expectation = { source: "Radarr", sizeBytes: 4096 };
+      await expect(copyMediaLink(
+        { id: 1, section: "items", itemName: "Junk Title", relativePath, linkPath, targetPath: sourcePath, kind: "remote", targetExists: true, isMedia: true, storagePolicy: "location_1", resolvedStorageFileId: null, sizeBytes: 4096, firstSeenAt: timestamp, lastSeenAt: timestamp, lastChangedAt: timestamp, missingSince: null, updatedAt: timestamp },
+        { symlinkDir, localDir, remoteDir },
+        "to_local",
+        runner,
+        undefined,
+        { profile: "off", byteCompare: false, mediaValidation: "off" },
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        expectation
+      )).rejects.toThrow("Source media failed preflight checks: junk.mkv starts with zero-filled data");
+      expect(transfers).toBe(0);
+      expect(receivedExpectation).toEqual(expectation);
+      await expect(fs.readlink(linkPath)).resolves.toBe(sourcePath);
+      await expect(fs.readdir(path.join(localDir, "items"))).resolves.toEqual([]);
     } finally {
       await fs.rm(directory, { recursive: true, force: true });
     }
@@ -228,7 +277,7 @@ describe("copy runner", () => {
         },
         { symlinkDir, localDir, remoteDir },
         "to_local",
-        defaultCopyRunner,
+        fileRunner,
         undefined,
         { profile: "off", byteCompare: false, mediaValidation: "off" }
       );
@@ -288,7 +337,7 @@ describe("copy runner", () => {
           },
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -350,7 +399,7 @@ describe("copy runner", () => {
           },
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -393,7 +442,7 @@ describe("copy runner", () => {
           remoteCopyLink("Displacement Title", relativePath, linkPath, sourcePath, Buffer.byteLength("new destination contents")),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -448,7 +497,7 @@ describe("copy runner", () => {
           remoteCopyLink("Rollback Title", relativePath, linkPath, sourcePath, Buffer.byteLength("rollback contents")),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -492,7 +541,7 @@ describe("copy runner", () => {
           remoteCopyLink("Promotion Race Title", relativePath, linkPath, sourcePath, Buffer.byteLength("copied contents")),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -540,7 +589,7 @@ describe("copy runner", () => {
           remoteCopyLink("Replacement Race Title", relativePath, linkPath, sourcePath, Buffer.byteLength("new copied contents")),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -585,7 +634,7 @@ describe("copy runner", () => {
       await fs.symlink(sourcePath, linkPath);
 
       const runner = {
-        ...defaultCopyRunner,
+        ...fileRunner,
         async copyFile(...args: Parameters<typeof defaultCopyRunner.copyFile>) {
           await defaultCopyRunner.copyFile(...args);
           await fs.rm(linkPath);
@@ -644,7 +693,7 @@ describe("copy runner", () => {
           remoteCopyLink("Identity Rollback Title", relativePath, linkPath, sourcePath, sourceContents.length),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -709,7 +758,7 @@ describe("copy runner", () => {
           remoteCopyLink("Post Mutation Lease", relativePath, linkPath, sourcePath, Buffer.byteLength("matching contents")),
           { symlinkDir, localDir, remoteDir },
           "to_local",
-          defaultCopyRunner,
+          fileRunner,
           undefined,
           { profile: "off", byteCompare: false, mediaValidation: "off" },
           undefined,
@@ -769,7 +818,7 @@ describe("copy runner", () => {
         remoteCopyLink("Cancellation Title", relativePath, linkPath, sourcePath, Buffer.byteLength("cancelled contents")),
         { symlinkDir, localDir, remoteDir },
         "to_local",
-        defaultCopyRunner,
+        fileRunner,
         undefined,
         { profile: "off", byteCompare: false, mediaValidation: "off" },
         controller.signal,

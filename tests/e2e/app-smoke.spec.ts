@@ -940,7 +940,7 @@ test("advanced settings can disable copy verification and identify the recommend
   await expect(byteCompare).not.toBeChecked();
   await expect(byteCompare).toBeDisabled();
   await expect(copySection.locator(".advanced-readonly-value")).toContainText("Off");
-  await expect(copySection.getByRole("alert")).toContainText("source bytes and media integrity are not checked");
+  await expect(copySection.getByRole("alert")).toContainText("source bytes and full media integrity are not checked");
   await page.getByRole("button", { name: "Save advanced settings", exact: true }).click();
   await expect(scanSection.getByText("Current: Parallel by folder", { exact: true })).toBeVisible();
   await expect(copySection.getByText("Current: Off", { exact: true })).toBeVisible();

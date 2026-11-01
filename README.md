@@ -10,7 +10,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Symlink, local-root, remote-root, and orphan inventory with targeted title rescans and exact target checks.
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles.
 - Fast and deep audits across local and remote targets.
-- Bidirectional copies with live progress, transient transfer retry, conflict handling, configurable verification, and source/title risk checks.
+- Bidirectional copies with live progress, transient transfer retry, conflict handling, configurable verification, source/title risk checks, and source media checks that reject hollow, zero-filled, truncated, or unreadable files before transferring.
 - Safe job termination, complete event timelines, restart recovery, and durable per-file copy journals.
 - Configurable parallel job and copy-file execution with database-backed overlap protection.
 - Required path-change review before different configured roots or storage mount sources can affect managed links.

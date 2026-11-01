@@ -12,6 +12,7 @@ import { markOnboardingCompleteForExistingInstall, onboardingSettingKey } from "
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
 import { authenticateRadarrWebhook, getRadarrCopyDefaults, getRadarrState, mapRadarrMovie, processRadarrWork, radarrTagPolicy, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, saveRadarrSettings, testRadarrConnection } from "../src/server/lib/radarr";
 import { RadarrClient, normalizeRadarrUrl, radarrAddressAllowed, type RadarrMovie } from "../src/server/lib/radarrClient";
+import { defaultCopyRunner } from "../src/server/lib/copier";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
 import type { RadarrSettingsInput } from "../src/shared/radarr";
@@ -513,7 +514,9 @@ describe("Radarr policy and webhook integration", () => {
     await fs.writeFile(remoteFile, "test movie bytes");
     await fs.mkdir(path.join(root, "links", "movies", itemName), { recursive: true });
     await fs.symlink(remoteFile, path.join(root, "links", "movies", itemName, "My First Wedding.mkv"));
-    const worker = new JobWorker(app.database.db, { workerId: "radarr-copy-test", logger: { info: () => undefined, warn: () => undefined, error: () => undefined } });
+    // Placeholder bytes stand in for media here, so the content preflight is left out of this copy runner.
+    const copyRunner = { copyFile: defaultCopyRunner.copyFile, runCmp: defaultCopyRunner.runCmp, runFfmpeg: defaultCopyRunner.runFfmpeg };
+    const worker = new JobWorker(app.database.db, { workerId: "radarr-copy-test", copyRunner, logger: { info: () => undefined, warn: () => undefined, error: () => undefined } });
     await app.jobs.startExternalTitleScan([{ section: "movies", itemName }]);
     await worker.runOnce();
     await setStoragePolicyTitle(app.database.db, itemName, "location_1");

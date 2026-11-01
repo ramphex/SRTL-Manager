@@ -9,6 +9,7 @@ import type { AuditMode, CopyDirection, CopyJobBehaviorSettings, CopyLocalConfli
 import { isMediaFile, isPathInside } from "./media";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, assertReadableRegularFile } from "./filesystemSafety";
 import { appendBoundedOutput, commandTimeoutMs, terminateChildProcess } from "./processSafety";
+import { describeInspectionFailure, evaluateFfmpegValidation, inspectMediaContent, type MediaExpectation, type MediaInspection } from "./mediaIntegrity";
 
 const copyDirectoryMode = 0o755;
 const copyFileMode = 0o644;
@@ -22,6 +23,8 @@ export interface CopyCommandRunner {
   copyFile(sourcePath: string, tempPath: string, reportProgress?: CopyFileProgressReporter, signal?: AbortSignal): Promise<void>;
   runCmp(sourcePath: string, targetPath: string, reportProgress?: CopyFileProgressReporter, signal?: AbortSignal): Promise<CopyCommandResult>;
   runFfmpeg(mode: AuditMode, targetPath: string, reportProgress?: CopyFileProgressReporter, signal?: AbortSignal): Promise<CopyCommandResult>;
+  // Content checks on the source before any bytes move; runners without it skip the preflight.
+  inspectSource?(sourcePath: string, expectation: MediaExpectation | undefined, signal?: AbortSignal): Promise<MediaInspection>;
 }
 
 export type CopyStage = "preparing" | "copying" | "verifying" | "symlinking";
@@ -316,7 +319,7 @@ function parseFfmpegOutTimeSeconds(key: string, value: string): number | null {
   return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]);
 }
 
-async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, reportProgress?: CopyFileProgressReporter, signal?: AbortSignal): Promise<CopyCommandResult> {
+export async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, reportProgress?: CopyFileProgressReporter, signal?: AbortSignal): Promise<CopyCommandResult> {
   throwIfAborted(signal);
   const [targetStat, durationSeconds] = await Promise.all([fs.stat(targetPath).catch(() => null), readMediaDurationSeconds(targetPath, signal)]);
   const totalBytes = targetStat?.size ?? 0;
@@ -324,6 +327,7 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
   const progressState = { startedAt: Date.now(), lastReportAt: 0 };
   let progressChain = Promise.resolve();
   let progressBuffer = "";
+  let reachedSeconds: number | null = null;
   let settled = false;
 
   if (canReportProgress) await emitByteProgress(reportProgress, progressState, 0, totalBytes, true);
@@ -333,10 +337,12 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
       reject(abortError(signal));
       return;
     }
+    // Progress time follows the slowest mapped stream, and subtitle tracks stop early, so only the main
+    // video (excluding cover art) and first audio track are mapped. The demuxer still reads every stream.
     const args =
       mode === "fast"
-        ? ["-v", "error", "-nostats", "-progress", "pipe:1", "-i", targetPath, "-map", "0", "-c", "copy", "-f", "null", nullOutputPath()]
-        : ["-v", "error", "-nostats", "-progress", "pipe:1", "-i", targetPath, "-f", "null", nullOutputPath()];
+        ? ["-v", "error", "-nostats", "-progress", "pipe:1", "-i", targetPath, "-map", "0:V:0?", "-map", "0:a:0?", "-c", "copy", "-f", "null", nullOutputPath()]
+        : ["-v", "error", "-nostats", "-progress", "pipe:1", "-i", targetPath, "-map", "0:V:0?", "-map", "0:a:0?", "-sn", "-dn", "-f", "null", nullOutputPath()];
     const child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
     let output = "";
     let killTimer: ReturnType<typeof setTimeout> | null = null;
@@ -381,6 +387,7 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
         const key = line.slice(0, separator);
         const value = line.slice(separator + 1);
         const outTimeSeconds = parseFfmpegOutTimeSeconds(key, value);
+        if (outTimeSeconds != null) reachedSeconds = Math.max(reachedSeconds ?? 0, outTimeSeconds);
         if (outTimeSeconds != null && durationSeconds && totalBytes > 0) {
           const fraction = Math.min(1, Math.max(0, outTimeSeconds / durationSeconds));
           queueProgress(Math.round(totalBytes * fraction));
@@ -408,7 +415,7 @@ async function runFfmpegWithProgress(mode: AuditMode, targetPath: string, report
       progressChain
         .then(async () => {
           if (canReportProgress && code === 0) await emitByteProgress(reportProgress, progressState, totalBytes, totalBytes, true);
-          resolve({ status: code === 0 ? "pass" : "fail", output: output.trim() });
+          resolve(evaluateFfmpegValidation({ exitCode: code, stderr: output, reachedSeconds, durationSeconds }));
         })
         .catch((error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
     });
@@ -424,6 +431,9 @@ export const defaultCopyRunner: CopyCommandRunner = {
   },
   runFfmpeg(mode, targetPath, reportProgress, signal) {
     return runFfmpegWithProgress(mode, targetPath, reportProgress, signal);
+  },
+  inspectSource(sourcePath, expectation, signal) {
+    return inspectMediaContent(sourcePath, { expectation, signal });
   }
 };
 
@@ -799,7 +809,8 @@ export async function copyMediaLink(
   signal?: AbortSignal,
   localConflictStrategy?: CopyLocalConflictStrategy,
   reportOperation?: CopyOperationReporter,
-  assertMutationAllowed?: CopyMutationGuard
+  assertMutationAllowed?: CopyMutationGuard,
+  sourceExpectation?: MediaExpectation
 ): Promise<CopyMediaResult> {
   throwIfAborted(signal);
   let mutationAuthorityLost = false;
@@ -882,6 +893,12 @@ export async function copyMediaLink(
     signal,
     onRetry: () => reportCopyProgress(reportProgress, { stage: "preparing", message: "Source is temporarily unreadable; retrying preflight", sourcePath, linkPath: link.linkPath })
   });
+  if (runner.inspectSource) {
+    await reportCopyProgress(reportProgress, { stage: "preparing", message: "Checking source media content", sourcePath, linkPath: link.linkPath, sizeBytes: sourceStatBefore.size });
+    const inspection = await runner.inspectSource(sourcePath, sourceExpectation, signal);
+    throwIfAborted(signal);
+    if (inspection.status === "fail") throw new Error(`Source media failed preflight checks: ${describeInspectionFailure(inspection)}`);
+  }
   const destinationPath = copyDestinationPath(link, paths, destinationRootType);
   assertInside(destinationRoot, destinationPath, "Destination path");
   await assertDestinationPathInside(destinationRoot, destinationPath, "Destination path");
