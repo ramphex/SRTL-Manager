@@ -102,6 +102,13 @@ export const defaultScanOptions: ScanOptions = {
 
 const maxSymlinkDiscoveryPasses = 2;
 
+export interface RequiredStorageRoot {
+  rootType: StorageRootType;
+  // Current inventory an unmounted root would wrongly turn into broken symlinks or missing files.
+  links: number;
+  files: number;
+}
+
 function storagePolicyForTitle(storagePolicies: StoragePolicyLookup, title: string): StoragePolicyKind {
   const titleKey = canonicalTitleKey(title);
   return storagePolicies.get(titleKey) ?? "unassigned";
@@ -428,14 +435,41 @@ async function walkLocalStorageFilesForSections(root: string, sections: string[]
   return files;
 }
 
+function storageRootUnavailableMessage(root: string, required: RequiredStorageRoot): string {
+  const consequences = [
+    ...(required.links > 0 ? [`${required.links.toLocaleString()} ${required.rootType} ${required.links === 1 ? "symlink isn't" : "symlinks aren't"} marked broken`] : []),
+    ...(required.files > 0 ? [`${required.files.toLocaleString()} ${required.files === 1 ? "file isn't" : "files aren't"} marked missing`] : [])
+  ];
+  const label = required.rootType === "local" ? "Local" : "Remote";
+  return `${label} storage at ${root} looks unmounted or empty; scan stopped so ${consequences.join(" and ") || "inventory isn't changed"}`;
+}
+
+// An unmounted NFS share or FUSE mount usually leaves an empty or unreadable mount point behind.
+async function assertStorageRootMounted(paths: PathsSettings, required: RequiredStorageRoot): Promise<void> {
+  const root = required.rootType === "local" ? paths.localDir : paths.remoteDir;
+  let entries: string[] | null;
+  try {
+    entries = await withFilesystemTimeout(fs.readdir(root), `Checking ${required.rootType} storage mount ${root}`);
+  } catch {
+    entries = null;
+  }
+  if (entries?.some((name) => name !== holdingFolderName)) return;
+  throw new Error(storageRootUnavailableMessage(root, required));
+}
+
 export async function scanLibrary(
   paths: PathsSettings,
   settings: SectionSettings,
   storagePolicies: StoragePolicyLookup,
   options: ScanOptions = defaultScanOptions,
   isCancelled?: ScanCancellationCheck,
-  onProgress?: ScanActivityReporter
+  onProgress?: ScanActivityReporter,
+  requiredStorageRoots: RequiredStorageRoot[] = []
 ): Promise<ScanResult> {
+  const assertRequiredStorageRootsMounted = async () => {
+    for (const required of requiredStorageRoots) await assertStorageRootMounted(paths, required);
+  };
+  await assertRequiredStorageRootsMounted();
   const links: ClassifiedLink[] = [];
   const storageFiles: ClassifiedStorageFile[] = [];
   const storageScanIssues: StorageScanIssue[] = [];
@@ -541,6 +575,9 @@ export async function scanLibrary(
     }
   }
 
+  // A mount that dropped while targets were being checked would have turned every link on it broken.
+  if (options.scanSymlinks) await assertRequiredStorageRootsMounted();
+
   if (options.scanLocal) {
     storageFiles.push(...(await walkLocalStorageFilesForSections(paths.localDir, localSections, isCancelled)));
   }
@@ -552,10 +589,13 @@ export async function scanLibrary(
     storageScanIssues.push(...remoteScan.issues);
   }
 
+  if (options.scanLocal || options.scanRemote) await assertRequiredStorageRootsMounted();
+
   const classifiedStorageFiles = applyStorageFileMetadata(storageFiles, settings);
-  const reconciledStorageFiles = titleScopesBySection
-    ? uniqueStorageFiles(links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null))
-    : [];
+  // Link targets are recorded so new downloads resolve to storage rows between storage scans.
+  const reconciledStorageFiles = uniqueStorageFiles(
+    links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null)
+  );
   const summaries = summarizeLinks(links, scopedSettings.sections, scopedSettings.sectionTitles, scopedSettings.sectionTypes);
   return { options, links, storageFiles: classifiedStorageFiles, reconciledStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
 }
@@ -755,8 +795,12 @@ async function throwIfPersistenceCancelled(isCancelled?: ScanCancellationCheck):
 export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
-  const filesToReconcile = uniqueStorageFiles([...result.storageFiles, ...result.reconciledStorageFiles]);
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
+  // Walked files carry storage-derived metadata, so they win over the same file seen through a link.
+  const filesToReconcile = uniqueStorageFiles([
+    ...result.storageFiles,
+    ...result.reconciledStorageFiles.filter((file) => !seenStorageFilePaths.has(file.filePath))
+  ]);
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
   const scannedSymlinkSections = scopedSectionSet(result.options.symlinkSections ?? result.options.sections);
@@ -776,7 +820,9 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   for (const file of filesToReconcile) {
     await throwIfPersistenceCancelled(isCancelled);
     const existing = existingStorageFileByPath.get(file.filePath);
-    const persistedFile: ClassifiedStorageFile = { ...file, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
+    // Keeping an existing row's section and title stops storage and symlink scans from flipping them back and forth.
+    const metadata = existing && !seenStorageFilePaths.has(file.filePath) ? { section: existing.section, itemName: existing.itemName } : {};
+    const persistedFile: ClassifiedStorageFile = { ...file, ...metadata, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
     const firstSeenAt = existing?.firstSeenAt ?? timestamp;
     const lastChangedAt = storageFileChanged(existing, persistedFile) ? timestamp : existing?.lastChangedAt ?? timestamp;
     const persisted = await db
@@ -957,6 +1003,45 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     missingLocalFiles,
     missingRemoteFiles
   };
+}
+
+// Roots whose current inventory this scan could wrongly mark broken or missing if the mount were gone.
+export async function requiredStorageRootsForScan(db: Db, options: ScanOptions): Promise<RequiredStorageRoot[]> {
+  const linkCounts = new Map<string, number>();
+  if (options.scanSymlinks) {
+    const titleScopes = options.titleScopes?.length ? JSON.stringify(options.titleScopes.map((scope) => [scope.section, scope.itemName])) : null;
+    const symlinkSections = options.symlinkSections ?? options.sections;
+    const scope = titleScopes
+      ? sql`and jsonb_build_array(section, item_name) in (select value from jsonb_array_elements(${titleScopes}::jsonb))`
+      : symlinkSections
+        ? sql`and section in (select jsonb_array_elements_text(${JSON.stringify(symlinkSections)}::jsonb))`
+        : sql``;
+    const rows = await dbAll<{ kind: string; total: number | string }>(db, sql`
+      select kind, count(*) as total
+      from media_links
+      where missing_since is null and kind in ('local', 'remote') ${scope}
+      group by kind
+    `);
+    for (const row of rows) linkCounts.set(row.kind, Number(row.total));
+  }
+  const fileCounts = new Map<string, number>();
+  if (options.scanLocal || options.scanRemote) {
+    const localSections = options.localSections ?? options.sections;
+    const localScope = localSections
+      ? sql`and split_part(relative_path, '/', 1) in (select jsonb_array_elements_text(${JSON.stringify(localSections)}::jsonb))`
+      : sql``;
+    const rows = await dbAll<{ rootType: string; total: number | string }>(db, sql`
+      select root_type as "rootType", count(*) as total
+      from storage_files
+      where missing_since is null
+        and ((root_type = 'local' and ${options.scanLocal === true}::boolean ${localScope}) or (root_type = 'remote' and ${options.scanRemote === true}::boolean))
+      group by root_type
+    `);
+    for (const row of rows) fileCounts.set(row.rootType, Number(row.total));
+  }
+  return (["local", "remote"] as const)
+    .map((rootType) => ({ rootType, links: linkCounts.get(rootType) ?? 0, files: fileCounts.get(rootType) ?? 0 }))
+    .filter((required) => required.links > 0 || required.files > 0);
 }
 
 interface ResolvedStorageFileScope {

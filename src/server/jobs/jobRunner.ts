@@ -25,7 +25,7 @@ import { assertDestinationPathInside, assertExistingPathInside, assertPathParent
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
 import { completeOnboardingScan } from "../lib/onboarding";
-import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, scanLibrary, type ScanActivity } from "../lib/scanner";
+import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../lib/scanner";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
@@ -3735,7 +3735,8 @@ export class JobWorker {
           const liveTotals = emptyScanTotals();
           liveTotals.totalLinks = activity.checkedLinks;
           await ctx.setProgress(scanProgressPayload(normalizedOptions, "scanning", activity.message, liveTotals, activity));
-        }
+        },
+        await requiredStorageRootsForScan(this.db, normalizedOptions)
       );
       await ctx.setProgress(scanProgressPayload(normalizedOptions, "indexing", "Writing scan results to the inventory database", result.inventory));
       for (const issue of result.storageScanIssues) {

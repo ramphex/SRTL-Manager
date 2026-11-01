@@ -1248,6 +1248,26 @@ describe("api app", () => {
     });
   });
 
+  it("fails a storage scan instead of marking files missing when the root looks unmounted", async () => {
+    const cookie = await createAdminSession();
+    const fileId = await insertStorageFile("remote", path.join("Some Release", "release.mkv"));
+    await fs.rm(path.join(tmpDir, "remote"), { recursive: true, force: true });
+    await fs.mkdir(path.join(tmpDir, "remote"), { recursive: true });
+
+    const scan = await ctx.app.inject({
+      method: "POST",
+      url: "/api/scans",
+      headers: { cookie },
+      payload: { scanSymlinks: false, scanLocal: false, scanRemote: true }
+    });
+    expect(scan.statusCode).toBe(200);
+    const job = await runQueuedJob(scan.json<{ jobId: number }>().jobId);
+
+    expect(job).toMatchObject({ status: "failed", progress: expect.objectContaining({ message: expect.stringContaining("looks unmounted or empty; scan stopped so 1 file isn't marked missing") }) });
+    const [file] = await ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, fileId));
+    expect(file?.missingSince).toBeNull();
+  });
+
   it("keeps scan result totals scoped to the selected scan inputs", async () => {
     const cookie = await createAdminSession();
     await insertStorageFile("local", path.join("movies", "Already Local", "local.mkv"));
@@ -1314,7 +1334,8 @@ describe("api app", () => {
 
     const inventory = await ctx.app.inject({ method: "GET", url: "/api/inventory/summary", headers: { cookie } });
     expect(inventory.statusCode).toBe(200);
-    expect(inventory.json()).toMatchObject({ totalLinks: 1, localFiles: 1, remoteFiles: 1 });
+    // The scanned link's target is recorded as a storage file even though storage was not walked.
+    expect(inventory.json()).toMatchObject({ totalLinks: 1, localFiles: 1, remoteFiles: 2 });
   });
 
   it("updates the authenticated admin username and password", async () => {

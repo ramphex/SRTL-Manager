@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openTestDatabase } from "./testDb";
 import * as schema from "../src/server/db/schema";
-import { getInventorySummary, getStoragePolicyMap, listMediaLinks, listMediaLinkTree, listStorageFileTree, listStorageFiles, persistScanResult, scanLibrary, type ScanActivity } from "../src/server/lib/scanner";
+import { getInventorySummary, getStoragePolicyMap, listMediaLinks, listMediaLinkTree, listStorageFileTree, listStorageFiles, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../src/server/lib/scanner";
 import { listStoragePolicyCandidates, setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
 
 let tmpDir: string;
@@ -344,6 +344,122 @@ describe("scanner", () => {
     }
   });
 
+  it("records link targets on full symlink scans without marking unseen storage files missing", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const settings = { sections: ["movies"] };
+    await fs.mkdir(path.join(symlinkDir, "movies", "Linked Title"), { recursive: true });
+    await fs.mkdir(path.join(symlinkDir, "movies", "New Title"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Linked (2001)"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Orphan (2002)"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "New (2003)"), { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    const linkedTarget = path.join(localDir, "movies", "Linked (2001)", "linked.mkv");
+    const orphan = path.join(localDir, "movies", "Orphan (2002)", "orphan.mkv");
+    const newTarget = path.join(localDir, "movies", "New (2003)", "new.mkv");
+    await fs.writeFile(linkedTarget, "linked");
+    await fs.writeFile(orphan, "orphan");
+    await fs.symlink(linkedTarget, path.join(symlinkDir, "movies", "Linked Title", "linked.mkv"));
+
+    const database = await openTestDatabase();
+    try {
+      await persistScanResult(database.db, await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: true, scanLocal: true, scanRemote: false }), 1);
+
+      // Downloaded after the last storage scan, then linked.
+      await fs.writeFile(newTarget, "new");
+      const newLink = path.join(symlinkDir, "movies", "New Title", "new.mkv");
+      await fs.symlink(newTarget, newLink);
+      const symlinkScan = await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: false });
+      const summary = await persistScanResult(database.db, symlinkScan, 2);
+
+      expect(summary).toMatchObject({ missingLocalFiles: 0, missingRemoteFiles: 0 });
+      const files = await listStorageFiles(database.db, "local", false, "all");
+      expect(files.map((file) => [file.filePath, file.itemName, file.missingSince, file.linked]).sort()).toEqual(
+        [
+          [linkedTarget, "Linked (2001)", null, true],
+          [orphan, "Orphan (2002)", null, false],
+          [newTarget, "New Title", null, true]
+        ].sort()
+      );
+      const [link] = await database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.linkPath, newLink));
+      expect(link?.resolvedStorageFileId).toBe(files.find((file) => file.filePath === newTarget)?.id);
+
+      // A later storage scan replaces link-derived metadata with the storage layout.
+      await persistScanResult(database.db, await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: false }), 3);
+      expect((await listStorageFiles(database.db, "local")).find((file) => file.filePath === newTarget)).toMatchObject({ section: "movies", itemName: "New (2003)" });
+    } finally {
+      await database.close();
+    }
+  });
+
+  it("stops before trusting results when a required storage root looks unmounted", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(path.join(symlinkDir, "movies", "Remote Movie"), { recursive: true });
+    await fs.mkdir(path.join(symlinkDir, "shows", "Local Show"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "shows", "Local Show"), { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    const remoteTarget = path.join(remoteDir, "remote.mkv");
+    const localTarget = path.join(localDir, "shows", "Local Show", "episode.mkv");
+    await fs.writeFile(remoteTarget, "remote");
+    await fs.writeFile(localTarget, "local");
+    await fs.symlink(remoteTarget, path.join(symlinkDir, "movies", "Remote Movie", "remote.mkv"));
+    await fs.symlink(localTarget, path.join(symlinkDir, "shows", "Local Show", "episode.mkv"));
+    const settings = { sections: ["movies", "shows"] };
+
+    const database = await openTestDatabase();
+    try {
+      await persistScanResult(database.db, await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: true, scanLocal: true, scanRemote: true }), 1);
+      expect(await requiredStorageRootsForScan(database.db, { scanSymlinks: true, scanLocal: false, scanRemote: false })).toEqual([
+        { rootType: "local", links: 1, files: 0 },
+        { rootType: "remote", links: 1, files: 0 }
+      ]);
+      expect(await requiredStorageRootsForScan(database.db, { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"] })).toEqual([
+        { rootType: "remote", links: 1, files: 0 }
+      ]);
+      expect(await requiredStorageRootsForScan(database.db, { scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["shows"] })).toEqual([
+        { rootType: "local", links: 0, files: 1 }
+      ]);
+      expect(await requiredStorageRootsForScan(database.db, { scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["movies"] })).toEqual([]);
+
+      await expect(
+        scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: false, scanLocal: false, scanRemote: true }, undefined, undefined, [
+          { rootType: "remote", links: 0, files: 1 }
+        ])
+      ).resolves.toMatchObject({ storageFiles: [expect.objectContaining({ filePath: remoteTarget })] });
+
+      // The mount drops while symlink targets are being checked.
+      const required = await requiredStorageRootsForScan(database.db, { scanSymlinks: true, scanLocal: false, scanRemote: false });
+      let unmounted = false;
+      await expect(
+        scanLibrary(
+          { symlinkDir, localDir, remoteDir },
+          settings,
+          new Map(),
+          { scanSymlinks: true, scanLocal: false, scanRemote: false },
+          undefined,
+          async (activity) => {
+            if (unmounted || activity.phase !== "checking_symlinks") return;
+            unmounted = true;
+            await fs.rm(remoteTarget);
+          },
+          required
+        )
+      ).rejects.toThrow(`Remote storage at ${remoteDir} looks unmounted or empty; scan stopped so 1 remote symlink isn't marked broken`);
+
+      await fs.rm(remoteDir, { recursive: true });
+      await expect(
+        scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: false, scanLocal: false, scanRemote: true }, undefined, undefined, [
+          { rootType: "remote", links: 0, files: 19_000 }
+        ])
+      ).rejects.toThrow("scan stopped so 19,000 files aren't marked missing");
+    } finally {
+      await database.close();
+    }
+  });
+
   it("runs symlink-only scans without walking local or remote storage roots", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local-not-mounted");
@@ -647,12 +763,20 @@ describe("scanner", () => {
       );
       const rescannedLink = persistedLinks.find((link) => link.linkPath === newFirstLink);
       expect(rescannedLink?.resolvedStorageFileId).toEqual(expect.any(Number));
-      expect(await listStorageFiles(database.db, "remote")).toEqual([
-        expect.objectContaining({ filePath: newFirstTarget, section: "shows", itemName: "First Title" })
-      ]);
-      await expect(database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.filePath, newFirstTarget))).resolves.toEqual([
-        expect.objectContaining({ filePath: newFirstTarget, lastSeenJobId: 2 })
-      ]);
+      // Symlink scans record link targets but never mark storage files missing, so the old target stays current.
+      expect((await listStorageFiles(database.db, "remote")).map((file) => [file.filePath, file.itemName, file.linked]).sort()).toEqual(
+        [
+          [oldFirstTarget, "First Title", false],
+          [secondTarget, "Second Title", true],
+          [newFirstTarget, "First Title", true]
+        ].sort()
+      );
+      const storageRows = await database.db.select().from(schema.storageFiles);
+      expect(Object.fromEntries(storageRows.map((file) => [file.filePath, file.lastSeenJobId]))).toEqual({
+        [oldFirstTarget]: 1,
+        [secondTarget]: 1,
+        [newFirstTarget]: 2
+      });
       expect(await listMediaLinks(database.db, undefined, "missing")).toMatchObject([{ linkPath: oldFirstLink, missingSince: expect.any(String) }]);
     } finally {
       await database.close();
