@@ -1198,6 +1198,59 @@ describe("scanner", () => {
     }
   });
 
+  it("tolerates NAS read errors in local section scans without marking their files missing", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const flakyDir = path.join(localDir, "movies", "Flaky (2001)");
+    const brokenDir = path.join(localDir, "movies", "Broken (2002)");
+    await fs.mkdir(symlinkDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Healthy (2000)"), { recursive: true });
+    await fs.mkdir(flakyDir, { recursive: true });
+    await fs.mkdir(brokenDir, { recursive: true });
+    const healthyFile = path.join(localDir, "movies", "Healthy (2000)", "healthy.mkv");
+    const flakyFile = path.join(flakyDir, "flaky.mkv");
+    const protectedFile = path.join(brokenDir, "protected.mkv");
+    await fs.writeFile(healthyFile, "healthy");
+    await fs.writeFile(flakyFile, "flaky");
+    await fs.writeFile(protectedFile, "protected");
+    const scan = () => scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["movies"] });
+
+    const database = await openTestDatabase();
+    const realReaddir = fs.readdir.bind(fs);
+    try {
+      await persistScanResult(database.db, await scan(), 1);
+      expect(await listStorageFiles(database.db, "local")).toHaveLength(3);
+
+      let flakyFailures = 0;
+      const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+        if (String(dir) === brokenDir) throw Object.assign(new Error("Stale file handle"), { code: "ESTALE" });
+        if (String(dir) === flakyDir && flakyFailures === 0) {
+          flakyFailures += 1;
+          throw Object.assign(new Error("Input/output error"), { code: "EIO" });
+        }
+        return realReaddir(dir as never, options as never);
+      }) as typeof fs.readdir);
+
+      try {
+        const secondScan = await scan();
+        const summary = await persistScanResult(database.db, secondScan, 2);
+
+        expect(secondScan.storageFiles.map((file) => file.filePath).sort()).toEqual([flakyFile, healthyFile].sort());
+        expect(secondScan.storageScanIssues).toEqual([
+          expect.objectContaining({ rootType: "local", rootPath: localDir, directoryPath: brokenDir, relativePath: path.join("movies", "Broken (2002)"), attempts: 2 })
+        ]);
+        expect(summary).toMatchObject({ missingLocalFiles: 0 });
+        expect(await listStorageFiles(database.db, "local", false, "missing")).toHaveLength(0);
+      } finally {
+        readdirSpy.mockRestore();
+      }
+    } finally {
+      await database.close();
+    }
+  });
+
   it("walks the whole remote root during section-scoped remote scans", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");

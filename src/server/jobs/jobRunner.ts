@@ -3740,7 +3740,7 @@ export class JobWorker {
       );
       await ctx.setProgress(scanProgressPayload(normalizedOptions, "indexing", "Writing scan results to the inventory database", result.inventory));
       for (const issue of result.storageScanIssues) {
-        await ctx.event("warn", "Remote storage directory remained unreadable after retry", issue);
+        await ctx.event("warn", "Storage directory remained unreadable after retry", issue);
       }
       for (const link of result.links) {
         if (!link.targetReadError) continue;

@@ -31,7 +31,7 @@ function event(overrides: Partial<JobEventRecord> = {}): JobEventRecord {
     jobId: 42,
     timestamp: "2026-07-01T12:00:10.000Z",
     level: "warn",
-    message: "Remote storage directory remained unreadable after retry",
+    message: "Storage directory remained unreadable after retry",
     data: {
       targetPath: "/mnt/remote/example",
       attempts: 2,

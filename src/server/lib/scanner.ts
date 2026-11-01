@@ -270,7 +270,7 @@ interface StorageWalkResult {
   failedDirectories: StorageWalkFailure[];
 }
 
-async function walkStorageFilesCollecting(root: string, rootType: StorageRootType, storageRoot: string, tolerateReadErrors: boolean, isCancelled?: ScanCancellationCheck): Promise<StorageWalkResult> {
+async function walkStorageFilesCollecting(root: string, rootType: StorageRootType, storageRoot: string, isCancelled?: ScanCancellationCheck): Promise<StorageWalkResult> {
   const files: ClassifiedStorageFile[] = [];
   const failedDirectories: StorageWalkFailure[] = [];
 
@@ -280,7 +280,6 @@ async function walkStorageFilesCollecting(root: string, rootType: StorageRootTyp
     try {
       entries = await withFilesystemTimeout(fs.readdir(dir, { withFileTypes: true }), `Reading storage directory ${dir}`);
     } catch (error) {
-      if (!tolerateReadErrors) throw error;
       failedDirectories.push({ directoryPath: dir, error });
       return;
     }
@@ -307,8 +306,7 @@ async function walkStorageFilesCollecting(root: string, rootType: StorageRootTyp
             mtimeMs: Math.trunc(stat.mtimeMs)
           });
         } catch (error) {
-          if (!tolerateReadErrors) throw error;
-          failedDirectories.push({ directoryPath: dir, error });
+              failedDirectories.push({ directoryPath: dir, error });
         }
       }
     }
@@ -322,12 +320,14 @@ function uniqueStorageFiles(files: ClassifiedStorageFile[]): ClassifiedStorageFi
   return [...new Map(files.map((file) => [file.filePath, file])).values()];
 }
 
-async function walkStorageFiles(root: string, rootType: StorageRootType, storageRoot = root, isCancelled?: ScanCancellationCheck): Promise<ClassifiedStorageFile[]> {
-  return (await walkStorageFilesCollecting(root, rootType, storageRoot, false, isCancelled)).files;
-}
-
-async function walkRemoteStorageFiles(root: string, isCancelled?: ScanCancellationCheck): Promise<{ files: ClassifiedStorageFile[]; issues: StorageScanIssue[] }> {
-  const firstPass = await walkStorageFilesCollecting(root, "remote", root, true, isCancelled);
+// Directories that fail to read are retried once at the end; files under ones that still fail are never marked missing.
+async function walkStorageFilesWithRetry(
+  root: string,
+  rootType: StorageRootType,
+  storageRoot: string,
+  isCancelled?: ScanCancellationCheck
+): Promise<{ files: ClassifiedStorageFile[]; issues: StorageScanIssue[] }> {
+  const firstPass = await walkStorageFilesCollecting(root, rootType, storageRoot, isCancelled);
   const files = [...firstPass.files];
   const failureAttempts = new Map<string, { error: unknown; attempts: number }>();
 
@@ -338,7 +338,7 @@ async function walkRemoteStorageFiles(root: string, isCancelled?: ScanCancellati
 
   for (const failure of firstPass.failedDirectories) {
     await throwIfScanCancelled(isCancelled);
-    const retry = await walkStorageFilesCollecting(failure.directoryPath, "remote", root, true, isCancelled);
+    const retry = await walkStorageFilesCollecting(failure.directoryPath, rootType, storageRoot, isCancelled);
     files.push(...retry.files);
 
     const retryFailurePaths = new Set<string>();
@@ -354,10 +354,10 @@ async function walkRemoteStorageFiles(root: string, isCancelled?: ScanCancellati
   }
 
   const issues = [...failureAttempts.entries()].map(([directoryPath, issue]) => ({
-    rootType: "remote" as const,
-    rootPath: root,
+    rootType,
+    rootPath: storageRoot,
     directoryPath,
-    relativePath: safeRelativePath(root, directoryPath),
+    relativePath: safeRelativePath(storageRoot, directoryPath),
     message: describeError(issue.error),
     attempts: issue.attempts
   }));
@@ -423,19 +423,26 @@ async function optionalReadableDirectory(root: string, label: string): Promise<b
   }
 }
 
-async function walkLocalStorageFilesForSections(root: string, sections: string[], isCancelled?: ScanCancellationCheck): Promise<ClassifiedStorageFile[]> {
+async function walkLocalStorageFilesForSections(
+  root: string,
+  sections: string[],
+  isCancelled?: ScanCancellationCheck
+): Promise<{ files: ClassifiedStorageFile[]; issues: StorageScanIssue[] }> {
   await assertReadableDirectory(root, "Local storage root");
-  if (sections.length === 0) return walkStorageFiles(root, "local", root, isCancelled);
+  if (sections.length === 0) return walkStorageFilesWithRetry(root, "local", root, isCancelled);
 
   const files: ClassifiedStorageFile[] = [];
+  const issues: StorageScanIssue[] = [];
   for (const section of sections) {
     await throwIfScanCancelled(isCancelled);
     const sectionRoot = path.join(root, section);
     if (await directoryExists(sectionRoot)) {
-      files.push(...(await walkStorageFiles(sectionRoot, "local", root, isCancelled)));
+      const sectionScan = await walkStorageFilesWithRetry(sectionRoot, "local", root, isCancelled);
+      files.push(...sectionScan.files);
+      issues.push(...sectionScan.issues);
     }
   }
-  return files;
+  return { files, issues };
 }
 
 function storageRootUnavailableMessage(root: string, required: RequiredStorageRoot): string {
@@ -601,12 +608,14 @@ export async function scanLibrary(
   if (options.scanSymlinks) await assertRequiredStorageRootsMounted();
 
   if (options.scanLocal) {
-    storageFiles.push(...(await walkLocalStorageFilesForSections(paths.localDir, localSections, isCancelled)));
+    const localScan = await walkLocalStorageFilesForSections(paths.localDir, localSections, isCancelled);
+    storageFiles.push(...localScan.files);
+    storageScanIssues.push(...localScan.issues);
   }
 
   if (options.scanRemote) {
     await assertReadableDirectory(paths.remoteDir, "Remote storage root");
-    const remoteScan = await walkRemoteStorageFiles(paths.remoteDir, isCancelled);
+    const remoteScan = await walkStorageFilesWithRetry(paths.remoteDir, "remote", paths.remoteDir, isCancelled);
     storageFiles.push(...remoteScan.files);
     storageScanIssues.push(...remoteScan.issues);
   }
