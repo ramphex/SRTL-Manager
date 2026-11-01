@@ -1,7 +1,8 @@
 import fs from "node:fs/promises";
 import type { Dirent } from "node:fs";
 import path from "node:path";
-import { and, count, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import { and, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, sql } from "drizzle-orm";
+import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
 import type { SQL } from "drizzle-orm";
 import { dbAll, dbGet, first, getSectionSettings, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
@@ -101,6 +102,8 @@ export const defaultScanOptions: ScanOptions = {
 };
 
 const maxSymlinkDiscoveryPasses = 2;
+// Target checks are network round trips on NFS and FUSE, so a few run at once.
+const symlinkCheckConcurrency = 12;
 
 export interface RequiredStorageRoot {
   rootType: StorageRootType;
@@ -542,28 +545,47 @@ export async function scanLibrary(
           });
           const checkingUpdate = reportSymlinkActivity("checking_symlinks", section, `Checking symlink targets in ${scanLabel}`, true);
           if (checkingUpdate) await checkingUpdate;
-          for (const linkPath of symlinks) {
-            if (checkedInRoot.has(linkPath)) continue;
-            await throwIfScanCancelled(isCancelled);
-            try {
-              links.push(await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection)));
-            } catch (error) {
-              if (!(await symlinkChangedSinceDiscovery(linkPath, error))) throw error;
-              if (discoveredInRoot.delete(linkPath)) discoveredLinks = Math.max(0, discoveredLinks - 1);
-              refreshNeeded = true;
-              continue;
+          const pending = symlinks.filter((linkPath) => !checkedInRoot.has(linkPath));
+          const classified: Array<ClassifiedLink | undefined> = new Array(pending.length);
+          let nextIndex = 0;
+          let failure: { error: unknown } | null = null;
+          const checkPending = async (): Promise<void> => {
+            while (!failure && nextIndex < pending.length) {
+              const index = nextIndex;
+              nextIndex += 1;
+              const linkPath = pending[index]!;
+              try {
+                await throwIfScanCancelled(isCancelled);
+                classified[index] = await classifySymlink(linkPath, sectionRoot, paths, section, storagePolicies, Boolean(titleScopesBySection));
+              } catch (error) {
+                const fatal = await symlinkChangedSinceDiscovery(linkPath, error).then(
+                  (changed) => (changed ? null : { error }),
+                  (inspectionError: unknown) => ({ error: inspectionError })
+                );
+                if (fatal) {
+                  failure ??= fatal;
+                  return;
+                }
+                if (discoveredInRoot.delete(linkPath)) discoveredLinks = Math.max(0, discoveredLinks - 1);
+                refreshNeeded = true;
+                continue;
+              }
+              checkedInRoot.add(linkPath);
+              checkedLinks += 1;
+              if (!shouldReportSymlinkActivity()) continue;
+              const progressUpdate = reportSymlinkActivity(
+                "checking_symlinks",
+                section,
+                `Checked ${checkedLinks.toLocaleString()} of ${discoveredLinks.toLocaleString()} discovered symlinks`,
+                true
+              );
+              if (progressUpdate) await progressUpdate;
             }
-            checkedInRoot.add(linkPath);
-            checkedLinks += 1;
-            if (!shouldReportSymlinkActivity()) continue;
-            const progressUpdate = reportSymlinkActivity(
-              "checking_symlinks",
-              section,
-              `Checked ${checkedLinks.toLocaleString()} of ${discoveredLinks.toLocaleString()} discovered symlinks`,
-              true
-            );
-            if (progressUpdate) await progressUpdate;
-          }
+          };
+          await Promise.all(Array.from({ length: Math.min(symlinkCheckConcurrency, pending.length) }, () => checkPending()));
+          if (failure) throw (failure as { error: unknown }).error;
+          // Results keep discovery order however the checks interleaved.
+          for (const link of classified) if (link) links.push(link);
           if (!refreshNeeded || discoveryPass + 1 >= maxSymlinkDiscoveryPasses) break;
           const refreshUpdate = reportSymlinkActivity("discovering_symlinks", section, `Refreshing ${scanLabel} after symlinks changed during the scan`, true);
           if (refreshUpdate) await refreshUpdate;
@@ -792,6 +814,28 @@ async function throwIfPersistenceCancelled(isCancelled?: ScanCancellationCheck):
   if (isCancelled && (await isCancelled())) throw new Error("Scan indexing was cancelled");
 }
 
+// Keeps each multi-row statement well under Postgres's 65,535 bind parameter limit.
+const persistChunkSize = 500;
+
+function persistChunks<T>(items: T[]): T[][] {
+  const batches: T[][] = [];
+  for (let offset = 0; offset < items.length; offset += persistChunkSize) batches.push(items.slice(offset, offset + persistChunkSize));
+  return batches;
+}
+
+function idInList(column: PgColumn, ids: number[]): SQL {
+  return sql`${column} = any(${`{${ids.map((id) => Math.trunc(id)).join(",")}}`}::integer[])`;
+}
+
+// Upserts take every column from the proposed row except the id and any keys kept from the existing row.
+function excludedColumns(table: PgTable, keep: string[] = []): Record<string, SQL> {
+  return Object.fromEntries(
+    Object.entries(getTableColumns(table))
+      .filter(([key, column]) => key !== "id" && !column.primary && !keep.includes(key))
+      .map(([key, column]) => [key, sql.raw(`excluded."${column.name}"`)])
+  );
+}
+
 export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
@@ -817,27 +861,46 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   const existingStorageFiles = await db.select().from(schema.storageFiles);
   const existingStorageFileByPath = new Map(existingStorageFiles.map((file) => [file.filePath, file]));
 
+  const storageFileWrites: Array<typeof schema.storageFiles.$inferInsert> = [];
+  const unchangedStorageFileIds: number[] = [];
   for (const file of filesToReconcile) {
-    await throwIfPersistenceCancelled(isCancelled);
     const existing = existingStorageFileByPath.get(file.filePath);
     // Keeping an existing row's section and title stops storage and symlink scans from flipping them back and forth.
     const metadata = existing && !seenStorageFilePaths.has(file.filePath) ? { section: existing.section, itemName: existing.itemName } : {};
     const persistedFile: ClassifiedStorageFile = { ...file, ...metadata, storagePolicy: normalizeStoragePolicy(existing?.storagePolicy) };
-    const firstSeenAt = existing?.firstSeenAt ?? timestamp;
-    const lastChangedAt = storageFileChanged(existing, persistedFile) ? timestamp : existing?.lastChangedAt ?? timestamp;
-    const persisted = await db
-      .insert(schema.storageFiles)
-      .values({ ...persistedFile, firstSeenAt, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp })
-      .onConflictDoUpdate({
-        target: schema.storageFiles.filePath,
-        set: { ...persistedFile, lastSeenAt: timestamp, lastChangedAt, missingSince: null, lastSeenJobId: jobId, updatedAt: timestamp }
-      })
-      .returning({ id: schema.storageFiles.id });
-    if (persisted[0]) affectedStorageFilePolicyIds.add(persisted[0].id);
+    const changed = storageFileChanged(existing, persistedFile);
+    if (existing && !changed && !existing.missingSince) {
+      unchangedStorageFileIds.push(existing.id);
+      affectedStorageFilePolicyIds.add(existing.id);
+      continue;
+    }
+    storageFileWrites.push({
+      ...persistedFile,
+      firstSeenAt: existing?.firstSeenAt ?? timestamp,
+      lastSeenAt: timestamp,
+      lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? timestamp,
+      missingSince: null,
+      lastSeenJobId: jobId,
+      updatedAt: timestamp
+    });
   }
 
-  for (const file of existingStorageFiles) {
+  for (const batch of persistChunks(storageFileWrites)) {
     await throwIfPersistenceCancelled(isCancelled);
+    const persisted = await db
+      .insert(schema.storageFiles)
+      .values(batch)
+      .onConflictDoUpdate({ target: schema.storageFiles.filePath, set: excludedColumns(schema.storageFiles, ["firstSeenAt"]) })
+      .returning({ id: schema.storageFiles.id });
+    for (const row of persisted) affectedStorageFilePolicyIds.add(row.id);
+  }
+  for (const batch of persistChunks(unchangedStorageFileIds)) {
+    await throwIfPersistenceCancelled(isCancelled);
+    await db.update(schema.storageFiles).set({ lastSeenAt: timestamp, lastSeenJobId: jobId, updatedAt: timestamp }).where(idInList(schema.storageFiles.id, batch));
+  }
+
+  const missingStorageFileIds: number[] = [];
+  for (const file of existingStorageFiles) {
     const fileSection = firstRelativePathPart(file.relativePath);
     const scannedFileSection = file.rootType === "remote" || !scannedLocalSections || scannedLocalSections.has(fileSection);
     if (
@@ -847,28 +910,39 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       !seenStorageFilePaths.has(file.filePath) &&
       !isInsideUnscannedStorageDirectory(file, result.storageScanIssues)
     ) {
-      await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.id, file.id));
+      missingStorageFileIds.push(file.id);
       affectedStorageFilePolicyIds.add(file.id);
       if (file.rootType === "local") missingLocalFiles += 1;
       if (file.rootType === "remote") missingRemoteFiles += 1;
     }
   }
+  for (const batch of persistChunks(missingStorageFileIds)) {
+    await throwIfPersistenceCancelled(isCancelled);
+    await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(idInList(schema.storageFiles.id, batch));
+  }
 
   if (result.options.scanSymlinks) {
-    const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
+    const currentStorageFiles = await db
+      .select({ id: schema.storageFiles.id, filePath: schema.storageFiles.filePath })
+      .from(schema.storageFiles)
+      .where(isNull(schema.storageFiles.missingSince));
     const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
     const existingMediaLinks = await db.select().from(schema.mediaLinks);
     const existingMediaLinkByPath = new Map(existingMediaLinks.map((link) => [link.linkPath, link]));
+    const linkWrites: Array<typeof schema.mediaLinks.$inferInsert> = [];
+    const unchangedLinkIds: number[] = [];
 
-    for (const link of result.links) {
-      await throwIfPersistenceCancelled(isCancelled);
+    for (const link of new Map(result.links.map((link) => [link.linkPath, link])).values()) {
       const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
       const existing = existingMediaLinkByPath.get(link.linkPath);
       if (existing?.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(existing.resolvedStorageFileId);
       if (resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(resolvedStorageFileId);
-      const firstSeenAt = existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp;
-      const lastChangedAt = linkChanged(existing, link, resolvedStorageFileId) ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp;
-      const values = {
+      const changed = linkChanged(existing, link, resolvedStorageFileId);
+      if (existing && !changed && !existing.missingSince && existing.firstSeenAt && existing.lastChangedAt) {
+        unchangedLinkIds.push(existing.id);
+        continue;
+      }
+      linkWrites.push({
         section: link.section,
         itemName: link.itemName,
         relativePath: link.relativePath,
@@ -880,33 +954,37 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         storagePolicy: link.storagePolicy,
         sizeBytes: link.sizeBytes,
         resolvedStorageFileId,
-        firstSeenAt,
+        firstSeenAt: existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp,
         lastSeenAt: timestamp,
-        lastChangedAt,
+        lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp,
         missingSince: null,
         lastSeenJobId: jobId,
         updatedAt: timestamp
-      };
-      await db
-        .insert(schema.mediaLinks)
-        .values(values)
-        .onConflictDoUpdate({
-          target: schema.mediaLinks.linkPath,
-          set: { ...values, firstSeenAt, lastChangedAt }
-        });
+      });
     }
 
-    for (const link of existingMediaLinks) {
+    for (const batch of persistChunks(linkWrites)) {
       await throwIfPersistenceCancelled(isCancelled);
+      await db.insert(schema.mediaLinks).values(batch).onConflictDoUpdate({ target: schema.mediaLinks.linkPath, set: excludedColumns(schema.mediaLinks) });
+    }
+    for (const batch of persistChunks(unchangedLinkIds)) {
+      await throwIfPersistenceCancelled(isCancelled);
+      await db.update(schema.mediaLinks).set({ lastSeenAt: timestamp, lastSeenJobId: jobId, updatedAt: timestamp }).where(idInList(schema.mediaLinks.id, batch));
+    }
+
+    const missingLinkIds: number[] = [];
+    for (const link of existingMediaLinks) {
       const scannedLinkScope = scannedSymlinkTitles
         ? scannedSymlinkTitles.has(scanTitleScopeKey(link.section, link.itemName))
         : !scannedSymlinkSections || scannedSymlinkSections.has(link.section);
       if (scannedLinkScope && link.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(link.resolvedStorageFileId);
-      if (!link.missingSince && scannedLinkScope && !seenLinkPaths.has(link.linkPath)) {
-        await db.update(schema.mediaLinks).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
-        missingLinks += 1;
-      }
+      if (!link.missingSince && scannedLinkScope && !seenLinkPaths.has(link.linkPath)) missingLinkIds.push(link.id);
     }
+    for (const batch of persistChunks(missingLinkIds)) {
+      await throwIfPersistenceCancelled(isCancelled);
+      await db.update(schema.mediaLinks).set({ missingSince: timestamp, updatedAt: timestamp }).where(idInList(schema.mediaLinks.id, batch));
+    }
+    missingLinks = missingLinkIds.length;
 
     for (const summary of result.summaries) {
       await throwIfPersistenceCancelled(isCancelled);
@@ -1051,20 +1129,23 @@ interface ResolvedStorageFileScope {
 }
 
 async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scope?: ResolvedStorageFileScope): Promise<void> {
-  const currentStorageFiles = (await db.select().from(schema.storageFiles)).filter((file) => !file.missingSince);
-  const storageFileIdByPath = new Map(currentStorageFiles.map((file) => [file.filePath, file.id]));
-  for (const link of await db.select().from(schema.mediaLinks)) {
-    if (
-      link.missingSince ||
-      (scope?.linkPaths && !scope.linkPaths.has(link.linkPath)) ||
-      (scope?.sections && !scope.sections.has(link.section)) ||
-      (scope?.kinds && !scope.kinds.has(link.kind as LinkKind))
-    ) continue;
-    const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
-    if (link.resolvedStorageFileId !== resolvedStorageFileId) {
-      await db.update(schema.mediaLinks).set({ resolvedStorageFileId, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
-    }
-  }
+  const textScope = (column: SQL, values: ReadonlySet<string> | undefined) =>
+    values ? sql`and ${column} in (select jsonb_array_elements_text(${JSON.stringify([...values])}::jsonb))` : sql``;
+  await db.execute(sql`
+    update media_links
+    set resolved_storage_file_id = resolved.storage_file_id, updated_at = ${timestamp}
+    from (
+      select ml.id, sf.id as storage_file_id
+      from media_links ml
+      left join storage_files sf on sf.file_path = ml.target_path and sf.missing_since is null
+      where ml.missing_since is null
+        ${textScope(sql`ml.link_path`, scope?.linkPaths)}
+        ${textScope(sql`ml.section`, scope?.sections)}
+        ${textScope(sql`ml.kind`, scope?.kinds)}
+    ) resolved
+    where media_links.id = resolved.id
+      and media_links.resolved_storage_file_id is distinct from resolved.storage_file_id
+  `);
 }
 
 export async function getStoragePolicyMap(db: Db): Promise<Map<string, StoragePolicyKind>> {

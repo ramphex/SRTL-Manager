@@ -234,6 +234,128 @@ describe("scanner", () => {
     }
   });
 
+  it("checks symlink targets concurrently while keeping discovery order", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "shows", "Long Show", "Season 01");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    const names = Array.from({ length: 40 }, (_unused, index) => `episode-${String(index).padStart(2, "0")}.mkv`);
+    for (const name of names) {
+      await fs.writeFile(path.join(remoteDir, name), name);
+      await fs.symlink(path.join(remoteDir, name), path.join(titleDir, name));
+    }
+
+    const realStat = fs.stat.bind(fs);
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const statSpy = vi.spyOn(fs, "stat").mockImplementation((async (candidate: unknown, options?: unknown) => {
+      if (!String(candidate).startsWith(remoteDir) || String(candidate) === remoteDir) return realStat(candidate as never, options as never);
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      // Later files answer sooner, so completion order is the reverse of discovery order.
+      await new Promise((resolve) => setTimeout(resolve, 40 - names.indexOf(path.basename(String(candidate)))));
+      inFlight -= 1;
+      return realStat(candidate as never, options as never);
+    }) as typeof fs.stat);
+
+    try {
+      const sequential = names.map((name) => path.join(titleDir, name));
+      const result = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["shows"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: false });
+      const discoveryOrder = (await fs.readdir(titleDir)).map((name) => path.join(titleDir, name));
+      expect(result.links.map((link) => link.linkPath)).toEqual(discoveryOrder);
+      expect([...discoveryOrder].sort()).toEqual(sequential);
+      expect(result.links.every((link) => link.kind === "remote")).toBe(true);
+      expect(maxInFlight).toBeGreaterThan(1);
+      expect(maxInFlight).toBeLessThanOrEqual(12);
+    } finally {
+      statSpy.mockRestore();
+    }
+  });
+
+  it("stops the target-check pool on the first non-transient error", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "movies", "Many");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    for (let index = 0; index < 60; index += 1) {
+      await fs.writeFile(path.join(remoteDir, `${index}.mkv`), "x");
+      await fs.symlink(path.join(remoteDir, `${index}.mkv`), path.join(titleDir, `${index}.mkv`));
+    }
+    const failing = path.join(titleDir, "0.mkv");
+    const realReadlink = fs.readlink.bind(fs);
+    let reads = 0;
+    const readlinkSpy = vi.spyOn(fs, "readlink").mockImplementation((async (candidate: unknown, options?: unknown) => {
+      reads += 1;
+      if (String(candidate) === failing) throw Object.assign(new Error("I/O error"), { code: "EIO" });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return realReadlink(candidate as never, options as never);
+    }) as typeof fs.readlink);
+
+    try {
+      await expect(scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: false })).rejects.toMatchObject({ code: "EIO" });
+      expect(reads).toBeLessThan(60);
+    } finally {
+      readlinkSpy.mockRestore();
+    }
+  });
+
+  it("writes large inventories in batches and only bumps sightings for unchanged rows", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const titleDir = path.join(symlinkDir, "shows", "Big Show", "Season 01");
+    await fs.mkdir(titleDir, { recursive: true });
+    await fs.mkdir(path.join(localDir, "shows"), { recursive: true });
+    await fs.mkdir(remoteDir, { recursive: true });
+    const count = 1_203;
+    for (let index = 0; index < count; index += 1) {
+      const target = path.join(remoteDir, `episode-${index}.mkv`);
+      await fs.writeFile(target, "x");
+      await fs.symlink(target, path.join(titleDir, `episode-${index}.mkv`));
+    }
+    const scan = () => scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["shows"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: true });
+
+    const database = await openTestDatabase();
+    try {
+      await persistScanResult(database.db, await scan(), 1);
+      const before = await database.db.select().from(schema.storageFiles);
+      expect(before).toHaveLength(count);
+
+      const changedTarget = path.join(remoteDir, "episode-7.mkv");
+      await fs.writeFile(changedTarget, "longer");
+      await fs.rm(path.join(remoteDir, "episode-8.mkv"));
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const summary = await persistScanResult(database.db, await scan(), 2);
+
+      expect(summary).toMatchObject({ totalLinks: count, remoteLinks: count - 1, brokenLinks: 1, remoteFiles: count - 1, missingRemoteFiles: 1 });
+      const after = new Map((await database.db.select().from(schema.storageFiles)).map((file) => [file.filePath, file]));
+      const unchanged = before.find((file) => file.filePath.endsWith("episode-9.mkv"))!;
+      expect(after.get(unchanged.filePath)).toMatchObject({
+        id: unchanged.id,
+        firstSeenAt: unchanged.firstSeenAt,
+        lastChangedAt: unchanged.lastChangedAt,
+        lastSeenJobId: 2,
+        missingSince: null
+      });
+      expect(after.get(unchanged.filePath)?.lastSeenAt).not.toBe(unchanged.lastSeenAt);
+      const changed = after.get(changedTarget)!;
+      expect(changed).toMatchObject({ sizeBytes: 6, lastSeenJobId: 2, firstSeenAt: before.find((file) => file.filePath === changedTarget)?.firstSeenAt });
+      expect(changed.lastChangedAt).toBe(changed.lastSeenAt);
+      expect(after.get(path.join(remoteDir, "episode-8.mkv"))?.missingSince).toEqual(expect.any(String));
+      const links = await database.db.select().from(schema.mediaLinks);
+      expect(links.filter((link) => link.lastSeenJobId === 2)).toHaveLength(count);
+      expect(links.filter((link) => link.resolvedStorageFileId === null).map((link) => path.basename(link.linkPath))).toEqual(["episode-8.mkv"]);
+    } finally {
+      await database.close();
+    }
+  });
+
   it("marks disappeared symlinks and storage files missing instead of deleting rows", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");
