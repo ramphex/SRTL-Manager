@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, TriangleAlert, UserCog } from "lucide-react";
+import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, Trash2, TriangleAlert, UserCog, X } from "lucide-react";
 import { api } from "./api";
 import { IntegrationSettings } from "./integrationSettings";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -9,9 +9,9 @@ import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters
 import { normalizeAuditTargets } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
-import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
+import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
-import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useStorageLocations, useUserPreferences } from "./appShared";
+import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
 import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
 
@@ -584,12 +584,126 @@ function StorageLocationsPanel({ paths, isLoadingPaths, pathsError }: { paths: P
   );
 }
 
+function PartialCopyDiscardDialog({
+  operation,
+  onClose,
+  onDiscarded
+}: {
+  operation: CopyReconciliationRecord | null;
+  onClose: () => void;
+  onDiscarded: (message: string) => void;
+}) {
+  const queryClient = useQueryClient();
+  const preview = useQuery({
+    queryKey: ["partial-copy-discard", operation?.id],
+    queryFn: () => api.previewPartialCopyDiscard(operation!.id),
+    enabled: Boolean(operation),
+    gcTime: 0,
+    staleTime: 0
+  });
+  const discard = useMutation({
+    mutationFn: () => {
+      const data = preview.data;
+      if (!operation || !data?.tempPath || data.tempSizeBytes == null) throw new Error("Review the partial copy before discarding it.");
+      return api.discardPartialCopy(operation.id, { tempPath: data.tempPath, tempSizeBytes: data.tempSizeBytes });
+    },
+    onSuccess: (result) => {
+      queryClient.setQueryData(["copy-reconciliation"], result.state);
+      queryClient.invalidateQueries({ queryKey: ["jobs"] });
+      onDiscarded(`Discarded ${formatBytes(result.removedBytes)} partial copy for operation #${result.operationId} and closed it.`);
+    },
+    onError: () => {
+      void preview.refetch();
+    }
+  });
+  const close = () => {
+    if (discard.isPending) return;
+    discard.reset();
+    onClose();
+  };
+  const dialogRef = useModalLifecycle(Boolean(operation), close);
+  if (!operation) return null;
+  const data = preview.data;
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && close()}>
+      <section ref={dialogRef} className="audit-dialog terminate-dialog" role="dialog" aria-modal="true" aria-labelledby="discard-partial-copy-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <span className="audit-dialog-eyebrow">Copy recovery</span>
+            <h2 id="discard-partial-copy-title">Discard partial copy for operation #{operation.id}</h2>
+            <p>Deletes only the interrupted temporary file from job #{operation.jobId} and closes this journal entry as failed. The library symlink, its current target and any existing destination file are left untouched.</p>
+          </div>
+          <button type="button" className="icon-button" onClick={close} aria-label="Close discard confirmation" disabled={discard.isPending}>
+            <X size={18} />
+          </button>
+        </div>
+        {preview.isLoading ? <p className="section-settings-help">Inspecting the current filesystem state...</p> : null}
+        {preview.error ? <p className="panel-message action-error">{preview.error.message}</p> : null}
+        {data ? (
+          <dl className="partial-copy-discard-details">
+            <dt>Temporary file to delete</dt>
+            <dd>
+              <code>{data.tempPath ?? "Not recorded"}</code>
+              {data.tempSizeBytes != null ? <small>{formatBytes(data.tempSizeBytes)}</small> : null}
+            </dd>
+            <dt>Library symlink</dt>
+            <dd>
+              <code>{data.linkPath}</code>
+            </dd>
+            <dt>Current symlink target</dt>
+            <dd>
+              <code>{data.currentLinkTarget ?? "Not a readable symlink"}</code>
+            </dd>
+            <dt>Destination (kept)</dt>
+            <dd>
+              <code>{data.destinationPath}</code>
+              <small>{data.destinationExists == null ? "Could not be inspected" : data.destinationExists ? "Exists, will not be touched" : "Not present"}</small>
+            </dd>
+          </dl>
+        ) : null}
+        {data && !data.eligible ? (
+          <div className="terminate-dialog-warning">
+            <TriangleAlert size={18} />
+            <div>
+              <strong>This entry cannot be discarded automatically.</strong>
+              {data.blockers.map((blocker) => (
+                <span key={blocker}>{blocker}</span>
+              ))}
+            </div>
+          </div>
+        ) : null}
+        {data?.eligible ? (
+          <div className="terminate-dialog-warning">
+            <TriangleAlert size={18} />
+            <div>
+              <strong>This cannot be undone.</strong>
+              <span>The server re-checks the symlink, journal and temporary file again before deleting anything and refuses if they changed.</span>
+            </div>
+          </div>
+        ) : null}
+        {discard.error ? <p className="panel-message action-error">{discard.error.message}</p> : null}
+        <div className="terminate-dialog-actions">
+          <button type="button" className="secondary" onClick={close} disabled={discard.isPending}>
+            Cancel
+          </button>
+          <button type="button" className="danger-button" onClick={() => discard.mutate()} disabled={!data?.eligible || discard.isPending || preview.isFetching}>
+            <Trash2 size={16} />
+            {discard.isPending ? "Discarding..." : "Discard partial copy"}
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function AdvancedSettingsPanel() {
   const queryClient = useQueryClient();
   const settings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
   const reconciliation = useQuery({ queryKey: ["copy-reconciliation"], queryFn: api.copyReconciliation, refetchInterval: 30_000 });
   const [draft, setDraft] = useState<AdvancedSettings>(defaultAdvancedSettings);
   const [message, setMessage] = useState<string | null>(null);
+  const [discardOperation, setDiscardOperation] = useState<CopyReconciliationRecord | null>(null);
+  const [discardMessage, setDiscardMessage] = useState<string | null>(null);
   const savedAdvancedSettings = normalizeAdvancedSettings(settings.data ?? defaultAdvancedSettings);
   const savedCopyProfileLabel = copyProfileOptions.find((option) => option.value === savedAdvancedSettings.copy.profile)?.label ?? savedAdvancedSettings.copy.profile;
   const savedAuditModeLabel = auditModeOptions.find((option) => option.value === savedAdvancedSettings.audit.defaultMode)?.label ?? savedAdvancedSettings.audit.defaultMode;
@@ -806,6 +920,7 @@ function AdvancedSettingsPanel() {
             </span>
           </div>
           {reconciliation.error ? <p className="panel-message action-error">{reconciliation.error.message}</p> : null}
+          {discardMessage ? <p className="panel-message success">{discardMessage}</p> : null}
           {recheckReconciliation.data?.resolvedNow ? (
             <p className="panel-message success">Resolved {formatNumber(recheckReconciliation.data.resolvedNow)} stale copy journal {recheckReconciliation.data.resolvedNow === 1 ? "entry" : "entries"}.</p>
           ) : null}
@@ -815,6 +930,10 @@ function AdvancedSettingsPanel() {
                 <li key={operation.id}>
                   <strong>Operation #{operation.id} / job #{operation.jobId}</strong>
                   <span>{operation.errorMessage ?? "Filesystem state is still uncertain."}</span>
+                  <button type="button" className="secondary settings-reconciliation-action" onClick={() => { setDiscardMessage(null); setDiscardOperation(operation); }}>
+                    <Trash2 size={14} />
+                    Discard partial copy
+                  </button>
                 </li>
               ))}
             </ul>
@@ -826,6 +945,14 @@ function AdvancedSettingsPanel() {
             {recheckReconciliation.isPending ? "Rechecking..." : "Recheck filesystem state"}
           </button>
           {recheckReconciliation.error ? <span className="error">{recheckReconciliation.error.message}</span> : null}
+          <PartialCopyDiscardDialog
+            operation={discardOperation}
+            onClose={() => setDiscardOperation(null)}
+            onDiscarded={(text) => {
+              setDiscardOperation(null);
+              setDiscardMessage(text);
+            }}
+          />
         </section>
 
         <div className="advanced-settings-actions">

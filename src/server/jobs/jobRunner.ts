@@ -30,6 +30,7 @@ import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
+import { discardPartialCopy, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
 import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
 import type {
@@ -47,6 +48,9 @@ import type {
   JobEventRecord,
   JobRecord,
   CopyReconciliationState,
+  PartialCopyDiscardPreview,
+  PartialCopyDiscardRequest,
+  PartialCopyDiscardResult,
   CopyFailureList,
   JobSelectionSummary,
   JobStatus,
@@ -2434,6 +2438,14 @@ export class JobRunner {
 
   async recheckCopyReconciliation(): Promise<CopyReconciliationState> {
     return reconcileProvablySettledCopyOperations(this.db);
+  }
+
+  async previewPartialCopyDiscard(operationId: number): Promise<PartialCopyDiscardPreview> {
+    return previewPartialCopyDiscard(this.db, operationId);
+  }
+
+  async discardPartialCopy(operationId: number, request: PartialCopyDiscardRequest): Promise<PartialCopyDiscardResult> {
+    return discardPartialCopy(this.db, operationId, request);
   }
 
   async listEvents(jobId: number, afterId = 0, limit = 100): Promise<JobEventRecord[]> {

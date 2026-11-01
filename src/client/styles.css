@@ -3752,6 +3752,41 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   line-height: 1.4;
 }
 
+.settings-reconciliation-list .settings-reconciliation-action {
+  font-size: 12px;
+  justify-self: start;
+  margin-top: 4px;
+}
+
+.partial-copy-discard-details {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+}
+
+.partial-copy-discard-details dt {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 6px;
+}
+
+.partial-copy-discard-details dd {
+  display: grid;
+  gap: 2px;
+  margin: 0;
+}
+
+.partial-copy-discard-details code {
+  color: var(--text-strong);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.partial-copy-discard-details small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .inline-form {
   align-items: end;
   display: grid;

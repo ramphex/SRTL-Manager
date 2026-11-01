@@ -593,6 +593,35 @@ export interface CopyReconciliationState {
   resolvedNow: number;
 }
 
+export interface PartialCopyDiscardPreview {
+  operationId: number;
+  jobId: number;
+  mediaLinkId: number;
+  linkPath: string;
+  originalTargetPath: string;
+  currentLinkTarget: string | null;
+  destinationPath: string;
+  destinationExists: boolean | null;
+  tempPath: string | null;
+  tempSizeBytes: number | null;
+  displacedPath: string | null;
+  eligible: boolean;
+  blockers: string[];
+}
+
+export interface PartialCopyDiscardRequest {
+  tempPath: string;
+  tempSizeBytes: number;
+}
+
+export interface PartialCopyDiscardResult {
+  operationId: number;
+  jobId: number;
+  removedTempPath: string;
+  removedBytes: number;
+  state: CopyReconciliationState;
+}
+
 export interface ScanRunRecord {
   id: number | null;
   jobId: number;

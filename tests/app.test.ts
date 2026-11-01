@@ -319,13 +319,15 @@ async function insertCopyOperationFixture({
   fixture,
   stage,
   resultStatus = null,
-  errorMessage = null
+  errorMessage = null,
+  overrides = {}
 }: {
   jobId: number;
   fixture: Awaited<ReturnType<typeof insertCopySymlink>>;
   stage: "committed" | "reconciliation_required";
   resultStatus?: "copied" | "repointed" | null;
   errorMessage?: string | null;
+  overrides?: Partial<typeof schema.copyOperations.$inferInsert>;
 }): Promise<number> {
   const mediaLink = await first(ctx.database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, fixture.id)).limit(1));
   if (!mediaLink) throw new Error("Copy operation fixture media link was not found");
@@ -354,12 +356,34 @@ async function insertCopyOperationFixture({
         errorMessage,
         createdAt: timestamp,
         updatedAt: timestamp,
-        completedAt: stage === "committed" ? timestamp : null
+        completedAt: stage === "committed" ? timestamp : null,
+        ...overrides
       })
       .returning({ id: schema.copyOperations.id })
   );
   if (!operation) throw new Error("Copy operation fixture was not inserted");
   return operation.id;
+}
+
+async function insertInterruptedPartialCopy(itemName: string, { jobStatus = "failed" }: { jobStatus?: "failed" | "running" } = {}) {
+  const fixture = await insertCopySymlink({ itemName, kind: "remote", storagePolicy: "location_1", content: "remote source payload" });
+  const jobId = await ctx.jobs.createJob("copy");
+  await ctx.database.db
+    .update(schema.jobs)
+    .set({ status: jobStatus, finishedAt: jobStatus === "failed" ? new Date().toISOString() : null })
+    .where(eq(schema.jobs.id, jobId));
+  await fs.mkdir(path.dirname(fixture.destinationPath), { recursive: true });
+  await fs.writeFile(fixture.destinationPath, "old placeholder");
+  const tempPath = path.join(path.dirname(fixture.destinationPath), `.${path.basename(fixture.destinationPath)}.srtl-copy-4242-1761955200000-9f3a1c`);
+  await fs.writeFile(tempPath, "partial transfer bytes");
+  const operationId = await insertCopyOperationFixture({
+    jobId,
+    fixture,
+    stage: "reconciliation_required",
+    errorMessage: "Interrupted copy left a temporary file without a durable identity",
+    overrides: { tempPath, localConflictStrategy: "keep_both" }
+  });
+  return { fixture, jobId, operationId, tempPath, tempSizeBytes: Buffer.byteLength("partial transfer bytes") };
 }
 
 describe("api app", () => {
@@ -2118,6 +2142,194 @@ describe("api app", () => {
       errorMessage: expect.stringContaining("Restored displaced destination changed after its file identity was journaled")
     });
   });
+
+  it("discards a journaled partial copy after re-validating it and unblocks the media item", async () => {
+    const cookie = await createAdminSession();
+    const { fixture, jobId, operationId, tempPath, tempSizeBytes } = await insertInterruptedPartialCopy("Interrupted Partial Copy");
+    await expect(ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] })).rejects.toThrow(
+      `Copy data from job #${jobId} requires manual reconciliation`
+    );
+
+    const preview = await ctx.app.inject({ method: "GET", url: `/api/job-reconciliation/${operationId}/discard-partial-copy`, headers: { cookie } });
+    expect(preview.statusCode).toBe(200);
+    expect(preview.json()).toMatchObject({
+      operationId,
+      jobId,
+      tempPath,
+      tempSizeBytes,
+      linkPath: fixture.linkPath,
+      currentLinkTarget: path.resolve(fixture.sourcePath),
+      destinationExists: true,
+      eligible: true,
+      blockers: []
+    });
+
+    const discard = await ctx.app.inject({
+      method: "POST",
+      url: `/api/job-reconciliation/${operationId}/discard-partial-copy`,
+      headers: { cookie },
+      payload: { tempPath, tempSizeBytes }
+    });
+    expect(discard.statusCode).toBe(200);
+    expect(discard.json()).toMatchObject({ operationId, jobId, removedTempPath: tempPath, removedBytes: tempSizeBytes, state: { unresolvedCount: 0 } });
+    await expect(fs.lstat(tempPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("old placeholder");
+    await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("remote source payload");
+    await expect(fs.readlink(fixture.linkPath)).resolves.toBe(fixture.sourcePath);
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.id, operationId)).limit(1))).resolves.toMatchObject({
+      stage: "failed",
+      tempPath: null,
+      tempIdentity: null,
+      reconciliationResolvedAt: expect.any(String),
+      completedAt: expect.any(String),
+      errorMessage: expect.stringContaining("Partial copy discarded")
+    });
+    const events = await ctx.database.db.select().from(schema.jobEvents).where(eq(schema.jobEvents.jobId, jobId));
+    const discardEvent = events.find((event) => event.message === "Partial copy discarded during manual reconciliation");
+    expect(discardEvent).toMatchObject({ level: "warn" });
+    expect(JSON.parse(discardEvent?.data ?? "{}")).toMatchObject({ operationId, removedTempPath: tempPath, removedBytes: tempSizeBytes });
+
+    const repeat = await ctx.app.inject({
+      method: "POST",
+      url: `/api/job-reconciliation/${operationId}/discard-partial-copy`,
+      headers: { cookie },
+      payload: { tempPath, tempSizeBytes }
+    });
+    expect(repeat.statusCode).toBe(409);
+    expect(repeat.json()).toMatchObject({ error: expect.stringContaining("no longer requires manual reconciliation") });
+
+    const retriedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
+    await expect(ctx.jobs.getJob(retriedJobId)).resolves.toMatchObject({ status: "queued" });
+    await expect(ctx.jobs.terminate(retriedJobId)).resolves.toBe(true);
+  });
+
+  it("returns 404 when discarding a partial copy for an unknown operation", async () => {
+    const cookie = await createAdminSession();
+    const preview = await ctx.app.inject({ method: "GET", url: "/api/job-reconciliation/999999/discard-partial-copy", headers: { cookie } });
+    expect(preview.statusCode).toBe(404);
+    const discard = await ctx.app.inject({
+      method: "POST",
+      url: "/api/job-reconciliation/999999/discard-partial-copy",
+      headers: { cookie },
+      payload: { tempPath: "/tmp/.x.srtl-copy-1-2-a", tempSizeBytes: 1 }
+    });
+    expect(discard.statusCode).toBe(404);
+  });
+
+  const partialCopyRefusals: Array<{
+    name: string;
+    blocker: string;
+    arrange: (setup: Awaited<ReturnType<typeof insertInterruptedPartialCopy>>) => Promise<{ tempPath?: string; tempSizeBytes?: number } | void>;
+    jobStatus?: "failed" | "running";
+  }> = [
+    {
+      name: "the symlink moved away from the original target",
+      blocker: "no longer points at the copy's original target",
+      arrange: async ({ fixture }) => {
+        const elsewhere = path.join(tmpDir, "remote", "movies", "elsewhere.mkv");
+        await fs.writeFile(elsewhere, "other");
+        await fs.rm(fixture.linkPath);
+        await fs.symlink(elsewhere, fixture.linkPath);
+      }
+    },
+    {
+      name: "the symlink is missing",
+      blocker: "library symlink is missing",
+      arrange: async ({ fixture }) => {
+        await fs.rm(fixture.linkPath);
+      }
+    },
+    {
+      name: "a displaced destination file still exists",
+      blocker: "displaced destination file from this copy still exists",
+      arrange: async ({ fixture, operationId }) => {
+        const displacedPath = `${fixture.destinationPath}.srtl-displaced`;
+        await fs.writeFile(displacedPath, "displaced original");
+        await ctx.database.db.update(schema.copyOperations).set({ displacedPath }).where(eq(schema.copyOperations.id, operationId));
+      }
+    },
+    {
+      name: "the journaled temporary file is outside the destination root",
+      blocker: "outside the configured destination root",
+      arrange: async ({ fixture, operationId }) => {
+        const outsideDir = path.join(tmpDir, "outside");
+        await fs.mkdir(outsideDir, { recursive: true });
+        const tempPath = path.join(outsideDir, `.${path.basename(fixture.destinationPath)}.srtl-copy-1-2-ab`);
+        await fs.writeFile(tempPath, "outside bytes");
+        await ctx.database.db.update(schema.copyOperations).set({ tempPath }).where(eq(schema.copyOperations.id, operationId));
+        return { tempPath, tempSizeBytes: Buffer.byteLength("outside bytes") };
+      }
+    },
+    {
+      name: "the journaled temporary file does not match the copy naming pattern",
+      blocker: "does not match SRTL's copy naming pattern",
+      arrange: async ({ fixture, operationId }) => {
+        await ctx.database.db.update(schema.copyOperations).set({ tempPath: fixture.destinationPath }).where(eq(schema.copyOperations.id, operationId));
+        return { tempPath: fixture.destinationPath, tempSizeBytes: Buffer.byteLength("old placeholder") };
+      }
+    },
+    {
+      name: "the temporary path is a symlink rather than a regular file",
+      blocker: "not a regular file",
+      arrange: async ({ fixture, tempPath }) => {
+        await fs.rm(tempPath);
+        await fs.symlink(fixture.sourcePath, tempPath);
+      }
+    },
+    {
+      name: "the temporary file changed after its identity was journaled",
+      blocker: "changed after its identity was journaled",
+      arrange: async ({ operationId, tempPath }) => {
+        const identity = await readCopyFileIdentity(tempPath);
+        if (!identity) throw new Error("Temporary file identity was not readable");
+        await ctx.database.db
+          .update(schema.copyOperations)
+          .set({ tempIdentity: serializeCopyFileIdentity({ ...identity, ino: String(BigInt(identity.ino) + 1n) }) })
+          .where(eq(schema.copyOperations.id, operationId));
+      }
+    },
+    {
+      name: "the temporary file changed since it was reviewed",
+      blocker: "changed since it was reviewed",
+      arrange: async ({ tempSizeBytes }) => ({ tempSizeBytes: tempSizeBytes + 1 })
+    },
+    {
+      name: "the copy job is still running",
+      blocker: "is still running",
+      jobStatus: "running",
+      arrange: async () => undefined
+    }
+  ];
+
+  for (const refusal of partialCopyRefusals) {
+    it(`refuses to discard a partial copy when ${refusal.name}`, async () => {
+      const cookie = await createAdminSession();
+      const setup = await insertInterruptedPartialCopy(`Refused Partial ${partialCopyRefusals.indexOf(refusal)}`, { jobStatus: refusal.jobStatus });
+      const confirmation = { tempPath: setup.tempPath, tempSizeBytes: setup.tempSizeBytes, ...((await refusal.arrange(setup)) ?? {}) };
+      const linkBefore = await fs.readlink(setup.fixture.linkPath).catch(() => null);
+
+      if (refusal.blocker !== "changed since it was reviewed") {
+        const preview = await ctx.app.inject({ method: "GET", url: `/api/job-reconciliation/${setup.operationId}/discard-partial-copy`, headers: { cookie } });
+        expect(preview.statusCode).toBe(200);
+        expect(preview.json()).toMatchObject({ eligible: false, blockers: expect.arrayContaining([expect.stringContaining(refusal.blocker)]) });
+      }
+
+      const discard = await ctx.app.inject({
+        method: "POST",
+        url: `/api/job-reconciliation/${setup.operationId}/discard-partial-copy`,
+        headers: { cookie },
+        payload: confirmation
+      });
+      expect(discard.statusCode).toBe(409);
+      expect(discard.json()).toMatchObject({ error: expect.stringContaining(refusal.blocker) });
+      await expect(fs.lstat(confirmation.tempPath)).resolves.toBeTruthy();
+      await expect(fs.readFile(setup.fixture.destinationPath, "utf8")).resolves.toBe("old placeholder");
+      await expect(fs.readlink(setup.fixture.linkPath).catch(() => null)).resolves.toBe(linkBefore);
+      await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.id, setup.operationId)).limit(1))).resolves.toMatchObject({
+        stage: "reconciliation_required"
+      });
+    });
+  }
 
   it("auto-closes provably empty legacy reconciliation state without blocking related or retried media", async () => {
     const blockedFixture = await insertCopySymlink({ itemName: "Uncertain Legacy Movie", kind: "remote", storagePolicy: "location_1", content: "uncertain source" });

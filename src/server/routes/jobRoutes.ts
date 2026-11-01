@@ -51,6 +51,17 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
 
   app.post("/api/job-reconciliation/recheck", async () => jobs.recheckCopyReconciliation());
 
+  app.get("/api/job-reconciliation/:id/discard-partial-copy", async (request) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    return jobs.previewPartialCopyDiscard(params.id);
+  });
+
+  app.post("/api/job-reconciliation/:id/discard-partial-copy", async (request) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const body = z.object({ tempPath: z.string().min(1), tempSizeBytes: z.number().int().min(0) }).parse(request.body);
+    return jobs.discardPartialCopy(params.id, body);
+  });
+
   app.post("/api/jobs/:id/terminate", async (request, reply) => {
     const params = z.object({ id: z.coerce.number() }).parse(request.params);
     if (!(await jobs.terminate(params.id))) return reply.code(409).send({ error: "Job cannot be terminated" });

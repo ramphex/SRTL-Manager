@@ -21,6 +21,9 @@ import type {
   OnboardingStartRequest,
   OnboardingState,
   CopyOptions,
+  PartialCopyDiscardPreview,
+  PartialCopyDiscardRequest,
+  PartialCopyDiscardResult,
   PathsSettings,
   PathConfigurationState,
   ScanRunRecord,
@@ -123,6 +126,9 @@ export const api = {
   copyConflicts: (body: CopyOptions) => request<CopyConflictPreview>("/api/copies/conflicts", { method: "POST", body: JSON.stringify(body) }),
   copyReconciliation: () => request<CopyReconciliationState>("/api/job-reconciliation"),
   recheckCopyReconciliation: () => request<CopyReconciliationState>("/api/job-reconciliation/recheck", { method: "POST" }),
+  previewPartialCopyDiscard: (operationId: number) => request<PartialCopyDiscardPreview>(`/api/job-reconciliation/${operationId}/discard-partial-copy`),
+  discardPartialCopy: (operationId: number, body: PartialCopyDiscardRequest) =>
+    request<PartialCopyDiscardResult>(`/api/job-reconciliation/${operationId}/discard-partial-copy`, { method: "POST", body: JSON.stringify(body) }),
   mediaLinks: (kind?: string) => request<MediaLinkRow[]>(`/api/media-links${kind ? `?kind=${kind}` : ""}`),
   mediaLinksByIds,
   mediaLinksPage: (params: { kind?: LinkKind; section?: string; storagePolicy?: StoragePolicyKind; relativePathPrefix?: string; search?: string; limit: number; offset: number }) => {

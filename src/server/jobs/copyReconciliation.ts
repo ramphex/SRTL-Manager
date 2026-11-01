@@ -23,11 +23,11 @@ export function unresolvedCopyReconciliation(): SQL {
   `;
 }
 
-type CopyOperation = typeof schema.copyOperations.$inferSelect;
-type PathPresence = "exists" | "missing" | "unknown";
-type LinkState = { kind: "symlink"; target: string } | { kind: "missing" | "other" | "unknown" };
+export type CopyOperation = typeof schema.copyOperations.$inferSelect;
+export type PathPresence = "exists" | "missing" | "unknown";
+export type LinkState = { kind: "symlink"; target: string } | { kind: "missing" | "other" | "unknown" };
 
-async function pathPresence(filePath: string | null, label: string): Promise<PathPresence> {
+export async function pathPresence(filePath: string | null, label: string): Promise<PathPresence> {
   if (!filePath) return "missing";
   try {
     await withFilesystemTimeout(fs.lstat(filePath), label);
@@ -38,7 +38,7 @@ async function pathPresence(filePath: string | null, label: string): Promise<Pat
   }
 }
 
-async function linkState(linkPath: string): Promise<LinkState> {
+export async function linkState(linkPath: string): Promise<LinkState> {
   try {
     const stat = await withFilesystemTimeout(fs.lstat(linkPath), `Copy reconciliation link inspection for ${linkPath}`);
     if (!stat.isSymbolicLink()) return { kind: "other" };
