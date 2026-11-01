@@ -50,7 +50,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -247,7 +247,8 @@ describe("database bootstrap", () => {
         { version: 13 },
         { version: 14 },
         { version: 15 },
-        { version: 16 }
+        { version: 16 },
+        { version: 17 }
       ]);
     } finally {
       await database.close();
@@ -438,7 +439,8 @@ describe("database bootstrap", () => {
         { version: 13, name: "failed_copy_symlink_cleanup" },
         { version: 14, name: "radarr_policy_and_refresh" },
         { version: 15, name: "radarr_copy_monitoring" },
-        { version: 16, name: "orphan_purge" }
+        { version: 16, name: "orphan_purge" },
+        { version: 17, name: "orphan_path_indexes" }
       ]);
     } finally {
       await database.close();

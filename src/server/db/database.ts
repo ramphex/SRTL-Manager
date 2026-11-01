@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 16;
+export const currentSchemaVersion = 17;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -600,6 +600,25 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END IF;
         END $$`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (16, 'orphan_purge', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(17)) {
+      await client.query("BEGIN");
+      try {
+        // Orphan review and purge checks look files up by path in both tables.
+        await client.query(`DO $$ BEGIN
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'media_links' AND column_name = 'target_path') THEN
+            CREATE INDEX IF NOT EXISTS media_links_target_path_idx ON media_links(target_path);
+          END IF;
+          IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'copy_operations' AND column_name = 'source_path') THEN
+            CREATE INDEX IF NOT EXISTS copy_operations_source_path_idx ON copy_operations(source_path);
+          END IF;
+        END $$`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (17, 'orphan_path_indexes', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -6,6 +6,7 @@ import { nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
+import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
 
 export { holdingFolderName };
@@ -14,7 +15,8 @@ export const purgeGraceMs = 24 * 60 * 60_000;
 // Remote files cannot be checked against their title folder, so the symlink inventory must be this fresh.
 const maxSymlinkInventoryAgeMs = 24 * 60 * 60_000;
 const sidecarExtensions = new Set([".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn"]);
-const unfinishedCopyStages = sql`('committed', 'failed', 'rolled_back')`;
+// Copy work that may still move or replace a file: in-flight stages, plus reconciliation records no later copy superseded.
+const unfinishedCopyCondition = sql`(copy_operations.stage not in ('committed', 'failed', 'rolled_back', 'reconciliation_required') or (${unresolvedCopyReconciliation()}))`;
 
 type OrphanRow = {
   id: number;
@@ -45,21 +47,25 @@ function errorCode(error: unknown): string | null {
 
 async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFileIds?: number[]): Promise<OrphanRow[]> {
   const idFilter = storageFileIds ? sql`and sf.id in (select jsonb_array_elements_text(${JSON.stringify(storageFileIds)}::jsonb)::integer)` : sql``;
+  // Set-based joins keep this to one pass over each table; per-row subqueries with OR took minutes on real libraries.
   return (
     await db.execute<OrphanRow>(sql`
+      with committed_sources as (
+        select distinct source_path as path from copy_operations where stage = 'committed'
+      ), active_paths as (
+        select distinct p as path
+        from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
+        where ${unfinishedCopyCondition} and p is not null
+      )
       select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms,
-        exists (select 1 from copy_operations co where co.source_path = sf.file_path and co.stage = 'committed') as copy_leftover,
-        exists (
-          select 1 from copy_operations co
-          where co.stage not in ${unfinishedCopyStages}
-            and sf.file_path in (co.source_path, co.destination_path, coalesce(co.temp_path, ''), coalesce(co.displaced_path, ''))
-        ) as active_copy
+        cs.path is not null as copy_leftover,
+        ap.path is not null as active_copy
       from storage_files sf
+      left join committed_sources cs on cs.path = sf.file_path
+      left join active_paths ap on ap.path = sf.file_path
       where sf.missing_since is null and sf.root_type = ${rootType} ${idFilter}
-        and not exists (
-          select 1 from media_links ml
-          where ml.missing_since is null and (ml.resolved_storage_file_id = sf.id or ml.target_path = sf.file_path)
-        )
+        and not exists (select 1 from media_links ml where ml.missing_since is null and ml.resolved_storage_file_id = sf.id)
+        and not exists (select 1 from media_links ml where ml.missing_since is null and ml.target_path = sf.file_path)
       order by sf.relative_path
     `)
   ).rows;
@@ -243,9 +249,9 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   if (linked) throw new Error("A symlink now points to this file; it is no longer an orphan");
   const activeCopy = (
     await db.execute<{ id: number }>(sql`
-      select id from copy_operations
-      where stage not in ${unfinishedCopyStages}
-        and ${operation.filePath} in (source_path, destination_path, coalesce(temp_path, ''), coalesce(displaced_path, ''))
+      select copy_operations.id from copy_operations
+      where ${unfinishedCopyCondition}
+        and ${operation.filePath} in (copy_operations.source_path, copy_operations.destination_path, coalesce(copy_operations.temp_path, ''), coalesce(copy_operations.displaced_path, ''))
       limit 1
     `)
   ).rows[0];

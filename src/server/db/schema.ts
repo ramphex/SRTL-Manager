@@ -151,7 +151,7 @@ export const mediaLinks = pgTable(
     lastSeenJobId: integer("last_seen_job_id"),
     updatedAt: text("updated_at").notNull()
   },
-  (table) => [uniqueIndex("media_links_link_path_idx").on(table.linkPath)]
+  (table) => [uniqueIndex("media_links_link_path_idx").on(table.linkPath), index("media_links_target_path_idx").on(table.targetPath)]
 );
 
 export const storageFiles = pgTable(
@@ -304,7 +304,7 @@ export const copyOperations = pgTable(
     updatedAt: text("updated_at").notNull(),
     completedAt: text("completed_at")
   },
-  (table) => [uniqueIndex("copy_operations_job_link_idx").on(table.jobId, table.mediaLinkId)]
+  (table) => [uniqueIndex("copy_operations_job_link_idx").on(table.jobId, table.mediaLinkId), index("copy_operations_source_path_idx").on(table.sourcePath)]
 );
 
 export const symlinkCleanupOperations = pgTable(
