@@ -7,7 +7,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 ## Highlights
 
 - Guided first-run account, path, section, policy, and initial-scan setup.
-- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans and exact target checks, plus categorized orphan review and purge with a restorable holding period.
+- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period.
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles.
 - Fast and deep audits across local and remote targets.
 - Bidirectional copies with live progress, transient transfer retry, conflict handling, configurable verification, source/title risk checks, and source media checks that reject hollow, zero-filled, truncated, or unreadable files before transferring.
@@ -80,6 +80,8 @@ The API receives read-only root mounts. The worker alone receives writable roots
 The single Compose worker service can host any positive number of independent job slots. Set `SRTL_WORKER_COUNT` to the desired slot count; there is no fixed two-worker ceiling. Jobs still pass database-backed admission, resource-claim, and lease checks, so adding slots does not allow two jobs to mutate the same managed resources.
 
 Settings > Advanced can keep selected symlink folders in one sequential scan job, the default, or queue one job per folder so independent folders use the available scan slots concurrently.
+
+Settings > Advanced also controls automatic scanning. By default, every symlink scan also queues the remote storage scan as a separate job, and the worker queues a full inventory scan once a day after 05:00 server time, starting the day after it is first deployed. A scan stops without changing the inventory when a storage root it depends on is unreadable or empty, as an unmounted NFS share or FUSE mount usually is, so a missing mount cannot mark links broken or files missing.
 
 The optional `SRTL_MAX_RUNNING_JOBS` setting limits total simultaneous jobs and must not exceed `SRTL_WORKER_COUNT`. `SRTL_MAX_RUNNING_SCANS`, `SRTL_MAX_RUNNING_AUDITS`, and `SRTL_MAX_RUNNING_COPIES` apply per-type limits, may be zero to pause that job type, and must not exceed the total-job limit. When omitted, the total limit follows the configured worker count and the per-type limits follow that total limit.
 

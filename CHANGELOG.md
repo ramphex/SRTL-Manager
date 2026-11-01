@@ -12,15 +12,24 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Added orphan purge for both storage locations: a review panel groups orphans into older or duplicate versions, copy leftovers, titles no longer in the library, SRTL leftovers, and unlinked files, with sizes, bulk selection, and a stale-inventory warning. Purges run as durable jobs that recheck every file immediately before touching it, can hold files in a restorable `.srtl-purged` area for a configurable period or delete them immediately, and clean up subtitles, artwork, and empty folders with the last video in a folder.
 - Added an option to delete the remote source after a verified, byte-compared copy to local when no other symlink uses it.
 - Added Radarr copy monitoring: copies to Location 1 can unmonitor movies in Radarr and copies back to Location 2 can monitor them again, once every file of the movie reaches the destination. A checkbox beside copy buttons defaults to a setting in Settings > Integrations.
+- Added a daily full inventory scan, on by default after 05:00 server time and configurable in Settings > Advanced. The worker queues it once a day through the configured folder scheduling, starting the day after the upgrade, and skips it while another scan is queued or running.
+- Symlink scans now queue the remote storage scan, usually a few seconds, as a separate job by default, so new downloads are inventoried with the links that point to them.
+- Added hollow file detection to storage scans: files of 50 MB or more with almost nothing stored on disk show a Hollow pill in storage views and are counted in the orphan review.
+- Added "Folders with no video" to the orphan review: folders left with only subtitles, artwork, samples, or nothing at all. They can be held or deleted with the same purge job, which walks each folder again right before touching it and skips it if a video, symlink, unfinished copy, or recent change appears.
+- The orphan review now warns when the storage inventory is unknown or more than 24 hours old. The warning does not block purges, which re-check every file.
 
 ### Fixed
 
+- Scans now stop with a clear message when a storage root they depend on is unreadable or empty, as an unmounted NFS share or FUSE mount is, instead of marking every link on it broken or every file on it missing.
+- A read error on the NAS no longer fails a local storage scan. Unreadable folders are retried once at the end, reported as warnings, and their files are not marked missing.
+- Links added after the last storage scan now resolve to a storage file: every symlink scan records the files its links point to, without marking any unseen file missing.
 - Copy jobs that partially failed no longer leave the replaced local versions of their successful copies behind; upgrades now clean up the previous local file even when another item in the same job fails. Year-numbered seasons such as `S1941E38` are now matched when detecting earlier local versions.
 
 ### Changed
 
 - Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
 - Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
+- Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
 
 ## [0.1.3] - 2026-09-03
 
