@@ -4019,6 +4019,10 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   padding: 10px 12px;
 }
 
+.panel-message.storage-stale-warning {
+  color: var(--warn);
+}
+
 .panel-message.action-progress {
   align-items: center;
   color: var(--muted-strong);

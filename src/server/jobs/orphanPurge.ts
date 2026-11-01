@@ -2,11 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { HeldOrphanFile, OrphanCategory, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
-import { nowIso, type Db, type DbExecutor } from "../db/database";
+import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
 import { isHollowAllocation } from "../lib/mediaIntegrity";
+import { getInventoryScanTimestamps } from "../lib/scanner";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
 
@@ -15,6 +16,7 @@ export { holdingFolderName };
 export const purgeGraceMs = 24 * 60 * 60_000;
 // Remote files cannot be checked against their title folder, so the symlink inventory must be this fresh.
 const maxSymlinkInventoryAgeMs = 24 * 60 * 60_000;
+const maxStorageInventoryAgeMs = 24 * 60 * 60_000;
 const sidecarExtensions = new Set([".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn"]);
 // Copy work that may still move or replace a file: in-flight stages, plus reconciliation records no later copy superseded.
 const unfinishedCopyCondition = sql`(copy_operations.stage not in ('committed', 'failed', 'rolled_back', 'reconciliation_required') or (${unresolvedCopyReconciliation()}))`;
@@ -123,11 +125,31 @@ export async function symlinkInventoryStaleness(db: DbExecutor, now = Date.now()
   return { at, warning: null };
 }
 
+// The oldest completed storage scan covering this root; a local section that was never scanned leaves it unknown.
+async function storageInventoryAt(db: Db, rootType: StorageRootType): Promise<string | null> {
+  const timestamps = await getInventoryScanTimestamps(db);
+  if (rootType === "remote") return timestamps.remoteRoot;
+  const sections = (await getSectionSettings(db)).sections;
+  const scanned = sections.map((section) => timestamps.localSections[section] ?? null);
+  if (scanned.length === 0 || scanned.some((timestamp) => !timestamp)) return null;
+  return (scanned as string[]).sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null;
+}
+
+function storageStaleness(at: string | null, now: number): string | null {
+  if (!at) return "Storage has not been fully scanned yet, so files added since are not listed. Purges still re-check every file before touching it.";
+  if (now - Date.parse(at) > maxStorageInventoryAgeMs) {
+    return "Storage was last scanned more than 24 hours ago, so files added since are not listed. Purges still re-check every file before touching it.";
+  }
+  return null;
+}
+
 export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDays: number, now = Date.now()): Promise<OrphanReview> {
-  const [rows, keys, staleness] = await Promise.all([orphanRows(db, rootType), linkedTitleKeys(db), symlinkInventoryStaleness(db, now)]);
-  const storageInventory = (
-    await db.execute<{ newest: string | null }>(sql`select max(last_seen_at) as newest from storage_files where root_type = ${rootType}`)
-  ).rows[0]?.newest ?? null;
+  const [rows, keys, staleness, storageInventory] = await Promise.all([
+    orphanRows(db, rootType),
+    linkedTitleKeys(db),
+    symlinkInventoryStaleness(db, now),
+    storageInventoryAt(db, rootType)
+  ]);
   const items: OrphanReviewItem[] = rows.map((row) => ({
     storageFileId: row.id,
     rootType,
@@ -154,7 +176,7 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     })
     .filter((entry) => entry.count > 0);
   const hollowCount = items.filter((item) => item.hollow).length;
-  return { rootType, items, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, holdDays };
+  return { rootType, items, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.

@@ -1878,10 +1878,15 @@ export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanT
   const localSectionTimestamps = new Map<string, string>();
   let remoteRoot: string | null = null;
 
+  // Scan runs keep their own options, so timestamps survive pruning of old job history.
   const completedScans = await dbAll<CompletedScanTimestampRow>(db, sql`
-    select sr.started_at as "startedAt", sr.finished_at as "finishedAt", j.progress as progress, j.options as options
+    select
+      sr.started_at as "startedAt",
+      sr.finished_at as "finishedAt",
+      coalesce(j.progress, '{}') as progress,
+      coalesce(nullif(sr.options, '{}'), j.options, '{}') as options
     from scan_runs sr
-    join jobs j on j.id = sr.job_id
+    left join jobs j on j.id = sr.job_id
     where sr.status = 'completed'
     order by sr.finished_at asc, sr.started_at asc
   `);
@@ -1932,11 +1937,12 @@ export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanT
     if (row.section && !symlinkSectionTimestamps.has(row.section)) setLatestTimestamp(symlinkSectionTimestamps, row.section, row.lastSeenAt);
   }
 
+  // Symlink scans refresh last_seen_at on link targets, so storage sightings only stand in for scans that predate scan run options.
   for (const row of localRows) {
-    if (row.section) setLatestTimestamp(localSectionTimestamps, row.section, row.lastSeenAt);
+    if (row.section && !localSectionTimestamps.has(row.section)) setLatestTimestamp(localSectionTimestamps, row.section, row.lastSeenAt);
   }
 
-  if (remoteRow?.lastSeenAt && (!remoteRoot || Date.parse(remoteRow.lastSeenAt) > Date.parse(remoteRoot))) remoteRoot = remoteRow.lastSeenAt;
+  if (!remoteRoot && remoteRow?.lastSeenAt) remoteRoot = remoteRow.lastSeenAt;
 
   return {
     symlinkSections: Object.fromEntries(symlinkSectionTimestamps),

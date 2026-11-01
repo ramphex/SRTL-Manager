@@ -41,7 +41,14 @@ const auditSettingsSchema = z.object({
 const advancedSettingsSchema = z.object({
   scan: z
     .object({
-      symlinkFolderScheduling: z.enum(["single_job", "per_folder"]).default("single_job")
+      symlinkFolderScheduling: z.enum(["single_job", "per_folder"]).default("single_job"),
+      includeRemoteWithSymlinkScans: z.boolean().default(true),
+      scheduledInventory: z
+        .object({
+          enabled: z.boolean().default(true),
+          hour: z.number().int().min(0).max(23).default(5)
+        })
+        .default(defaultScanJobBehaviorSettings.scheduledInventory)
     })
     .default(defaultScanJobBehaviorSettings),
   copy: z

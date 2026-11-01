@@ -632,6 +632,9 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           IF to_regclass('public.storage_files') IS NOT NULL THEN
             ALTER TABLE storage_files ADD COLUMN IF NOT EXISTS allocated_bytes BIGINT;
           END IF;
+          IF to_regclass('public.scan_runs') IS NOT NULL THEN
+            ALTER TABLE scan_runs ADD COLUMN IF NOT EXISTS options TEXT NOT NULL DEFAULT '{}';
+          END IF;
         END $$`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (18, 'scan_inventory_health', $1)`, [nowIso()]);
         await client.query("COMMIT");

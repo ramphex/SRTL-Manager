@@ -211,8 +211,17 @@ export interface AuditJobBehaviorSettings {
 
 export type SymlinkScanSchedulingMode = "single_job" | "per_folder";
 
+export interface ScheduledInventorySettings {
+  enabled: boolean;
+  // Hour of the day (0-23, server local time) after which the daily full scan is queued.
+  hour: number;
+}
+
 export interface ScanJobBehaviorSettings {
   symlinkFolderScheduling: SymlinkScanSchedulingMode;
+  // Queue the remote storage scan (seconds on a FUSE mount) alongside every symlink scan.
+  includeRemoteWithSymlinkScans: boolean;
+  scheduledInventory: ScheduledInventorySettings;
 }
 
 export interface CleanupSettings {
@@ -551,6 +560,8 @@ export interface OrphanReview {
   symlinkInventoryAt: string | null;
   storageInventoryAt: string | null;
   staleWarning: string | null;
+  // Informational only: purges re-check every file on disk.
+  storageStaleWarning: string | null;
   holdDays: number;
 }
 

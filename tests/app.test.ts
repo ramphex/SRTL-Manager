@@ -8,6 +8,7 @@ import { first, getJsonSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { CopyTransferLimiter } from "../src/server/jobs/copyLimiter";
 import { JobWorker } from "../src/server/jobs/jobRunner";
+import { scheduledInventoryLastRunKey, startScheduledInventoryScan } from "../src/server/jobs/scheduledScans";
 import type { AuditCommandRunner } from "../src/server/lib/auditor";
 import { readCopyFileIdentity, serializeCopyFileIdentity, type CopyCommandRunner, type CopyFileProgressReporter } from "../src/server/lib/copier";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
@@ -540,7 +541,7 @@ describe("api app", () => {
     const defaultAdvancedSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/advanced", headers: { cookie: String(setupCookie) } });
     expect(defaultAdvancedSettings.statusCode).toBe(200);
     expect(defaultAdvancedSettings.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job" },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
@@ -557,7 +558,7 @@ describe("api app", () => {
     });
     expect(saveAdvancedSettings.statusCode).toBe(200);
     expect(saveAdvancedSettings.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job" },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
       audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
@@ -574,7 +575,7 @@ describe("api app", () => {
     });
     expect(disableCopyVerification.statusCode).toBe(200);
     expect(disableCopyVerification.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job" },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
@@ -594,8 +595,9 @@ describe("api app", () => {
 
     const scan = await ctx.app.inject({ method: "POST", url: "/api/scans", headers: { cookie: String(setupCookie) } });
     expect(scan.statusCode).toBe(200);
-    expect(scan.json()).toEqual({ jobId: expect.any(Number), jobIds: [expect.any(Number)] });
-    expect(await ctx.jobs.terminate(scan.json<{ jobId: number }>().jobId)).toBe(true);
+    // The remote storage scan is queued alongside the symlink scan by default.
+    expect(scan.json()).toEqual({ jobId: expect.any(Number), jobIds: [expect.any(Number), expect.any(Number)] });
+    for (const queuedJobId of scan.json<{ jobIds: number[] }>().jobIds) expect(await ctx.jobs.terminate(queuedJobId)).toBe(true);
 
     const scopedScan = await ctx.app.inject({
       method: "POST",
@@ -611,6 +613,10 @@ describe("api app", () => {
         options: { scanSymlinks: true, scanLocal: false, scanRemote: false, sections: ["movies"], symlinkSections: ["movies"], localSections: ["movies"] }
       }
     });
+
+    const autoRemoteJobId = scopedScan.json<{ jobIds: number[] }>().jobIds[1];
+    expect(await ctx.jobs.getJob(autoRemoteJobId!)).toMatchObject({ options: expect.objectContaining({ scanSymlinks: false, scanRemote: true }) });
+    expect(await ctx.jobs.terminate(autoRemoteJobId!)).toBe(true);
 
     await fs.mkdir(path.join(tmpDir, "remote", "Release One"), { recursive: true });
     await fs.writeFile(path.join(tmpDir, "remote", "Release One", "remote.mkv"), "remote");
@@ -1118,7 +1124,7 @@ describe("api app", () => {
       url: "/api/settings/advanced",
       headers: { cookie },
       payload: {
-        scan: { symlinkFolderScheduling: "per_folder" },
+        scan: { symlinkFolderScheduling: "per_folder", includeRemoteWithSymlinkScans: false },
         copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
         audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
       }
@@ -1246,6 +1252,71 @@ describe("api app", () => {
       localSections: { shows: expect.any(String) },
       remoteRoot: expect.any(String)
     });
+  });
+
+  it("queues the remote storage scan alongside symlink scans as its own job", async () => {
+    await createAdminSession();
+    const symlinkOnly = { scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: ["movies"], localSections: [] };
+    const remoteOptions = { scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] };
+
+    const singleJob = await ctx.jobs.startScanJobs(symlinkOnly, "single_job");
+    expect(await Promise.all(singleJob.map((id) => ctx.jobs.getJob(id)))).toEqual([
+      expect.objectContaining({ exclusive: false, options: expect.objectContaining({ scanSymlinks: true, scanRemote: false, symlinkSections: ["movies"] }) }),
+      expect.objectContaining({ exclusive: false, options: expect.objectContaining(remoteOptions) })
+    ]);
+
+    // A remote scan is already queued, so a second symlink scan does not add another.
+    const second = await ctx.jobs.startScanJobs({ ...symlinkOnly, symlinkSections: ["shows"] }, "single_job");
+    expect(second).toHaveLength(1);
+    for (const id of [...singleJob, ...second]) await ctx.jobs.terminate(id);
+
+    const perFolder = await ctx.jobs.startScanJobs({ ...symlinkOnly, symlinkSections: ["movies", "shows"] }, "per_folder");
+    const perFolderJobs = await Promise.all(perFolder.map((id) => ctx.jobs.getJob(id)));
+    expect(perFolderJobs.map((job) => job?.options)).toEqual([
+      expect.objectContaining({ scanSymlinks: true, symlinkSections: ["movies"] }),
+      expect.objectContaining({ scanSymlinks: true, symlinkSections: ["shows"] }),
+      expect.objectContaining(remoteOptions)
+    ]);
+    for (const id of perFolder) await ctx.jobs.terminate(id);
+
+    await fs.mkdir(path.join(tmpDir, "plex", "movies", "Title"), { recursive: true });
+    await fs.mkdir(path.join(tmpDir, "remote", "Title"), { recursive: true });
+    await fs.writeFile(path.join(tmpDir, "remote", "Title", "title.mkv"), "title");
+    await fs.symlink(path.join(tmpDir, "remote", "Title", "title.mkv"), path.join(tmpDir, "plex", "movies", "Title", "title.mkv"));
+    await setSetting(ctx.database.db, "advancedSettings", { scan: { includeRemoteWithSymlinkScans: false } });
+    const [initial] = await ctx.jobs.startScanJobs(symlinkOnly, "single_job");
+    await expect(runQueuedJob(initial!)).resolves.toMatchObject({ status: "completed" });
+    await setSetting(ctx.database.db, "advancedSettings", {});
+    expect(await ctx.jobs.startScanJobs({ ...symlinkOnly, titleScopes: [{ section: "movies", itemName: "Title" }] }, "single_job")).toHaveLength(1);
+  });
+
+  it("queues the daily inventory scan once after the configured server hour", async () => {
+    await createAdminSession();
+    const at = (hour: number, day = 2) => new Date(2026, 10, day, hour, 30);
+
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(4))).toBeNull();
+    const queued = await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(5));
+    expect(queued).toHaveLength(1);
+    expect(await ctx.jobs.getJob(queued![0]!)).toMatchObject({
+      status: "queued",
+      options: expect.objectContaining({ scanSymlinks: true, scanLocal: true, scanRemote: true, symlinkSections: ["movies", "shows"], localSections: ["movies", "shows"] })
+    });
+    expect(await getJsonSetting(ctx.database.db, scheduledInventoryLastRunKey, null)).toBe("2026-11-02");
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(23))).toBeNull();
+
+    // The next day's run finds the previous scan still queued and skips quietly until it can be admitted.
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(6, 3))).toBeNull();
+    expect(await getJsonSetting(ctx.database.db, scheduledInventoryLastRunKey, null)).toBe("2026-11-02");
+    await ctx.jobs.terminate(queued![0]!);
+
+    await setSetting(ctx.database.db, "advancedSettings", { scan: { symlinkFolderScheduling: "per_folder", scheduledInventory: { enabled: true, hour: 2 } } });
+    const perFolder = await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(3, 3));
+    expect(perFolder).toHaveLength(5);
+    expect(await getJsonSetting(ctx.database.db, scheduledInventoryLastRunKey, null)).toBe("2026-11-03");
+    for (const id of perFolder!) await ctx.jobs.terminate(id);
+
+    await setSetting(ctx.database.db, "advancedSettings", { scan: { scheduledInventory: { enabled: false, hour: 0 } } });
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(12, 4))).toBeNull();
   });
 
   it("fails a storage scan instead of marking files missing when the root looks unmounted", async () => {

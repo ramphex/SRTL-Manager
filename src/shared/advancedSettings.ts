@@ -27,7 +27,9 @@ export const defaultAuditJobBehaviorSettings: AuditJobBehaviorSettings = {
 };
 
 export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
-  symlinkFolderScheduling: "single_job"
+  symlinkFolderScheduling: "single_job",
+  includeRemoteWithSymlinkScans: true,
+  scheduledInventory: { enabled: true, hour: 5 }
 };
 
 export const defaultCleanupSettings: CleanupSettings = {
@@ -70,8 +72,15 @@ function normalizeAuditBehavior(value: unknown): AuditJobBehaviorSettings {
 
 function normalizeScanBehavior(value: unknown): ScanJobBehaviorSettings {
   const record = isRecord(value) ? value : {};
+  const scheduled = isRecord(record.scheduledInventory) ? record.scheduledInventory : {};
+  const hour = Number(scheduled.hour);
   return {
-    symlinkFolderScheduling: record.symlinkFolderScheduling === "per_folder" ? "per_folder" : "single_job"
+    symlinkFolderScheduling: record.symlinkFolderScheduling === "per_folder" ? "per_folder" : "single_job",
+    includeRemoteWithSymlinkScans: record.includeRemoteWithSymlinkScans !== false,
+    scheduledInventory: {
+      enabled: scheduled.enabled !== false,
+      hour: Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : defaultScanJobBehaviorSettings.scheduledInventory.hour
+    }
   };
 }
 

@@ -308,6 +308,7 @@ describe("job scheduler", () => {
       )
       .onConflictDoNothing();
 
+    await setSetting(ctx.database.db, "advancedSettings", { scan: { includeRemoteWithSymlinkScans: false } });
     const jobIds = await ctx.jobs.startScanJobs(
       {
         scanSymlinks: true,

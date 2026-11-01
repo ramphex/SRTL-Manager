@@ -126,6 +126,37 @@ describe("orphan review", () => {
   });
 });
 
+describe("orphan review storage freshness", () => {
+  async function completedScan(options: Record<string, unknown>, finishedAt: Date) {
+    const timestamp = finishedAt.toISOString();
+    const [job] = await app.database.db.insert(schema.jobs).values({ type: "scan", status: "completed", createdAt: timestamp, finishedAt: timestamp, progress: "{}", options: "{}" }).returning();
+    const totals = { totalLinks: 0, remoteLinks: 0, localLinks: 0, brokenLinks: 0, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 0, assignedRemoteLinks: 0 };
+    await app.database.db.insert(schema.scanRuns).values({ jobId: job!.id, status: "completed", options: JSON.stringify(options), startedAt: timestamp, finishedAt: timestamp, ...totals });
+  }
+
+  it("warns when storage scans are missing or older than a day without blocking purges", async () => {
+    // Recent sightings from symlink scans do not count as storage scans once scan runs exist.
+    await storageFile("local", "movies/Gone (1999)/Gone (1999).mkv");
+    await storageFile("remote", "Some.Release/release.mkv");
+    await completedScan({ scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["movies"] }, new Date(Date.now() - 2 * 86_400_000));
+
+    let local = await listOrphanReview(app.database.db, "local", 7);
+    expect(local).toMatchObject({ storageInventoryAt: null, storageStaleWarning: expect.stringContaining("not been fully scanned") });
+
+    await completedScan({ scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["shows"] }, new Date(Date.now() - 3_600_000));
+    local = await listOrphanReview(app.database.db, "local", 7);
+    expect(Date.now() - Date.parse(local.storageInventoryAt!)).toBeGreaterThan(86_400_000);
+    expect(local.storageStaleWarning).toContain("more than 24 hours ago");
+
+    await completedScan({ scanSymlinks: false, scanLocal: true, scanRemote: true, localSections: ["movies", "shows"] }, new Date());
+    local = await listOrphanReview(app.database.db, "local", 7);
+    expect(local.storageStaleWarning).toBeNull();
+    const remote = await listOrphanReview(app.database.db, "remote", 7);
+    expect(remote).toMatchObject({ storageInventoryAt: expect.any(String), storageStaleWarning: null });
+    expect(remote.items).toHaveLength(1);
+  });
+});
+
 describe("orphan purge", () => {
   beforeEach(async () => {
     const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");

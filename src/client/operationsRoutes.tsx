@@ -754,9 +754,13 @@ function AdvancedSettingsPanel() {
     setDraft((current) => ({ ...current, cleanup: { ...current.cleanup, ...patch } }));
   }
 
-  function updateScanScheduling(symlinkFolderScheduling: SymlinkScanSchedulingMode) {
+  function updateScan(patch: Partial<AdvancedSettings["scan"]>) {
     setMessage(null);
-    setDraft((current) => ({ ...current, scan: { symlinkFolderScheduling } }));
+    setDraft((current) => ({ ...current, scan: { ...current.scan, ...patch } }));
+  }
+
+  function updateScanScheduling(symlinkFolderScheduling: SymlinkScanSchedulingMode) {
+    updateScan({ symlinkFolderScheduling });
   }
 
   const copyVerificationDisabled = !draft.copy.byteCompare && draft.copy.mediaValidation === "off";
@@ -804,6 +808,44 @@ function AdvancedSettingsPanel() {
             </button>
           </div>
           <p className="section-settings-help">Parallel scans finish independent scopes sooner but increase filesystem and mounted-storage activity.</p>
+          <div className="advanced-settings-grid">
+            <label className="advanced-toggle">
+              <input
+                type="checkbox"
+                checked={draft.scan.includeRemoteWithSymlinkScans}
+                onChange={(event) => updateScan({ includeRemoteWithSymlinkScans: event.target.checked })}
+              />
+              <span>
+                <strong>Scan remote storage with every symlink scan</strong>
+                <small>Queues the remote storage scan, usually a few seconds, alongside symlink folder scans so new downloads are inventoried.</small>
+              </span>
+            </label>
+            <label className="advanced-toggle">
+              <input
+                type="checkbox"
+                checked={draft.scan.scheduledInventory.enabled}
+                onChange={(event) => updateScan({ scheduledInventory: { ...draft.scan.scheduledInventory, enabled: event.target.checked } })}
+              />
+              <span>
+                <strong>Run a full inventory scan every day</strong>
+                <small>Scans all symlink folders, local folders, and remote storage once a day, using the scheduling above.</small>
+              </span>
+            </label>
+            <label className="advanced-field">
+              <span>Daily scan starts after (server time)</span>
+              <select
+                value={draft.scan.scheduledInventory.hour}
+                disabled={!draft.scan.scheduledInventory.enabled}
+                onChange={(event) => updateScan({ scheduledInventory: { ...draft.scan.scheduledInventory, hour: Number(event.target.value) } })}
+              >
+                {Array.from({ length: 24 }, (_unused, hour) => (
+                  <option key={hour} value={hour}>
+                    {String(hour).padStart(2, "0")}:00
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
         </section>
 
         <section className="advanced-settings-section">

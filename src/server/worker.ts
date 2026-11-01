@@ -4,7 +4,8 @@ import { loadConfig } from "./config";
 import { getJsonSetting, nowIso, openDatabase } from "./db/database";
 import type { PathsSettings } from "../shared/types";
 import { CopyTransferLimiter } from "./jobs/copyLimiter";
-import { JobWorker } from "./jobs/jobRunner";
+import { JobRunner, JobWorker } from "./jobs/jobRunner";
+import { startScheduledInventoryScan } from "./jobs/scheduledScans";
 import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
@@ -83,6 +84,9 @@ let maintenanceRun: Promise<void> | null = null;
 let workerRun: Promise<void> | null = null;
 let radarrTimer: NodeJS.Timeout | null = null;
 let radarrRun: Promise<void> | null = null;
+let scheduledScanTimer: NodeJS.Timeout | null = null;
+let scheduledScanRun: Promise<void> | null = null;
+const scheduledScanRunner = new JobRunner(database.db);
 try {
   await recordHeartbeat("running");
   // A shutdown signal may arrive while the initial database write is in flight.
@@ -95,6 +99,20 @@ try {
         .finally(() => { radarrRun = null; });
     }, 5000);
     radarrTimer.unref();
+    scheduledScanTimer = setInterval(() => {
+      if (shuttingDown || scheduledScanRun) return;
+      scheduledScanRun = startScheduledInventoryScan(database.db, scheduledScanRunner)
+        .then((jobIds) => {
+          if (jobIds) console.warn(`Queued the scheduled inventory scan as job${jobIds.length === 1 ? "" : "s"} ${jobIds.map((id) => `#${id}`).join(", ")}.`);
+        })
+        .catch((error: unknown) => {
+          console.error("Scheduled inventory scan could not be queued; it will be retried.", error);
+        })
+        .finally(() => {
+          scheduledScanRun = null;
+        });
+    }, 5 * 60 * 1_000);
+    scheduledScanTimer.unref();
     heartbeatTimer = setInterval(() => {
       if (shuttingDown || heartbeatRun) return;
       heartbeatRun = recordHeartbeat("running")
@@ -125,10 +143,12 @@ try {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   if (radarrTimer) clearInterval(radarrTimer);
+  if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
   await maintenanceRun;
   await radarrRun;
+  await scheduledScanRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);
   });

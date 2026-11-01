@@ -376,6 +376,8 @@ export const scanRuns = pgTable("scan_runs", {
   id: serial("id").primaryKey(),
   jobId: integer("job_id").notNull(),
   status: text("status").notNull(),
+  // Normalized scan options as JSON, kept so scan timestamps survive job history pruning.
+  options: text("options").notNull().default("{}"),
   startedAt: text("started_at").notNull(),
   finishedAt: text("finished_at"),
   errorMessage: text("error_message"),

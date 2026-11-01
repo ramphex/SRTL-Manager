@@ -97,6 +97,11 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
             <TriangleAlert size={14} /> {review.data.staleWarning}
           </p>
         ) : null}
+        {review.data?.storageStaleWarning ? (
+          <p className="panel-message storage-stale-warning">
+            <TriangleAlert size={14} /> {review.data.storageStaleWarning}
+          </p>
+        ) : null}
         {review.data ? (
           <>
             <div className="orphan-categories" role="group" aria-label="Orphan categories">

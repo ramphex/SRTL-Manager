@@ -87,6 +87,14 @@ export class LeaseLostError extends Error {
   }
 }
 
+// A scan for the same scope is already queued or running.
+export class ScanAdmissionConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ScanAdmissionConflictError";
+  }
+}
+
 class PartialJobFailureError extends Error {
   constructor(message: string) {
     super(message);
@@ -2245,7 +2253,7 @@ async function assertNoActiveSymlinkScanForSections(db: DbExecutor, sections: st
     LIMIT 1
   `);
   if (!conflict) return;
-  throw new Error(`Symlink folder "${conflict.section}" already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
+  throw new ScanAdmissionConflictError(`Symlink folder "${conflict.section}" already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
 }
 
 async function assertNoActiveStorageScanForClaims(db: DbExecutor, claims: ResourceClaim[]): Promise<void> {
@@ -2269,7 +2277,7 @@ async function assertNoActiveStorageScanForClaims(db: DbExecutor, claims: Resour
   if (!conflict) return;
   const [rootType, section] = JSON.parse(conflict.resourceKey) as ["local" | "remote", string];
   const label = rootType === "remote" ? "Remote storage root" : `Local folder "${section}"`;
-  throw new Error(`${label} already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
+  throw new ScanAdmissionConflictError(`${label} already has scan job #${conflict.jobId} ${conflict.status}. Wait for it to finish or terminate it before queuing another scan.`);
 }
 
 export class JobRunner {
@@ -2607,15 +2615,31 @@ export class JobRunner {
   }
 
   async startScanJobs(options: ScanOptions, scheduling: SymlinkScanSchedulingMode): Promise<number[]> {
-    const normalizedOptions = await normalizeScanOptions(this.db, options);
+    const requestedOptions = await normalizeScanOptions(this.db, options);
+    const includeRemote =
+      requestedOptions.scanSymlinks &&
+      !requestedOptions.scanRemote &&
+      !requestedOptions.titleScopes?.length &&
+      normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).scan.includeRemoteWithSymlinkScans &&
+      !(await this.storageScanActive([{ resourceType: "inventory_scope", resourceKey: JSON.stringify(["remote", "*"]), access: "exclusive" }]));
+    if (includeRemote && scheduling !== "per_folder") {
+      // A separate remote job keeps a symlink scan from becoming one exclusive combined scan.
+      const jobIds = [await this.startScan(requestedOptions)];
+      try {
+        jobIds.push(await this.startScan({ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] }));
+      } catch (error) {
+        if (!(error instanceof ScanAdmissionConflictError)) throw error;
+      }
+      return jobIds;
+    }
+    const normalizedOptions = includeRemote ? { ...requestedOptions, scanRemote: true } : requestedOptions;
     if (scheduling !== "per_folder" || normalizedOptions.titleScopes?.length) return [await this.startScan(normalizedOptions)];
 
     const selectedSymlinkSections = normalizedOptions.scanSymlinks ? normalizedOptions.symlinkSections ?? [] : [];
     const selectedLocalSections = normalizedOptions.scanLocal ? normalizedOptions.localSections ?? [] : [];
     const orderedSections = [...new Set([...selectedSymlinkSections, ...selectedLocalSections])];
-    const splitJobs: ScanOptions[] = normalizedOptions.scanRemote
-      ? [{ scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] }]
-      : [];
+    const remoteJob: ScanOptions = { scanSymlinks: false, scanLocal: false, scanRemote: true, symlinkSections: [], localSections: [] };
+    const splitJobs: ScanOptions[] = requestedOptions.scanRemote ? [remoteJob] : [];
     for (const section of orderedSections) {
       if (selectedSymlinkSections.includes(section)) {
         splitJobs.push({ scanSymlinks: true, scanLocal: false, scanRemote: false, symlinkSections: [section], localSections: [] });
@@ -2624,6 +2648,8 @@ export class JobRunner {
         splitJobs.push({ scanSymlinks: false, scanLocal: true, scanRemote: false, symlinkSections: [], localSections: [section] });
       }
     }
+    // The automatically added remote scan goes last so the first job id stays the requested scan.
+    if (includeRemote) splitJobs.push(remoteJob);
     if (splitJobs.length <= 1) return [await this.startScan(normalizedOptions)];
 
     return this.enqueuePreparedJobs("scan", async (transaction) => {
@@ -2633,6 +2659,16 @@ export class JobRunner {
       for (const scanOptions of splitJobs) prepared.push(await prepareScanJob(transaction, scanOptions));
       return prepared;
     });
+  }
+
+  private async storageScanActive(claims: ResourceClaim[]): Promise<boolean> {
+    try {
+      await assertNoActiveStorageScanForClaims(this.db, claims);
+      return false;
+    } catch (error) {
+      if (error instanceof ScanAdmissionConflictError) return true;
+      throw error;
+    }
   }
 
   async startAudit(input: AuditMode | AuditOptions): Promise<number> {
@@ -3700,7 +3736,7 @@ export class JobWorker {
       first(
         leaseDb
           .insert(schema.scanRuns)
-          .values({ jobId, status: "running", startedAt: nowIso(), finishedAt: null, errorMessage: null, ...emptyScanTotals() })
+          .values({ jobId, status: "running", options: JSON.stringify(normalizedOptions), startedAt: nowIso(), finishedAt: null, errorMessage: null, ...emptyScanTotals() })
           .returning({ id: schema.scanRuns.id })
       )
     );
