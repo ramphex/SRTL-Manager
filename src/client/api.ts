@@ -39,7 +39,10 @@ import type {
   StorageLocationNamesUpdate,
   StorageLocationsSettings,
   StorageRootType,
-  UserPreferences
+  UserPreferences,
+  HeldOrphanFile,
+  OrphanPurgeMode,
+  OrphanReview
 } from "../shared/types";
 
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrSettingsInput, RadarrState } from "../shared/radarr";
@@ -147,6 +150,12 @@ export const api = {
     return request<MediaLinkTree>(`/api/media-links/tree?${search.toString()}`);
   },
   storageFiles: (rootType: StorageRootType, orphan = false) => request<StorageFileRow[]>(`/api/storage-files?rootType=${rootType}${orphan ? "&orphan=true" : ""}`),
+  orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
+  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; mode: OrphanPurgeMode }) =>
+    request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
+  heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
+  restoreHeldOrphans: (operationIds: number[]) =>
+    request<{ restored: number; errors: string[] }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),
   storageFileTree: (params: { rootType: StorageRootType; prefix?: string; orphan?: boolean }) => {
     const search = new URLSearchParams({ rootType: params.rootType });
     if (params.prefix) search.set("prefix", params.prefix);

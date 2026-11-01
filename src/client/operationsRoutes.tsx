@@ -749,6 +749,11 @@ function AdvancedSettingsPanel() {
     setDraft((current) => ({ ...current, audit: { ...current.audit, ...patch } }));
   }
 
+  function updateCleanup(patch: Partial<AdvancedSettings["cleanup"]>) {
+    setMessage(null);
+    setDraft((current) => ({ ...current, cleanup: { ...current.cleanup, ...patch } }));
+  }
+
   function updateScanScheduling(symlinkFolderScheduling: SymlinkScanSchedulingMode) {
     setMessage(null);
     setDraft((current) => ({ ...current, scan: { symlinkFolderScheduling } }));
@@ -763,7 +768,8 @@ function AdvancedSettingsPanel() {
         ...(draft.copy.byteCompare ? ["Byte compare source and destination"] : ["Byte compare skipped"]),
         copyPipelineLabels[draft.copy.mediaValidation],
         "Promote verified file",
-        "Repoint symlink"
+        "Repoint symlink",
+        ...(draft.cleanup.deleteRemoteSourceAfterCopy && draft.copy.byteCompare ? ["Delete remote source after copies to local"] : [])
       ];
   const isCustomCopyProfile = draft.copy.profile === "custom";
   const selectedMediaValidation = mediaValidationOptions.find((option) => option.value === draft.copy.mediaValidation);
@@ -907,6 +913,41 @@ function AdvancedSettingsPanel() {
               </span>
             </label>
           </div>
+        </section>
+
+        <section className="advanced-settings-section">
+          <div className="advanced-settings-heading">
+            <div>
+              <h3>Cleanup</h3>
+              <p>Controls how purged orphans are held and whether remote copies are removed after a verified copy to local.</p>
+            </div>
+          </div>
+          <div className="advanced-settings-grid">
+            <label className="advanced-field">
+              <span>Hold purged orphans for</span>
+              <select value={draft.cleanup.holdDays} onChange={(event) => updateCleanup({ holdDays: Number(event.target.value) })}>
+                {[1, 3, 7, 14, 30, 60, 90].map((days) => (
+                  <option key={days} value={days}>
+                    {days} {days === 1 ? "day" : "days"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="advanced-toggle">
+              <input
+                type="checkbox"
+                checked={draft.cleanup.deleteRemoteSourceAfterCopy}
+                onChange={(event) => updateCleanup({ deleteRemoteSourceAfterCopy: event.target.checked })}
+              />
+              <span>
+                <strong>Delete the remote source after a verified copy to local</strong>
+                <small>Runs when the copy job finishes, only after a byte-compared copy, and never when another symlink still uses the remote file. Applies to copies queued after saving.</small>
+              </span>
+            </label>
+          </div>
+          {draft.cleanup.deleteRemoteSourceAfterCopy && !draft.copy.byteCompare ? (
+            <p className="panel-message action-error" role="alert">Remote sources are kept while copy verification skips byte comparison.</p>
+          ) : null}
         </section>
 
         <section className="advanced-settings-section">
@@ -1290,6 +1331,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "audit", label: "Audits" },
   { value: "copy", label: "Copies" },
   { value: "symlink_cleanup", label: "Symlink cleanups" },
+  { value: "orphan_purge", label: "Orphan purges" },
   { value: "path_migration", label: "Path migrations" },
 ];
 

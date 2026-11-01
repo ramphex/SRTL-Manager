@@ -542,7 +542,8 @@ describe("api app", () => {
     expect(defaultAdvancedSettings.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
-      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
     });
 
     const saveAdvancedSettings = await ctx.app.inject({
@@ -558,7 +559,8 @@ describe("api app", () => {
     expect(saveAdvancedSettings.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
-      audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false }
+      audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false },
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
     });
 
     const disableCopyVerification = await ctx.app.inject({
@@ -574,7 +576,8 @@ describe("api app", () => {
     expect(disableCopyVerification.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job" },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
-      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false }
     });
 
     const invalidAdvancedSettings = await ctx.app.inject({

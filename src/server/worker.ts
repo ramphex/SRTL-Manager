@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import { loadConfig } from "./config";
-import { nowIso, openDatabase } from "./db/database";
+import { getJsonSetting, nowIso, openDatabase } from "./db/database";
+import type { PathsSettings } from "../shared/types";
 import { CopyTransferLimiter } from "./jobs/copyLimiter";
 import { JobWorker } from "./jobs/jobRunner";
 import { workerProcessLockKey } from "./jobs/scheduling";
@@ -9,6 +10,7 @@ import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
 import { processRadarrWork, radarrMediaExpectation } from "./lib/radarr";
+import { expireHeldOrphans } from "./jobs/orphanPurge";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
@@ -21,6 +23,8 @@ async function runDataMaintenance(): Promise<void> {
   await pruneWorkerHeartbeatHistory(database.db);
   await pruneExpiredSessions(database.db);
   await pruneTerminalJobHistory(database.db, config.jobHistoryRetentionDays);
+  const expired = await expireHeldOrphans(database.db, await getJsonSetting<PathsSettings>(database.db, "paths", config.paths));
+  if (expired > 0) console.warn(`Permanently deleted ${expired} purged orphan file(s) whose holding period ended.`);
 }
 try {
   const workerLockResult = await workerProcessLock.query<{ acquired: boolean }>("select pg_try_advisory_lock($1) as acquired", [workerProcessLockKey]);

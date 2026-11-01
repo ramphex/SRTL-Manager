@@ -12,6 +12,7 @@ import { type AuditOptions, type AuditSettings, type InventorySummary, type JobR
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
+import { OrphanReviewPanel } from "./orphanReview";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
 
 function stripLegacyScanSections(options: ScanOptions): ScanOptions {
@@ -2024,6 +2025,8 @@ export function LibraryPage() {
           onRemove={(id) => removePolicy.mutate(id)}
         />
       ) : (
+        <>
+        {orphanOnly ? <OrphanReviewPanel rootType={storageRoot} rootLabel={storageRoot === "local" ? localName : remoteName} /> : null}
         <StorageFileBrowser
           rootType={storageRoot}
           orphanOnly={orphanOnly}
@@ -2032,6 +2035,7 @@ export function LibraryPage() {
           isLoading={storageTree.isLoading || storageTree.isFetching}
           onPrefixChange={setStoragePrefix}
         />
+        </>
       )}
       <AuditDialog prompt={auditPrompt} onClose={() => setAuditPrompt(null)} />
       <CopyDialog prompt={copyPrompt} onClose={() => setCopyPrompt(null)} />

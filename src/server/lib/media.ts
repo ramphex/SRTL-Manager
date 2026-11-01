@@ -18,6 +18,9 @@ const mediaExtensions = new Set([
   ".wmv"
 ]);
 
+// Purged orphans wait out their holding period here, inside each storage root.
+export const holdingFolderName = ".srtl-purged";
+
 export function isMediaFile(filePath: string): boolean {
   return mediaExtensions.has(path.extname(filePath).toLowerCase());
 }

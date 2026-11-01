@@ -20,6 +20,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
+import { executeOrphanPurgeOperation, operationsForJob, purgeableOrphans, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -59,13 +60,15 @@ import type {
   ScanOptions,
   ScanTitleScope,
   StoragePolicyKind,
+  OrphanPurgeMode,
   StorageRootType,
   SymlinkCleanupOptions,
   SymlinkScanSchedulingMode
 } from "../../shared/types";
 
 type JobRow = typeof schema.jobs.$inferSelect;
-type StoredCopyOptions = CopyOptions & { behavior?: CopyJobBehaviorSettings };
+// deleteRemoteSource is frozen at admission so a settings change never alters a queued copy.
+type StoredCopyOptions = CopyOptions & { behavior?: CopyJobBehaviorSettings; deleteRemoteSource?: boolean };
 type CopyProgressStage = CopyProgressUpdate["stage"] | "queued" | "done" | "skipped" | "conflict" | "partially_failed" | "failed" | "completed" | "cancelled";
 const maxSelectionTitlesPerJob = 100;
 const maxAdvisorySelectionLinkIds = 1_000;
@@ -122,6 +125,14 @@ interface PreparedJob {
     mediaLinkId: number;
     linkPath: string;
     expectedTargetPath: string;
+  }>;
+  orphanPurgeOperations?: Array<{
+    storageFileId: number;
+    rootType: StorageRootType;
+    filePath: string;
+    sizeBytes: number;
+    mtimeMs: number;
+    mode: OrphanPurgeMode;
   }>;
 }
 
@@ -437,7 +448,8 @@ function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCop
     ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
     ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
     ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {}),
-    ...(behavior ? { behavior } : {})
+    ...(behavior ? { behavior } : {}),
+    ...(options.deleteRemoteSource === true && options.direction === "to_local" ? { deleteRemoteSource: true } : {})
   };
 }
 
@@ -1177,6 +1189,44 @@ async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyO
     sourceTitleRisks,
     totalSourceTitleBlocks: sourceTitleRisks.length
   };
+}
+
+// Deletes a copy's remote source only when it is provably the file that was verified and nothing else uses it.
+async function deleteVerifiedRemoteSource(db: DbExecutor, paths: PathsSettings, operation: typeof schema.copyOperations.$inferSelect): Promise<boolean> {
+  const sourcePath = path.resolve(operation.sourcePath);
+  if (!paths.remoteDir || !isPathInside(paths.remoteDir, sourcePath)) throw new Error("source is outside the remote root");
+  const stat = await fs.lstat(sourcePath).catch((error: unknown) => {
+    if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return null;
+    throw error;
+  });
+  if (!stat) return false;
+  if (!stat.isFile()) throw new Error("source is no longer a regular file");
+  if (operation.sizeBytes !== null && stat.size !== Number(operation.sizeBytes)) throw new Error("source changed after the copy was verified");
+  const user = (
+    await db.execute<{ id: number }>(sql`
+      select ml.id from media_links ml
+      left join storage_files sf on sf.id = ml.resolved_storage_file_id
+      where ml.missing_since is null and (ml.target_path = ${sourcePath} or sf.file_path = ${sourcePath})
+      limit 1
+    `)
+  ).rows[0];
+  if (user) throw new Error("another symlink still points to it");
+  const activeCopy = (
+    await db.execute<{ id: number }>(sql`
+      select id from copy_operations
+      where id <> ${operation.id} and stage not in ('committed', 'failed', 'rolled_back')
+        and ${sourcePath} in (source_path, destination_path, coalesce(temp_path, ''), coalesce(displaced_path, ''))
+      limit 1
+    `)
+  ).rows[0];
+  if (activeCopy) throw new Error("another copy is using it");
+  await assertExistingPathInside(paths.remoteDir, sourcePath, "Remote source");
+  await withFilesystemTimeout(fs.unlink(sourcePath), `Deleting remote source ${sourcePath}`);
+  const timestamp = nowIso();
+  await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.filePath, sourcePath));
+  // Copy history would otherwise offer this source for a later copy back to remote.
+  await db.delete(schema.copySources).where(eq(schema.copySources.sourcePath, sourcePath));
+  return true;
 }
 
 async function removeLocalConflictCandidates(
@@ -2368,6 +2418,18 @@ export class JobRunner {
             }))
           );
         }
+        const purgeOperations = prepared.orphanPurgeOperations ?? [];
+        for (let offset = 0; offset < purgeOperations.length; offset += 500) {
+          await transaction.insert(schema.orphanPurgeOperations).values(
+            purgeOperations.slice(offset, offset + 500).map((operation) => ({
+              jobId: row.id,
+              ...operation,
+              stage: "planned",
+              createdAt: timestamp,
+              updatedAt: timestamp
+            }))
+          );
+        }
         const cleanupOperations = prepared.symlinkCleanupOperations ?? [];
         for (let offset = 0; offset < cleanupOperations.length; offset += 500) {
           await transaction.insert(schema.symlinkCleanupOperations).values(
@@ -2606,7 +2668,11 @@ export class JobRunner {
     const claimedLinks = normalizedOptions.linkIds === undefined ? orderedSelectedLinks : filterCopySelectedLinks(links, normalizedOptions);
     const optionsWithResolvedLinks = { ...normalizedOptions, linkIds: orderedSelectedLinks.map((link) => link.id) };
     const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
-    const storedOptions: StoredCopyOptions = { ...optionsWithResolvedLinks, behavior: advancedSettings.copy };
+    const storedOptions: StoredCopyOptions = {
+      ...optionsWithResolvedLinks,
+      behavior: advancedSettings.copy,
+      ...(normalizedOptions.direction === "to_local" && advancedSettings.cleanup.deleteRemoteSourceAfterCopy ? { deleteRemoteSource: true } : {})
+    };
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
     const replacementClaims = await copyReplacementResourceClaims(this.db, orderedSelectedLinks, paths, optionsWithResolvedLinks);
@@ -2639,6 +2705,43 @@ export class JobRunner {
 
   async copyFailures(jobId: number): Promise<CopyFailureList> {
     return (await resolveCopyFailures(this.db, jobId)).list;
+  }
+
+  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode): Promise<number> {
+    const requested = [...new Set(storageFileIds)];
+    if (requested.length === 0 || requested.some((id) => !Number.isInteger(id) || id < 1)) throw new Error("Choose at least one orphan file to purge");
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    const root = rootPathFor(paths, rootType);
+    if (!root) throw new Error("Storage path settings are incomplete");
+    return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
+      const staleness = await symlinkInventoryStaleness(transaction);
+      if (staleness.warning) throw new Error(staleness.warning);
+      const { eligible, rejected } = await purgeableOrphans(transaction, rootType, requested);
+      if (rejected.length > 0) {
+        throw new Error(`Some selected files cannot be purged: ${rejected.slice(0, 5).join("; ")}${rejected.length > 5 ? ` and ${rejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
+      }
+      const claims: ResourceClaim[] = inventoryScopeResourceClaims(rootType, eligible.map((row) => row.section), "shared");
+      for (let offset = 0; offset < eligible.length; offset += 16) {
+        const batch = eligible.slice(offset, offset + 16);
+        const pathClaims = await Promise.all(batch.map((row) => managedPathResourceClaims(root, row.file_path, "Orphan purge claim", "exclusive", true)));
+        claims.push(...pathClaims.flat());
+      }
+      const options = { rootType, mode, total: eligible.length };
+      return {
+        progress: { options, current: 0, total: eligible.length, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to purge orphan files" },
+        options,
+        exclusive: false,
+        claims: normalizeResourceClaims(claims),
+        orphanPurgeOperations: eligible.map((row) => ({
+          storageFileId: row.id,
+          rootType,
+          filePath: row.file_path,
+          sizeBytes: Number(row.size_bytes),
+          mtimeMs: Number(row.mtime_ms),
+          mode
+        }))
+      };
+    });
   }
 
   async startSymlinkCleanup(sourceJobId: number, linkIds: number[]): Promise<number> {
@@ -3064,7 +3167,7 @@ export class JobWorker {
   private limitForType(type: JobRecord["type"]): number {
     if (type === "scan") return this.concurrency.maxRunningScans;
     if (type === "audit") return this.concurrency.maxRunningAudits;
-    if (type === "copy" || type === "symlink_cleanup") return this.concurrency.maxRunningCopies;
+    if (type === "copy" || type === "symlink_cleanup" || type === "orphan_purge") return this.concurrency.maxRunningCopies;
     return this.concurrency.maxRunningJobs;
   }
 
@@ -3338,6 +3441,10 @@ export class JobWorker {
     }
     if (job.type === "symlink_cleanup") {
       await this.runSymlinkCleanupJob(readSymlinkCleanupOptions(job, frozenLinkIds), ctx);
+      return;
+    }
+    if (job.type === "orphan_purge") {
+      await this.runOrphanPurgeJob(ctx);
       return;
     }
     if (job.type === "path_migration") {
@@ -3877,6 +3984,97 @@ export class JobWorker {
       await ctx.setProgress(auditProgress("failed", message));
       throw error;
     }
+  }
+
+  private async runOrphanPurgeJob(ctx: JobContext): Promise<void> {
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    const holdDays = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).cleanup.holdDays;
+    const operations = await operationsForJob(this.db, ctx.jobId);
+    if (operations.length === 0) throw new Error("Orphan purge journal is empty");
+    const count = (stage: string) => operations.filter((operation) => operation.stage === stage).length;
+    let held = count("held");
+    let deleted = count("deleted");
+    let alreadyMissing = count("already_missing");
+    let failed = count("failed");
+    let current = held + deleted + alreadyMissing + failed;
+    const total = operations.length;
+    const setProgress = (stage: string, message: string) =>
+      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message });
+
+    await setProgress("preparing", "Preparing orphan purge");
+    await ctx.event("info", "Orphan purge started", { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType });
+    for (const operation of operations) {
+      if (operation.stage !== "planned") continue;
+      if (await ctx.isCancelled()) break;
+      await setProgress("purging", `Checking ${path.basename(operation.filePath)}`);
+      try {
+        const outcome = await ctx.withLeaseDb(async (leaseDb) => {
+          const journal = await first(
+            leaseDb
+              .select()
+              .from(schema.orphanPurgeOperations)
+              .where(and(eq(schema.orphanPurgeOperations.id, operation.id), eq(schema.orphanPurgeOperations.stage, "planned")))
+              .for("update")
+              .limit(1)
+          );
+          if (!journal) throw new Error(`Orphan purge operation #${operation.id} changed before execution`);
+          const result = await executeOrphanPurgeOperation(leaseDb, journal, { paths, holdDays });
+          const timestamp = nowIso();
+          await leaseDb
+            .update(schema.orphanPurgeOperations)
+            .set({
+              stage: result.stage,
+              heldPath: result.heldPath,
+              extras: JSON.stringify(result.extras),
+              purgeAfter: result.stage === "held" ? new Date(Date.now() + holdDays * 86_400_000).toISOString() : null,
+              errorMessage: null,
+              updatedAt: timestamp,
+              completedAt: timestamp
+            })
+            .where(eq(schema.orphanPurgeOperations.id, journal.id));
+          return result;
+        });
+        current += 1;
+        if (outcome.stage === "held") held += 1;
+        else if (outcome.stage === "deleted") deleted += 1;
+        else alreadyMissing += 1;
+        await ctx.event(outcome.stage === "already_missing" ? "warn" : "info", outcome.stage === "held" ? "Orphan moved to the holding area" : outcome.stage === "deleted" ? "Orphan deleted" : "Orphan was already missing", {
+          filePath: operation.filePath,
+          heldPath: outcome.heldPath,
+          sidecars: outcome.extras.length
+        });
+      } catch (error: unknown) {
+        if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+        current += 1;
+        failed += 1;
+        const message = errorMessage(error);
+        await ctx.withLeaseDb((leaseDb) =>
+          leaseDb
+            .update(schema.orphanPurgeOperations)
+            .set({ stage: "failed", errorMessage: message, updatedAt: nowIso(), completedAt: nowIso() })
+            .where(and(eq(schema.orphanPurgeOperations.id, operation.id), eq(schema.orphanPurgeOperations.stage, "planned")))
+        );
+        await ctx.event("error", "Orphan was not purged", { filePath: operation.filePath, reason: message });
+      }
+      await setProgress("purging", `${current} of ${total} processed`);
+    }
+
+    if (await ctx.isCancelled()) {
+      await setProgress("cancelled", "Orphan purge stopped; completed purges were kept");
+      await ctx.event("warn", "Orphan purge stopped; completed purges were kept", { held, deleted, alreadyMissing, failed, total });
+      return;
+    }
+    const summary = `${held ? `${held} held` : ""}${held && deleted ? ", " : ""}${deleted ? `${deleted} deleted` : ""}${alreadyMissing ? `, ${alreadyMissing} already missing` : ""}`;
+    if (failed > 0) {
+      const partial = current - failed > 0;
+      const message = `Orphan purge ${partial ? "partially failed" : "failed"}: ${failed} of ${total} files were not purged`;
+      await setProgress(partial ? "partially_failed" : "failed", message);
+      await ctx.event(partial ? "warn" : "error", message, { held, deleted, alreadyMissing, failed, total });
+      if (partial) throw new PartialJobFailureError(message);
+      throw new Error(message);
+    }
+    await setProgress("completed", `Orphan purge finished: ${summary || "nothing to do"}`);
+    await ctx.event("info", "Orphan purge finished", { held, deleted, alreadyMissing, failed, total });
   }
 
   private async runSymlinkCleanupJob(options: SymlinkCleanupOptions, ctx: JobContext): Promise<void> {
@@ -4516,6 +4714,32 @@ export class JobWorker {
             .where(eq(schema.copyOperations.id, operation.id));
         } catch (error: unknown) {
           finalizationWarnings.push(`Could not finalize displaced backup for copy operation #${operation.id}: ${errorMessage(error)}`);
+        }
+      }
+      if (normalizedOptions.deleteRemoteSource && normalizedOptions.direction === "to_local") {
+        if (!copyBehavior.byteCompare) {
+          finalizationWarnings.push("Remote sources were kept because this copy ran without byte comparison");
+        } else {
+          for (const operation of await leaseDb
+            .select()
+            .from(schema.copyOperations)
+            .where(and(eq(schema.copyOperations.jobId, ctx.jobId), eq(schema.copyOperations.stage, "committed")))) {
+            if (operation.resultStatus !== "copied" && operation.resultStatus !== "repointed") continue;
+            try {
+              const removed = await deleteVerifiedRemoteSource(leaseDb, paths, operation);
+              if (removed) {
+                await leaseDb.insert(schema.jobEvents).values({
+                  jobId: ctx.jobId,
+                  timestamp: nowIso(),
+                  level: "info",
+                  message: "Deleted remote source after verified copy",
+                  data: JSON.stringify({ sourcePath: operation.sourcePath, destinationPath: operation.destinationPath })
+                });
+              }
+            } catch (error: unknown) {
+              finalizationWarnings.push(`Kept remote source ${operation.sourcePath}: ${errorMessage(error)}`);
+            }
+          }
         }
       }
       for (const warning of finalizationWarnings) {

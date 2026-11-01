@@ -28,7 +28,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "path_migration";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration";
 
 export type AuditMode = "fast" | "deep";
 
@@ -215,10 +215,18 @@ export interface ScanJobBehaviorSettings {
   symlinkFolderScheduling: SymlinkScanSchedulingMode;
 }
 
+export interface CleanupSettings {
+  // Days purged orphans stay restorable in the holding area before permanent deletion.
+  holdDays: number;
+  // Delete the remote source once a verified copy to local finishes and nothing else links to it.
+  deleteRemoteSourceAfterCopy: boolean;
+}
+
 export interface AdvancedSettings {
   scan: ScanJobBehaviorSettings;
   copy: CopyJobBehaviorSettings;
   audit: AuditJobBehaviorSettings;
+  cleanup: CleanupSettings;
 }
 
 export interface ScanStartResult {
@@ -513,6 +521,44 @@ export interface StorageFileRow {
   updatedAt: string;
   linkCount: number;
   linked: boolean;
+}
+
+export type OrphanCategory = "superseded" | "copy_leftover" | "not_in_library" | "srtl_artifact" | "unlinked";
+
+export interface OrphanReviewItem {
+  storageFileId: number;
+  rootType: StorageRootType;
+  relativePath: string;
+  filePath: string;
+  section: string;
+  itemName: string;
+  sizeBytes: number;
+  mtimeMs: number;
+  category: OrphanCategory;
+  protectedReason: string | null;
+}
+
+export interface OrphanReview {
+  rootType: StorageRootType;
+  items: OrphanReviewItem[];
+  summary: Array<{ category: OrphanCategory; count: number; sizeBytes: number; purgeableCount: number }>;
+  symlinkInventoryAt: string | null;
+  storageInventoryAt: string | null;
+  staleWarning: string | null;
+  holdDays: number;
+}
+
+export type OrphanPurgeMode = "hold" | "delete";
+
+export interface HeldOrphanFile {
+  operationId: number;
+  jobId: number;
+  rootType: StorageRootType;
+  filePath: string;
+  heldPath: string;
+  sizeBytes: number;
+  heldAt: string;
+  purgeAfter: string;
 }
 
 export type StorageFileTreeNodeType = "folder" | "file";

@@ -1509,6 +1509,18 @@ export function JobScope({
     );
   }
 
+  if (job.type === "orphan_purge") {
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
+    const total = finiteNumberFromUnknown(options?.total);
+    const where = options?.rootType === "remote" ? "remote" : "local";
+    const how = options?.mode === "hold" ? "held for restore" : "deleted";
+    return (
+      <span className="job-scope-cell">
+        <span>{total === 1 ? `1 ${where} orphan` : `${formatNumber(total)} ${where} orphans`}, {how}</span>
+      </span>
+    );
+  }
+
   if (job.type === "symlink_cleanup") {
     const progress = recordFromUnknown(job.progress);
     const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;

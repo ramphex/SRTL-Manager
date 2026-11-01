@@ -21,7 +21,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 15;
+export const currentSchemaVersion = 16;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -570,6 +570,36 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         END $$`);
         await client.query(`CREATE INDEX IF NOT EXISTS radarr_monitor_updates_pending_idx ON radarr_monitor_updates(next_attempt_at, id) WHERE processed_at IS NULL`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (15, 'radarr_copy_monitoring', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(16)) {
+      await client.query("BEGIN");
+      try {
+        await client.query(`CREATE TABLE IF NOT EXISTS orphan_purge_operations (
+          id SERIAL PRIMARY KEY, job_id INTEGER NOT NULL, storage_file_id INTEGER NOT NULL, root_type TEXT NOT NULL,
+          file_path TEXT NOT NULL, size_bytes BIGINT NOT NULL, mtime_ms BIGINT NOT NULL, mode TEXT NOT NULL, stage TEXT NOT NULL,
+          held_path TEXT, extras TEXT NOT NULL DEFAULT '[]', purge_after TEXT, error_message TEXT,
+          created_at TEXT NOT NULL, updated_at TEXT NOT NULL, completed_at TEXT
+        )`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS orphan_purge_operations_job_file_idx ON orphan_purge_operations(job_id, storage_file_id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS orphan_purge_operations_held_idx ON orphan_purge_operations(stage, purge_after)`);
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.jobs') IS NOT NULL THEN
+            ALTER TABLE orphan_purge_operations ADD CONSTRAINT orphan_purge_operations_job_fk FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE;
+          END IF;
+          IF to_regclass('public.jobs') IS NOT NULL AND EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'public' AND table_name = 'jobs' AND column_name = 'type'
+          ) THEN
+            ALTER TABLE jobs DROP CONSTRAINT IF EXISTS jobs_type_check;
+            ALTER TABLE jobs ADD CONSTRAINT jobs_type_check CHECK (type IN ('scan', 'audit', 'copy', 'symlink_cleanup', 'orphan_purge', 'path_migration'));
+          END IF;
+        END $$`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (16, 'orphan_purge', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -59,7 +59,13 @@ const advancedSettingsSchema = z.object({
       defaultMode: z.enum(["fast", "deep"]).default("fast"),
       byteCompareWhenSourceKnown: z.boolean().default(true)
     })
-    .default(defaultAuditJobBehaviorSettings)
+    .default(defaultAuditJobBehaviorSettings),
+  cleanup: z
+    .object({
+      holdDays: z.number().int().min(1).max(90).default(7),
+      deleteRemoteSourceAfterCopy: z.boolean().default(false)
+    })
+    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false })
 });
 
 const userPreferencesSchema = z.object({

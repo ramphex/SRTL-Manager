@@ -145,6 +145,7 @@ export function formatJobType(type: JobType): string {
   if (type === "audit") return "Audit";
   if (type === "copy") return "Copy";
   if (type === "symlink_cleanup") return "Symlink cleanup";
+  if (type === "orphan_purge") return "Orphan purge";
   if (type === "path_migration") return "Path migration";
   return "Integration sync";
 }

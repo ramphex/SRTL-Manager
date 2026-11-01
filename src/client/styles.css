@@ -7714,3 +7714,30 @@ button.danger-button:hover:not(:disabled) {
     grid-template-columns: minmax(0, 1fr);
   }
 }
+
+/* Orphan review and purge */
+.orphan-review { display: grid; gap: 14px; }
+.orphan-categories { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 10px; }
+.orphan-category { display: grid; gap: 4px; text-align: left; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; }
+.orphan-category small { color: var(--muted); }
+.orphan-category.selected { border-color: var(--selected-border); background: var(--selected-bg); box-shadow: inset 0 0 0 1px var(--selected-accent); }
+.orphan-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.orphan-toolbar input[type="search"] { min-width: 0; flex: 1 1 220px; max-width: 360px; height: 38px; }
+.orphan-pagination { font-size: 13px; color: var(--muted); }
+.orphan-table-scroll { overflow: auto; max-height: 560px; scrollbar-gutter: stable; }
+.orphan-table-scroll table { width: 100%; border-collapse: collapse; }
+.orphan-table-scroll th { text-align: left; color: var(--muted); font-size: 12px; }
+.orphan-table-scroll td, .orphan-table-scroll th { padding: 10px 12px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.orphan-table-scroll td { font-size: 13px; }
+.orphan-table-scroll td:first-child { width: 40px; }
+.orphan-path { display: block; color: var(--muted); font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+.orphan-path-cell { overflow-wrap: anywhere; }
+.orphan-protected { display: block; color: var(--warn); font-size: 12px; margin-top: 4px; }
+.orphan-nowrap { white-space: nowrap; }
+.orphan-purge-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.orphan-confirmation { border-left: 3px solid var(--warn); padding: 0 14px; }
+.orphan-held h3 { margin: 6px 0 10px; font-size: 15px; }
+@media (max-width: 640px) {
+  .orphan-categories { grid-template-columns: 1fr; }
+  .orphan-table-scroll td:nth-child(5), .orphan-table-scroll th:nth-child(5) { display: none; }
+}

@@ -1,6 +1,7 @@
 import type {
   AdvancedSettings,
   AuditJobBehaviorSettings,
+  CleanupSettings,
   CopyJobBehaviorSettings,
   CopyMediaValidationMode,
   CopyVerificationProfile,
@@ -29,10 +30,16 @@ export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
   symlinkFolderScheduling: "single_job"
 };
 
+export const defaultCleanupSettings: CleanupSettings = {
+  holdDays: 7,
+  deleteRemoteSourceAfterCopy: false
+};
+
 export const defaultAdvancedSettings: AdvancedSettings = {
   scan: defaultScanJobBehaviorSettings,
   copy: defaultCopyJobBehaviorSettings,
-  audit: defaultAuditJobBehaviorSettings
+  audit: defaultAuditJobBehaviorSettings,
+  cleanup: defaultCleanupSettings
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -68,11 +75,21 @@ function normalizeScanBehavior(value: unknown): ScanJobBehaviorSettings {
   };
 }
 
+function normalizeCleanup(value: unknown): CleanupSettings {
+  const record = isRecord(value) ? value : {};
+  const holdDays = Number(record.holdDays);
+  return {
+    holdDays: Number.isInteger(holdDays) && holdDays >= 1 && holdDays <= 90 ? holdDays : defaultCleanupSettings.holdDays,
+    deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true
+  };
+}
+
 export function normalizeAdvancedSettings(value: unknown): AdvancedSettings {
   const record = isRecord(value) ? value : {};
   return {
     scan: normalizeScanBehavior(record.scan),
     copy: normalizeCopyBehavior(record.copy),
-    audit: normalizeAuditBehavior(record.audit)
+    audit: normalizeAuditBehavior(record.audit),
+    cleanup: normalizeCleanup(record.cleanup)
   };
 }

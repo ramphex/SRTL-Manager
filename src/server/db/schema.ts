@@ -332,6 +332,35 @@ export const symlinkCleanupOperations = pgTable(
   ]
 );
 
+export const orphanPurgeOperations = pgTable(
+  "orphan_purge_operations",
+  {
+    id: serial("id").primaryKey(),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    storageFileId: integer("storage_file_id").notNull(),
+    rootType: text("root_type").notNull(),
+    filePath: text("file_path").notNull(),
+    sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
+    mtimeMs: bigint("mtime_ms", { mode: "number" }).notNull(),
+    mode: text("mode").notNull(),
+    stage: text("stage").notNull(),
+    heldPath: text("held_path"),
+    // JSON array of { from, to } for sidecar files moved or removed with the media file.
+    extras: text("extras").notNull().default("[]"),
+    purgeAfter: text("purge_after"),
+    errorMessage: text("error_message"),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    completedAt: text("completed_at")
+  },
+  (table) => [
+    uniqueIndex("orphan_purge_operations_job_file_idx").on(table.jobId, table.storageFileId),
+    index("orphan_purge_operations_held_idx").on(table.stage, table.purgeAfter)
+  ]
+);
+
 export const jobEvents = pgTable("job_events", {
   id: serial("id").primaryKey(),
   jobId: integer("job_id").notNull(),

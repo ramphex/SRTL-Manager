@@ -29,6 +29,7 @@ import { registerSystemRoutes } from "./routes/systemRoutes";
 import { registerPathConfigurationRoutes } from "./routes/pathConfigurationRoutes";
 import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
 import { radarrWebhookPath, registerRadarrRoutes } from "./routes/radarrRoutes";
+import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 
 export interface AppContext {
@@ -193,6 +194,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerRadarrRoutes(app, database.db);
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
+  registerOrphanRoutes(app, database.db, jobs);
   registerJobRoutes(app, jobs);
   registerSystemRoutes(app);
   registerPathConfigurationRoutes(app, database.db, jobs, config.paths);

@@ -8,7 +8,7 @@ import * as schema from "../db/schema";
 import { inferSectionContentType } from "../../shared/sections";
 import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
-import { isMediaFile, isPathInside, safeRelativePath } from "./media";
+import { holdingFolderName, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 import type {
@@ -279,6 +279,8 @@ async function walkStorageFilesCollecting(root: string, rootType: StorageRootTyp
       await throwIfScanCancelled(isCancelled);
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
+        // Purged orphans waiting out their holding period are not part of the library.
+        if (entry.name === holdingFolderName) continue;
         await walk(fullPath);
       } else if (entry.isFile() && isMediaFile(fullPath)) {
         try {
