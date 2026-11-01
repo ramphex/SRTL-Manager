@@ -18,7 +18,13 @@ export async function startScheduledInventoryScan(db: Db, jobs: Pick<JobRunner, 
   const schedule = settings.scan.scheduledInventory;
   if (!schedule.enabled || now.getHours() < schedule.hour) return null;
   const today = localDateKey(now);
-  if ((await getJsonSetting<string | null>(db, scheduledInventoryLastRunKey, null)) === today) return null;
+  const lastRun = await getJsonSetting<string | null>(db, scheduledInventoryLastRunKey, null);
+  if (lastRun === today) return null;
+  // The first check after an install or upgrade starts the schedule tomorrow instead of scanning right away.
+  if (!lastRun) {
+    await setSetting(db, scheduledInventoryLastRunKey, today);
+    return null;
+  }
   if (!(await isOnboardingComplete(db))) return null;
   const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
   const sections = (await getSectionSettings(db)).sections;

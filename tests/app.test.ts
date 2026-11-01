@@ -1294,6 +1294,12 @@ describe("api app", () => {
     await createAdminSession();
     const at = (hour: number, day = 2) => new Date(2026, 10, day, hour, 30);
 
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(4, 1))).toBeNull();
+    // The first check after the hour starts the schedule without scanning right after an upgrade.
+    expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(6, 1))).toBeNull();
+    expect(await getJsonSetting(ctx.database.db, scheduledInventoryLastRunKey, null)).toBe("2026-11-01");
+    expect(await ctx.jobs.listJobs()).toEqual([]);
+
     expect(await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(4))).toBeNull();
     const queued = await startScheduledInventoryScan(ctx.database.db, ctx.jobs, at(5));
     expect(queued).toHaveLength(1);
