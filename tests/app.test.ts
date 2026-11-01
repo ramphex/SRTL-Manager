@@ -3519,6 +3519,36 @@ describe("api app", () => {
     await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ level: "info", message: "Replaced previous local files" })]));
   });
 
+  it("still replaces previous local files for completed copies when another item in the job fails", async () => {
+    const cookie = await createAdminSession();
+    const upgraded = await insertCopySymlink({ itemName: "Partial Replace Movie", kind: "remote", storagePolicy: "location_1", content: "new upgraded version" });
+    const broken = await insertCopySymlink({ itemName: "Partial Missing Movie", kind: "remote", storagePolicy: "location_1", writeSource: false });
+    const oldRelativePath = path.join("movies", "Partial Replace Movie", "old-version.mkv");
+    const oldPath = path.join(tmpDir, "local", oldRelativePath);
+    await fs.mkdir(path.dirname(oldPath), { recursive: true });
+    await fs.writeFile(oldPath, "old upgraded version");
+    const oldStorageFileId = await insertStorageFile("local", oldRelativePath, Buffer.byteLength("old upgraded version"));
+
+    const copy = await ctx.app.inject({
+      method: "POST",
+      url: "/api/copies",
+      headers: { cookie },
+      payload: { direction: "to_local", linkIds: [upgraded.id, broken.id], localConflictStrategy: "replace" }
+    });
+    expect(copy.statusCode).toBe(200);
+    const { jobId } = copy.json<{ jobId: number }>();
+    await expect(runQueuedJob(jobId, { copyRunner: testCopyRunner })).resolves.toMatchObject({
+      status: "partially_failed",
+      progress: expect.objectContaining({ copied: 1, failed: 1 })
+    });
+
+    await expect(fs.readlink(upgraded.linkPath)).resolves.toBe(upgraded.destinationPath);
+    await expect(fs.stat(oldPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(first(ctx.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, oldStorageFileId)).limit(1))).resolves.toMatchObject({ missingSince: expect.any(String) });
+    await expect(ctx.jobs.listEvents(jobId)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ level: "info", message: "Replaced previous local files" })]));
+    await expect(fs.readlink(broken.linkPath)).resolves.toBe(broken.sourcePath);
+  });
+
   it("leaves symlinks untouched when the copy source is missing", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Missing Source Movie", kind: "remote", storagePolicy: "location_1", writeSource: false });

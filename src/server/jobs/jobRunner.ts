@@ -1003,7 +1003,8 @@ function episodeKeyFromRelativePath(relativePath: string): string | null {
   if (parts.length < 3) return null;
   const seasonFolder = parts[1]?.toLowerCase() ?? "";
   const fileName = parts.at(-1) ?? "";
-  const seasonEpisode = fileName.match(/\bs(\d{1,3})e(\d{1,4})\b/i);
+  // Year-numbered seasons (S1941E38) are common for long-running cartoon collections.
+  const seasonEpisode = fileName.match(/\bs(\d{1,4})e(\d{1,4})\b/i);
   if (seasonEpisode) return `${seasonFolder}:s${Number(seasonEpisode[1])}:e${Number(seasonEpisode[2])}`;
   const xEpisode = fileName.match(/\b(\d{1,3})x(\d{1,4})\b/i);
   if (xEpisode) return `${seasonFolder}:s${Number(xEpisode[1])}:e${Number(xEpisode[2])}`;
@@ -4463,6 +4464,64 @@ export class JobWorker {
       }
       await ctx.event("warn", "Copy job terminated; completed copy changes rolled back", { rolledBack, warnings });
     };
+    // Copies that finished stay installed when a job fails on other items, so their replaced local
+    // files and displaced backups are finalized either way. Only a terminated job rolls everything back.
+    const finalizeCompletedCopies = async (leaseDb: DbExecutor) => {
+      const finalizationWarnings: string[] = [];
+      for (const entry of replacementCandidateEntries.values()) {
+        try {
+          const removed = await removeLocalConflictCandidates(
+            leaseDb,
+            paths,
+            entry.candidates,
+            entry.destinationPath,
+            entry.expectedIdentities,
+            entry.linkId,
+            selectedDestinations
+          );
+          if (removed.length > 0) {
+            await leaseDb.insert(schema.jobEvents).values({
+              jobId: ctx.jobId,
+              timestamp: nowIso(),
+              level: "info",
+              message: "Replaced previous local files",
+              data: JSON.stringify({ linkId: entry.linkId, removed })
+            });
+          }
+        } catch (error: unknown) {
+          finalizationWarnings.push(`Could not remove every previous local file for media #${entry.linkId}: ${errorMessage(error)}`);
+        }
+      }
+
+      const operationsWithBackups = (
+        await leaseDb
+          .select()
+          .from(schema.copyOperations)
+          .where(and(eq(schema.copyOperations.jobId, ctx.jobId), eq(schema.copyOperations.stage, "committed")))
+      ).filter((operation) => Boolean(operation.displacedPath));
+      for (const operation of operationsWithBackups) {
+        try {
+          if (operation.localConflictStrategy === "replace") {
+            const rootType = copyOperationDestinationRoot(operation, paths);
+            await removeJournalFile(
+              rootType === "local" ? paths.localDir : paths.remoteDir,
+              operation.displacedPath,
+              operation.displacedIdentity,
+              "Displaced destination backup"
+            );
+          }
+          await leaseDb
+            .update(schema.copyOperations)
+            .set({ displacedPath: null, displacedIdentity: null, updatedAt: nowIso() })
+            .where(eq(schema.copyOperations.id, operation.id));
+        } catch (error: unknown) {
+          finalizationWarnings.push(`Could not finalize displaced backup for copy operation #${operation.id}: ${errorMessage(error)}`);
+        }
+      }
+      for (const warning of finalizationWarnings) {
+        await leaseDb.insert(schema.jobEvents).values({ jobId: ctx.jobId, timestamp: nowIso(), level: "warn", message: warning, data: "{}" });
+      }
+    };
     if (cancelled) await rollbackCancelledCopy();
     if (!cancelled && failed > 0) {
       const itemLabel = total === 1 ? "media item" : "media items";
@@ -4479,6 +4538,11 @@ export class JobWorker {
         failed,
         unavailable
       });
+      if (copied + repointed > 0) {
+        await setCopyProgress("symlinking", "Finalizing replacements for completed copies");
+        await ctx.withLeaseDb(finalizeCompletedCopies);
+      }
+      await setCopyProgress(partialFailure ? "partially_failed" : "failed", failureMessage);
       if (partialFailure) throw new PartialJobFailureError(failureMessage);
       throw new Error(failureMessage);
     }
@@ -4488,62 +4552,7 @@ export class JobWorker {
       }
       await setCopyProgress("completed", links.length === 0 && alreadyCompleted === 0 ? "No matching media found" : "Copy job finished");
       await ctx.event("info", "Copy job finished processing media", { total, copied, repointed, skipped, conflicts, failed, unavailable });
-      const finalized = await ctx.finishCompletedIsolated(async (leaseDb) => {
-        const finalizationWarnings: string[] = [];
-        for (const entry of replacementCandidateEntries.values()) {
-          try {
-            const removed = await removeLocalConflictCandidates(
-              leaseDb,
-              paths,
-              entry.candidates,
-              entry.destinationPath,
-              entry.expectedIdentities,
-              entry.linkId,
-              selectedDestinations
-            );
-            if (removed.length > 0) {
-              await leaseDb.insert(schema.jobEvents).values({
-                jobId: ctx.jobId,
-                timestamp: nowIso(),
-                level: "info",
-                message: "Replaced previous local files",
-                data: JSON.stringify({ linkId: entry.linkId, removed })
-              });
-            }
-          } catch (error: unknown) {
-            finalizationWarnings.push(`Could not remove every previous local file for media #${entry.linkId}: ${errorMessage(error)}`);
-          }
-        }
-
-        const operationsWithBackups = (
-          await leaseDb
-            .select()
-            .from(schema.copyOperations)
-            .where(and(eq(schema.copyOperations.jobId, ctx.jobId), eq(schema.copyOperations.stage, "committed")))
-        ).filter((operation) => Boolean(operation.displacedPath));
-        for (const operation of operationsWithBackups) {
-          try {
-            if (operation.localConflictStrategy === "replace") {
-              const rootType = copyOperationDestinationRoot(operation, paths);
-              await removeJournalFile(
-                rootType === "local" ? paths.localDir : paths.remoteDir,
-                operation.displacedPath,
-                operation.displacedIdentity,
-                "Displaced destination backup"
-              );
-            }
-            await leaseDb
-              .update(schema.copyOperations)
-              .set({ displacedPath: null, displacedIdentity: null, updatedAt: nowIso() })
-              .where(eq(schema.copyOperations.id, operation.id));
-          } catch (error: unknown) {
-            finalizationWarnings.push(`Could not finalize displaced backup for copy operation #${operation.id}: ${errorMessage(error)}`);
-          }
-        }
-        for (const warning of finalizationWarnings) {
-          await leaseDb.insert(schema.jobEvents).values({ jobId: ctx.jobId, timestamp: nowIso(), level: "warn", message: warning, data: "{}" });
-        }
-      });
+      const finalized = await ctx.finishCompletedIsolated(finalizeCompletedCopies);
       if (finalized) return;
       await rollbackCancelledCopy();
     }
