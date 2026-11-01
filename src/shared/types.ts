@@ -552,9 +552,22 @@ export interface OrphanReviewItem {
   hollow: boolean;
 }
 
+export interface OrphanLeftoverFolder {
+  folderId: number;
+  rootType: StorageRootType;
+  relativePath: string;
+  dirPath: string;
+  fileCount: number;
+  totalBytes: number;
+  newestMtimeMs: number;
+  protectedReason: string | null;
+}
+
 export interface OrphanReview {
   rootType: StorageRootType;
   items: OrphanReviewItem[];
+  // Folders whose whole subtree holds no video, such as leftover subtitles, artwork, samples, or empty folders.
+  leftoverFolders: OrphanLeftoverFolder[];
   summary: Array<{ category: OrphanCategory; count: number; sizeBytes: number; purgeableCount: number }>;
   hollowCount: number;
   symlinkInventoryAt: string | null;

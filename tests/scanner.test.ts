@@ -1292,6 +1292,81 @@ describe("scanner", () => {
     }
   });
 
+  it("reports the top-most storage folders with no video and replaces them per scanned scope", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const write = async (relativePath: string, content = "x") => {
+      await fs.mkdir(path.dirname(path.join(tmpDir, relativePath)), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, relativePath), content);
+    };
+    await fs.mkdir(symlinkDir, { recursive: true });
+    await write("local/movies/Good (2000)/good.mkv");
+    await write("local/movies/Good (2000)/good.srt");
+    await write("local/movies/Gone (2001)/gone.srt", "subtitle");
+    await write("local/movies/Gone (2001)/poster.jpg", "art");
+    await fs.mkdir(path.join(localDir, "movies", "Empty (2002)"), { recursive: true });
+    await write("local/movies/Nested (2003)/Subs/a.srt");
+    await fs.mkdir(path.join(localDir, "movies", "Nested (2003)", "Featurettes"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Linky (2004)"), { recursive: true });
+    await fs.symlink(path.join(localDir, "movies", "Good (2000)", "good.srt"), path.join(localDir, "movies", "Linky (2004)", "linked.srt"));
+    await write("local/movies/Mixed (2005)/Season 01/episode.mkv");
+    await write("local/movies/Mixed (2005)/Extras/extra.nfo");
+    await write("local/movies/Broken (2006)/Unreadable/thing.nfo");
+    await write("local/movies/.srtl-purged/job-1/movies/Held (1999)/held.srt");
+    await write("local/shows/Orphan Show (2010)/tvshow.nfo");
+    await write("remote/Release.One/release.mkv");
+    await write("remote/Release.Two/sample.txt");
+    const settings = { sections: ["movies", "shows"] };
+    const unreadable = path.join(localDir, "movies", "Broken (2006)", "Unreadable");
+    const realReaddir = fs.readdir.bind(fs);
+    const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+      if (String(dir) === unreadable) throw Object.assign(new Error("Stale file handle"), { code: "ESTALE" });
+      return realReaddir(dir as never, options as never);
+    }) as typeof fs.readdir);
+
+    const database = await openTestDatabase();
+    try {
+      const scan = await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: true });
+      expect(scan.leftoverFolders.map((folder) => [folder.rootType, folder.relativePath, folder.fileCount]).sort()).toEqual(
+        [
+          ["local", path.join("movies", "Empty (2002)"), 0],
+          ["local", path.join("movies", "Gone (2001)"), 2],
+          ["local", path.join("movies", "Mixed (2005)", "Extras"), 1],
+          ["local", path.join("movies", "Nested (2003)"), 1],
+          ["local", path.join("shows", "Orphan Show (2010)"), 1],
+          ["remote", "Release.Two", 1]
+        ].sort()
+      );
+      expect(scan.leftoverFolders.find((folder) => folder.relativePath.endsWith("Gone (2001)"))).toMatchObject({ totalBytes: 11, newestMtimeMs: expect.any(Number) });
+      await persistScanResult(database.db, scan, 1);
+      expect(await database.db.select().from(schema.storageLeftoverFolders)).toHaveLength(6);
+      const goneId = (await database.db.select().from(schema.storageLeftoverFolders)).find((folder) => folder.relativePath.endsWith("Gone (2001)"))!.id;
+
+      await fs.rm(path.join(localDir, "movies", "Empty (2002)"), { recursive: true });
+      await write("local/movies/Gone (2001)/extra.nfo");
+      await persistScanResult(
+        database.db,
+        await scanLibrary({ symlinkDir, localDir, remoteDir }, settings, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["movies"] }),
+        2
+      );
+      const rows = await database.db.select().from(schema.storageLeftoverFolders);
+      expect(rows.map((folder) => [folder.relativePath, folder.lastSeenJobId]).sort()).toEqual(
+        [
+          [path.join("movies", "Gone (2001)"), 2],
+          [path.join("movies", "Mixed (2005)", "Extras"), 2],
+          [path.join("movies", "Nested (2003)"), 2],
+          [path.join("shows", "Orphan Show (2010)"), 1],
+          ["Release.Two", 1]
+        ].sort()
+      );
+      expect(rows.find((folder) => folder.id === goneId)).toMatchObject({ fileCount: 3 });
+    } finally {
+      readdirSpy.mockRestore();
+      await database.close();
+    }
+  });
+
   it("walks the whole remote root during section-scoped remote scans", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");

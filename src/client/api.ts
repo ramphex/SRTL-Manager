@@ -151,7 +151,7 @@ export const api = {
   },
   storageFiles: (rootType: StorageRootType, orphan = false) => request<StorageFileRow[]>(`/api/storage-files?rootType=${rootType}${orphan ? "&orphan=true" : ""}`),
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
-  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; mode: OrphanPurgeMode }) =>
+  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>

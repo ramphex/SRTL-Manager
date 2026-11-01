@@ -636,6 +636,16 @@ async function initializeDatabase(pool: Pool): Promise<void> {
             ALTER TABLE scan_runs ADD COLUMN IF NOT EXISTS options TEXT NOT NULL DEFAULT '{}';
           END IF;
         END $$`);
+        await client.query(`CREATE TABLE IF NOT EXISTS storage_leftover_folders (
+          id SERIAL PRIMARY KEY, root_type TEXT NOT NULL, dir_path TEXT NOT NULL, relative_path TEXT NOT NULL,
+          file_count INTEGER NOT NULL, total_bytes BIGINT NOT NULL, newest_mtime_ms BIGINT NOT NULL,
+          last_seen_job_id INTEGER NOT NULL, updated_at TEXT NOT NULL
+        )`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS storage_leftover_folders_dir_path_idx ON storage_leftover_folders(dir_path)`);
+        // Folder purges reuse the operation journal; a folder id may equal a file id within one job.
+        await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'file'`);
+        await client.query(`DROP INDEX IF EXISTS orphan_purge_operations_job_file_idx`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS orphan_purge_operations_job_target_idx ON orphan_purge_operations(job_id, target_kind, storage_file_id)`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (18, 'scan_inventory_health', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {

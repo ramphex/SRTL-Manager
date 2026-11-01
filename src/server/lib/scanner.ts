@@ -82,6 +82,8 @@ export interface ScanResult {
   storageFiles: ClassifiedStorageFile[];
   reconciledStorageFiles: ClassifiedStorageFile[];
   storageScanIssues: StorageScanIssue[];
+  // Top-most storage folders whose subtree holds no media file; the walk root and section roots are never included.
+  leftoverFolders: LeftoverFolder[];
   summaries: SectionSummary[];
   inventory: InventorySummary;
 }
@@ -272,33 +274,106 @@ interface StorageWalkFailure {
   error: unknown;
 }
 
+export interface LeftoverFolder {
+  rootType: StorageRootType;
+  dirPath: string;
+  relativePath: string;
+  fileCount: number;
+  totalBytes: number;
+  newestMtimeMs: number;
+}
+
 interface StorageWalkResult {
   files: ClassifiedStorageFile[];
   failedDirectories: StorageWalkFailure[];
+  leftoverFolders: LeftoverFolder[];
 }
 
-async function walkStorageFilesCollecting(root: string, rootType: StorageRootType, storageRoot: string, isCancelled?: ScanCancellationCheck): Promise<StorageWalkResult> {
+// A directory subtree with no media file in it; null stands for a subtree that has media or could not be fully read.
+interface LeftoverCandidate {
+  dirPath: string;
+  files: string[];
+  children: LeftoverCandidate[];
+}
+
+function candidatePaths(candidate: LeftoverCandidate): { directories: string[]; files: string[] } {
+  const directories = [candidate.dirPath];
+  const files = [...candidate.files];
+  for (const child of candidate.children) {
+    const nested = candidatePaths(child);
+    directories.push(...nested.directories);
+    files.push(...nested.files);
+  }
+  return { directories, files };
+}
+
+async function walkStorageFilesCollecting(
+  root: string,
+  rootType: StorageRootType,
+  storageRoot: string,
+  isCancelled?: ScanCancellationCheck,
+  unreportableDirectories: ReadonlySet<string> = new Set()
+): Promise<StorageWalkResult> {
   const files: ClassifiedStorageFile[] = [];
   const failedDirectories: StorageWalkFailure[] = [];
+  const leftoverFolders: LeftoverFolder[] = [];
+  const unreportable = new Set([path.resolve(root), path.resolve(storageRoot), ...[...unreportableDirectories].map((directory) => path.resolve(directory))]);
 
-  async function walk(dir: string): Promise<void> {
+  // Non-media files are only statted once a subtree is known to hold no media, which saves NFS round trips.
+  async function report(candidate: LeftoverCandidate): Promise<void> {
+    if (unreportable.has(path.resolve(candidate.dirPath))) {
+      for (const child of candidate.children) await report(child);
+      return;
+    }
+    const { directories, files: candidateFiles } = candidatePaths(candidate);
+    let totalBytes = 0;
+    let newestMtimeMs = 0;
+    try {
+      for (const entryPath of [...directories, ...candidateFiles]) {
+        await throwIfScanCancelled(isCancelled);
+        const stat = await withFilesystemTimeout(fs.lstat(entryPath), `Reading leftover folder entry ${entryPath}`);
+        if (!stat.isFile() && !stat.isDirectory()) return;
+        if (stat.isFile()) totalBytes += stat.size;
+        newestMtimeMs = Math.max(newestMtimeMs, Math.trunc(stat.mtimeMs));
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message === "Job terminated") throw error;
+      return;
+    }
+    leftoverFolders.push({
+      rootType,
+      dirPath: candidate.dirPath,
+      relativePath: safeRelativePath(storageRoot, candidate.dirPath),
+      fileCount: candidateFiles.length,
+      totalBytes,
+      newestMtimeMs
+    });
+  }
+
+  async function walk(dir: string): Promise<LeftoverCandidate | null> {
     await throwIfScanCancelled(isCancelled);
     let entries: Dirent[];
     try {
       entries = await withFilesystemTimeout(fs.readdir(dir, { withFileTypes: true }), `Reading storage directory ${dir}`);
     } catch (error) {
       failedDirectories.push({ directoryPath: dir, error });
-      return;
+      return null;
     }
 
+    let hasMedia = false;
+    const directFiles: string[] = [];
+    const children: LeftoverCandidate[] = [];
     for (const entry of entries) {
       await throwIfScanCancelled(isCancelled);
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         // Purged orphans waiting out their holding period are not part of the library.
         if (entry.name === holdingFolderName) continue;
-        await walk(fullPath);
+        const child = await walk(fullPath);
+        if (child) children.push(child);
+        else hasMedia = true;
       } else if (entry.isFile() && isMediaFile(fullPath)) {
+        hasMedia = true;
         try {
           const stat = await withFilesystemTimeout(fs.stat(fullPath), `Reading storage file ${fullPath}`);
           files.push({
@@ -314,18 +389,34 @@ async function walkStorageFilesCollecting(root: string, rootType: StorageRootTyp
             allocatedBytes: stat.blocks * 512
           });
         } catch (error) {
-              failedDirectories.push({ directoryPath: dir, error });
+          failedDirectories.push({ directoryPath: dir, error });
         }
+      } else if (entry.isFile()) {
+        directFiles.push(fullPath);
+      } else {
+        // Symlinks and special files may be someone else's data, so the folder is never reported.
+        hasMedia = true;
       }
     }
+
+    if (!hasMedia) return { dirPath: dir, files: directFiles, children };
+    for (const child of children) await report(child);
+    return null;
   }
 
-  await walk(root);
-  return { files, failedDirectories };
+  const rootCandidate = await walk(root);
+  if (rootCandidate) await report(rootCandidate);
+  return { files, failedDirectories, leftoverFolders };
 }
 
 function uniqueStorageFiles(files: ClassifiedStorageFile[]): ClassifiedStorageFile[] {
   return [...new Map(files.map((file) => [file.filePath, file])).values()];
+}
+
+interface StorageWalkWithIssues {
+  files: ClassifiedStorageFile[];
+  issues: StorageScanIssue[];
+  leftoverFolders: LeftoverFolder[];
 }
 
 // Directories that fail to read are retried once at the end; files under ones that still fail are never marked missing.
@@ -333,10 +424,12 @@ async function walkStorageFilesWithRetry(
   root: string,
   rootType: StorageRootType,
   storageRoot: string,
-  isCancelled?: ScanCancellationCheck
-): Promise<{ files: ClassifiedStorageFile[]; issues: StorageScanIssue[] }> {
-  const firstPass = await walkStorageFilesCollecting(root, rootType, storageRoot, isCancelled);
+  isCancelled?: ScanCancellationCheck,
+  unreportableDirectories: ReadonlySet<string> = new Set()
+): Promise<StorageWalkWithIssues> {
+  const firstPass = await walkStorageFilesCollecting(root, rootType, storageRoot, isCancelled, unreportableDirectories);
   const files = [...firstPass.files];
+  const leftoverFolders = [...firstPass.leftoverFolders];
   const failureAttempts = new Map<string, { error: unknown; attempts: number }>();
 
   for (const failure of firstPass.failedDirectories) {
@@ -346,8 +439,9 @@ async function walkStorageFilesWithRetry(
 
   for (const failure of firstPass.failedDirectories) {
     await throwIfScanCancelled(isCancelled);
-    const retry = await walkStorageFilesCollecting(failure.directoryPath, rootType, storageRoot, isCancelled);
+    const retry = await walkStorageFilesCollecting(failure.directoryPath, rootType, storageRoot, isCancelled, unreportableDirectories);
     files.push(...retry.files);
+    leftoverFolders.push(...retry.leftoverFolders);
 
     const retryFailurePaths = new Set<string>();
     for (const retryFailure of retry.failedDirectories) {
@@ -370,7 +464,11 @@ async function walkStorageFilesWithRetry(
     attempts: issue.attempts
   }));
 
-  return { files: uniqueStorageFiles(files), issues };
+  // Nothing at or around a directory that stayed unreadable is reported as a leftover.
+  const safeLeftovers = [...new Map(leftoverFolders.map((folder) => [folder.dirPath, folder])).values()].filter(
+    (folder) => !issues.some((issue) => isPathInside(folder.dirPath, issue.directoryPath) || isPathInside(issue.directoryPath, folder.dirPath))
+  );
+  return { files: uniqueStorageFiles(files), issues, leftoverFolders: safeLeftovers };
 }
 
 function scanSections(settings: SectionSettings, selectedSections: string[] | undefined): string[] {
@@ -434,23 +532,25 @@ async function optionalReadableDirectory(root: string, label: string): Promise<b
 async function walkLocalStorageFilesForSections(
   root: string,
   sections: string[],
+  configuredSections: string[],
   isCancelled?: ScanCancellationCheck
-): Promise<{ files: ClassifiedStorageFile[]; issues: StorageScanIssue[] }> {
+): Promise<StorageWalkWithIssues> {
   await assertReadableDirectory(root, "Local storage root");
-  if (sections.length === 0) return walkStorageFilesWithRetry(root, "local", root, isCancelled);
+  const sectionRoots = new Set(configuredSections.map((section) => path.join(root, section)));
+  if (sections.length === 0) return walkStorageFilesWithRetry(root, "local", root, isCancelled, sectionRoots);
 
-  const files: ClassifiedStorageFile[] = [];
-  const issues: StorageScanIssue[] = [];
+  const result: StorageWalkWithIssues = { files: [], issues: [], leftoverFolders: [] };
   for (const section of sections) {
     await throwIfScanCancelled(isCancelled);
     const sectionRoot = path.join(root, section);
     if (await directoryExists(sectionRoot)) {
-      const sectionScan = await walkStorageFilesWithRetry(sectionRoot, "local", root, isCancelled);
-      files.push(...sectionScan.files);
-      issues.push(...sectionScan.issues);
+      const sectionScan = await walkStorageFilesWithRetry(sectionRoot, "local", root, isCancelled, sectionRoots);
+      result.files.push(...sectionScan.files);
+      result.issues.push(...sectionScan.issues);
+      result.leftoverFolders.push(...sectionScan.leftoverFolders);
     }
   }
-  return { files, issues };
+  return result;
 }
 
 function storageRootUnavailableMessage(root: string, required: RequiredStorageRoot): string {
@@ -491,6 +591,7 @@ export async function scanLibrary(
   const links: ClassifiedLink[] = [];
   const storageFiles: ClassifiedStorageFile[] = [];
   const storageScanIssues: StorageScanIssue[] = [];
+  const leftoverFolders: LeftoverFolder[] = [];
   const symlinkSections = scanSymlinkSections(settings, options);
   const localSections = scanLocalSections(settings, options);
   const titleScopesBySection = scanTitleScopesBySection(options.titleScopes);
@@ -616,9 +717,10 @@ export async function scanLibrary(
   if (options.scanSymlinks) await assertRequiredStorageRootsMounted();
 
   if (options.scanLocal) {
-    const localScan = await walkLocalStorageFilesForSections(paths.localDir, localSections, isCancelled);
+    const localScan = await walkLocalStorageFilesForSections(paths.localDir, localSections, settings.sections, isCancelled);
     storageFiles.push(...localScan.files);
     storageScanIssues.push(...localScan.issues);
+    leftoverFolders.push(...localScan.leftoverFolders);
   }
 
   if (options.scanRemote) {
@@ -626,6 +728,7 @@ export async function scanLibrary(
     const remoteScan = await walkStorageFilesWithRetry(paths.remoteDir, "remote", paths.remoteDir, isCancelled);
     storageFiles.push(...remoteScan.files);
     storageScanIssues.push(...remoteScan.issues);
+    leftoverFolders.push(...remoteScan.leftoverFolders);
   }
 
   if (options.scanLocal || options.scanRemote) await assertRequiredStorageRootsMounted();
@@ -636,7 +739,16 @@ export async function scanLibrary(
     links.map((link) => storageFileFromTargetedLink(link, paths)).filter((file): file is ClassifiedStorageFile => file !== null)
   );
   const summaries = summarizeLinks(links, scopedSettings.sections, scopedSettings.sectionTitles, scopedSettings.sectionTypes);
-  return { options, links, storageFiles: classifiedStorageFiles, reconciledStorageFiles, storageScanIssues, summaries, inventory: summarizeInventory(links, classifiedStorageFiles) };
+  return {
+    options,
+    links,
+    storageFiles: classifiedStorageFiles,
+    reconciledStorageFiles,
+    storageScanIssues,
+    leftoverFolders,
+    summaries,
+    inventory: summarizeInventory(links, classifiedStorageFiles)
+  };
 }
 
 export function summarizeLinks(
@@ -945,6 +1057,11 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(idInList(schema.storageFiles.id, batch));
   }
 
+  if (result.options.scanLocal || result.options.scanRemote) {
+    await throwIfPersistenceCancelled(isCancelled);
+    await replaceLeftoverFolders(db, result, jobId, timestamp, scannedLocalSections);
+  }
+
   if (result.options.scanSymlinks) {
     const currentStorageFiles = await db
       .select({ id: schema.storageFiles.id, filePath: schema.storageFiles.filePath })
@@ -1144,6 +1261,33 @@ export async function requiredStorageRootsForScan(db: Db, options: ScanOptions):
   return (["local", "remote"] as const)
     .map((rootType) => ({ rootType, links: linkCounts.get(rootType) ?? 0, files: fileCounts.get(rootType) ?? 0 }))
     .filter((required) => required.links > 0 || required.files > 0);
+}
+
+// Each storage scan replaces the leftover folders within its scope; existing rows keep their ids so queued purges still match.
+async function replaceLeftoverFolders(db: Db, result: ScanResult, jobId: number, timestamp: string, scannedLocalSections: Set<string> | null): Promise<void> {
+  const found = new Map(
+    result.leftoverFolders
+      .filter((folder) => (folder.rootType === "local" ? result.options.scanLocal : result.options.scanRemote))
+      .map((folder) => [folder.dirPath, folder])
+  );
+  const existing = await db.select({ id: schema.storageLeftoverFolders.id, rootType: schema.storageLeftoverFolders.rootType, dirPath: schema.storageLeftoverFolders.dirPath, relativePath: schema.storageLeftoverFolders.relativePath }).from(schema.storageLeftoverFolders);
+  const staleIds = existing
+    .filter((folder) =>
+      folder.rootType === "remote"
+        ? result.options.scanRemote
+        : result.options.scanLocal && (!scannedLocalSections || scannedLocalSections.has(firstRelativePathPart(folder.relativePath)))
+    )
+    .filter((folder) => !found.has(folder.dirPath))
+    .map((folder) => folder.id);
+  for (const batch of persistChunks(staleIds)) {
+    await db.delete(schema.storageLeftoverFolders).where(idInList(schema.storageLeftoverFolders.id, batch));
+  }
+  for (const batch of persistChunks([...found.values()])) {
+    await db
+      .insert(schema.storageLeftoverFolders)
+      .values(batch.map((folder) => ({ ...folder, lastSeenJobId: jobId, updatedAt: timestamp })))
+      .onConflictDoUpdate({ target: schema.storageLeftoverFolders.dirPath, set: excludedColumns(schema.storageLeftoverFolders) });
+  }
 }
 
 interface ResolvedStorageFileScope {

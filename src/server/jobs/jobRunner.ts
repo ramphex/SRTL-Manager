@@ -20,7 +20,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, operationsForJob, purgeableOrphans, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, operationsForJob, purgeableLeftoverFolders, purgeableOrphans, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -136,6 +136,7 @@ interface PreparedJob {
   }>;
   orphanPurgeOperations?: Array<{
     storageFileId: number;
+    targetKind?: "file" | "folder";
     rootType: StorageRootType;
     filePath: string;
     sizeBytes: number;
@@ -2743,39 +2744,59 @@ export class JobRunner {
     return (await resolveCopyFailures(this.db, jobId)).list;
   }
 
-  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode): Promise<number> {
+  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = []): Promise<number> {
     const requested = [...new Set(storageFileIds)];
-    if (requested.length === 0 || requested.some((id) => !Number.isInteger(id) || id < 1)) throw new Error("Choose at least one orphan file to purge");
+    const requestedFolders = [...new Set(folderIds)];
+    if (requested.length + requestedFolders.length === 0 || [...requested, ...requestedFolders].some((id) => !Number.isInteger(id) || id < 1)) {
+      throw new Error("Choose at least one orphan file or folder to purge");
+    }
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     const root = rootPathFor(paths, rootType);
     if (!root) throw new Error("Storage path settings are incomplete");
     return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
       const staleness = await symlinkInventoryStaleness(transaction);
       if (staleness.warning) throw new Error(staleness.warning);
-      const { eligible, rejected } = await purgeableOrphans(transaction, rootType, requested);
-      if (rejected.length > 0) {
-        throw new Error(`Some selected files cannot be purged: ${rejected.slice(0, 5).join("; ")}${rejected.length > 5 ? ` and ${rejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
+      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested) : { eligible: [], rejected: [] };
+      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders);
+      const allRejected = [...rejected, ...folders.rejected];
+      if (allRejected.length > 0) {
+        throw new Error(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
       }
-      const claims: ResourceClaim[] = inventoryScopeResourceClaims(rootType, eligible.map((row) => row.section), "shared");
-      for (let offset = 0; offset < eligible.length; offset += 16) {
-        const batch = eligible.slice(offset, offset + 16);
-        const pathClaims = await Promise.all(batch.map((row) => managedPathResourceClaims(root, row.file_path, "Orphan purge claim", "exclusive", true)));
+      const folderSections = folders.eligible.map((folder) => folder.relativePath.split("/")[0] ?? "");
+      const claims: ResourceClaim[] = inventoryScopeResourceClaims(rootType, [...eligible.map((row) => row.section), ...folderSections], "shared");
+      const targetPaths = [...eligible.map((row) => row.file_path), ...folders.eligible.map((folder) => folder.dirPath)];
+      for (let offset = 0; offset < targetPaths.length; offset += 16) {
+        const batch = targetPaths.slice(offset, offset + 16);
+        const pathClaims = await Promise.all(batch.map((targetPath) => managedPathResourceClaims(root, targetPath, "Orphan purge claim", "exclusive", true)));
         claims.push(...pathClaims.flat());
       }
-      const options = { rootType, mode, total: eligible.length };
+      const total = eligible.length + folders.eligible.length;
+      const options = { rootType, mode, total };
       return {
-        progress: { options, current: 0, total: eligible.length, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to purge orphan files" },
+        progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to purge orphan files" },
         options,
         exclusive: false,
         claims: normalizeResourceClaims(claims),
-        orphanPurgeOperations: eligible.map((row) => ({
-          storageFileId: row.id,
-          rootType,
-          filePath: row.file_path,
-          sizeBytes: Number(row.size_bytes),
-          mtimeMs: Number(row.mtime_ms),
-          mode
-        }))
+        orphanPurgeOperations: [
+          ...eligible.map((row) => ({
+            storageFileId: row.id,
+            targetKind: "file" as const,
+            rootType,
+            filePath: row.file_path,
+            sizeBytes: Number(row.size_bytes),
+            mtimeMs: Number(row.mtime_ms),
+            mode
+          })),
+          ...folders.eligible.map((folder) => ({
+            storageFileId: folder.id,
+            targetKind: "folder" as const,
+            rootType,
+            filePath: folder.dirPath,
+            sizeBytes: Number(folder.totalBytes),
+            mtimeMs: Number(folder.newestMtimeMs),
+            mode
+          }))
+        ]
       };
     });
   }

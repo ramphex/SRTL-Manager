@@ -31,6 +31,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [selectedFolders, setSelectedFolders] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<OrphanPurgeMode>(rootType === "local" ? "hold" : "delete");
   const [confirming, setConfirming] = useState(false);
   const [selectedHeld, setSelectedHeld] = useState<Set<number>>(new Set());
@@ -38,9 +39,10 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
     for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary", "jobs"]) void queryClient.invalidateQueries({ queryKey: [key] });
   };
   const purge = useMutation({
-    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], mode }),
+    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode }),
     onSuccess: () => {
       setSelected(new Set());
+      setSelectedFolders(new Set());
       setConfirming(false);
       refresh();
     }
@@ -61,8 +63,11 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
+  const folders = useMemo(() => review.data?.leftoverFolders ?? [], [review.data]);
   const selectedItems = items.filter((item) => selected.has(item.storageFileId));
-  const selectedBytes = selectedItems.reduce((total, item) => total + item.sizeBytes, 0);
+  const selectedFolderItems = folders.filter((folder) => selectedFolders.has(folder.folderId));
+  const selectedBytes = selectedItems.reduce((total, item) => total + item.sizeBytes, 0) + selectedFolderItems.reduce((total, folder) => total + folder.totalBytes, 0);
+  const selectedCount = selected.size + selectedFolders.size;
   const heldHere = (held.data ?? []).filter((file) => file.rootType === rootType);
   const stale = Boolean(review.data?.staleWarning);
   const busy = purge.isPending || restore.isPending;
@@ -74,6 +79,8 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
     wasRunning.current = purgeRunning;
   }, [purgeRunning, queryClient]);
   const files = (count: number) => `${formatNumber(count)} ${count === 1 ? "file" : "files"}`;
+  const selectionLabel = () =>
+    [selected.size ? files(selected.size) : "", selectedFolders.size ? `${formatNumber(selectedFolders.size)} ${selectedFolders.size === 1 ? "folder" : "folders"}` : ""].filter(Boolean).join(" and ");
 
   const toggle = (id: number, checked: boolean) =>
     setSelected((current) => {
@@ -125,7 +132,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
               <button type="button" className="secondary" disabled={busy || stale || !filtered.some((item) => !item.protectedReason && !selected.has(item.storageFileId))} onClick={() => selectPurgeable(filtered)}>
                 Select all {category === "all" ? "" : orphanCategoryLabels[category].label.toLowerCase()} ({formatNumber(filtered.filter((item) => !item.protectedReason).length)})
               </button>
-              <button type="button" className="secondary" disabled={busy || selected.size === 0} onClick={() => { setSelected(new Set()); setConfirming(false); }}>
+              <button type="button" className="secondary" disabled={busy || selectedCount === 0} onClick={() => { setSelected(new Set()); setSelectedFolders(new Set()); setConfirming(false); }}>
                 Clear selection
               </button>
             </div>
@@ -163,7 +170,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
             {filtered.length === 0 ? <p className="muted">{items.length ? "No matching orphans." : "No orphans on this storage."}</p> : null}
             <div className="orphan-toolbar orphan-pagination">
               <span>
-                {formatNumber(selected.size)} selected ({formatBytes(selectedBytes)})
+                {formatNumber(selectedCount)} selected ({formatBytes(selectedBytes)})
               </span>
               <span>
                 Page {currentPage + 1} of {pageCount}
@@ -175,6 +182,74 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
                 Next
               </button>
             </div>
+            <section className="orphan-folders" aria-labelledby={`folders-${rootType}-heading`}>
+              <h3 id={`folders-${rootType}-heading`}>Folders with no video</h3>
+              <p className="muted">Folders left with only subtitles, artwork, samples, or nothing at all. Each folder is walked again right before it is purged and is skipped if a video, symlink, or recent change appears.</p>
+              {folders.length === 0 ? (
+                <p className="muted">No folders without video were found by the last storage scan.</p>
+              ) : (
+                <>
+                  <div className="orphan-toolbar">
+                    <button
+                      type="button"
+                      className="secondary"
+                      disabled={busy || stale || !folders.some((folder) => !folder.protectedReason && !selectedFolders.has(folder.folderId))}
+                      onClick={() => {
+                        setSelectedFolders((current) => new Set([...current, ...folders.filter((folder) => !folder.protectedReason).map((folder) => folder.folderId)]));
+                        setConfirming(false);
+                      }}
+                    >
+                      Select all folders ({formatNumber(folders.filter((folder) => !folder.protectedReason).length)})
+                    </button>
+                  </div>
+                  <div className="orphan-table-scroll" tabIndex={0} aria-label="Folders with no video">
+                    <table>
+                      <thead>
+                        <tr>
+                          <th aria-label="Select" />
+                          <th>Folder</th>
+                          <th>Files</th>
+                          <th>Size</th>
+                          <th>Modified</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {folders.map((folder) => (
+                          <tr key={folder.folderId}>
+                            <td>
+                              <input
+                                type="checkbox"
+                                aria-label={`Select folder ${folder.relativePath}`}
+                                checked={selectedFolders.has(folder.folderId)}
+                                disabled={busy || stale || Boolean(folder.protectedReason)}
+                                onChange={(event) => {
+                                  const checked = event.target.checked;
+                                  setSelectedFolders((current) => {
+                                    const next = new Set(current);
+                                    if (checked) next.add(folder.folderId);
+                                    else next.delete(folder.folderId);
+                                    return next;
+                                  });
+                                  setConfirming(false);
+                                }}
+                              />
+                            </td>
+                            <td>
+                              <strong>{folder.relativePath.split("/").at(-1) ?? folder.relativePath}</strong>
+                              <span className="orphan-path">{folder.relativePath}</span>
+                              {folder.protectedReason ? <span className="orphan-protected">Protected: {folder.protectedReason}</span> : null}
+                            </td>
+                            <td className="orphan-nowrap">{formatNumber(folder.fileCount)}</td>
+                            <td className="orphan-nowrap">{formatBytes(folder.totalBytes)}</td>
+                            <td className="orphan-nowrap">{folder.newestMtimeMs ? formatDate(new Date(folder.newestMtimeMs).toISOString()) : "-"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </section>
             <div className="orphan-purge-actions">
               <div className="segmented" role="group" aria-label="Purge mode">
                 <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} onClick={() => { setMode("hold"); setConfirming(false); }}>
@@ -187,7 +262,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
               <InfoTooltip label="About purge modes">
                 Hold moves files into a hidden .srtl-purged folder on the same storage, where they can be restored until they are permanently deleted after the holding period. Delete now removes them immediately with no undo. {rootType === "remote" ? "The remote mount may not support holding; files it refuses are reported and left in place." : ""} Every file is rechecked right before it is touched: still unlinked, unchanged, not part of a copy, and older than 24 hours. Subtitles, artwork, and empty folders are cleaned up with the last video in a folder.
               </InfoTooltip>
-              <button type="button" disabled={busy || stale || selected.size === 0} onClick={() => setConfirming(true)}>
+              <button type="button" disabled={busy || stale || selectedCount === 0} onClick={() => setConfirming(true)}>
                 <Trash2 size={16} /> Purge selected
               </button>
             </div>
@@ -195,8 +270,8 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
               <div className="orphan-confirmation" role="group" aria-label="Confirm orphan purge">
                 <p>
                   {mode === "hold"
-                    ? `Move ${files(selected.size)} (${formatBytes(selectedBytes)}) on ${rootLabel} to the holding area? They can be restored for ${review.data.holdDays} days, then they are permanently deleted.`
-                    : `Permanently delete ${files(selected.size)} (${formatBytes(selectedBytes)}) on ${rootLabel}? This cannot be undone.`}
+                    ? `Move ${selectionLabel()} (${formatBytes(selectedBytes)}) on ${rootLabel} to the holding area? They can be restored for ${review.data.holdDays} days, then they are permanently deleted.`
+                    : `Permanently delete ${selectionLabel()} (${formatBytes(selectedBytes)}) on ${rootLabel}? This cannot be undone.`}
                 </p>
                 <div className="orphan-toolbar">
                   <button type="button" disabled={busy} onClick={() => purge.mutate()}>

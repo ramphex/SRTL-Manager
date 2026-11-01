@@ -7741,7 +7741,7 @@ button.danger-button:hover:not(:disabled) {
 .orphan-nowrap { white-space: nowrap; }
 .orphan-purge-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .orphan-confirmation { border-left: 3px solid var(--warn); padding: 0 14px; }
-.orphan-held h3 { margin: 6px 0 10px; font-size: 15px; }
+.orphan-held h3, .orphan-folders h3 { margin: 6px 0 10px; font-size: 15px; }
 @media (max-width: 640px) {
   .orphan-categories { grid-template-columns: 1fr; }
   .orphan-table-scroll td:nth-child(5), .orphan-table-scroll th:nth-child(5) { display: none; }

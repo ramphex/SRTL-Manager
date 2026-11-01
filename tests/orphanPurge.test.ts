@@ -245,6 +245,142 @@ describe("orphan purge", () => {
   });
 });
 
+describe("folders with no video", () => {
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  async function leftoverFolder(rootType: "local" | "remote", relativePath: string, entries: Record<string, string> = {}, mtime = oldTime) {
+    const base = rootType === "local" ? paths.localDir : paths.remoteDir;
+    const dirPath = path.join(base, relativePath);
+    await fs.mkdir(dirPath, { recursive: true });
+    for (const [name, content] of Object.entries(entries)) {
+      await fs.mkdir(path.dirname(path.join(dirPath, name)), { recursive: true });
+      await fs.writeFile(path.join(dirPath, name), content);
+      await fs.utimes(path.join(dirPath, name), mtime, mtime);
+    }
+    for (const directory of [...new Set(Object.keys(entries).map((name) => path.dirname(path.join(dirPath, name))))].sort().reverse()) await fs.utimes(directory, mtime, mtime);
+    await fs.utimes(dirPath, mtime, mtime);
+    const [row] = await app.database.db
+      .insert(schema.storageLeftoverFolders)
+      .values({
+        rootType,
+        dirPath,
+        relativePath,
+        fileCount: Object.keys(entries).length,
+        totalBytes: Object.values(entries).reduce((total, content) => total + content.length, 0),
+        newestMtimeMs: mtime.getTime(),
+        lastSeenJobId: 0,
+        updatedAt: new Date().toISOString()
+      })
+      .returning();
+    return row!;
+  }
+
+  it("lists folders with protections and purges them with files in one job", async () => {
+    const gone = await leftoverFolder("local", "movies/Gone (1999)", { "gone.srt": "subtitle", "art/poster.jpg": "art" });
+    const fresh = await leftoverFolder("local", "movies/Fresh (2026)", { "fresh.srt": "new" }, new Date());
+    const linked = await leftoverFolder("local", "movies/Linked (2002)", { "linked.srt": "subtitle" });
+    await mediaLink("movies", "Linked (2002)", "linked.srt", path.join(linked.dirPath, "linked.srt"));
+    const orphan = await storageFile("local", "movies/Orphan (1998)/Orphan (1998).mkv");
+
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    expect(review.leftoverFolders.map((folder) => [folder.relativePath, folder.protectedReason])).toEqual([
+      ["movies/Fresh (2026)", "Modified in the last 24 hours"],
+      ["movies/Gone (1999)", null],
+      ["movies/Linked (2002)", "A symlink points into this folder"]
+    ]);
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [fresh.id])).rejects.toThrow("Modified in the last 24 hours");
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [linked.id])).rejects.toThrow("A symlink points into this folder");
+
+    // A folder id may equal a file id in the same job.
+    await app.database.db.update(schema.storageLeftoverFolders).set({ id: 500 }).where(eq(schema.storageLeftoverFolders.id, gone.id));
+    await app.database.db.update(schema.storageFiles).set({ id: 500 }).where(eq(schema.storageFiles.id, orphan.id));
+    const jobId = await app.jobs.startOrphanPurge("local", [500], "hold", [500]);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ held: 2 }) });
+    await expect(fs.stat(gone.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await app.database.db.select().from(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, 500))).toEqual([]);
+
+    const held = await listHeldOrphans(app.database.db);
+    const heldFolder = held.find((entry) => entry.filePath === gone.dirPath)!;
+    await expect(fs.readFile(path.join(heldFolder.heldPath, "art", "poster.jpg"), "utf8")).resolves.toBe("art");
+    expect(await restoreHeldOrphans(app.database.db, paths, [heldFolder.operationId])).toEqual({ restored: 1, errors: [] });
+    await expect(fs.readFile(path.join(gone.dirPath, "gone.srt"), "utf8")).resolves.toBe("subtitle");
+    // The restored folder's file row is untouched; it reappears as a leftover on the next storage scan.
+    const [orphanRow] = await app.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, 500));
+    expect(orphanRow!.missingSince).not.toBeNull();
+  });
+
+  it("deletes folders immediately and expires held folders after their holding period", async () => {
+    const deleted = await leftoverFolder("local", "movies/Deleted (1990)", { "a.nfo": "nfo", "Sub/b.srt": "srt" });
+    const empty = await leftoverFolder("remote", "Empty.Release");
+    const held = await leftoverFolder("local", "shows/Held Show (1991)/Season 01", { "c.srt": "srt" });
+    await expect(app.jobs.startOrphanPurge("local", [], "delete")).rejects.toThrow("Choose at least one orphan file or folder");
+    const deleteJob = await app.jobs.startOrphanPurge("local", [], "delete", [deleted.id]);
+    const remoteJob = await app.jobs.startOrphanPurge("remote", [], "delete", [empty.id]);
+    const holdJob = await app.jobs.startOrphanPurge("local", [], "hold", [held.id]);
+    await runJobs();
+    for (const jobId of [deleteJob, remoteJob, holdJob]) expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed" });
+    await expect(fs.stat(deleted.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(empty.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(paths.localDir, "shows", "Held Show (1991)"))).resolves.toBeTruthy();
+
+    const [entry] = await listHeldOrphans(app.database.db);
+    expect(entry).toMatchObject({ filePath: held.dirPath });
+    expect(await expireHeldOrphans(app.database.db, paths, Date.parse(entry!.purgeAfter) + 1000)).toBe(1);
+    await expect(fs.stat(entry!.heldPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.stat(path.join(paths.localDir, ".srtl-purged"))).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses folders that gained a video, a symlink, a recent change, or an unfinished copy", async () => {
+    const video = await leftoverFolder("local", "movies/Video (2001)", { "a.srt": "srt" });
+    const symlinked = await leftoverFolder("local", "movies/Symlinked (2002)", { "a.srt": "srt" });
+    const touched = await leftoverFolder("local", "movies/Touched (2003)", { "a.srt": "srt" });
+    const copying = await leftoverFolder("local", "movies/Copying (2004)", { "a.srt": "srt" });
+    const sectionRoot = await leftoverFolder("local", "shows", { "a.srt": "srt" });
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [9_999])).rejects.toThrow("no longer a folder without video");
+    const jobId = await app.jobs.startOrphanPurge("local", [], "delete", [video.id, symlinked.id, touched.id, copying.id, sectionRoot.id]);
+
+    await fs.writeFile(path.join(video.dirPath, "Video (2001).mkv"), "video");
+    await fs.utimes(path.join(video.dirPath, "Video (2001).mkv"), oldTime, oldTime);
+    await fs.symlink("/nowhere", path.join(symlinked.dirPath, "pointer"));
+    // Adding entries also bumps each folder's own mtime, which on its own would stop the purge.
+    await fs.utimes(video.dirPath, oldTime, oldTime);
+    await fs.utimes(symlinked.dirPath, oldTime, oldTime);
+    await fs.writeFile(path.join(touched.dirPath, "a.srt"), "edited");
+    const timestamp = new Date().toISOString();
+    await app.database.db.insert(schema.jobs).values({ id: 901, type: "copy", status: "failed", createdAt: timestamp, progress: "{}" });
+    const destination = path.join(copying.dirPath, "Copying (2004).mkv");
+    await app.database.db.insert(schema.copyOperations).values({ jobId: 901, mediaLinkId: 1, linkPath: "/x", sourcePath: "/remote/c.mkv", destinationPath: destination, originalTargetPath: "/remote/c.mkv", originalLinkState: "symlink", stage: "transferring", createdAt: timestamp, updatedAt: timestamp });
+    await runJobs();
+
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    for (const folder of [video, symlinked, touched, copying, sectionRoot]) await expect(fs.stat(folder.dirPath)).resolves.toBeTruthy();
+    const events = (await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join();
+    expect(events).toContain("Folder now contains a video");
+    expect(events).toContain("symlink or special file");
+    expect(events).toContain("modified in the last 24 hours");
+    expect(events).toContain("unfinished copy");
+    expect(events).toContain("Only folders inside a storage title area can be purged");
+  });
+
+  it("accepts folder ids over HTTP", async () => {
+    const folder = await leftoverFolder("remote", "Sample.Only", { "sample.txt": "sample" });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const cookie = String(setup.headers["set-cookie"]);
+    const review = await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } });
+    expect(review.json().leftoverFolders).toEqual([expect.objectContaining({ folderId: folder.id, fileCount: 1, protectedReason: null })]);
+    const empty = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", mode: "delete" } });
+    expect(empty.statusCode).toBe(400);
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", folderIds: [folder.id], mode: "delete" } });
+    expect(queued.statusCode).toBe(200);
+    await runJobs();
+    await expect(fs.stat(folder.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+});
+
 describe("remote source deletion after copy", () => {
   async function remoteLinkedMovie(name: string) {
     const sourcePath = path.join(paths.remoteDir, `${name}.mkv`);

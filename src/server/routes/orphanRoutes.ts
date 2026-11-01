@@ -17,10 +17,16 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
 
   app.post("/api/orphans/purge", { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
     const body = z
-      .object({ rootType: rootTypeSchema, storageFileIds: z.array(z.number().int().positive()).min(1).max(50_000), mode: z.enum(["hold", "delete"]) })
+      .object({
+        rootType: rootTypeSchema,
+        storageFileIds: z.array(z.number().int().positive()).max(50_000).default([]),
+        folderIds: z.array(z.number().int().positive()).max(50_000).default([]),
+        mode: z.enum(["hold", "delete"])
+      })
+      .refine((value) => value.storageFileIds.length + value.folderIds.length > 0, { message: "Choose at least one orphan file or folder to purge" })
       .parse(request.body);
     try {
-      return { jobId: await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode) };
+      return { jobId: await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode, body.folderIds) };
     } catch (error: unknown) {
       request.log.warn({ err: error }, "Orphan purge admission rejected");
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });

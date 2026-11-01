@@ -179,6 +179,23 @@ export const storageFiles = pgTable(
   (table) => [uniqueIndex("storage_files_file_path_idx").on(table.filePath)]
 );
 
+// Storage folders whose whole subtree holds no media file, found by the last storage scan of their scope.
+export const storageLeftoverFolders = pgTable(
+  "storage_leftover_folders",
+  {
+    id: serial("id").primaryKey(),
+    rootType: text("root_type").notNull(),
+    dirPath: text("dir_path").notNull(),
+    relativePath: text("relative_path").notNull(),
+    fileCount: integer("file_count").notNull(),
+    totalBytes: bigint("total_bytes", { mode: "number" }).notNull(),
+    newestMtimeMs: bigint("newest_mtime_ms", { mode: "number" }).notNull(),
+    lastSeenJobId: integer("last_seen_job_id").notNull(),
+    updatedAt: text("updated_at").notNull()
+  },
+  (table) => [uniqueIndex("storage_leftover_folders_dir_path_idx").on(table.dirPath)]
+);
+
 export const storagePolicies = pgTable(
   "storage_policies",
   {
@@ -341,7 +358,9 @@ export const orphanPurgeOperations = pgTable(
     jobId: integer("job_id")
       .notNull()
       .references(() => jobs.id, { onDelete: "cascade" }),
+    // The storage_files id for a file, or the storage_leftover_folders id when targetKind is "folder".
     storageFileId: integer("storage_file_id").notNull(),
+    targetKind: text("target_kind").notNull().default("file"),
     rootType: text("root_type").notNull(),
     filePath: text("file_path").notNull(),
     sizeBytes: bigint("size_bytes", { mode: "number" }).notNull(),
@@ -358,7 +377,7 @@ export const orphanPurgeOperations = pgTable(
     completedAt: text("completed_at")
   },
   (table) => [
-    uniqueIndex("orphan_purge_operations_job_file_idx").on(table.jobId, table.storageFileId),
+    uniqueIndex("orphan_purge_operations_job_target_idx").on(table.jobId, table.targetKind, table.storageFileId),
     index("orphan_purge_operations_held_idx").on(table.stage, table.purgeAfter)
   ]
 );

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCategory, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
+import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
 import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
@@ -34,6 +34,7 @@ type OrphanRow = {
   active_copy: boolean;
 };
 type PurgeOperation = typeof schema.orphanPurgeOperations.$inferSelect;
+type LeftoverFolderRow = typeof schema.storageLeftoverFolders.$inferSelect;
 type Extra = { from: string; to: string | null };
 
 export function rootPathFor(paths: PathsSettings, rootType: StorageRootType): string {
@@ -125,6 +126,64 @@ export async function symlinkInventoryStaleness(db: DbExecutor, now = Date.now()
   return { at, warning: null };
 }
 
+function ancestorDirectories(paths: Iterable<string>): Set<string> {
+  const ancestors = new Set<string>();
+  for (const candidate of paths) {
+    let current = path.dirname(path.resolve(candidate));
+    while (!ancestors.has(current)) {
+      ancestors.add(current);
+      const parent = path.dirname(current);
+      if (parent === current) break;
+      current = parent;
+    }
+  }
+  return ancestors;
+}
+
+async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now()): Promise<Array<LeftoverFolderRow & { protectedReason: string | null }>> {
+  const rows = await db
+    .select()
+    .from(schema.storageLeftoverFolders)
+    .where(folderIds ? and(eq(schema.storageLeftoverFolders.rootType, rootType), inArray(schema.storageLeftoverFolders.id, folderIds)) : eq(schema.storageLeftoverFolders.rootType, rootType))
+    .orderBy(schema.storageLeftoverFolders.relativePath);
+  if (rows.length === 0) return [];
+  // One pass over link targets and copy paths, instead of a prefix scan per folder.
+  const linkTargets = await db.select({ targetPath: schema.mediaLinks.targetPath }).from(schema.mediaLinks).where(isNull(schema.mediaLinks.missingSince));
+  const copyPaths = (
+    await db.execute<{ path: string }>(sql`
+      select distinct p as path
+      from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
+      where ${unfinishedCopyCondition} and p is not null
+    `)
+  ).rows.map((row) => row.path);
+  const linkedDirectories = ancestorDirectories(linkTargets.map((link) => link.targetPath));
+  const copyDirectories = ancestorDirectories(copyPaths);
+  return rows.map((row) => ({ ...row, protectedReason: leftoverProtectedReason(row, copyDirectories, linkedDirectories, now) }));
+}
+
+function leftoverProtectedReason(row: LeftoverFolderRow, copyDirectories: Set<string>, linkedDirectories: Set<string>, now: number): string | null {
+  const directory = path.resolve(row.dirPath);
+  if (copyDirectories.has(directory)) return "Part of an unfinished copy";
+  if (linkedDirectories.has(directory)) return "A symlink points into this folder";
+  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return "Modified in the last 24 hours";
+  return null;
+}
+
+// Recomputed under the job's admission transaction so only folders that are still leftovers can be queued.
+export async function purgeableLeftoverFolders(db: DbExecutor, rootType: StorageRootType, folderIds: number[], now = Date.now()): Promise<{ eligible: LeftoverFolderRow[]; rejected: string[] }> {
+  if (folderIds.length === 0) return { eligible: [], rejected: [] };
+  const found = new Map((await leftoverFolderRows(db, rootType, folderIds, now)).map((row) => [row.id, row]));
+  const eligible: LeftoverFolderRow[] = [];
+  const rejected: string[] = [];
+  for (const id of folderIds) {
+    const row = found.get(id);
+    if (!row) rejected.push(`folder #${id} is no longer a folder without video on this storage`);
+    else if (row.protectedReason) rejected.push(`${row.relativePath}: ${row.protectedReason}`);
+    else eligible.push(row);
+  }
+  return { eligible, rejected };
+}
+
 // The oldest completed storage scan covering this root; a local section that was never scanned leaves it unknown.
 async function storageInventoryAt(db: Db, rootType: StorageRootType): Promise<string | null> {
   const timestamps = await getInventoryScanTimestamps(db);
@@ -144,12 +203,23 @@ function storageStaleness(at: string | null, now: number): string | null {
 }
 
 export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDays: number, now = Date.now()): Promise<OrphanReview> {
-  const [rows, keys, staleness, storageInventory] = await Promise.all([
+  const [rows, keys, staleness, storageInventory, folders] = await Promise.all([
     orphanRows(db, rootType),
     linkedTitleKeys(db),
     symlinkInventoryStaleness(db, now),
-    storageInventoryAt(db, rootType)
+    storageInventoryAt(db, rootType),
+    leftoverFolderRows(db, rootType, undefined, now)
   ]);
+  const leftoverFolders: OrphanLeftoverFolder[] = folders.map((folder) => ({
+    folderId: folder.id,
+    rootType,
+    relativePath: folder.relativePath,
+    dirPath: folder.dirPath,
+    fileCount: folder.fileCount,
+    totalBytes: Number(folder.totalBytes),
+    newestMtimeMs: Number(folder.newestMtimeMs),
+    protectedReason: folder.protectedReason
+  }));
   const items: OrphanReviewItem[] = rows.map((row) => ({
     storageFileId: row.id,
     rootType,
@@ -176,7 +246,7 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     })
     .filter((entry) => entry.count > 0);
   const hollowCount = items.filter((item) => item.hollow).length;
-  return { rootType, items, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
+  return { rootType, items, leftoverFolders, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.
@@ -255,11 +325,99 @@ export interface PurgeExecutionContext {
   now?: number;
 }
 
-export async function executeOrphanPurgeOperation(db: DbExecutor, operation: PurgeOperation, context: PurgeExecutionContext): Promise<{ stage: "held" | "deleted" | "already_missing"; heldPath: string | null; extras: Extra[] }> {
+type PurgeOutcome = { stage: "held" | "deleted" | "already_missing"; heldPath: string | null; extras: Extra[] };
+
+function holdingAreaError(error: unknown, heldPath: string | null): unknown {
+  const code = errorCode(error);
+  if (heldPath && code && ["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EINVAL", "EACCES"].includes(code)) {
+    return new Error(`This storage does not support moving files into the holding area (${code}); purge with immediate deletion instead`, { cause: error });
+  }
+  return error;
+}
+
+// Re-walks a folder right before it is purged; anything that could be someone's media stops the purge.
+async function assertFolderStillLeftover(directory: string, now: number): Promise<void> {
+  const stat = await withFilesystemTimeout(fs.lstat(directory), `Inspection of ${directory}`);
+  if (now - stat.mtimeMs < purgeGraceMs) throw new Error(`${directory} was modified in the last 24 hours`);
+  const entries = await withFilesystemTimeout(fs.readdir(directory, { withFileTypes: true }), `Reading ${directory}`);
+  for (const entry of entries) {
+    const entryPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      await assertFolderStillLeftover(entryPath, now);
+    } else if (entry.isFile()) {
+      if (isMediaFile(entry.name)) throw new Error(`Folder now contains a video (${entryPath}); nothing was purged`);
+      const fileStat = await withFilesystemTimeout(fs.lstat(entryPath), `Inspection of ${entryPath}`);
+      if (now - fileStat.mtimeMs < purgeGraceMs) throw new Error(`${entryPath} was modified in the last 24 hours`);
+    } else {
+      throw new Error(`Folder contains a symlink or special file (${entryPath}); nothing was purged`);
+    }
+  }
+}
+
+async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperation, root: string, now: number): Promise<PurgeOutcome> {
+  const folder = (
+    await db.select().from(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, operation.storageFileId)).for("update").limit(1)
+  )[0];
+  if (!folder || path.resolve(folder.dirPath) !== path.resolve(operation.filePath)) throw new Error("Folder record changed after the purge was queued; rescan before purging");
+  const directory = path.resolve(operation.filePath);
+  const sectionRoots = (await getSectionSettings(db)).sections.map((section) => path.resolve(root, section));
+  if (!isPathInside(root, directory) || directory === path.resolve(root) || sectionRoots.includes(directory) || isPathInside(path.join(root, holdingFolderName), directory)) {
+    throw new Error("Only folders inside a storage title area can be purged");
+  }
+
+  const prefix = `${directory}${path.sep}`;
+  const linked = (
+    await db.execute<{ id: number }>(sql`
+      select id from media_links
+      where missing_since is null and (target_path = ${directory} or left(target_path, ${prefix.length}) = ${prefix})
+      limit 1
+    `)
+  ).rows[0];
+  if (linked) throw new Error("A symlink points into this folder; nothing was purged");
+  const activeCopy = (
+    await db.execute<{ id: number }>(sql`
+      select copy_operations.id
+      from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
+      where ${unfinishedCopyCondition} and p is not null and left(p, ${prefix.length}) = ${prefix}
+      limit 1
+    `)
+  ).rows[0];
+  if (activeCopy) throw new Error("This folder holds part of an unfinished copy");
+
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await withFilesystemTimeout(fs.lstat(directory), `Inspection of ${directory}`);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+    await db.delete(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, folder.id));
+    return { stage: "already_missing", heldPath: null, extras: [] };
+  }
+  if (!stat.isDirectory()) throw new Error("Path is no longer a folder; nothing was purged");
+  await assertExistingPathInside(root, directory, "Leftover folder");
+  await assertFolderStillLeftover(directory, now);
+
+  const heldPath = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`, path.relative(root, directory)) : null;
+  try {
+    if (heldPath) {
+      await assertPathParentInside(root, heldPath, "Holding area").catch(() => undefined);
+      await fs.mkdir(path.dirname(heldPath), { recursive: true });
+      await withFilesystemTimeout(fs.rename(directory, heldPath), `Moving ${directory} to the holding area`);
+    } else {
+      await withFilesystemTimeout(fs.rm(directory, { recursive: true }), `Deleting ${directory}`);
+    }
+  } catch (error) {
+    throw holdingAreaError(error, heldPath);
+  }
+  await db.delete(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, folder.id));
+  return { stage: heldPath ? "held" : "deleted", heldPath, extras: [] };
+}
+
+export async function executeOrphanPurgeOperation(db: DbExecutor, operation: PurgeOperation, context: PurgeExecutionContext): Promise<PurgeOutcome> {
   const now = context.now ?? Date.now();
   const rootType = operation.rootType as StorageRootType;
   const root = rootPathFor(context.paths, rootType);
   if (!root) throw new Error("Storage root is not configured");
+  if (operation.targetKind === "folder") return executeLeftoverFolderPurge(db, operation, root, now);
   const storageFile = (
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
   )[0];
@@ -310,11 +468,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   try {
     await moveOrRemove(operation.filePath, heldPath);
   } catch (error) {
-    const code = errorCode(error);
-    if (heldPath && code && ["EXDEV", "EPERM", "ENOTSUP", "EOPNOTSUPP", "ENOSYS", "EINVAL", "EACCES"].includes(code)) {
-      throw new Error(`This storage does not support moving files into the holding area (${code}); purge with immediate deletion instead`, { cause: error });
-    }
-    throw error;
+    throw holdingAreaError(error, heldPath);
   }
   const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
   const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase).catch(() => []);
@@ -374,7 +528,10 @@ export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operation
             await removeEmptyHoldingFolders(path.dirname(operation.heldPath!), holdRoot);
             await fs.rmdir(holdRoot).catch(() => undefined);
             const timestamp = nowIso();
-            await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
+            // A restored folder is found again by the next storage scan.
+            if (operation.targetKind !== "folder") {
+              await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
+            }
             await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
           }
         };
@@ -409,9 +566,13 @@ export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date
     const targets = [operation.heldPath, ...parseExtras(operation.extras).map((extra) => extra.to)].filter((value): value is string => Boolean(value));
     if (!root || targets.some((target) => !isPathInside(holdRoot, target))) continue;
     for (const target of targets) {
-      await fs.unlink(target).catch((error: unknown) => {
-        if (errorCode(error) !== "ENOENT") throw error;
-      });
+      if (operation.targetKind === "folder") {
+        await fs.rm(target, { recursive: true, force: true });
+      } else {
+        await fs.unlink(target).catch((error: unknown) => {
+          if (errorCode(error) !== "ENOENT") throw error;
+        });
+      }
       await removeEmptyHoldingFolders(path.dirname(target), holdRoot);
     }
     await db.update(schema.orphanPurgeOperations).set({ stage: "expired", updatedAt: nowIso() }).where(eq(schema.orphanPurgeOperations.id, operation.id));
