@@ -11,9 +11,9 @@ import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall, onboardingSettingKey } from "../src/server/lib/onboarding";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
-import { authenticateRadarrWebhook, createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, mapRadarrMovie, processRadarrWork, radarrMediaExpectation, radarrSettingsSchema, radarrTagPolicy, radarrWebhookSecretSchema, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, saveRadarrSettings, startRadarrWork, testRadarrConnection } from "../src/server/lib/radarr";
+import { authenticateRadarrWebhook, createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, mapRadarrMovie, processRadarrWork, queueCopiedTitleMonitorUpdates, radarrMediaExpectation, radarrSettingsSchema, radarrTagPolicy, radarrWebhookSecretSchema, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, saveRadarrSettings, startRadarrWork, testRadarrConnection } from "../src/server/lib/radarr";
 import { RadarrClient, normalizeRadarrUrl, radarrAddressAllowed, type RadarrMovie } from "../src/server/lib/radarrClient";
-import { defaultCopyRunner } from "../src/server/lib/copier";
+import { defaultCopyRunner, type CopyCommandRunner } from "../src/server/lib/copier";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
 import { generateRadarrWebhookSecret, type RadarrOverview, type RadarrSettingsInput } from "../src/shared/radarr";
@@ -557,6 +557,143 @@ describe("Radarr policy and webhook integration", () => {
     expect(movies[0]!.monitored).toBe(true);
   });
 
+  describe("per-title copy monitoring", () => {
+    const quiet = { info: () => undefined, warn: () => undefined, error: () => undefined };
+    const monitorEdits = () => edits.filter((edit) => "monitored" in edit);
+    const copyUpdates = async (jobId: number) => (await app.database.db.select().from(schema.radarrMonitorUpdates).where(eq(schema.radarrMonitorUpdates.copyJobId, jobId)).orderBy(schema.radarrMonitorUpdates.id))
+      .map((update) => ({ movieId: update.movieId, monitored: update.monitored, error: update.error }));
+
+    // Three scanned remote titles kept local by policy, and a copy runner that can fail one title or hold another mid-copy.
+    async function threeTitles(options: { fail?: string; hold?: string } = {}) {
+      movies = [movie(1, "Alpha"), movie(2, "Bravo"), movie(3, "Charlie")];
+      await saveRadarrSettings(app.database.db, instanceId, { ...input, monitorOnCopy: true });
+      await setSetting(app.database.db, "advancedSettings", { copy: { profile: "fast" } });
+      const itemNames = movies.map((item) => `${item.title} (2020)`);
+      for (const [index, itemName] of itemNames.entries()) {
+        const remoteFile = path.join(root, "remote", itemName, `${movies[index]!.title}.mkv`);
+        await fs.mkdir(path.dirname(remoteFile), { recursive: true });
+        await fs.writeFile(remoteFile, "test movie bytes");
+        await fs.mkdir(path.join(root, "links", "movies", itemName), { recursive: true });
+        await fs.symlink(remoteFile, path.join(root, "links", "movies", itemName, `${movies[index]!.title}.mkv`));
+      }
+      let release = () => undefined as void;
+      const released = new Promise<void>((resolve) => { release = resolve; });
+      let reached = () => undefined as void;
+      const held = new Promise<void>((resolve) => { reached = resolve; });
+      let queuedWhenHeld: number[] | null = null;
+      const copyRunner: CopyCommandRunner = {
+        async copyFile(sourcePath, tempPath, reportProgress, signal) {
+          if (options.hold && sourcePath.includes(options.hold)) {
+            queuedWhenHeld = (await app.database.db.select().from(schema.radarrMonitorUpdates)).map((update) => update.movieId);
+            reached();
+            await released;
+          }
+          return defaultCopyRunner.copyFile(sourcePath, tempPath, reportProgress, signal);
+        },
+        runCmp: defaultCopyRunner.runCmp,
+        runFfmpeg: defaultCopyRunner.runFfmpeg,
+        // Placeholder bytes stand in for media, so the preflight passes everything except the title chosen to fail.
+        async inspectSource(sourcePath) {
+          const failing = Boolean(options.fail && sourcePath.includes(options.fail));
+          return { status: failing ? "fail" : "pass", problems: failing ? ["unreadable video stream"] : [], warnings: [], durationSeconds: null };
+        }
+      };
+      const worker = new JobWorker(app.database.db, { workerId: "radarr-per-title", copyRunner, logger: quiet, copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(app.database.db, copy, titles) });
+      await app.jobs.startExternalTitleScan(itemNames.map((itemName) => ({ section: "movies", itemName })));
+      await worker.runOnce();
+      for (const itemName of itemNames) await setStoragePolicyTitle(app.database.db, itemName, "location_1");
+      const links = (await app.database.db.select().from(schema.mediaLinks)).sort((left, right) => left.itemName.localeCompare(right.itemName));
+      expect(links.map((link) => [link.itemName, link.kind])).toEqual(itemNames.map((itemName) => [itemName, "remote"]));
+      return { worker, links, held, release, queuedWhenHeld: () => queuedWhenHeld };
+    }
+
+    it("queues each title as it is verified, never a failed one, and once per movie after the job ends", async () => {
+      const batch = await threeTitles({ fail: "Bravo", hold: "Charlie" });
+      const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: batch.links.map((link) => link.id), radarrMonitoring: true });
+      const run = batch.worker.runOnce();
+      await batch.held;
+      // Alpha was queued before Charlie began copying; the failed Bravo was not.
+      expect(batch.queuedWhenHeld()).toEqual([1]);
+      // While the job is still running, the Radarr loop unmonitors Alpha and reports it on the copy job.
+      expect((await app.jobs.getJob(jobId))?.status).toBe("running");
+      await processRadarrWork(app.database.db);
+      expect(monitorEdits()).toEqual([{ movieIds: [1], monitored: false }]);
+      expect(movies.map((item) => item.monitored)).toEqual([false, true, true]);
+      expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toContain("Unmonitored in Radarr: Alpha (2020)");
+
+      batch.release();
+      await run;
+      expect((await app.jobs.getJob(jobId))?.status).toBe("partially_failed");
+      expect(await copyUpdates(jobId)).toEqual([{ movieId: 1, monitored: false, error: null }, { movieId: 3, monitored: false, error: null }]);
+      await processRadarrWork(app.database.db);
+      await processRadarrWork(app.database.db);
+      await queueCopiedTitleMonitorUpdates(app.database.db, { jobId, direction: "to_local" }, batch.links.map((link) => ({ section: link.section, itemName: link.itemName })));
+      await processRadarrWork(app.database.db);
+      // The end-of-job pass only records the failed title; nothing is queued or sent twice.
+      expect(await copyUpdates(jobId)).toEqual([
+        { movieId: 1, monitored: false, error: null },
+        { movieId: 3, monitored: false, error: null },
+        { movieId: 2, monitored: false, error: "Skipped: not every file of this movie finished copying." }
+      ]);
+      expect(monitorEdits()).toEqual([{ movieIds: [1], monitored: false }, { movieIds: [3], monitored: false }]);
+      expect(movies.map((item) => item.monitored)).toEqual([false, true, false]);
+      const messages = (await app.jobs.listEvents(jobId)).map((event) => event.message);
+      expect(messages.filter((message) => message.startsWith("Unmonitored in Radarr"))).toEqual(["Unmonitored in Radarr: Alpha (2020)", "Unmonitored in Radarr: Charlie (2020)"]);
+    });
+
+    it("keeps completed titles' updates when the job never finishes", async () => {
+      const batch = await threeTitles({ hold: "Charlie" });
+      const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: batch.links.map((link) => link.id), radarrMonitoring: true });
+      const run = batch.worker.runOnce();
+      await batch.held;
+      // The job is stuck on Charlie, so the end-of-job pass never runs, yet Alpha and Bravo are unmonitored.
+      await processRadarrWork(app.database.db);
+      expect((await app.jobs.getJob(jobId))?.status).toBe("running");
+      expect(await app.database.db.select().from(schema.radarrCopyJobs)).toEqual([]);
+      expect(monitorEdits()).toEqual([{ movieIds: [1, 2], monitored: false }]);
+      expect(movies.map((item) => item.monitored)).toEqual([false, false, true]);
+      batch.release();
+      await run;
+    });
+
+    it("puts monitoring back for titles a terminated copy rolled back", async () => {
+      const batch = await threeTitles({ hold: "Charlie" });
+      const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: batch.links.map((link) => link.id), radarrMonitoring: true });
+      const run = batch.worker.runOnce();
+      await batch.held;
+      // Alpha's change reaches Radarr; Bravo's is still queued when the job is terminated.
+      await app.database.db.update(schema.radarrMonitorUpdates).set({ nextAttemptAt: "2999-01-01T00:00:00.000Z" }).where(eq(schema.radarrMonitorUpdates.movieId, 2));
+      await processRadarrWork(app.database.db);
+      expect(monitorEdits()).toEqual([{ movieIds: [1], monitored: false }]);
+      expect(await app.jobs.cancel(jobId)).toBe(true);
+      batch.release();
+      await run;
+      expect((await app.jobs.getJob(jobId))?.status).toBe("cancelled");
+      expect((await app.database.db.select().from(schema.mediaLinks)).map((link) => link.kind)).toEqual(["remote", "remote", "remote"]);
+      await processRadarrWork(app.database.db);
+      await processRadarrWork(app.database.db);
+      expect(await copyUpdates(jobId)).toEqual([
+        { movieId: 1, monitored: false, error: null },
+        { movieId: 2, monitored: false, error: "Skipped: the copy was terminated and rolled back." },
+        { movieId: 1, monitored: true, error: null },
+        { movieId: 3, monitored: false, error: "Skipped: not every file of this movie finished copying." }
+      ]);
+      expect(monitorEdits()).toEqual([{ movieIds: [1], monitored: false }, { movieIds: [1], monitored: true }]);
+      expect(movies.map((item) => item.monitored)).toEqual([true, true, true]);
+      expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toContain("Monitored in Radarr: Alpha (2020)");
+    });
+
+    it("leaves monitoring alone for copies that did not ask for it", async () => {
+      const batch = await threeTitles();
+      const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: batch.links.map((link) => link.id) });
+      await batch.worker.runOnce();
+      expect((await app.jobs.getJob(jobId))?.status).toBe("completed");
+      await processRadarrWork(app.database.db);
+      expect(await copyUpdates(jobId)).toEqual([]);
+      expect(monitorEdits()).toEqual([]);
+    });
+  });
+
   it("orders preview titles alphabetically regardless of Radarr response order", async () => {
     movies = [movie(3, "Zebra Crossing"), movie(1, "Anniversary"), movie(2, "My First Wedding")];
     await connected();
@@ -778,6 +915,38 @@ describe("multiple Radarr instances", () => {
     expect((await getRadarrState(app.database.db, replacementId)).monitorUpdates).toEqual([]);
   });
 
+  it("queues each copied title for the instance that owns its folder as soon as it is copied", async () => {
+    const hd = await fakeRadarr([titleIn("/library", 1, "Alpha"), titleIn("/library", 2, "Bravo")], ["/library"]);
+    const uhd = await fakeRadarr([titleIn("/library4k", 1, "Alpha")], ["/library4k"]);
+    await saveRadarrSettings(app.database.db, instanceId, settingsFor(hd, [{ rootPath: "/library", section: "movies" }]));
+    const uhdId = (await createRadarrInstance(app.database.db, "Radarr 4K")).settings.id;
+    await saveRadarrSettings(app.database.db, uhdId, settingsFor(uhd, [{ rootPath: "/library4k", section: "movies4k" }]));
+    await setSetting(app.database.db, "advancedSettings", { copy: { profile: "fast" } });
+    await scannedLink("movies", "Alpha (2020)", "Alpha.mkv");
+    await scannedLink("movies", "Bravo (2020)", "Bravo.mkv");
+    await scannedLink("movies4k", "Alpha (2020)", "Alpha 4K.mkv");
+    // Placeholder bytes stand in for media here, so the content preflight is left out of this copy runner.
+    const copyRunner = { copyFile: defaultCopyRunner.copyFile, runCmp: defaultCopyRunner.runCmp, runFfmpeg: defaultCopyRunner.runFfmpeg };
+    const worker = new JobWorker(app.database.db, { workerId: "radarr-instances-per-title", copyRunner, logger: quiet, copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(app.database.db, copy, titles) });
+    await app.jobs.startExternalTitleScan([{ section: "movies", itemName: "Alpha (2020)" }, { section: "movies", itemName: "Bravo (2020)" }, { section: "movies4k", itemName: "Alpha (2020)" }]);
+    await worker.runOnce();
+    for (const itemName of ["Alpha (2020)", "Bravo (2020)"]) await setStoragePolicyTitle(app.database.db, itemName, "location_1");
+    // The 1080p Alpha stays remote; only 1080p Bravo and 4K Alpha are copied. Both instances call their movie id 1.
+    const links = (await app.database.db.select().from(schema.mediaLinks)).filter((link) => link.section === "movies4k" || link.itemName === "Bravo (2020)");
+    const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: links.map((link) => link.id), radarrMonitoring: true });
+    await worker.runOnce();
+    expect((await app.jobs.getJob(jobId))?.status).toBe("completed");
+    const queued = await app.database.db.select().from(schema.radarrMonitorUpdates);
+    expect(queued.map((update) => [update.instanceId, update.movieId, update.monitored]).sort()).toEqual([[instanceId, 2, false], [uhdId, 1, false]].sort());
+    await processRadarrWork(app.database.db);
+    expect(hd.edits.filter((edit) => "monitored" in edit)).toEqual([{ movieIds: [2], monitored: false }]);
+    expect(uhd.edits.filter((edit) => "monitored" in edit)).toEqual([{ movieIds: [1], monitored: false }]);
+    expect(hd.movies.map((item) => item.monitored)).toEqual([true, false]);
+    expect(await app.database.db.select().from(schema.radarrMonitorUpdates)).toHaveLength(2);
+    const messages = (await app.jobs.listEvents(jobId)).map((event) => event.message);
+    expect(messages).toEqual(expect.arrayContaining(["Unmonitored in Radarr: Bravo (2020)", "Unmonitored in Radarr 4K: Alpha (2020)"]));
+  });
+
   it("keeps working when another instance is offline or slow, with separate error state", async () => {
     const hd = await fakeRadarr([titleIn("/library", 1, "Alpha")], ["/library"]);
     const uhd = await fakeRadarr([titleIn("/library4k", 1, "Alpha")], ["/library4k"]);
@@ -878,7 +1047,8 @@ describe("multiple Radarr instances", () => {
       await pool.query(`ALTER TABLE radarr_movies ADD PRIMARY KEY (movie_id)`);
       await pool.query(`ALTER TABLE radarr_events ADD CONSTRAINT radarr_events_fingerprint_key UNIQUE (fingerprint)`);
       await pool.query(`ALTER TABLE radarr_copy_jobs ADD PRIMARY KEY (job_id)`);
-      await pool.query(`DELETE FROM schema_migrations WHERE version = 19`);
+      await pool.query(`ALTER TABLE radarr_monitor_updates DROP COLUMN previous_monitored`);
+      await pool.query(`DELETE FROM schema_migrations WHERE version IN (19, 20)`);
     } finally {
       await pool.end();
     }
@@ -905,6 +1075,31 @@ describe("multiple Radarr instances", () => {
     expect((await app.app.inject({ method: "POST", url: "/api/integrations/radarr/webhook", headers: { "x-srtl-webhook-secret": "wrong-secret-with-enough-characters" }, payload: { eventType: "Test" } })).statusCode).toBe(401);
     const migratedSecond = await createRadarrInstance(app.database.db, "Radarr 4K");
     expect(migratedSecond.settings.legacyWebhook).toBe(false);
+  });
+
+  it("keeps one copy monitoring update per job, instance, movie, and direction after upgrading", async () => {
+    const timestamp = new Date().toISOString();
+    const [job] = await app.database.db.insert(schema.jobs).values({ type: "copy", status: "completed", createdAt: timestamp, finishedAt: timestamp, options: JSON.stringify({ direction: "to_local", radarrMonitoring: true }), progress: "{}" }).returning();
+    const config = app.config;
+    await app.app.close();
+    const pool = new Pool({ connectionString: database.databaseUrl });
+    try {
+      // Before version 20 nothing stopped the same update from being queued twice.
+      await pool.query(`DROP INDEX radarr_monitor_updates_copy_movie_idx`);
+      await pool.query(`ALTER TABLE radarr_monitor_updates DROP COLUMN previous_monitored`);
+      await pool.query(`DELETE FROM schema_migrations WHERE version = 20`);
+      for (const [movieId, monitored] of [[1, false], [1, false], [1, true], [2, false]] as const) {
+        await pool.query(`INSERT INTO radarr_monitor_updates (instance_id, copy_job_id, movie_id, title, monitored, created_at, next_attempt_at) VALUES ($1, $2, $3, 'Movie', $4, $5, $5)`, [instanceId, job!.id, movieId, monitored, timestamp]);
+      }
+      await pool.query(`INSERT INTO radarr_monitor_updates (instance_id, copy_job_id, movie_id, title, monitored, created_at, next_attempt_at) VALUES ($1, NULL, 1, 'Movie', false, $2, $2), ($1, NULL, 1, 'Movie', false, $2, $2)`, [instanceId, timestamp]);
+    } finally {
+      await pool.end();
+    }
+    app = await createApp(config);
+    app.app.log.level = "silent";
+    const rows = await app.database.db.select().from(schema.radarrMonitorUpdates).orderBy(schema.radarrMonitorUpdates.id);
+    expect(rows.map((row) => [row.copyJobId, row.movieId, row.monitored, row.previousMonitored])).toEqual([[job!.id, 1, false, null], [job!.id, 1, true, null], [job!.id, 2, false, null], [null, 1, false, null], [null, 1, false, null]]);
+    await expect(app.database.db.insert(schema.radarrMonitorUpdates).values({ instanceId, copyJobId: job!.id, movieId: 2, title: "Movie", monitored: false, createdAt: timestamp, nextAttemptAt: timestamp })).rejects.toThrow();
   });
 });
 

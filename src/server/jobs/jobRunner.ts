@@ -185,6 +185,9 @@ export interface JobWorkerOptions {
   dispatchConcurrency?: number;
   // Optional external facts about a source file (for example Radarr's recorded size and runtime).
   mediaExpectations?: (link: MediaLinkRow) => Promise<MediaExpectation | undefined>;
+  // Called for copies that update Radarr monitoring, with titles whose files may all have reached the destination.
+  // The callee checks which titles are complete, so calling it again for the same title is harmless.
+  copiedTitles?: (copy: { jobId: number; direction: CopyOptions["direction"] }, titles: Array<{ section: string; itemName: string }>) => Promise<void>;
 }
 
 function normalizeSelectedSections(selectedSections: string[] | undefined, configuredSections: string[], label: string): string[] {
@@ -2931,6 +2934,7 @@ export class JobWorker {
   private readonly concurrency: JobConcurrencySettings;
   private readonly copyTransferLimiter: CopyTransferLimiter;
   private readonly mediaExpectations: JobWorkerOptions["mediaExpectations"];
+  private readonly copiedTitles: JobWorkerOptions["copiedTitles"];
   private readonly activeAbortControllers = new Map<number, AbortController>();
   private readonly activeRuns = new Set<Promise<void>>();
   private stopRequested = false;
@@ -2952,6 +2956,7 @@ export class JobWorker {
     this.concurrency = options.concurrency ?? defaultJobConcurrency;
     this.copyTransferLimiter = options.copyTransferLimiter ?? new CopyTransferLimiter(this.concurrency.maxActiveCopyFiles);
     this.mediaExpectations = options.mediaExpectations;
+    this.copiedTitles = options.copiedTitles;
   }
 
   async start(): Promise<void> {
@@ -4412,6 +4417,20 @@ export class JobWorker {
       return progressWrite;
     };
 
+    // Each title is reported as soon as its files are committed, so Radarr monitoring changes while the rest of
+    // the batch copies. A failure here only delays the change to the end-of-job pass.
+    const reportCopiedTitles = async (titleLinks: MediaLinkRow[]) => {
+      if (!normalizedOptions.radarrMonitoring || !this.copiedTitles || titleLinks.length === 0 || (await ctx.isCancelled())) return;
+      const titles = new Map(titleLinks.map((link) => [`${link.section}\0${link.itemName}`, { section: link.section, itemName: link.itemName }]));
+      try {
+        await this.copiedTitles({ jobId: ctx.jobId, direction: normalizedOptions.direction }, [...titles.values()]);
+      } catch (error: unknown) {
+        await ctx.event("warn", "Radarr monitoring will be updated when the copy job ends", { error: errorMessage(error) });
+      }
+    };
+    // Titles committed before a restart, or already at the destination, are reported before copying resumes.
+    await reportCopiedTitles(selectedLinks.filter((link) => link.kind === destinationKind));
+
     if (unavailable > 0) {
       await ctx.event("warn", "Selected copy media is no longer available", { total, unavailable });
     }
@@ -4702,7 +4721,10 @@ export class JobWorker {
       links,
       this.concurrency.copyFileConcurrency,
       (link) => String(link.id),
-      processLink,
+      async (link) => {
+        await processLink(link);
+        await reportCopiedTitles([link]);
+      },
       () => !ctx.signal.aborted
     );
 

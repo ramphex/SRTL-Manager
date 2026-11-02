@@ -4,7 +4,7 @@ import path from "node:path";
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { radarrInstanceLimit, type RadarrConnectionTest, type RadarrCopyDefaults, type RadarrMovieStatus, type RadarrOverview, type RadarrPathMapping, type RadarrRootConflict, type RadarrSettings, type RadarrSettingsInput, type RadarrState } from "../../shared/radarr";
-import type { JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind } from "../../shared/types";
+import type { CopyOptions, JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind, StorageRootType } from "../../shared/types";
 import { dbAll, first, getJsonSetting, getSectionSettings, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
@@ -726,8 +726,54 @@ async function syncTags(db: Db, config: StoredSettings): Promise<void> {
   });
 }
 
-// Copies that requested it update Radarr monitoring once every file of the movie is at the destination.
+interface CopiedTitle { section: string; itemName: string }
+interface CopiedMovie { movie: MovieRow; complete: boolean }
+
+const titleKey = (title: CopiedTitle) => `${title.section}\0${title.itemName}`;
+const notCopiedMessage = "Skipped: not every file of this movie finished copying.";
+const rolledBackMessage = "Skipped: the copy was terminated and rolled back.";
+
+// The instance's movies among the copied titles, each marked complete when every current file of it is at the destination.
 // Each instance handles only the movies in folders it maps, so a copy across folders reaches every owning instance.
+async function copiedMovies(db: Db, config: StoredSettings, titles: CopiedTitle[], destination: StorageRootType): Promise<CopiedMovie[]> {
+  const keys = new Set(titles.map(titleKey));
+  const sections = [...new Set(titles.map((title) => title.section))];
+  if (!sections.length) return [];
+  // Small selections, such as a single finished title, are looked up by name instead of reading whole sections.
+  const itemNames = titles.length <= 500 ? [...new Set(titles.map((title) => title.itemName))] : null;
+  const movies = (await db.select().from(schema.radarrMovies).where(and(forInstance(config), inArray(schema.radarrMovies.section, sections), itemNames ? inArray(schema.radarrMovies.itemName, itemNames) : undefined)))
+    .filter((movie) => movie.section !== null && movie.itemName !== null && keys.has(titleKey({ section: movie.section, itemName: movie.itemName })));
+  if (!movies.length) return [];
+  const links = await db.select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, kind: schema.mediaLinks.kind }).from(schema.mediaLinks)
+    .where(and(inArray(schema.mediaLinks.section, sections), itemNames ? inArray(schema.mediaLinks.itemName, itemNames) : undefined, eq(schema.mediaLinks.isMedia, true), isNull(schema.mediaLinks.missingSince)));
+  return movies.map((movie) => {
+    const titleLinks = links.filter((link) => link.section === movie.section && link.itemName === movie.itemName);
+    return { movie, complete: titleLinks.length > 0 && titleLinks.every((link) => link.kind === destination) };
+  });
+}
+
+function copyMonitorUpdate(config: StoredSettings, copyJobId: number, movie: MovieRow, monitored: boolean, timestamp: string): typeof schema.radarrMonitorUpdates.$inferInsert {
+  return { instanceId: config.id, copyJobId, movieId: movie.movieId, title: movie.title, monitored, previousMonitored: movie.monitored, createdAt: timestamp, nextAttemptAt: timestamp };
+}
+
+// The copy worker calls this as soon as a title's files are committed, so a long batch changes each movie's monitoring
+// within seconds of it being safe instead of when the whole job ends. Titles not yet complete are left for later calls
+// and for the end-of-job pass. Every (job, instance, movie) is queued at most once, so repeated calls are harmless.
+export async function queueCopiedTitleMonitorUpdates(db: Db, copy: { jobId: number; direction: CopyOptions["direction"] }, titles: CopiedTitle[]): Promise<void> {
+  if (!titles.length) return;
+  const monitored = copy.direction === "to_remote";
+  await locked(db, async (transaction) => {
+    const timestamp = nowIso();
+    for (const config of (await storedInstances(transaction)).instances) {
+      if (!config.enabled || copy.jobId <= config.copyJobFloor) continue;
+      const complete = (await copiedMovies(transaction, config, titles, monitored ? "remote" : "local")).filter((entry) => entry.complete);
+      if (complete.length) await transaction.insert(schema.radarrMonitorUpdates).values(complete.map(({ movie }) => copyMonitorUpdate(config, copy.jobId, movie, monitored, timestamp))).onConflictDoNothing();
+    }
+  });
+}
+
+// Once a requested copy ends, this pass queues anything the per-title calls missed and records titles that did not fully copy.
+// A terminated copy rolls its files back to the source, so monitoring already changed for them is put back as it was.
 async function queueCopyMonitorUpdates(db: Db, config: StoredSettings): Promise<void> {
   const copyJobs = (await db.execute<{ id: number; options: string }>(sql`
     select jobs.id, jobs.options from jobs
@@ -738,20 +784,31 @@ async function queueCopyMonitorUpdates(db: Db, config: StoredSettings): Promise<
     order by jobs.id limit 20`)).rows;
   for (const job of copyJobs) {
     await commitCurrent(db, config, async (transaction) => {
-      const direction = (JSON.parse(job.options) as { direction?: string }).direction;
-      const destination = direction === "to_remote" ? "remote" : "local";
+      const monitored = (JSON.parse(job.options) as { direction?: string }).direction === "to_remote";
       const titles = await transaction.selectDistinct({ section: schema.jobSelectionItems.section, itemName: schema.jobSelectionItems.itemName }).from(schema.jobSelectionItems).where(eq(schema.jobSelectionItems.jobId, job.id));
-      const titleKeys = new Set(titles.map((title) => `${title.section}\0${title.itemName}`));
-      const sections = [...new Set(titles.map((title) => title.section))];
-      const movies = sections.length ? (await transaction.select().from(schema.radarrMovies).where(and(forInstance(config), inArray(schema.radarrMovies.section, sections)))).filter((movie) => titleKeys.has(`${movie.section}\0${movie.itemName}`)) : [];
-      const links = movies.length ? await transaction.select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, kind: schema.mediaLinks.kind }).from(schema.mediaLinks).where(and(inArray(schema.mediaLinks.section, sections), eq(schema.mediaLinks.isMedia, true), isNull(schema.mediaLinks.missingSince))) : [];
+      const movies = await copiedMovies(transaction, config, titles, monitored ? "remote" : "local");
+      const queued = new Map((await transaction.select().from(schema.radarrMonitorUpdates)
+        .where(and(eq(schema.radarrMonitorUpdates.instanceId, config.id), eq(schema.radarrMonitorUpdates.copyJobId, job.id), eq(schema.radarrMonitorUpdates.monitored, monitored))))
+        .map((update) => [update.movieId, update]));
+      const rolledBack = new Set((await transaction.selectDistinct({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName }).from(schema.copyOperations)
+        .innerJoin(schema.mediaLinks, eq(schema.mediaLinks.id, schema.copyOperations.mediaLinkId))
+        .where(and(eq(schema.copyOperations.jobId, job.id), eq(schema.copyOperations.stage, "rolled_back")))).map(titleKey));
       const timestamp = nowIso();
-      const updates = movies.map((movie) => {
-        const titleLinks = links.filter((link) => link.section === movie.section && link.itemName === movie.itemName);
-        const complete = titleLinks.length > 0 && titleLinks.every((link) => link.kind === destination);
-        return { instanceId: config.id, copyJobId: job.id, movieId: movie.movieId, title: movie.title, monitored: direction === "to_remote", createdAt: timestamp, nextAttemptAt: timestamp, ...(complete ? {} : { processedAt: timestamp, error: "Skipped: not every file of this movie finished copying." }) };
-      });
-      if (updates.length) await transaction.insert(schema.radarrMonitorUpdates).values(updates);
+      const updates: Array<typeof schema.radarrMonitorUpdates.$inferInsert> = [];
+      for (const { movie, complete } of movies) {
+        const update = queued.get(movie.movieId);
+        if (!update) {
+          updates.push({ ...copyMonitorUpdate(config, job.id, movie, monitored, timestamp), ...(complete ? {} : { processedAt: timestamp, error: notCopiedMessage }) });
+          continue;
+        }
+        if (complete || update.error?.startsWith("Skipped") || !rolledBack.has(titleKey({ section: movie.section!, itemName: movie.itemName! }))) continue;
+        if (!update.processedAt) {
+          await transaction.update(schema.radarrMonitorUpdates).set({ processedAt: timestamp, error: rolledBackMessage }).where(eq(schema.radarrMonitorUpdates.id, update.id));
+        } else if (update.previousMonitored === !monitored) {
+          updates.push(copyMonitorUpdate(config, job.id, movie, !monitored, timestamp));
+        }
+      }
+      if (updates.length) await transaction.insert(schema.radarrMonitorUpdates).values(updates).onConflictDoNothing();
       await transaction.insert(schema.radarrCopyJobs).values({ instanceId: config.id, jobId: job.id, handledAt: timestamp }).onConflictDoNothing();
     });
   }

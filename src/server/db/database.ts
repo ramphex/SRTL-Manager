@@ -22,7 +22,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 19;
+export const currentSchemaVersion = 20;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -695,6 +695,24 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS radarr_events_instance_fingerprint_idx ON radarr_events(instance_id, fingerprint)`);
         await client.query(`ALTER TABLE radarr_copy_jobs ADD CONSTRAINT radarr_copy_jobs_pkey PRIMARY KEY (instance_id, job_id)`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (19, 'radarr_instances', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(20)) {
+      await client.query("BEGIN");
+      try {
+        // Copies queue monitoring per title as each one finishes, so each (job, instance, movie, direction)
+        // is recorded once. Older rows could only repeat through a retried end-of-job pass; the first one is kept.
+        await client.query(`ALTER TABLE radarr_monitor_updates ADD COLUMN IF NOT EXISTS previous_monitored BOOLEAN`);
+        await client.query(`DELETE FROM radarr_monitor_updates later USING radarr_monitor_updates earlier
+          WHERE later.copy_job_id IS NOT NULL AND later.copy_job_id = earlier.copy_job_id AND later.instance_id = earlier.instance_id
+            AND later.movie_id = earlier.movie_id AND later.monitored = earlier.monitored AND later.id > earlier.id`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS radarr_monitor_updates_copy_movie_idx
+          ON radarr_monitor_updates(copy_job_id, instance_id, movie_id, monitored) WHERE copy_job_id IS NOT NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (20, 'radarr_per_title_monitoring', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

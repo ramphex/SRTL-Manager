@@ -43,12 +43,17 @@ export const radarrMonitorUpdates = pgTable("radarr_monitor_updates", {
   movieId: integer("movie_id").notNull(),
   title: text("title").notNull(),
   monitored: boolean("monitored").notNull(),
+  // Radarr's monitored state when the update was queued, restored if a cancelled copy is rolled back.
+  previousMonitored: boolean("previous_monitored"),
   createdAt: text("created_at").notNull(),
   processedAt: text("processed_at"),
   nextAttemptAt: text("next_attempt_at").notNull(),
   attempts: integer("attempts").notNull().default(0),
   error: text("error")
-});
+}, (table) => [
+  // A copy changes a movie's monitoring once, and restores it at most once if the copy is rolled back.
+  uniqueIndex("radarr_monitor_updates_copy_movie_idx").on(table.copyJobId, table.instanceId, table.movieId, table.monitored).where(sql`copy_job_id is not null`)
+]);
 
 export const radarrEvents = pgTable("radarr_events", {
   id: serial("id").primaryKey(),

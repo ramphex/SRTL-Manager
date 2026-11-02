@@ -10,7 +10,7 @@ import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
-import { radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
+import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 
 // Media outputs must remain readable by services running under a different account.
@@ -54,7 +54,8 @@ const worker = new JobWorker(database.db, {
   concurrency: config.jobConcurrency,
   copyTransferLimiter,
   dispatchConcurrency: config.jobConcurrency.maxRunningJobs,
-  mediaExpectations: (link) => radarrMediaExpectation(database.db, link)
+  mediaExpectations: (link) => radarrMediaExpectation(database.db, link),
+  copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(database.db, copy, titles)
 });
 
 async function recordHeartbeat(status: "running" | "stopped"): Promise<void> {

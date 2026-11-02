@@ -29,6 +29,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Changed
 
+- Radarr copy monitoring now updates each movie as soon as all of its files are copied and verified, instead of after the whole copy job ends, so long batches no longer leave copied movies monitored for hours. Each movie is updated once per copy and instance; the end-of-job pass still catches anything missed and lists titles that did not fully copy, and a job that fails on other titles or never finishes keeps the updates for titles that did copy. Terminating a copy now restores the monitoring of movies it had already changed, since their files are rolled back.
 - Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
 - Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
 - Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
