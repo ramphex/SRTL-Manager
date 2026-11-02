@@ -33,6 +33,7 @@ import { registerDamagedRoutes } from "./routes/damagedRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { registerMediaServerRoutes } from "./routes/mediaServerRoutes";
 import { registerWatchSyncRoutes } from "./routes/watchSyncRoutes";
+import { registerNowPlayingRoutes } from "./routes/nowPlayingRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
 import { registerSonarrRoutes, sonarrWebhookInstanceId, sonarrWebhookPath } from "./routes/sonarrRoutes";
@@ -208,6 +209,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerSonarrRoutes(app, database.db);
   registerMediaServerRoutes(app, database.db);
   registerWatchSyncRoutes(app, database.db, jobs);
+  registerNowPlayingRoutes(app, database.db);
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
   registerOrphanRoutes(app, database.db, jobs);
