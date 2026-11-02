@@ -1,12 +1,13 @@
 import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronLeft, ClipboardCopy, KeyRound, ChevronRight, Eye, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronLeft, KeyRound, ChevronRight, Eye, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
 import { generateRadarrWebhookSecret, type RadarrInstanceSummary, type RadarrMovieStatus, type RadarrOverview, type RadarrSettings, type RadarrSettingsInput, type RadarrState } from "../shared/radarr";
 import type { SectionSettings } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip } from "./App";
 import { formatDate, storagePolicyLabel, useStorageLocations, type ScanStatusPrompt } from "./appShared";
+import { CopyButton } from "./copyButton";
 import { ScanStatusDialog } from "./jobPresentation";
 import { SettingsTabs } from "./settingsTabs";
 
@@ -228,23 +229,11 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
   const [confirmRemove, setConfirmRemove] = useState(false);
   // Shown until saved: SRTL stores only a hash, so this is the one chance to copy it into Radarr.
   const [generatedSecret, setGeneratedSecret] = useState<string | null>(null);
-  const [secretCopied, setSecretCopied] = useState(false);
   const showGeneratedSecret = generatedSecret !== null && draft.webhookSecret === generatedSecret;
   const generateSecret = () => {
     const secret = generateRadarrWebhookSecret();
     setGeneratedSecret(secret);
-    setSecretCopied(false);
     update("webhookSecret", secret);
-  };
-  const copySecret = async () => {
-    if (!generatedSecret) return;
-    try {
-      await navigator.clipboard.writeText(generatedSecret);
-      setSecretCopied(true);
-    } catch {
-      // Clipboard access can be refused; the field stays selected for a manual copy.
-      document.querySelector<HTMLInputElement>("#radarr-generated-secret")?.select();
-    }
   };
   const remove = useMutation({ mutationFn: () => api.removeRadarrInstance(settings.id), onSuccess: (overview) => {
     queryClient.setQueryData(overviewKey, overview);
@@ -391,14 +380,14 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
           <p className="radarr-lede">Optional. Lets Radarr queue a title rescan after imports, upgrades, and renames.</p>
           <fieldset disabled={fieldsDisabled} className="radarr-fields">
             <div className="radarr-grid">
-              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} />{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
+              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><div className="radarr-input-action"><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} /><CopyButton text={webhookUrl} fallbackInputId="radarr-webhook-url" /></div>{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
               <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-secret" label="X-SRTL-Webhook-Secret" help="Optional; required only to accept webhooks. Enter your own 24-256 character secret using letters, numbers, hyphens, or underscores. Add the same value as a custom header in Radarr. Save it securely: SRTL cannot display it again. Leave blank to keep a saved secret." /><input form={settingsFormId} id="radarr-webhook-secret" type="password" autoComplete="new-password" minLength={24} maxLength={256} pattern={"[A-Za-z0-9_\\-]+"} value={draft.webhookSecret} placeholder={settings.hasWebhookSecret ? "Saved; leave blank to keep" : "Your secret, at least 24 characters"} onChange={(event) => update("webhookSecret", event.target.value)} /><div className="radarr-toolbar"><button type="button" className="secondary" onClick={generateSecret}><KeyRound size={16} />{settings.hasWebhookSecret || showGeneratedSecret ? "Generate new secret" : "Generate secret"}</button></div></div>
             </div>
             {showGeneratedSecret ? <div className="radarr-generated-secret" role="group" aria-label="Generated webhook secret">
               <label htmlFor="radarr-generated-secret">Generated secret</label>
-              <div className="radarr-toolbar">
+              <div className="radarr-input-action">
                 <input id="radarr-generated-secret" readOnly value={generatedSecret} spellCheck={false} onFocus={(event) => event.target.select()} />
-                <button type="button" className="secondary" onClick={() => void copySecret()}>{secretCopied ? <Check size={16} /> : <ClipboardCopy size={16} />}{secretCopied ? "Copied" : "Copy"}</button>
+                <CopyButton text={generatedSecret} fallbackInputId="radarr-generated-secret" />
               </div>
               <p className="muted">Copy this into Radarr's X-SRTL-Webhook-Secret header now. SRTL only stores a hash and can't show it again.{settings.hasWebhookSecret ? " Saving replaces the current secret, so Radarr must be updated with this new value." : ""} It applies after you save.</p>
             </div> : null}

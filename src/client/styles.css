@@ -3495,6 +3495,9 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-unmatched { margin-top: 16px; }
 .radarr-unmatched ul { margin: 0 0 10px; padding-left: 20px; }
 .radarr-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.radarr-input-action { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.radarr-input-action input { flex: 1 1 auto; min-width: 0; }
+.radarr-input-action button { flex: 0 0 auto; white-space: nowrap; }
 .radarr-toolbar input, .radarr-toolbar select { min-width: 0; max-width: 100%; height: 38px; }
 .radarr-search { flex: 1 1 220px; }
 .radarr-table-scroll { overflow: auto; max-height: 580px; margin-top: 14px; scrollbar-gutter: stable; }
