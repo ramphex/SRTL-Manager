@@ -45,10 +45,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Cleared the critical and high npm advisories for Fastify, Zod, undici, the router's serializer, Vite, and related packages by updating runtime and development dependencies and refreshing the lockfile.
 - Upgraded Vitest to 5 and jsdom to 30; jsdom 30 requires Node.js 24.15 or newer, which CI and release workflows already use.
-- Pinned GitHub Actions to their newer releases, each checked against its release tag, and refreshed the Node 24 base image to clear fixable Debian CVEs that failed the container image scan.
-
-### Security
-
+- Pinned GitHub Actions to their newer releases, each checked against its release tag.
 - Pinned a newer Node.js 24 bookworm-slim base image, so the container no longer ships the fixed critical and high vulnerabilities in Debian's perl and pcre2 packages.
 
 ## [0.1.3] - 2026-09-03
