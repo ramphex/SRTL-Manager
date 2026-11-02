@@ -251,7 +251,8 @@ describe("database bootstrap", () => {
         { version: 17 },
         { version: 18 },
         { version: 19 },
-        { version: 20 }
+        { version: 20 },
+        { version: 22 }
       ]);
     } finally {
       await database.close();
@@ -446,7 +447,8 @@ describe("database bootstrap", () => {
         { version: 17, name: "orphan_path_indexes" },
         { version: 18, name: "scan_inventory_health" },
         { version: 19, name: "radarr_instances" },
-        { version: 20, name: "radarr_per_title_monitoring" }
+        { version: 20, name: "radarr_per_title_monitoring" },
+        { version: 22, name: "watch_sync" }
       ]);
     } finally {
       await database.close();
