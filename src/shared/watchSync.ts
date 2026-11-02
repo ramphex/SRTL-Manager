@@ -1,43 +1,18 @@
-export type WatchSyncServerKind = "plex" | "jellyfin";
+import type { MediaServer, MediaServerKind, MediaServerPrefixMapping } from "./mediaServers";
+
+// Watch sync reads the shared media server connections from Settings > Media servers.
+export type WatchSyncServerKind = MediaServerKind;
+export type WatchSyncPrefixMapping = MediaServerPrefixMapping;
 export type WatchSyncDirection = "plex_to_jellyfin" | "jellyfin_to_plex" | "both";
 export type WatchSyncTransfer = Exclude<WatchSyncDirection, "both">;
 export type WatchSyncAction = "watched" | "unwatched" | "position";
 export type WatchSyncUserKind = "owner" | "home" | "managed" | "friend" | "user";
 
-export const watchSyncServerLimit = 10;
 export const watchSyncDirectionLabels: Record<WatchSyncDirection, string> = {
   plex_to_jellyfin: "Plex → Jellyfin",
   jellyfin_to_plex: "Jellyfin → Plex",
   both: "Both ways"
 };
-
-// The server sees the library under serverPrefix; SRTL's symlinks live under srtlPrefix.
-export interface WatchSyncPrefixMapping {
-  serverPrefix: string;
-  srtlPrefix: string;
-}
-
-export interface WatchSyncServerInput {
-  name: string;
-  url: string;
-  // Write-only: a Plex owner token or a Jellyfin API key. Empty keeps the stored one.
-  token?: string;
-  prefixMappings: WatchSyncPrefixMapping[];
-}
-
-export interface WatchSyncServer {
-  id: string;
-  kind: WatchSyncServerKind;
-  name: string;
-  url: string;
-  hasToken: boolean;
-  prefixMappings: WatchSyncPrefixMapping[];
-  // Plex only: the server's machine identifier and the plex.tv account that owns it.
-  machineIdentifier: string | null;
-  accountName: string | null;
-  lastCheckedAt: string | null;
-  lastError: string | null;
-}
 
 export interface WatchSyncSettingsInput {
   revision: number;
@@ -49,7 +24,6 @@ export interface WatchSyncSettingsInput {
 }
 
 export interface WatchSyncSettings extends WatchSyncSettingsInput {
-  servers: WatchSyncServer[];
   lastReconcileAt: string | null;
 }
 
@@ -162,23 +136,13 @@ export type WatchSyncJobMode = "preview" | "reconcile" | "restore";
 
 export interface WatchSyncState {
   settings: WatchSyncSettings;
+  // The shared media server connections, without their tokens.
+  servers: MediaServer[];
   users: WatchSyncUser[];
   pairs: WatchSyncPair[];
   suggestions: WatchSyncSuggestion[];
   activeJobs: WatchSyncJobSummary[];
   indexedItems: Record<string, number>;
-}
-
-export interface WatchSyncPlexPin {
-  pinId: number;
-  code: string;
-  authUrl: string;
-  expiresAt: string;
-}
-
-export interface WatchSyncPinStatus {
-  status: "waiting" | "authorized" | "expired";
-  state?: WatchSyncState;
 }
 
 export interface WatchSyncSideState {

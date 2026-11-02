@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { MediaServer, MediaServerList } from "../../src/shared/mediaServers";
 import type { RadarrOverview } from "../../src/shared/radarr";
 import type { WatchSyncPair, WatchSyncState } from "../../src/shared/watchSync";
 
@@ -20,15 +21,15 @@ function pair(overrides: Partial<WatchSyncPair> = {}): WatchSyncPair {
   };
 }
 
-async function fixture(page: Page) {
+const servers: MediaServer[] = [
+  { id: "plex1", kind: "plex", name: "Home Plex", url: "http://plex:32400", hasToken: true, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: "/mnt/plex" }], machineIdentifier: "m1", accountName: "alex_03", version: "1.43.0", lastCheckedAt: "2026-11-01T11:00:00.000Z", lastError: null },
+  { id: "jf1", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin:8096", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "10.10.0", lastCheckedAt: null, lastError: "Jellyfin: Jellyfin returned HTTP 503." }
+];
+
+async function fixture(page: Page, options: { servers?: MediaServer[] } = {}) {
   const state: WatchSyncState = {
-    settings: {
-      revision: 3, paused: false, intervalMinutes: 5, reconcileIntervalDays: 7, syncWatched: true, syncPosition: true, lastReconcileAt: null,
-      servers: [
-        { id: "plex1", kind: "plex", name: "Home Plex", url: "http://plex:32400", hasToken: true, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: "/mnt/plex" }], machineIdentifier: "m1", accountName: "alex_03", lastCheckedAt: "2026-11-01T11:00:00.000Z", lastError: null },
-        { id: "jf1", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin:8096", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, lastCheckedAt: null, lastError: "Jellyfin: Jellyfin returned HTTP 503." }
-      ]
-    },
+    settings: { revision: 3, paused: false, intervalMinutes: 5, reconcileIntervalDays: 7, syncWatched: true, syncPosition: true, lastReconcileAt: null },
+    servers: options.servers ?? servers,
     users: [
       { serverId: "plex1", externalId: "100", name: "alex_03", username: "alex_03", kind: "owner", ready: true, note: null },
       { serverId: "plex1", externalId: "200", name: "Friend.Bob", username: "friendbob", kind: "friend", ready: true, note: null },
@@ -36,7 +37,7 @@ async function fixture(page: Page) {
       { serverId: "jf1", externalId: "u1", name: "Alex", username: null, kind: "user", ready: true, note: null },
       { serverId: "jf1", externalId: "u2", name: "friendbob", username: null, kind: "user", ready: true, note: null }
     ],
-    pairs: [pair()],
+    pairs: options.servers?.length === 0 ? [] : [pair()],
     suggestions: [{ plexServerId: "plex1", plexUserId: "200", plexUserName: "Friend.Bob", jellyfinServerId: "jf1", jellyfinUserId: "u2", jellyfinUserName: "friendbob", match: "exact" }],
     activeJobs: [],
     indexedItems: { plex1: 400, jf1: 398 }
@@ -58,7 +59,9 @@ async function fixture(page: Page) {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       response = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
     } else if (url.pathname === "/api/settings/radarr") response = { instances: [], limit: 25 } satisfies RadarrOverview;
+    else if (url.pathname === "/api/media-servers") response = { servers: state.servers, limit: 10 } satisfies MediaServerList;
     else if (url.pathname === "/api/settings/watch-sync") response = state;
+    else if (url.pathname === "/api/settings/watch-sync/servers/plex1/discover") response = state;
     else if (url.pathname === "/api/settings/watch-sync/activity") response = { entries: [{ id: 1, pairId: 1, at: "2026-11-01T12:05:00.000Z", level: "info", direction: "plex_to_jellyfin", action: "watched", linkPath: "/mnt/plex/movies/Alpha (2020)/Alpha.mkv", message: "Marked \"Alpha\" watched on Jellyfin (from Plex).", jobId: null }] };
     else if (url.pathname === "/api/settings/watch-sync/pairs/1/approve") {
       state.pairs = [pair({ approvedAt: "2026-11-01T12:10:00.000Z" })];
@@ -79,28 +82,43 @@ async function fixture(page: Page) {
   return { state, calls };
 }
 
-async function openWatchSync(page: Page) {
+async function openWatchSync(page: Page, heading = "Watch sync") {
   await page.goto(`${baseUrl}/settings/integrations`);
   await page.getByRole("tablist", { name: "Integrations" }).getByRole("tab", { name: "Watch sync" }).click();
-  await expect(page.getByRole("heading", { name: "Watch sync" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: heading })).toBeVisible();
 }
 
 function tab(page: Page, name: string) {
   return page.getByRole("tablist", { name: "Watch sync" }).getByRole("tab", { name });
 }
 
-test("lists servers with their users, status, and Plex sign-in", async ({ page }) => {
-  await fixture(page);
+test("lists each server's users and status, with the connection in Media servers", async ({ page }) => {
+  const { calls } = await fixture(page);
   await openWatchSync(page);
+  await expect(tab(page, "Users")).toHaveAttribute("aria-selected", "true");
   const plex = page.getByRole("region", { name: "Plex server Home Plex" });
-  await expect(plex.getByRole("button", { name: "Sign in with Plex again" })).toBeVisible();
   await expect(plex).toContainText("Plex account alex_03");
   await expect(plex).toContainText("400 SRTL items indexed");
   await expect(plex).toContainText("No server access token.");
   await expect(page.getByRole("region", { name: "Jellyfin server Jellyfin" })).toContainText("HTTP 503");
-  await plex.getByText("Connection and path mappings").click();
-  await expect(plex.getByLabel("Server path prefix")).toHaveValue("/data/media");
-  await expect(plex.getByRole("textbox", { name: "Plex token (optional)" })).toHaveAttribute("placeholder", "Saved. Leave empty to keep it.");
+  // Server setup moved to Settings > Media servers; watch sync only discovers users.
+  await expect(plex.getByRole("button", { name: /Sign in with Plex/ })).toHaveCount(0);
+  await expect(plex.getByLabel("Server path prefix")).toHaveCount(0);
+  await plex.getByRole("button", { name: "Discover users" }).click();
+  await expect.poll(() => calls.some((call) => call.method === "POST" && call.path === "/api/settings/watch-sync/servers/plex1/discover")).toBe(true);
+  await plex.getByRole("link", { name: "Edit Home Plex in Media servers" }).click();
+  await expect(page).toHaveURL(/\/settings\/media-servers$/);
+  await expect(page.getByRole("region", { name: "Plex server Home Plex" })).toContainText("Plex 1.43.0");
+});
+
+test("asks for a media server when none is connected", async ({ page }) => {
+  await fixture(page, { servers: [] });
+  await openWatchSync(page, "Watch sync needs a media server");
+  await expect(page.getByText("Connect a Plex or Jellyfin server in Settings > Media servers.")).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "Watch sync" })).toHaveCount(0);
+  await page.getByRole("link", { name: "Open Media servers" }).click();
+  await expect(page).toHaveURL(/\/settings\/media-servers$/);
+  await expect(page.getByText("No media servers yet.")).toBeVisible();
 });
 
 test("shows the preview and starts syncing only after approval", async ({ page }) => {

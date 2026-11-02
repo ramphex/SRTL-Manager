@@ -562,3 +562,4 @@ export const auditResults = pgTable(
 );
 
 export * from "./watchSyncSchema";
+export * from "./mediaServerSchema";

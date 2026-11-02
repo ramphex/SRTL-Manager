@@ -1,21 +1,13 @@
-import { randomBytes, randomUUID } from "node:crypto";
-import path from "node:path";
-import { and, asc, count, desc, eq, inArray, isNotNull, or, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, isNotNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
-  watchSyncServerLimit,
   type WatchSyncActivity,
   type WatchSyncBackup,
   type WatchSyncDirection,
   type WatchSyncPair,
   type WatchSyncPairInput,
   type WatchSyncPairUpdate,
-  type WatchSyncPinStatus,
-  type WatchSyncPlexPin,
   type WatchSyncPreview,
-  type WatchSyncPrefixMapping,
-  type WatchSyncServer,
-  type WatchSyncServerInput,
   type WatchSyncServerKind,
   type WatchSyncSettings,
   type WatchSyncSettingsInput,
@@ -27,27 +19,22 @@ import {
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JellyfinClient } from "./jellyfinClient";
+import { findMediaServer, getMediaServer, loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
-import { WatchSyncError, normalizeServerUrl } from "./watchSyncHttp";
+import { WatchSyncError } from "./watchSyncHttp";
 
 const settingKey = "watchSync";
 const settingsLock = 781_889_470;
 
-export interface StoredServer {
-  id: string;
-  kind: WatchSyncServerKind;
-  name: string;
-  url: string;
-  token: string;
-  prefixMappings: WatchSyncPrefixMapping[];
-  machineIdentifier: string | null;
-  accountName: string | null;
-  accountId: string | null;
-}
+// The shared connection from Settings > Media servers, token included.
+export type StoredServer = MediaServerRecord;
 
-export interface StoredSettings extends WatchSyncSettingsInput {
-  clientIdentifier: string;
+export type StoredSettings = WatchSyncSettingsInput;
+
+// Everything a sync pass needs: watch sync's own settings, the shared servers, and SRTL's client identifier.
+export interface WatchSyncContext extends StoredSettings {
   servers: StoredServer[];
+  clientIdentifier: string;
 }
 
 export type PairRow = typeof schema.watchSyncPairs.$inferSelect;
@@ -57,15 +44,7 @@ class WatchSyncNotFound extends WatchSyncError {
   override readonly statusCode = 404;
 }
 
-const absolutePrefix = z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/") && !/[\\\0]/.test(value) && path.posix.normalize(value) === value.replace(/(.)\/+$/, "$1"), "Use an absolute path prefix without parent-directory segments.")
-  .transform((value) => value.replace(/(.)\/+$/, "$1"));
-export const watchSyncServerIdSchema = z.string().regex(/^[a-z0-9]{1,40}$/, "Unknown media server.");
-export const watchSyncServerInputSchema = z.object({
-  name: z.string().trim().min(1, "Enter a name for this server.").max(60, "Use at most 60 characters for the server name."),
-  url: z.string().trim().min(1, "Enter the server URL.").max(2000),
-  token: z.string().trim().max(512).regex(/^[A-Za-z0-9_.\-~]*$/, "Tokens and API keys contain only letters, numbers, and - _ . ~").optional(),
-  prefixMappings: z.array(z.object({ serverPrefix: absolutePrefix, srtlPrefix: absolutePrefix })).max(20).default([])
-});
+export const watchSyncServerIdSchema = mediaServerIdSchema;
 export const watchSyncSettingsSchema = z.object({
   revision: z.number().int().nonnegative(),
   paused: z.boolean(),
@@ -102,35 +81,29 @@ export const watchSyncBackupSchema = z.object({
   items: z.array(z.object({ linkPath: z.string().min(1).max(4096), plex: sideStateSchema.nullable(), jellyfin: sideStateSchema.nullable() })).max(500_000)
 });
 
-const defaults: Omit<StoredSettings, "clientIdentifier"> = { revision: 0, paused: false, intervalMinutes: 5, reconcileIntervalDays: 7, syncWatched: true, syncPosition: true, servers: [] };
+const defaults: StoredSettings = { revision: 0, paused: false, intervalMinutes: 5, reconcileIntervalDays: 7, syncWatched: true, syncPosition: true };
 
 export async function loadWatchSyncSettings(db: Db): Promise<StoredSettings> {
   const saved = await getJsonSetting<Partial<StoredSettings>>(db, settingKey, {});
-  return { ...defaults, ...saved, clientIdentifier: saved.clientIdentifier ?? "", servers: saved.servers ?? [] };
+  return {
+    revision: saved.revision ?? defaults.revision, paused: saved.paused ?? defaults.paused, intervalMinutes: saved.intervalMinutes ?? defaults.intervalMinutes,
+    reconcileIntervalDays: saved.reconcileIntervalDays ?? defaults.reconcileIntervalDays, syncWatched: saved.syncWatched ?? defaults.syncWatched, syncPosition: saved.syncPosition ?? defaults.syncPosition
+  };
+}
+
+export async function loadWatchSyncContext(db: Db): Promise<WatchSyncContext> {
+  return { ...await loadWatchSyncSettings(db), servers: await loadMediaServers(db), clientIdentifier: await mediaServerClientIdentifier(db) };
 }
 
 async function locked<T>(db: Db, action: (transaction: Db, settings: StoredSettings) => Promise<T>): Promise<T> {
   return db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${settingsLock})`);
-    const settings = await loadWatchSyncSettings(transaction);
-    // Plex identifies SRTL by this id for PIN sign-in, so it is created once and kept.
-    if (!settings.clientIdentifier) {
-      settings.clientIdentifier = randomUUID();
-      await setSetting(transaction, settingKey, settings);
-    }
-    return action(transaction, settings);
+    return action(transaction, await loadWatchSyncSettings(transaction));
   });
 }
 
-async function clientIdentifier(db: Db): Promise<string> {
-  const settings = await loadWatchSyncSettings(db);
-  return settings.clientIdentifier || locked(db, async (_transaction, current) => current.clientIdentifier);
-}
-
-export function findServer(settings: StoredSettings, serverId: string, kind?: WatchSyncServerKind): StoredServer {
-  const server = settings.servers.find((entry) => entry.id === serverId && (!kind || entry.kind === kind));
-  if (!server) throw new WatchSyncNotFound("This media server no longer exists. Reload the watch sync settings.");
-  return server;
+export function findServer(context: Pick<WatchSyncContext, "servers">, serverId: string, kind?: WatchSyncServerKind): StoredServer {
+  return findMediaServer(context.servers, serverId, kind);
 }
 
 // Cursors and status records the worker writes without touching the user's settings revision.
@@ -147,34 +120,15 @@ export async function writeCursor(db: Db, scope: string, value: string | null): 
   await db.insert(schema.watchSyncCursors).values({ scope, value, updatedAt: nowIso() }).onConflictDoUpdate({ target: schema.watchSyncCursors.scope, set: { value, updatedAt: nowIso() } });
 }
 
-interface ServerStatus { lastCheckedAt: string | null; lastError: string | null }
 export async function recordServerStatus(db: Db, serverId: string, error: string | null): Promise<void> {
-  await writeCursor(db, `server-status:${serverId}`, JSON.stringify({ lastCheckedAt: nowIso(), lastError: error } satisfies ServerStatus));
-}
-
-async function serverStatuses(db: Db): Promise<Map<string, ServerStatus>> {
-  const rows = await db.select().from(schema.watchSyncCursors).where(sql`${schema.watchSyncCursors.scope} LIKE 'server-status:%'`);
-  return new Map(rows.map((row) => {
-    try { return [row.scope.slice("server-status:".length), JSON.parse(row.value) as ServerStatus]; }
-    catch { return [row.scope.slice("server-status:".length), { lastCheckedAt: null, lastError: null }]; }
-  }));
-}
-
-function publicServer(server: StoredServer, status: ServerStatus | undefined): WatchSyncServer {
-  return {
-    id: server.id, kind: server.kind, name: server.name, url: server.url, hasToken: Boolean(server.token), prefixMappings: server.prefixMappings,
-    machineIdentifier: server.machineIdentifier, accountName: server.accountName,
-    lastCheckedAt: status?.lastCheckedAt ?? null, lastError: status?.lastError ?? null
-  };
+  await recordMediaServerStatus(db, serverId, error);
 }
 
 export async function publicSettings(db: Db): Promise<WatchSyncSettings> {
   const settings = await loadWatchSyncSettings(db);
-  const statuses = await serverStatuses(db);
   return {
     revision: settings.revision, paused: settings.paused, intervalMinutes: settings.intervalMinutes, reconcileIntervalDays: settings.reconcileIntervalDays,
     syncWatched: settings.syncWatched, syncPosition: settings.syncPosition,
-    servers: settings.servers.map((server) => publicServer(server, statuses.get(server.id))),
     lastReconcileAt: await readCursor(db, "reconcile:last")
   };
 }
@@ -191,82 +145,6 @@ export async function saveWatchSyncSettings(db: Db, input: WatchSyncSettingsInpu
 export async function setWatchSyncPaused(db: Db, paused: boolean): Promise<WatchSyncState> {
   await locked(db, (transaction, settings) => setSetting(transaction, settingKey, { ...settings, paused, revision: settings.revision + 1 }));
   return getWatchSyncState(db);
-}
-
-function validateServerInput(kind: WatchSyncServerKind, input: WatchSyncServerInput) {
-  const parsed = watchSyncServerInputSchema.parse(input);
-  const service = kind === "plex" ? "Plex" : "Jellyfin";
-  return { ...parsed, url: normalizeServerUrl(parsed.url, service) };
-}
-
-export async function addWatchSyncServer(db: Db, kind: WatchSyncServerKind, input: WatchSyncServerInput): Promise<WatchSyncState> {
-  const draft = validateServerInput(kind, input);
-  await locked(db, async (transaction, settings) => {
-    if (settings.servers.length >= watchSyncServerLimit) throw new WatchSyncError(`Watch sync supports up to ${watchSyncServerLimit} media servers.`);
-    if (settings.servers.some((server) => server.name.toLowerCase() === draft.name.toLowerCase())) throw new WatchSyncError("Another media server already uses this name.");
-    const server: StoredServer = { id: randomBytes(6).toString("hex"), kind, name: draft.name, url: draft.url, token: draft.token ?? "", prefixMappings: draft.prefixMappings, machineIdentifier: null, accountName: null, accountId: null };
-    await setSetting(transaction, settingKey, { ...settings, servers: [...settings.servers, server] });
-  });
-  return getWatchSyncState(db);
-}
-
-export async function updateWatchSyncServer(db: Db, serverId: string, input: WatchSyncServerInput): Promise<WatchSyncState> {
-  await locked(db, async (transaction, settings) => {
-    const current = findServer(settings, serverId);
-    const draft = validateServerInput(current.kind, input);
-    if (settings.servers.some((server) => server.id !== serverId && server.name.toLowerCase() === draft.name.toLowerCase())) throw new WatchSyncError("Another media server already uses this name.");
-    if (draft.url !== current.url && !draft.token && current.kind === "jellyfin") throw new WatchSyncError("Enter the API key again when changing the Jellyfin address.");
-    const tokenChanged = Boolean(draft.token) && draft.token !== current.token;
-    const next: StoredServer = { ...current, name: draft.name, url: draft.url, token: draft.token || current.token, prefixMappings: draft.prefixMappings, ...(tokenChanged ? { machineIdentifier: null, accountName: null, accountId: null } : {}) };
-    await setSetting(transaction, settingKey, { ...settings, servers: settings.servers.map((server) => server.id === serverId ? next : server) });
-  });
-  return getWatchSyncState(db);
-}
-
-// Forgets SRTL's records for the server: its users, pairs, item index, and saved snapshots. Nothing on the server changes.
-export async function removeWatchSyncServer(db: Db, serverId: string): Promise<WatchSyncState> {
-  await locked(db, async (transaction, settings) => {
-    findServer(settings, serverId);
-    await transaction.delete(schema.watchSyncPairs).where(or(eq(schema.watchSyncPairs.plexServerId, serverId), eq(schema.watchSyncPairs.jellyfinServerId, serverId)));
-    await transaction.delete(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.serverId, serverId));
-    await transaction.delete(schema.watchSyncItems).where(eq(schema.watchSyncItems.serverId, serverId));
-    await transaction.delete(schema.watchSyncCursors).where(sql`${schema.watchSyncCursors.scope} LIKE ${`%:${serverId}`} OR ${schema.watchSyncCursors.scope} LIKE ${`%:${serverId}:%`}`);
-    await setSetting(transaction, settingKey, { ...settings, servers: settings.servers.filter((server) => server.id !== serverId) });
-  });
-  return getWatchSyncState(db);
-}
-
-// Plex sign-in: SRTL asks plex.tv for a PIN, the admin approves it at plex.tv, and SRTL polls until the PIN carries a token.
-export async function startPlexSignIn(db: Db, serverId: string): Promise<WatchSyncPlexPin> {
-  findServer(await loadWatchSyncSettings(db), serverId, "plex");
-  const plexTv = new PlexTvClient(await clientIdentifier(db));
-  const pin = await plexTv.createPin();
-  await writeCursor(db, `plex-pin:${serverId}`, JSON.stringify({ id: pin.id, code: pin.code, expiresAt: pin.expiresAt }));
-  return { pinId: pin.id, code: pin.code, authUrl: plexTv.authUrl(pin.code), expiresAt: pin.expiresAt };
-}
-
-export async function checkPlexSignIn(db: Db, serverId: string, pinId: number): Promise<WatchSyncPinStatus> {
-  findServer(await loadWatchSyncSettings(db), serverId, "plex");
-  const raw = await readCursor(db, `plex-pin:${serverId}`);
-  const pending = raw ? JSON.parse(raw) as { id: number; expiresAt: string } : null;
-  if (!pending || pending.id !== pinId) throw new WatchSyncError("This Plex sign-in is no longer pending. Start it again.");
-  const pin = await new PlexTvClient(await clientIdentifier(db)).checkPin(pinId);
-  if (!pin.authToken) {
-    const expiresAt = Date.parse(pin.expiresAt || pending.expiresAt);
-    if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
-      await writeCursor(db, `plex-pin:${serverId}`, null);
-      return { status: "expired" };
-    }
-    return { status: "waiting" };
-  }
-  const token = pin.authToken;
-  await writeCursor(db, `plex-pin:${serverId}`, null);
-  await locked(db, async (transaction, settings) => {
-    const current = findServer(settings, serverId, "plex");
-    await setSetting(transaction, settingKey, { ...settings, servers: settings.servers.map((server) => server.id === serverId ? { ...current, token, machineIdentifier: null, accountName: null, accountId: null } : server) });
-  });
-  await discoverWatchSyncUsers(db, serverId).catch(() => undefined);
-  return { status: "authorized", state: await getWatchSyncState(db) };
 }
 
 function plexUserKind(user: { home: boolean; restricted: boolean }): WatchSyncUserKind {
@@ -291,10 +169,10 @@ async function saveUsers(db: Db, serverId: string, users: Array<Omit<UserRow, "s
   });
 }
 
-async function discoverPlex(db: Db, server: StoredServer, identifier: string): Promise<void> {
+async function discoverPlex(db: Db, server: StoredServer, identifier: string): Promise<MediaServerDetails> {
   if (!server.token) throw new WatchSyncError("Sign in with Plex or paste a Plex token first.");
   const pms = new PlexServerClient(server.url, server.token, identifier);
-  const { machineIdentifier } = await pms.identity();
+  const { machineIdentifier, version } = await pms.identity();
   const plexTv = new PlexTvClient(identifier);
   const account = await plexTv.account(server.token);
   const [friends, shared] = await Promise.all([
@@ -327,33 +205,28 @@ async function discoverPlex(db: Db, server: StoredServer, identifier: string): P
     });
   }
   await saveUsers(db, server.id, users);
-  await locked(db, async (transaction, settings) => {
-    const current = settings.servers.find((entry) => entry.id === server.id);
-    if (!current || current.token !== server.token) return;
-    await setSetting(transaction, settingKey, { ...settings, servers: settings.servers.map((entry) => entry.id === server.id ? { ...current, machineIdentifier, accountName: account.title, accountId: account.id } : entry) });
-  });
+  return { machineIdentifier, version, accountName: account.title, accountId: account.id };
 }
 
-async function discoverJellyfin(db: Db, server: StoredServer, identifier: string): Promise<void> {
+async function discoverJellyfin(db: Db, server: StoredServer, identifier: string): Promise<MediaServerDetails> {
   if (!server.token) throw new WatchSyncError("Enter a Jellyfin API key first.");
   const client = new JellyfinClient(server.url, server.token, identifier);
-  await client.systemInfo();
+  const info = await client.systemInfo();
   const users = await client.users();
   await saveUsers(db, server.id, users.map((user) => ({
     externalId: user.id, name: user.name, username: null, kind: "user" as const, accountId: null, accessToken: null,
     available: !user.disabled, note: user.disabled ? "Disabled in Jellyfin." : null
   })));
+  return { version: info.version };
 }
 
-// Tests the connection and refreshes the server's user list (and, for Plex, every user's access token).
+// Refreshes the server's user list (and, for Plex, every user's access token), recording the connection status too.
 export async function discoverWatchSyncUsers(db: Db, serverId: string): Promise<WatchSyncState> {
-  const settings = await loadWatchSyncSettings(db);
-  const server = findServer(settings, serverId);
-  const identifier = await clientIdentifier(db);
+  const server = await getMediaServer(db, serverId);
+  const identifier = await mediaServerClientIdentifier(db);
   try {
-    if (server.kind === "plex") await discoverPlex(db, server, identifier);
-    else await discoverJellyfin(db, server, identifier);
-    await recordServerStatus(db, server.id, null);
+    const details = server.kind === "plex" ? await discoverPlex(db, server, identifier) : await discoverJellyfin(db, server, identifier);
+    await recordMediaServerStatus(db, server.id, null, details, server.token);
   } catch (error) {
     await recordServerStatus(db, server.id, error instanceof Error ? error.message : "Connection failed.");
     throw error;
@@ -401,7 +274,8 @@ function parsePreview(value: string | null): WatchSyncPreview | null {
 
 export async function getWatchSyncState(db: Db): Promise<WatchSyncState> {
   const settings = await publicSettings(db);
-  const serverIds = new Set(settings.servers.map((server) => server.id));
+  const servers = await loadMediaServers(db);
+  const serverIds = new Set(servers.map((server) => server.id));
   const users = (await db.select().from(schema.watchSyncUsers).orderBy(asc(schema.watchSyncUsers.name))).filter((user) => serverIds.has(user.serverId));
   const pairs = await db.select().from(schema.watchSyncPairs).orderBy(asc(schema.watchSyncPairs.id));
   const tracked = new Map((await db.select({ pairId: schema.watchSyncState.pairId, total: count() }).from(schema.watchSyncState).groupBy(schema.watchSyncState.pairId)).map((row) => [row.pairId, Number(row.total)]));
@@ -409,7 +283,7 @@ export async function getWatchSyncState(db: Db): Promise<WatchSyncState> {
   const jobs = await db.select({ id: schema.jobs.id, status: schema.jobs.status, options: schema.jobs.options }).from(schema.jobs)
     .where(and(eq(schema.jobs.type, "watch_sync"), inArray(schema.jobs.status, ["queued", "running"]))).orderBy(asc(schema.jobs.id));
   const userName = (serverId: string, externalId: string) => users.find((user) => user.serverId === serverId && user.externalId === externalId)?.name ?? externalId;
-  const kinds = new Map(settings.servers.map((server) => [server.id, server.kind]));
+  const kinds = new Map(servers.map((server) => [server.id, server.kind]));
   const publicUsers: WatchSyncUser[] = users.map((user) => ({
     serverId: user.serverId, externalId: user.externalId, name: user.name, username: user.username, kind: user.kind as WatchSyncUserKind,
     ready: user.available && (kinds.get(user.serverId) !== "plex" || Boolean(user.accessToken)), note: user.note
@@ -423,6 +297,7 @@ export async function getWatchSyncState(db: Db): Promise<WatchSyncState> {
   }));
   return {
     settings,
+    servers: servers.map(publicMediaServer),
     users: publicUsers,
     pairs: publicPairs,
     suggestions: suggestPairs(users.filter((user) => kinds.get(user.serverId) === "plex"), users.filter((user) => kinds.get(user.serverId) === "jellyfin" && user.available), pairs),
@@ -435,17 +310,17 @@ export async function getWatchSyncState(db: Db): Promise<WatchSyncState> {
   };
 }
 
-async function assertUser(db: Db, settings: StoredSettings, serverId: string, userId: string, kind: WatchSyncServerKind): Promise<void> {
-  findServer(settings, serverId, kind);
+async function assertUser(db: Db, servers: StoredServer[], serverId: string, userId: string, kind: WatchSyncServerKind): Promise<void> {
+  findMediaServer(servers, serverId, kind);
   const user = (await db.select().from(schema.watchSyncUsers).where(and(eq(schema.watchSyncUsers.serverId, serverId), eq(schema.watchSyncUsers.externalId, userId))).limit(1))[0];
   if (!user) throw new WatchSyncError(`Unknown ${kind === "plex" ? "Plex" : "Jellyfin"} user. Discover users again.`);
 }
 
 export async function createWatchSyncPair(db: Db, input: WatchSyncPairInput): Promise<WatchSyncState> {
   const draft = watchSyncPairInputSchema.parse(input);
-  const settings = await loadWatchSyncSettings(db);
-  await assertUser(db, settings, draft.plexServerId, draft.plexUserId, "plex");
-  await assertUser(db, settings, draft.jellyfinServerId, draft.jellyfinUserId, "jellyfin");
+  const servers = await loadMediaServers(db);
+  await assertUser(db, servers, draft.plexServerId, draft.plexUserId, "plex");
+  await assertUser(db, servers, draft.jellyfinServerId, draft.jellyfinUserId, "jellyfin");
   const timestamp = nowIso();
   const inserted = await db.insert(schema.watchSyncPairs).values({
     plexServerId: draft.plexServerId, plexUserId: draft.plexUserId, jellyfinServerId: draft.jellyfinServerId, jellyfinUserId: draft.jellyfinUserId,

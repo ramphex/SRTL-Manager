@@ -4,27 +4,17 @@ Watch sync keeps **watched state** and **resume positions** in sync between Plex
 
 It works because both servers read the same SRTL symlinks. An item is matched by its exact SRTL path (for example `/mnt/plex/movies/Alpha (2020)/Alpha.mkv`), never by title, year, or metadata IDs, so it cannot pick the wrong movie or episode and works the same in both directions. Movies and episodes are synced; music, photos, home videos, Live TV, and anything else that is not an SRTL media symlink are skipped and counted, never treated as errors.
 
-Watch sync lives in **Settings > Integrations > Watch sync**, next to Radarr and Sonarr.
+Watch sync lives in **Settings > Integrations > Watch sync**, next to Radarr and Sonarr. It uses the Plex and Jellyfin servers connected in **Settings > Media servers** (see the [media servers guide](media-servers.md)); until at least one is connected, watch sync shows a link there instead of its tabs.
 
-## 1. Connect the servers
+## 1. Connect the servers and discover users
 
-Open the **Servers** tab and add each server. Both the SRTL API and the worker need network access to them. Tokens and API keys are stored on the SRTL server only; the browser never receives them again, and the fields stay empty after saving ("Saved. Leave empty to keep it.").
+Connect each Plex and Jellyfin server in **Settings > Media servers**: Plex with **Sign in with Plex** as the account that **owns** the server, Jellyfin with an API key from **Dashboard > API Keys**. Path prefix mappings, which turn each server's file paths into SRTL symlink paths, are set there too. The [media servers guide](media-servers.md) covers both.
 
-### Plex: Sign in with Plex
-
-1. **Add Plex server**, enter a name and the server URL (for example `http://192.168.1.10:32400`), and add it.
-2. Select **Sign in with Plex**. A plex.tv window opens; sign in as the account that **owns** the server and approve "SRTL Manager". Two-factor authentication works as usual because you sign in at plex.tv itself.
-3. SRTL notices the approval within a few seconds, stores the account token, and discovers users.
-
-If the window was blocked, use the "open it here" link that appears. A sign-in that is not approved in about 15 minutes expires; start it again.
-
-**Pasting a token instead.** If you cannot use the PIN sign-in, paste your Plex account token into **Connection and path mappings > Plex token**. Use your own account's token, never the `PlexOnlineToken` from the server's `Preferences.xml`: that token belongs to the server, and plex.tv would apply SRTL's client details to the server's own registration.
-
-SRTL always identifies itself to Plex as its own client ("SRTL Manager", with a stable client identifier). It does not claim to be a player or controller and never switches Plex Home users.
+Watch sync's **Users** tab lists each connected server with its status, its users, and how many SRTL items watch sync has indexed for it. **Connection** opens the server in Settings > Media servers. Signing in with Plex there discovers the server's users automatically; select **Discover users** after sharing changes or to refresh a server's list.
 
 ### Plex users
 
-**Test and discover users** lists everyone who can use the server:
+**Discover users** lists everyone who can use the server:
 
 - **Owner**: the account you signed in with.
 - **Plex Home** members and **Managed** users (Home users with restrictions).
@@ -32,21 +22,17 @@ SRTL always identifies itself to Plex as its own client ("SRTL Manager", with a 
 
 Each user syncs with their *own* server access token, read from plex.tv's list of shared-server tokens, so every write lands in that user's own history and nobody's restrictions change. A user marked "No server access token" has not been shared any library on this server; share at least one library with them in Plex, then discover users again. Users who lose access stay listed (pairs may refer to them) but stop syncing.
 
-### Jellyfin: API key
+### Jellyfin users
 
-1. In Jellyfin, open **Dashboard > API Keys** and create a key, for example named "SRTL Manager".
-2. In SRTL, **Add Jellyfin server** with a name, the URL (for example `http://192.168.1.10:8096`), and the key.
-3. **Test and discover users** lists the Jellyfin users. Disabled users are listed but cannot be paired.
+**Discover users** lists the Jellyfin users. Disabled users are listed but cannot be paired.
 
-### Path prefix mappings (optional)
+### Indexed items and path mappings
 
-Watch sync needs to turn each server's file path into SRTL's symlink path. When a server mounts the library at the same place as SRTL (for example `/mnt/plex` everywhere), nothing is needed. Otherwise, under **Connection and path mappings**, map the server's prefix to SRTL's. For example, a Plex container that sees the library as `/data/media/...` while SRTL's symlink folder is `/mnt/plex` needs:
+Each server on the Users tab shows how many SRTL items it has indexed; if that stays at 0 after a preview, the server probably needs a path prefix mapping in Settings > Media servers. For example, a Plex container that sees the library as `/data/media/...` while SRTL's symlink folder is `/mnt/plex` needs:
 
 | Server path prefix | SRTL path prefix |
 | --- | --- |
 | `/data/media` | `/mnt/plex` |
-
-The longest matching prefix wins, and prefixes only match whole folder names (`/data/media` does not match `/data/mediaextra`). Each server shows how many SRTL items it has indexed; if that stays at 0 after a preview, a prefix mapping is probably missing.
 
 ## 2. Pair users
 
@@ -108,5 +94,5 @@ To restore, open **Restore from a backup** on the pair, choose **Restore to Jell
 - Plex marks an item watched with the time of the write; Jellyfin keeps the original play time that SRTL sends.
 - An item that only one server has (for example, not yet scanned into Jellyfin) is skipped until both servers list it.
 - Multi-version Plex items are written once even when SRTL has a symlink for each version.
-- Removing a server or a pair forgets SRTL's records for it (users, snapshots, index, activity). Nothing is changed on Plex or Jellyfin.
+- Removing a pair forgets its snapshots and activity. A server can only be removed in Settings > Media servers once no pair uses it; removing it then forgets its users and index. Nothing is changed on Plex or Jellyfin.
 - Emby is not supported.

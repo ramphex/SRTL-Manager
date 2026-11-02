@@ -31,6 +31,7 @@ import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
 import { radarrInstanceWebhookPath, radarrWebhookPath, registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
 import { registerDamagedRoutes } from "./routes/damagedRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
+import { registerMediaServerRoutes } from "./routes/mediaServerRoutes";
 import { registerWatchSyncRoutes } from "./routes/watchSyncRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
@@ -205,6 +206,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerSettingsRoutes(app, database.db);
   registerRadarrRoutes(app, database.db);
   registerSonarrRoutes(app, database.db);
+  registerMediaServerRoutes(app, database.db);
   registerWatchSyncRoutes(app, database.db, jobs);
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
