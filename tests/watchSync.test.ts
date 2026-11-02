@@ -253,7 +253,8 @@ describe("watch sync", () => {
   it("writes nothing before the preview is approved, and the preview counts each direction", async () => {
     const plexId = await signInPlex();
     const jellyfinId = await addJellyfin("jf1");
-    mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: minutesAgo(30) });
+    const alphaWatchedAt = minutesAgo(30);
+    mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: alphaWatchedAt });
     mock.setJellyfin("jf1", "jf-alex", beta.jellyfinId, { watched: true, at: minutesAgo(20) });
     mock.setJellyfin("jf1", "jf-alex", episode.jellyfinId, { offsetMs: 1_200_000, at: minutesAgo(10) });
     await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-alex" });
@@ -280,7 +281,7 @@ describe("watch sync", () => {
     expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(true);
     expect(mock.plexState(mock.ownerToken, episode.plexKey).offsetMs).toBe(1_200_000);
     // The original play time travels with the watch.
-    expect(mock.writes.find((write) => write.item === "a1")?.value).toBe(new Date(Math.floor(minutesAgo(30).getTime() / 1000) * 1000).toISOString());
+    expect(mock.writes.find((write) => write.item === "a1")?.value).toBe(new Date(Math.floor(alphaWatchedAt.getTime() / 1000) * 1000).toISOString());
     const pair = (await state()).pairs[0]!;
     expect(pair).toMatchObject({ lastError: null, trackedItems: 3 });
     expect(pair.lastFullSyncAt).not.toBeNull();
@@ -326,15 +327,16 @@ describe("watch sync", () => {
   });
 
   it("propagates unwatched from either side", async () => {
-    mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: minutesAgo(90) });
-    mock.setPlex(mock.ownerToken, beta.plexKey, { watched: true, at: minutesAgo(90) });
+    const watchedAt = minutesAgo(90);
+    mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: watchedAt });
+    mock.setPlex(mock.ownerToken, beta.plexKey, { watched: true, at: watchedAt });
     await connectedPair("both");
     expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(true);
     mock.writes = [];
     // Jellyfin reports unplayed items through MinDateLastSavedForUser.
     mock.setJellyfin("jf1", "jf-alex", alpha.jellyfinId, { watched: false });
     // Plex reports nothing when an item is marked unwatched; the rolling recheck finds it.
-    mock.plexUser(mock.ownerToken).set(beta.plexKey, { viewCount: 0, viewOffset: 0, lastViewedAt: Math.floor(minutesAgo(90).getTime() / 1000) });
+    mock.plexUser(mock.ownerToken).set(beta.plexKey, { viewCount: 0, viewOffset: 0, lastViewedAt: Math.floor(watchedAt.getTime() / 1000) });
     await tick();
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`).sort()).toEqual(["jf1:unplayed:b2", "plex:unscrobble:11"]);
     expect(mock.plexState(mock.ownerToken, alpha.plexKey).watched).toBe(false);
