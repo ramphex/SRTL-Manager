@@ -9,6 +9,7 @@ import * as schema from "../db/schema";
 import { inferSectionContentType } from "../../shared/sections";
 import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
+import { applyDefaultPoliciesToNewTitles, type DefaultPolicyTitle } from "./defaultPolicy";
 import { holdingFolderName, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
@@ -1012,6 +1013,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     : null;
   const scannedLocalSections = scopedSectionSet(result.options.localSections ?? result.options.sections);
   const affectedStorageFilePolicyIds = new Set<number>();
+  const newTitles: DefaultPolicyTitle[] = [];
   let missingLinks = 0;
   let missingLocalFiles = 0;
   let missingRemoteFiles = 0;
@@ -1110,12 +1112,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     const existingMediaLinkByPath = new Map(existingMediaLinks.map((link) => [link.linkPath, link]));
     const linkWrites: Array<typeof schema.mediaLinks.$inferInsert> = [];
     const unchangedLinkIds: number[] = [];
+    // A title is new when no link row, current or missing, has ever carried its name.
+    const knownTitleKeys = new Set(existingMediaLinks.map((link) => canonicalTitleKey(link.itemName)));
 
     for (const link of new Map(result.links.map((link) => [link.linkPath, link])).values()) {
       const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
       const existing = existingMediaLinkByPath.get(link.linkPath);
       if (existing?.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(existing.resolvedStorageFileId);
       if (resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(resolvedStorageFileId);
+      if (link.isMedia && !knownTitleKeys.has(canonicalTitleKey(link.itemName))) newTitles.push({ section: link.section, itemName: link.itemName });
       const changed = linkChanged(existing, link, resolvedStorageFileId);
       if (existing && !changed && !existing.missingSince && existing.firstSeenAt && existing.lastChangedAt) {
         unchangedLinkIds.push(existing.id);
@@ -1197,7 +1202,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         }
   );
   await throwIfPersistenceCancelled(isCancelled);
-  await applyPendingOnboardingPolicy(db, jobId);
+  if (!(await applyPendingOnboardingPolicy(db, jobId))) await applyDefaultPoliciesToNewTitles(db, newTitles, jobId);
   await throwIfPersistenceCancelled(isCancelled);
   await reconcileStorageFilePolicies(db, timestamp, [...affectedStorageFilePolicyIds]);
   await throwIfPersistenceCancelled(isCancelled);

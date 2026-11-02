@@ -3387,6 +3387,32 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   width: 38px;
 }
 
+.default-policy-row {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 12px;
+}
+
+.default-policy-row + .default-policy-row {
+  border-top: 1px solid var(--border-soft);
+}
+
+.default-policy-name {
+  color: var(--text-strong);
+  flex: 1 1 140px;
+  font-weight: 600;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.default-policy-row select {
+  flex: 2 1 260px;
+  height: 38px;
+  min-width: 0;
+}
+
 .section-settings-actions {
   display: flex;
   flex-wrap: wrap;

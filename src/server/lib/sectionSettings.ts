@@ -18,7 +18,8 @@ export const sectionSettingsSchema = z.object({
     .min(1, "Add at least one symlink folder")
     .refine((sections) => new Set(sections.map((section) => section.trim())).size === sections.length, { message: "Symlink folders must be unique" }),
   sectionTitles: z.record(z.string(), z.string().trim().max(120, "Library title must be 120 characters or fewer")).optional(),
-  sectionTypes: z.record(z.string(), z.enum(["shows", "movies", "other"])).optional()
+  sectionTypes: z.record(z.string(), z.enum(["shows", "movies", "other"])).optional(),
+  sectionDefaultPolicies: z.record(z.string(), z.enum(["location_1", "location_2"])).optional()
 });
 
 export function parseSectionSettings(value: unknown): SectionSettings {
