@@ -363,6 +363,23 @@ describe("Sonarr copy monitoring", () => {
     expect(hd.monitorEdits).toEqual([]);
   });
 
+  it("handles a copy of hundreds of episodes in batches", async () => {
+    const hd = await fakeSonarr([show(1, "Alpha", "/tv")], ["/tv"]);
+    const count = 600;
+    addEpisodes(hd, hd.series[0]!, Array.from({ length: count }, (_unused, index) => ({ name: `Alpha - S01E${index + 1}.mkv`, episodes: [index + 1] })));
+    await instance("Sonarr", hd, [{ rootPath: "/tv", section: "shows" }]);
+    const timestamp = new Date().toISOString();
+    const links = await app.database.db.insert(schema.mediaLinks).values(Array.from({ length: count }, (_unused, index) => ({ section: "shows", itemName, relativePath: `${itemName}/Season 01/Alpha - S01E${index + 1}.mkv`, linkPath: path.join(root, "links", "shows", itemName, `Season 01/Alpha - S01E${index + 1}.mkv`), targetPath: `/local/${index}.mkv`, kind: "local", targetExists: true, isMedia: true, updatedAt: timestamp }))).returning();
+    const [job] = await app.database.db.insert(schema.jobs).values({ type: "copy", status: "completed", createdAt: timestamp, finishedAt: timestamp, options: JSON.stringify({ direction: "to_local", sonarrMonitoring: true }), progress: "{}" }).returning();
+    await app.database.db.insert(schema.jobSelectionItems).values(links.map((link, index) => ({ jobId: job!.id, mediaLinkId: link.id, selectionOrder: index, section: "shows", itemName, relativePath: link.relativePath, linkPath: link.linkPath, createdAt: timestamp })));
+    await processSonarrWork(app.database.db);
+    await processSonarrWork(app.database.db);
+    expect(hd.monitorEdits.map((edit) => edit.episodeIds.length)).toEqual([200, 200, 100, 100]);
+    expect(hd.episodes.filter((episode) => !episode.monitored)).toHaveLength(count);
+    expect(await updates(job!.id)).toHaveLength(count);
+    expect((await app.jobs.listEvents(job!.id)).map((event) => event.message)).toEqual(["Unmonitored 500 episodes in Sonarr: Alpha (2020)", "Unmonitored 100 episodes in Sonarr: Alpha (2020)"]);
+  });
+
   it("retries episode lookups while Sonarr is offline without losing the copied files", async () => {
     const { hd, worker, links } = await season();
     const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: [links[0]!.id], sonarrMonitoring: true });

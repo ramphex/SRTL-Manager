@@ -613,6 +613,11 @@ async function selectedEpisodeFiles(db: Db, jobId: number, series: SeriesRow[], 
   });
 }
 
+// Large copies record thousands of episode files; inserts stay well under Postgres's parameter limit.
+async function inChunks<T>(rows: T[], insert: (chunk: T[]) => Promise<unknown>): Promise<void> {
+  for (let offset = 0; offset < rows.length; offset += 500) await insert(rows.slice(offset, offset + 500));
+}
+
 function copiedFile(config: StoredSettings, copyJobId: number, file: SelectedEpisodeFile, monitored: boolean, timestamp: string): typeof schema.sonarrCopiedFiles.$inferInsert {
   return { instanceId: config.id, copyJobId, seriesId: file.series.seriesId, mediaLinkId: file.mediaLinkId, relativePath: file.relativePath, monitored, createdAt: timestamp, nextAttemptAt: timestamp };
 }
@@ -628,7 +633,7 @@ export async function queueCopiedSonarrEpisodes(db: Db, copy: { jobId: number; d
     for (const config of (await storedInstances(transaction)).instances) {
       if (!config.enabled || copy.jobId <= config.copyJobFloor) continue;
       const files = (await selectedEpisodeFiles(transaction, copy.jobId, await copiedSeries(transaction, config, titles), monitored ? "remote" : "local")).filter((file) => file.copied);
-      if (files.length) await transaction.insert(schema.sonarrCopiedFiles).values(files.map((file) => copiedFile(config, copy.jobId, file, monitored, timestamp))).onConflictDoNothing();
+      await inChunks(files.map((file) => copiedFile(config, copy.jobId, file, monitored, timestamp)), (chunk) => transaction.insert(schema.sonarrCopiedFiles).values(chunk).onConflictDoNothing());
     }
   });
 }
@@ -676,8 +681,8 @@ async function queueCopyMonitorUpdates(db: Db, config: StoredSettings): Promise<
           }
         }
       }
-      if (inserts.length) await transaction.insert(schema.sonarrCopiedFiles).values(inserts).onConflictDoNothing();
-      if (reversals.length) await transaction.insert(schema.sonarrMonitorUpdates).values(reversals).onConflictDoNothing();
+      await inChunks(inserts, (chunk) => transaction.insert(schema.sonarrCopiedFiles).values(chunk).onConflictDoNothing());
+      await inChunks(reversals, (chunk) => transaction.insert(schema.sonarrMonitorUpdates).values(chunk).onConflictDoNothing());
       await transaction.insert(schema.sonarrCopyJobs).values({ instanceId: config.id, jobId: job.id, handledAt: timestamp }).onConflictDoNothing();
     });
   }
@@ -736,7 +741,7 @@ async function resolveCopiedFiles(db: Db, config: StoredSettings): Promise<void>
         }
       }
     }
-    for (let offset = 0; offset < updates.length; offset += 500) await transaction.insert(schema.sonarrMonitorUpdates).values(updates.slice(offset, offset + 500)).onConflictDoNothing();
+    await inChunks(updates, (chunk) => transaction.insert(schema.sonarrMonitorUpdates).values(chunk).onConflictDoNothing());
     for (const entry of unmatched.values()) {
       await transaction.insert(schema.jobEvents).values({ jobId: entry.jobId, timestamp, level: "warn", message: `${config.name} has no episode for ${entry.files.length === 1 ? "a copied file" : `${entry.files.length} copied files`} of ${titles.get(entry.seriesId) ?? `series ${entry.seriesId}`}; their monitoring was not changed`, data: JSON.stringify({ instanceId: config.id, seriesId: entry.seriesId, files: entry.files.slice(0, 20) }) });
     }
