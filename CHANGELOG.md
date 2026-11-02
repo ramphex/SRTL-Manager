@@ -34,6 +34,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
 - Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
 
+### Security
+
+- Pinned a newer Node.js 24 bookworm-slim base image, so the container no longer ships the fixed critical and high vulnerabilities in Debian's perl and pcre2 packages.
+
 ## [0.1.3] - 2026-09-03
 
 ### Added
