@@ -25,7 +25,6 @@ export interface LiveServerConfig {
 
 export type SocketEvent =
   | { type: "refresh"; minIntervalMs?: number }
-  | { type: "sessions"; sessions: ParsedSession[] }
   | { type: "progress"; sessionKey: string; positionMs: number | null; state: NowPlayingState | "stopped" };
 
 export interface SocketHandlers {
@@ -345,8 +344,10 @@ export class JellyfinLiveAdapter implements LiveAdapter {
     }, (data, socket) => {
       let message: { MessageType?: unknown; Data?: unknown };
       try { message = JSON.parse(data) as typeof message; } catch { return; }
-      if (message.MessageType === "Sessions" && Array.isArray(message.Data)) {
-        handlers.onEvent({ type: "sessions", sessions: parseJellyfinSessions(message.Data) });
+      // The pushed list may be filtered by the connection's user, which an API key does not have, so it only
+      // signals a change; the session list itself always comes from /Sessions.
+      if (message.MessageType === "Sessions") {
+        handlers.onEvent({ type: "refresh", minIntervalMs: 1000 });
       } else if (message.MessageType === "ForceKeepAlive") {
         const seconds = typeof message.Data === "number" && message.Data > 0 ? message.Data : 60;
         if (keepAlive) clearInterval(keepAlive);

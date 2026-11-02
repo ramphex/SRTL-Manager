@@ -76,6 +76,15 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// A slow or failed lookup never holds up an update; the card shows the fallback until the next one.
+function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    promise.catch(() => fallback),
+    new Promise<T>((resolve) => { timer = setTimeout(() => resolve(fallback), ms); })
+  ]).finally(() => clearTimeout(timer));
+}
+
 function unauthorizedMessage(kind: MediaServerRecord["kind"]): string {
   return kind === "plex"
     ? "Plex token invalid — sign in again in Settings > Media servers."
@@ -272,14 +281,6 @@ class ServerWatcher {
 
   private onSocketEvent(event: SocketEvent): void {
     if (this.stopped) return;
-    if (event.type === "sessions") {
-      this.applySessions(event.sessions);
-      this.failures = 0;
-      this.status = this.liveStatus();
-      this.message = null;
-      this.changed();
-      return;
-    }
     if (event.type === "refresh") {
       this.requestRefresh(event.minIntervalMs);
       return;
@@ -322,7 +323,8 @@ export class NowPlayingHub {
   private broadcasting = false;
   private broadcastAgain = false;
   private syncing: Promise<void> | null = null;
-  private snapshotCache: NowPlayingSnapshot;
+  // Null until the first snapshot after activation is built, so a new viewer never sees an empty placeholder.
+  private snapshotCache: NowPlayingSnapshot | null = null;
   private settings: NowPlayingSettings = { geoLookup: true };
   private clientId: string | null = null;
   private readonly plexPass = new Map<string, { token: string; value: boolean | null; checkedAt: number; inFlight: boolean }>();
@@ -334,7 +336,7 @@ export class NowPlayingHub {
 
   constructor(private readonly options: NowPlayingHubOptions) {
     this.timing = { ...defaultNowPlayingTiming, ...options.timing };
-    this.snapshotCache = this.emptySnapshot();
+    this.snapshotCache = null;
     this.geo = new GeoLookup({
       enabled: () => this.settings.geoLookup,
       token: () => this.records.find((record) => record.kind === "plex" && record.token)?.token ?? null,
@@ -360,7 +362,7 @@ export class NowPlayingHub {
   }
 
   snapshot(): NowPlayingSnapshot {
-    return this.snapshotCache;
+    return this.snapshotCache ?? this.emptySnapshot();
   }
 
   subscribe(listener: NowPlayingListener): () => void {
@@ -370,7 +372,7 @@ export class NowPlayingHub {
       this.graceTimer = null;
     }
     if (!this.active) this.activate();
-    listener({ type: "sessions", snapshot: this.snapshotCache });
+    if (this.snapshotCache) listener({ type: "sessions", snapshot: this.snapshotCache });
     listener({ type: "host", host: this.host.snapshot() });
     return () => {
       if (!this.listeners.delete(listener)) return;
@@ -402,7 +404,7 @@ export class NowPlayingHub {
     for (const watcher of this.watchers.values()) watcher.stop();
     this.watchers.clear();
     this.host.stop();
-    this.snapshotCache = this.emptySnapshot();
+    this.snapshotCache = null;
   }
 
   close(): void {
@@ -565,10 +567,7 @@ export class NowPlayingHub {
         bandwidth: watcher.extras.bandwidth ?? null, resources: watcher.extras.resources ?? null, lastUpdatedAt: watcher.lastUpdatedAt
       });
       const sessions = [...watcher.sessions.values()];
-      const sources = await Promise.all(sessions.map((session) => Promise.race([
-        this.options.resolveSource(record.id, record.prefixMappings, session.filePath).catch(() => unknownSource),
-        sleep(1500).then(() => unknownSource)
-      ])));
+      const sources = await Promise.all(sessions.map((session) => withTimeout(this.options.resolveSource(record.id, record.prefixMappings, session.filePath), 1500, unknownSource)));
       sessions.forEach((session, index) => {
         streams.push({
           ...session.stream,

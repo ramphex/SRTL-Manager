@@ -337,7 +337,7 @@ function LiveNowPlaying() {
     <>
       <QuickGlance snapshot={snapshot} host={host} connection={connection} />
       <ServerStatusList servers={snapshot?.servers ?? []} />
-      {snapshot === null ? (
+      {snapshot === null || (streams.length === 0 && snapshot.servers.some((server) => server.status === "connecting")) ? (
         <p className="panel-message" role="status"><LoaderCircle className="is-spinning" size={16} /> Connecting to your media servers</p>
       ) : streams.length === 0 ? (
         <section className="np-empty" role="status"><MonitorPlay size={22} /><p>Nothing is playing right now.</p></section>

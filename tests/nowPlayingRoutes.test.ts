@@ -57,7 +57,7 @@ describe("Now Playing routes", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
     const reader = response.body!.getReader();
     let text = "";
-    while (!text.includes("event: host")) {
+    while (!(text.includes("event: host") && text.includes("event: sessions"))) {
       const { value, done } = await reader.read();
       if (done) break;
       text += new TextDecoder().decode(value);

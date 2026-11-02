@@ -225,13 +225,15 @@ describe("Now Playing hub against mocked servers", () => {
   it("takes change events from the Plex and Jellyfin sockets, authenticating with headers rather than URLs", async () => {
     mock.sockets = true;
     mock.plexSessions = [plexDirectPlayMovie()];
-    // Jellyfin's socket pushes the session list itself; the safety poll answers with the same list.
     mock.jellyfinSessions = [jellyfinDirectPlay()];
-    mock.socketMessages.set("jellyfin", [{ MessageType: "ForceKeepAlive", Data: 60 }, { MessageType: "Sessions", Data: [jellyfinDirectPlay(), jellyfinVideoTranscodeWithBurnIn()] }]);
+    // Jellyfin's push only signals a change (its list may be filtered for an API key); SRTL then reads /Sessions.
+    mock.socketMessages.set("jellyfin", [{ MessageType: "ForceKeepAlive", Data: 60 }, { MessageType: "Sessions", Data: [] }]);
     mock.socketMessages.set("plex", [{ NotificationContainer: { type: "playing", size: 1, PlaySessionStateNotification: [{ sessionKey: "12", state: "playing", viewOffset: 777_000, ratingKey: "101" }] } }]);
     const view = watch(createHub());
-    const snapshot = await waitFor(() => view.latest()?.servers.every((server) => server.status === "live" && server.transport === "socket") && view.latest()!.streams.length === 3
-      && view.latest()!.streams.find((stream) => stream.sessionKey === "12")?.positionMs === 777_000 && view.latest());
+    await waitFor(() => view.latest()?.servers.every((server) => server.status === "live" && server.transport === "socket"));
+    // A new session appears on the next push, well before the 2-second safety poll in these tests.
+    mock.jellyfinSessions = [jellyfinDirectPlay(), jellyfinVideoTranscodeWithBurnIn()];
+    const snapshot = await waitFor(() => view.latest()!.streams.length === 3 && view.latest()!.streams.find((stream) => stream.sessionKey === "12")?.positionMs === 777_000 && view.latest(), 1500);
     expect(snapshot.streams.map((stream) => stream.sessionKey)).toEqual(["12", "jf-session-1", "jf-session-2"]);
     expect(mock.socketLog.sort()).toEqual(["jellyfin:header", "plex:header"]);
     expect(mock.socketReceived).toContain(JSON.stringify({ MessageType: "SessionsStart", Data: "0,2000" }));
@@ -380,8 +382,8 @@ describe("live lifecycle", () => {
 
       const events: NowPlayingEvent[] = [];
       const first = hub.subscribe((event) => events.push(event));
-      // A new viewer gets the current state straight away.
-      expect(events.map((event) => event.type)).toEqual(["sessions", "host"]);
+      // A new viewer gets the host history straight away; sessions follow once the servers have answered.
+      expect(events.map((event) => event.type)).toEqual(["host"]);
       await waitFor(() => adapter.fetches > 0 && adapter.sockets === 1);
       expect(hostRunning).toBe(1);
       await waitFor(() => (events.at(-1) as Extract<NowPlayingEvent, { type: "sessions" }>).snapshot?.servers[0]?.status === "live");
