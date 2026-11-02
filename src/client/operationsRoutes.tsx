@@ -3,6 +3,7 @@ import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, Trash2, TriangleAlert, UserCog, X } from "lucide-react";
 import { api } from "./api";
+import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
@@ -436,7 +437,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
     if (sections.data) setSectionsDraft(sectionSettingsToDrafts(sections.data));
   }, [sections.data]);
   const saveSections = useMutation({
-    mutationFn: () => api.saveSections(sectionDraftsToSettings(sectionsDraft)),
+    mutationFn: () => api.saveSections({ ...sectionDraftsToSettings(sectionsDraft), sectionDefaultPolicies: sections.data?.sectionDefaultPolicies }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["section-settings"] });
       queryClient.invalidateQueries({ queryKey: ["sections"] });
@@ -477,6 +478,11 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
               </div>
             </div>
           </Panel>
+          {sections.data && sections.data.sections.length > 0 ? (
+            <Panel title="Default policy for new titles" icon={<ListChecks size={18} />}>
+              <DefaultPolicySettings settings={sections.data} />
+            </Panel>
+          ) : null}
         </>
       ) : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
