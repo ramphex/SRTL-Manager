@@ -18,7 +18,7 @@ import type { JobContext } from "../jobs/jobRunner";
 import { JellyfinClient, type JellyfinItem } from "./jellyfinClient";
 import { PlexServerClient, type PlexItem } from "./plexClient";
 import { WatchSyncError } from "./watchSyncHttp";
-import { findServer, loadWatchSyncSettings, readCursor, recordServerStatus, writeCursor, type PairRow, type StoredServer, type StoredSettings, type UserRow } from "./watchSync";
+import { findServer, loadWatchSyncContext, loadWatchSyncSettings, readCursor, recordServerStatus, writeCursor, type PairRow, type StoredServer, type UserRow, type WatchSyncContext } from "./watchSync";
 
 type Side = "plex" | "jellyfin";
 export interface WatchSyncFeatures { watched: boolean; position: boolean }
@@ -203,7 +203,7 @@ async function onServer<T>(server: StoredServer, action: () => Promise<T>): Prom
   }
 }
 
-async function loadRuntime(db: Db, settings: StoredSettings, pair: PairRow, signal?: AbortSignal): Promise<PairRuntime> {
+async function loadRuntime(db: Db, settings: WatchSyncContext, pair: PairRow, signal?: AbortSignal): Promise<PairRuntime> {
   const plexServer = findServer(settings, pair.plexServerId, "plex");
   const jellyfinServer = findServer(settings, pair.jellyfinServerId, "jellyfin");
   const user = async (serverId: string, externalId: string) => (await db.select().from(schema.watchSyncUsers).where(and(eq(schema.watchSyncUsers.serverId, serverId), eq(schema.watchSyncUsers.externalId, externalId))).limit(1))[0];
@@ -613,7 +613,7 @@ export interface WatchSyncTickResult { synced: number; failed: number; written: 
 export async function runWatchSyncTick(db: Db): Promise<WatchSyncTickResult> {
   return serialized(async () => {
     const result: WatchSyncTickResult = { synced: 0, failed: 0, written: 0 };
-    const settings = await loadWatchSyncSettings(db);
+    const settings = await loadWatchSyncContext(db);
     if (settings.paused || !settings.servers.length || await watchSyncJobActive(db)) return result;
     const now = nowIso();
     const dueBefore = new Date(Date.now() - settings.intervalMinutes * 60_000 + 5000).toISOString();
@@ -734,7 +734,7 @@ export interface WatchSyncJobResult { failedPairs: number; summary: string }
 
 export async function runWatchSyncJob(db: Db, options: WatchSyncJobOptions, controls: JobControls): Promise<WatchSyncJobResult> {
   return serialized(async () => {
-    const settings = await loadWatchSyncSettings(db);
+    const settings = await loadWatchSyncContext(db);
     const writes = options.mode !== "preview";
     if (writes && settings.paused) {
       await controls.event("warn", "Watch sync is paused; nothing was written.");

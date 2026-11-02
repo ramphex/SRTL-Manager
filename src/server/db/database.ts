@@ -5,6 +5,7 @@ import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg
 import * as schema from "./schema";
 import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
+import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -23,7 +24,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 23;
+export const currentSchemaVersion = 24;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -803,6 +804,17 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END IF;
         END $$`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (23, 'storage_file_integrity', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(24)) {
+      await client.query("BEGIN");
+      try {
+        await applyMediaServerMigration(client, nowIso());
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (24, 'shared_media_servers', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -4,32 +4,25 @@ import { z } from "zod";
 import type { Db } from "../db/database";
 import type { JobRunner } from "../jobs/jobRunner";
 import {
-  addWatchSyncServer,
   approveWatchSyncPair,
-  checkPlexSignIn,
   createWatchSyncPair,
   discoverWatchSyncUsers,
   exportWatchSyncBackup,
   getWatchSyncState,
   listWatchSyncActivity,
   removeWatchSyncPair,
-  removeWatchSyncServer,
   saveWatchSyncSettings,
   setWatchSyncPaused,
-  startPlexSignIn,
   updateWatchSyncPair,
-  updateWatchSyncServer,
   watchSyncBackupSchema,
   watchSyncPairExists,
   watchSyncServerIdSchema,
-  watchSyncServerInputSchema,
   watchSyncSettingsSchema,
   writeCursor
 } from "../lib/watchSync";
 
 const serverParams = z.object({ serverId: watchSyncServerIdSchema });
 const pairParams = z.object({ pairId: z.coerce.number().int().positive() });
-const pinParams = serverParams.extend({ pinId: z.coerce.number().int().positive() });
 const remoteRateLimit = { rateLimit: { max: 20, timeWindow: "1 minute" } };
 
 export function registerWatchSyncRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
@@ -55,19 +48,8 @@ export function registerWatchSyncRoutes(app: FastifyInstance, db: Db, jobs: JobR
     return { entries: await listWatchSyncActivity(db, query.pairId ?? null, query.limit) };
   });
 
-  app.post(`${base}/servers`, async (request) => {
-    const body = z.object({ kind: z.enum(["plex", "jellyfin"]) }).passthrough().parse(request.body);
-    return addWatchSyncServer(db, body.kind, watchSyncServerInputSchema.parse(body));
-  });
-  app.put(`${base}/servers/:serverId`, async (request) => updateWatchSyncServer(db, serverId(request), watchSyncServerInputSchema.parse(request.body)));
-  app.delete(`${base}/servers/:serverId`, async (request) => removeWatchSyncServer(db, serverId(request)));
+  // Connections live in Settings > Media servers (/api/media-servers); watch sync only reads each server's users.
   app.post(`${base}/servers/:serverId/discover`, { config: remoteRateLimit }, async (request) => discoverWatchSyncUsers(db, serverId(request)));
-  app.post(`${base}/servers/:serverId/plex-pin`, { config: remoteRateLimit }, async (request) => startPlexSignIn(db, serverId(request)));
-  // Polled every few seconds while the admin approves the sign-in at plex.tv.
-  app.post(`${base}/servers/:serverId/plex-pin/:pinId`, { config: { rateLimit: { max: 60, timeWindow: "1 minute" } } }, async (request) => {
-    const params = pinParams.parse(request.params);
-    return checkPlexSignIn(db, params.serverId, params.pinId);
-  });
 
   app.post(`${base}/pairs`, async (request) => createWatchSyncPair(db, request.body as never));
   app.put(`${base}/pairs/:pairId`, async (request) => updateWatchSyncPair(db, pairId(request), request.body as never));

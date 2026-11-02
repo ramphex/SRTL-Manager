@@ -9,10 +9,9 @@ import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { plexEndpoints, xmlElements } from "../src/server/lib/plexClient";
+import { addMediaServer, checkPlexSignIn, startPlexSignIn } from "../src/server/lib/mediaServers";
 import {
-  addWatchSyncServer,
   approveWatchSyncPair,
-  checkPlexSignIn,
   createWatchSyncPair,
   discoverWatchSyncUsers,
   exportWatchSyncBackup,
@@ -20,7 +19,6 @@ import {
   listWatchSyncActivity,
   saveWatchSyncSettings,
   setWatchSyncPaused,
-  startPlexSignIn,
   suggestPairs,
   updateWatchSyncPair,
   watchSyncNameKeys,
@@ -28,6 +26,7 @@ import {
 } from "../src/server/lib/watchSync";
 import { decideWatchSync, runWatchSyncJob, runWatchSyncTick, scheduleWatchSyncReconcile, toSrtlPath, watchSyncPacing, type WatchSyncJobOptions } from "../src/server/lib/watchSyncEngine";
 import { watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
+import type { MediaServerList } from "../src/shared/mediaServers";
 import type { WatchSyncDirection, WatchSyncSideState, WatchSyncState } from "../src/shared/watchSync";
 import { MockMediaServers, type MockItem } from "./watchSyncMocks";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
@@ -83,26 +82,25 @@ async function state(): Promise<WatchSyncState> {
 
 async function signInPlex(): Promise<string> {
   const db = app.database.db;
-  await addWatchSyncServer(db, "plex", { name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: srtlRoot }] });
-  const plexId = (await state()).settings.servers.find((server) => server.kind === "plex")!.id;
+  const plexId = (await addMediaServer(db, "plex", { name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: srtlRoot }] })).id;
   const pin = await startPlexSignIn(db, plexId);
   expect(pin.authUrl).toContain("code=WXYZ");
-  expect((await checkPlexSignIn(db, plexId, pin.pinId)).status).toBe("waiting");
-  expect((await checkPlexSignIn(db, plexId, pin.pinId)).status).toBe("authorized");
+  const discover = (id: string) => discoverWatchSyncUsers(db, id);
+  expect((await checkPlexSignIn(db, plexId, pin.pinId, discover)).status).toBe("waiting");
+  expect((await checkPlexSignIn(db, plexId, pin.pinId, discover)).status).toBe("authorized");
   return plexId;
 }
 
 async function addJellyfin(name: string): Promise<string> {
   const db = app.database.db;
-  await addWatchSyncServer(db, "jellyfin", { name, url: `${mock.base}/${name}`, token: mock.jellyfin.get(name)!.apiKey, prefixMappings: [] });
-  const id = (await state()).settings.servers.find((server) => server.name === name)!.id;
+  const id = (await addMediaServer(db, "jellyfin", { name, url: `${mock.base}/${name}`, token: mock.jellyfin.get(name)!.apiKey, prefixMappings: [] })).id;
   await discoverWatchSyncUsers(db, id);
   return id;
 }
 
 // Signs in, pairs the owner with the Jellyfin user, previews, and approves with a first full sync.
 async function connectedPair(direction: WatchSyncDirection = "both", jellyfin = "jf1", jellyfinUser = "jf-jefe"): Promise<{ pairId: number; plexId: string; jellyfinId: string }> {
-  const existing = (await state()).settings.servers;
+  const existing = (await state()).servers;
   const plexId = existing.find((server) => server.kind === "plex")?.id ?? await signInPlex();
   const jellyfinId = existing.find((server) => server.name === jellyfin)?.id ?? await addJellyfin(jellyfin);
   await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: jellyfinUser, direction });
@@ -224,7 +222,7 @@ describe("watch sync user pairing", () => {
       ["Partner", "home", true]
     ]);
     expect(users.find((user) => user.name === "NoShare")?.note).toContain("Share at least one library");
-    expect(current.settings.servers[0]).toMatchObject({ hasToken: true, machineIdentifier: "machine-1", accountName: "ElJefe_03", lastError: null });
+    expect(current.servers[0]).toMatchObject({ hasToken: true, machineIdentifier: "machine-1", accountName: "ElJefe_03", lastError: null });
     // Tokens are stored for each user but never sent to the browser.
     expect(JSON.stringify(current)).not.toContain("tok-bob");
     expect(JSON.stringify(current)).not.toContain(mock.ownerToken);
@@ -393,7 +391,7 @@ describe("watch sync", () => {
     const pairs = (await state()).pairs;
     expect(pairs.find((pair) => pair.id === first.pairId)?.lastError).toBeNull();
     expect(pairs.find((pair) => pair.id === second.pairId)?.lastError).toContain("HTTP 503");
-    expect((await state()).settings.servers.find((server) => server.id === second.jellyfinId)?.lastError).toContain("HTTP 503");
+    expect((await state()).servers.find((server) => server.id === second.jellyfinId)?.lastError).toContain("HTTP 503");
     const failed = (await app.database.db.select().from(schema.watchSyncPairs).where(eq(schema.watchSyncPairs.id, second.pairId)))[0]!;
     expect(Date.parse(failed.nextAttemptAt!)).toBeGreaterThan(Date.now());
 
@@ -418,8 +416,8 @@ describe("watch sync", () => {
 
   it("syncs a friend through the friend's own Plex token, one-to-many", async () => {
     await connectedPair("both");
-    const plexId = (await state()).settings.servers.find((server) => server.kind === "plex")!.id;
-    const jellyfinId = (await state()).settings.servers.find((server) => server.name === "jf1")!.id;
+    const plexId = (await state()).servers.find((server) => server.kind === "plex")!.id;
+    const jellyfinId = (await state()).servers.find((server) => server.name === "jf1")!.id;
     // One Plex user may feed several Jellyfin users.
     await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-bob" });
     await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-jefe", direction: "plex_to_jellyfin" });
@@ -487,10 +485,10 @@ describe("watch sync", () => {
     expect((await app.app.inject({ method: "GET", url: "/api/settings/watch-sync" })).statusCode).toBe(401);
     const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
-    const created = await app.app.inject({ method: "POST", url: "/api/settings/watch-sync/servers", headers: { cookie }, payload: { kind: "jellyfin", name: "jf1", url: `${mock.base}/jf1`, token: mock.jellyfin.get("jf1")!.apiKey, prefixMappings: [] } });
+    const created = await app.app.inject({ method: "POST", url: "/api/media-servers", headers: { cookie }, payload: { kind: "jellyfin", name: "jf1", url: `${mock.base}/jf1`, token: mock.jellyfin.get("jf1")!.apiKey, prefixMappings: [] } });
     expect(created.statusCode).toBe(200);
     const plexId = await signInPlex();
-    const jellyfinId = (created.json() as WatchSyncState).settings.servers[0]!.id;
+    const jellyfinId = (created.json() as MediaServerList).servers[0]!.id;
     expect((await app.app.inject({ method: "POST", url: `/api/settings/watch-sync/servers/${jellyfinId}/discover`, headers: { cookie } })).statusCode).toBe(200);
     const paired = await app.app.inject({ method: "POST", url: "/api/settings/watch-sync/pairs", headers: { cookie }, payload: { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-jefe", direction: "both" } });
     const pairId = (paired.json() as WatchSyncState).pairs[0]!.id;
