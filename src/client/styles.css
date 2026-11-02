@@ -2614,6 +2614,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .pill-failed,
 .pill-orphan,
 .pill-hollow,
+.pill-damaged,
 .pill-error {
   background: var(--pill-bad-bg);
   color: var(--pill-bad-text);
@@ -7841,3 +7842,4 @@ button.danger-button:hover:not(:disabled) {
 .watch-sync-samples { max-height: 320px; overflow: auto; }
 .watch-sync-link-button { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--secondary-bg); color: var(--secondary-text); text-decoration: none; }
 .watch-sync-link-button:hover { background: var(--secondary-hover); }
+.dashboard-damaged { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

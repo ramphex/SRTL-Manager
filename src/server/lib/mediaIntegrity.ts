@@ -17,9 +17,76 @@ const runtimeShortfallRatio = 0.5;
 // A recorded size this small cannot be a movie; it means the size of a symlink was recorded instead of its target.
 const minimumTrustedExpectedBytes = 1024 * 1024;
 
+export const zeroSampleBytes = 256 * 1024;
+export const zeroSampleCount = 24;
+// Files storing at least this share of their size are not suspects: ZFS compression alone never gets past it on video.
+export const suspectAllocationRatio = 0.9;
+// Two all-zero samples of 24 mark a file as partially hollow. Zero-sampling the NAS found 56 damaged files: the
+// sampled ones all had 4 or more zero samples (1-10% allocated: 22-24, 10-50%: 15-19, 50-90%: 4-17), while the
+// compressed-but-intact files in the 50-90% band (Dora WEBRips, MPEG2 TV captures) had none. Real video never
+// contains 256 KB of zeros, so 2 leaves a wide margin below every damaged file and a single stray block is tolerated.
+export const partialHollowZeroSamples = 2;
+const zeroSampleTimeoutMs = 30_000;
+
+export type IntegrityVerdict = "ok" | "hollow" | "partial_hollow" | "unknown";
+
 // Some network filesystems report zero blocks for real files, so only a small non-zero allocation is trusted.
 export function isHollowAllocation(sizeBytes: number, allocatedBytes: number | null | undefined): boolean {
   return allocatedBytes != null && sizeBytes >= hollowMinimumBytes && allocatedBytes > 0 && allocatedBytes < sizeBytes * hollowAllocationRatio;
+}
+
+// Allocation alone cannot tell a damaged file from a well-compressed one, so these are the only files worth reading.
+export function needsZeroSampling(sizeBytes: number, allocatedBytes: number | null | undefined): boolean {
+  return allocatedBytes != null && sizeBytes >= hollowMinimumBytes && allocatedBytes < sizeBytes * suspectAllocationRatio && !isHollowAllocation(sizeBytes, allocatedBytes);
+}
+
+// sampling is null for files that were not worth sampling and "failed" when a read error left the result unknown.
+export function classifyIntegrity(sizeBytes: number, allocatedBytes: number | null | undefined, sampling: { zeroSamples: number } | "failed" | null): IntegrityVerdict {
+  if (isHollowAllocation(sizeBytes, allocatedBytes)) return "hollow";
+  if (sampling === "failed") return "unknown";
+  if (sampling && sampling.zeroSamples >= partialHollowZeroSamples) return "partial_hollow";
+  return "ok";
+}
+
+// The verdict shown for a stored row; rows scanned before zero-sampling existed carry no verdict and read as ok.
+export function effectiveIntegrity(sizeBytes: number, allocatedBytes: number | null | undefined, stored: string | null | undefined): IntegrityVerdict {
+  if (isHollowAllocation(sizeBytes, allocatedBytes)) return "hollow";
+  return stored === "hollow" || stored === "partial_hollow" || stored === "unknown" ? stored : "ok";
+}
+
+export function zeroSamplePositions(sizeBytes: number): number[] {
+  const last = Math.max(0, sizeBytes - zeroSampleBytes);
+  return Array.from({ length: zeroSampleCount }, (_unused, index) => Math.floor((last * index) / (zeroSampleCount - 1)));
+}
+
+export interface ZeroSampleResult {
+  zeroSamples: number;
+  totalSamples: number;
+}
+
+async function sampleZeroBlocksOpen(handle: fs.FileHandle, filePath: string, sizeBytes: number, signal?: AbortSignal): Promise<ZeroSampleResult> {
+  const buffer = Buffer.alloc(zeroSampleBytes);
+  let zeroSamples = 0;
+  const positions = zeroSamplePositions(sizeBytes);
+  for (const position of positions) {
+    if (signal?.aborted) throw new Error("Zero sampling was cancelled");
+    const expected = Math.min(zeroSampleBytes, sizeBytes - position);
+    const { bytesRead } = await withFilesystemTimeout(handle.read(buffer, 0, expected, position), `Zero sampling read for ${filePath}`, zeroSampleTimeoutMs);
+    // A short read means the file changed under the scan, so the result says nothing about damage.
+    if (bytesRead < expected) throw new Error(`Zero sampling read ${bytesRead} of ${expected} bytes at ${position} in ${filePath}`);
+    if (buffer.subarray(0, bytesRead).equals(zeroBlock256.subarray(0, bytesRead))) zeroSamples += 1;
+  }
+  return { zeroSamples, totalSamples: positions.length };
+}
+
+// Reads evenly spaced samples across the whole file; any read error rejects, and callers must treat that as "unknown".
+export async function sampleZeroBlocks(filePath: string, sizeBytes: number, signal?: AbortSignal): Promise<ZeroSampleResult> {
+  const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Zero sampling open for ${filePath}`, zeroSampleTimeoutMs);
+  try {
+    return await sampleZeroBlocksOpen(handle, filePath, sizeBytes, signal);
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
 }
 
 export interface MediaExpectation {
@@ -75,6 +142,7 @@ function minutesLabel(seconds: number): string {
 }
 
 const zeroBlock = Buffer.alloc(sampleBytes);
+const zeroBlock256 = Buffer.alloc(zeroSampleBytes);
 
 function isAllZero(buffer: Buffer): boolean {
   return buffer.length > 0 && buffer.equals(zeroBlock.subarray(0, buffer.length));
@@ -196,6 +264,7 @@ export async function inspectMediaContent(
   if (isHollowAllocation(stat.size, allocated)) {
     problems.push(`File is hollow: only ${bytesLabel(allocated)} of ${bytesLabel(stat.size)} is stored on disk`);
   }
+  const suspect = needsZeroSampling(stat.size, allocated);
 
   const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Media inspection open for ${filePath}`);
   try {
@@ -222,6 +291,18 @@ export async function inspectMediaContent(
       }
       if (zeroSamples >= 2) problems.push(`${zeroSamples} of ${middleSampleCount} sampled regions are zero-filled`);
       else if (zeroSamples === 1) warnings.push("One sampled region is zero-filled");
+    }
+    if (suspect) {
+      // Same sampling and threshold as storage scans, so audits and copy pre-checks agree with the Damaged files list.
+      try {
+        const sampled = await sampleZeroBlocksOpen(handle, filePath, stat.size, options.signal);
+        if (classifyIntegrity(stat.size, allocated, sampled) === "partial_hollow") {
+          problems.push(`File is partially hollow: ${sampled.zeroSamples} of ${sampled.totalSamples} sampled regions are zero-filled and only ${bytesLabel(allocated)} of ${bytesLabel(stat.size)} is stored on disk`);
+        }
+      } catch (error) {
+        if (options.signal?.aborted) throw error;
+        warnings.push("Zero-fill sampling could not read the whole file");
+      }
     }
   } finally {
     await handle.close().catch(() => undefined);

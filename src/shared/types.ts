@@ -513,6 +513,8 @@ export interface MediaLinkTree {
   nodes: MediaLinkTreeNode[];
 }
 
+export type StorageIntegrity = "ok" | "hollow" | "partial_hollow" | "unknown";
+
 export interface StorageFileRow {
   id: number;
   rootType: StorageRootType;
@@ -528,6 +530,10 @@ export interface StorageFileRow {
   allocatedBytes: number | null;
   // Large file with almost nothing stored on disk, usually a sparse placeholder or an interrupted copy.
   hollow: boolean;
+  integrity: StorageIntegrity;
+  // All-zero samples out of 24 evenly spaced 256 KB reads; null when the file was never sampled.
+  zeroSamples: number | null;
+  integrityCheckedAt: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -551,6 +557,8 @@ export interface OrphanReviewItem {
   category: OrphanCategory;
   protectedReason: string | null;
   hollow: boolean;
+  integrity: StorageIntegrity;
+  zeroSamples: number | null;
 }
 
 export interface OrphanLeftoverFolder {
@@ -571,6 +579,8 @@ export interface OrphanReview {
   leftoverFolders: OrphanLeftoverFolder[];
   summary: Array<{ category: OrphanCategory; count: number; sizeBytes: number; purgeableCount: number }>;
   hollowCount: number;
+  // Partially hollow files: allocated, but with zero-filled gaps found by sampling.
+  damagedCount: number;
   symlinkInventoryAt: string | null;
   storageInventoryAt: string | null;
   staleWarning: string | null;
@@ -784,4 +794,23 @@ export interface JobEventPage {
   events: JobEventRecord[];
   total: number;
   hasOlder: boolean;
+}
+
+export interface DamagedFileRow {
+  storageFileId: number;
+  section: string;
+  itemName: string;
+  relativePath: string;
+  filePath: string;
+  sizeBytes: number;
+  allocatedBytes: number | null;
+  // Share of the file stored on disk, 0-100.
+  storedPercent: number | null;
+  integrity: "hollow" | "partial_hollow";
+  zeroSamples: number | null;
+  zeroSamplesTotal: number;
+  checkedAt: string | null;
+  linked: boolean;
+  // A current remote file with the same relative path, usable as a source for a fresh copy.
+  remoteCopyExists: boolean;
 }

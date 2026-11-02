@@ -22,7 +22,7 @@ describe("database bootstrap", () => {
       await database.close();
     }
     try {
-      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow("Missing migration 4");
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migrations? 4\b/);
     } finally {
       await testDatabase.cleanup();
     }
@@ -50,7 +50,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -253,7 +253,8 @@ describe("database bootstrap", () => {
         { version: 19 },
         { version: 20 },
         { version: 21 },
-        { version: 22 }
+        { version: 22 },
+        { version: 23 }
       ]);
     } finally {
       await database.close();
@@ -450,7 +451,8 @@ describe("database bootstrap", () => {
         { version: 19, name: "radarr_instances" },
         { version: 20, name: "radarr_per_title_monitoring" },
         { version: 21, name: "sonarr_integration" },
-        { version: 22, name: "watch_sync" }
+        { version: 22, name: "watch_sync" },
+        { version: 23, name: "storage_file_integrity" }
       ]);
     } finally {
       await database.close();

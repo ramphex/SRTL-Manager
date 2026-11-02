@@ -266,6 +266,10 @@ export const storageFiles = pgTable(
     mtimeMs: bigint("mtime_ms", { mode: "number" }).notNull(),
     // Bytes actually stored on disk (stat blocks * 512); null until a scan records it.
     allocatedBytes: bigint("allocated_bytes", { mode: "number" }),
+    // ok | hollow | partial_hollow | unknown; null until a scan classifies the file. Zero samples are counted out of 24.
+    integrity: text("integrity"),
+    integrityZeroSamples: integer("integrity_zero_samples"),
+    integrityCheckedAt: text("integrity_checked_at"),
     firstSeenAt: text("first_seen_at").notNull(),
     lastSeenAt: text("last_seen_at").notNull(),
     lastChangedAt: text("last_changed_at").notNull(),
