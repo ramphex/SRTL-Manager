@@ -1894,7 +1894,7 @@ export function JobsTable({
                     <td className="mobile-card-detail" data-label="Scope">{renderJobScope(newest)}</td>
                     <td className="mobile-card-status" data-label="Status">
                       <StatusPill value={summary.failed > 0 ? "failed" : newest.status} />
-                      <small className="job-group-summary">{summary.label}</small>
+                      {summary.note ? <small className="job-group-summary">{summary.note}</small> : null}
                     </td>
                     <td className="mobile-card-detail" data-label="Started">{formatDate(newest.startedAt, timeFormat)}</td>
                     <td className="mobile-card-detail" data-label="Finished">{formatDate(newest.finishedAt, timeFormat)}</td>

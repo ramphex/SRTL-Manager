@@ -13,6 +13,9 @@ export interface JobGroupSummary {
   failed: number;
   completed: number;
   other: number;
+  cancelled: number;
+  /** Short note for the status cell; null when every job succeeded, so the pill alone says enough. */
+  note: string | null;
   label: string;
 }
 
@@ -37,12 +40,14 @@ export function jobSingleTitleKey(job: JobRecord): string | null {
 
 export function summarizeJobGroup(jobs: JobRecord[]): JobGroupSummary {
   const failed = jobs.filter((job) => job.status === "failed" || job.status === "partially_failed").length;
+  const cancelled = jobs.filter((job) => job.status === "cancelled").length;
   const completed = jobs.filter((job) => job.status === "completed").length;
   const other = jobs.length - failed - completed;
+  const noteParts = [failed > 0 ? `${failed} failed` : null, cancelled > 0 ? `${cancelled} cancelled` : null].filter((part): part is string => part !== null);
   const parts = [`${jobs.length} jobs`];
   if (failed > 0) parts.push(`${failed} failed`);
   else if (completed < jobs.length) parts.push(`${completed} completed`);
-  return { total: jobs.length, failed, completed, other, label: parts.join(" · ") };
+  return { total: jobs.length, failed, cancelled, completed, other, note: noteParts.length > 0 ? noteParts.join(", ") : null, label: parts.join(" · ") };
 }
 
 /**

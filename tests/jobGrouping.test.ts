@@ -25,7 +25,7 @@ describe("groupAdjacentJobs", () => {
     expect(entries).toHaveLength(1);
     const [group] = entries;
     expect(group.kind === "group" && group.jobs.map((job) => job.id)).toEqual([3, 2, 1]);
-    expect(group.kind === "group" && group.summary.label).toBe("3 jobs");
+    expect(group.kind === "group" && group.summary.note).toBeNull();
   });
 
   it("breaks the group when a different title sits in between", () => {
@@ -43,7 +43,9 @@ describe("groupAdjacentJobs", () => {
 
   it("surfaces failures in the summary", () => {
     const [group] = groupAdjacentJobs([rescan(3, "A"), rescan(2, "A", "failed"), rescan(1, "A", "partially_failed")]);
-    expect(group.kind === "group" && group.summary).toMatchObject({ total: 3, failed: 2, label: "3 jobs · 2 failed" });
+    expect(group.kind === "group" && group.summary).toMatchObject({ total: 3, failed: 2, note: "2 failed" });
+    const [mixed] = groupAdjacentJobs([rescan(2, "A"), rescan(1, "A", "cancelled")]);
+    expect(mixed.kind === "group" && mixed.summary.note).toBe("1 cancelled");
   });
 
   it("never groups multi-title or section-wide jobs", () => {

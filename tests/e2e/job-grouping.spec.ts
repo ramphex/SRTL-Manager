@@ -40,7 +40,8 @@ test("consecutive rescans of one title collapse and expand with the chevron", as
   await expect(table.locator("tbody tr")).toHaveCount(3);
   const toggle = table.getByRole("button", { name: /Expand 3 jobs · 1 failed/ });
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
-  await expect(table.getByText("3 jobs · 1 failed")).toBeVisible();
+  await expect(table.getByText("1 failed", { exact: true })).toBeVisible();
+  await expect(table.getByText(/^\d+ jobs/)).toHaveCount(0);
   await toggle.click();
   await expect(table.locator("tbody tr")).toHaveCount(6);
   await expect(table.getByRole("button", { name: /Collapse 3 jobs/ })).toHaveAttribute("aria-expanded", "true");
