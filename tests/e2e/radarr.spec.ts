@@ -45,6 +45,8 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
     } else if (url.pathname === "/api/settings/radarr") body = overview();
+    else if (url.pathname === "/api/settings/sonarr") body = { instances: [], limit: 25 };
+    else if (url.pathname === "/api/settings/sonarr/copy-defaults") body = { sections: [] };
     else if (url.pathname === "/api/settings/radarr/copy-defaults") body = { sections: instances.filter((entry) => entry.settings.enabled).flatMap((entry) => entry.settings.mappings.map((mapping) => ({ section: mapping.section, instanceId: entry.settings.id, instanceName: entry.settings.name, monitorOnCopy: entry.settings.monitorOnCopy }))) };
     else if (url.pathname === "/api/settings/radarr/instances" && request.method() === "POST") {
       const created = instanceState({ id: `new${instances.length}instance`, name: (request.postDataJSON() as { name: string }).name.trim() });
@@ -232,7 +234,7 @@ test("failed saves keep the draft and unsaved marker until retry succeeds", asyn
   await expect(page.getByRole("alert")).toContainText("Radarr rejected the API key.");
   await expect(page.locator(".radarr-save-status")).toHaveText("Unsaved changes");
   await expect(page.getByLabel("Archive policy tag", { exact: true })).toHaveValue("archive");
-  await page.getByRole("tab", { name: "Sonarr Coming soon", exact: true }).click();
+  await page.getByRole("tab", { name: "Sonarr", exact: true }).click();
   await page.getByRole("tab", { name: "Radarr", exact: true }).click();
   await expect(radarrTab(page, "Policy sync")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("Archive policy tag", { exact: true })).toHaveValue("archive");
@@ -274,13 +276,13 @@ test("integration tabs isolate settings and preserve edits with mouse and keyboa
   const { saves } = await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
   const radarr = page.getByRole("tab", { name: "Radarr", exact: true });
-  const sonarr = page.getByRole("tab", { name: "Sonarr Coming soon", exact: true });
+  const sonarr = page.getByRole("tab", { name: "Sonarr", exact: true });
   await expect(radarr).toHaveAttribute("aria-selected", "true");
   await openTab(page, "Policy sync");
   await page.getByLabel("Home NAS policy tag", { exact: true }).fill("home");
   await sonarr.click();
   await expect(page.getByRole("tabpanel", { name: "Radarr" })).toBeHidden();
-  await expect(page.getByRole("tabpanel", { name: "Sonarr Coming soon" })).toContainText("Sonarr integration is not available yet.");
+  await expect(page.getByRole("tabpanel", { name: "Sonarr" })).toContainText("No Sonarr instances yet.");
   await expect(page.getByRole("button", { name: "Save Radarr settings" })).toBeHidden();
   await sonarr.press("ArrowLeft");
   await expect(radarr).toBeFocused();

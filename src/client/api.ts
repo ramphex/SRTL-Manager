@@ -46,6 +46,7 @@ import type {
 } from "../shared/types";
 
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
+import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSettingsInput, SonarrState } from "../shared/sonarr";
 
 type ApiErrorPayload = {
   error?: string;
@@ -121,6 +122,16 @@ export const api = {
   testRadarr: (instanceId: string, body: RadarrSettingsInput) => request<RadarrConnectionTest>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/test`, { method: "POST", body: JSON.stringify(body) }),
   refreshRadarr: (instanceId: string) => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/refresh`, { method: "POST" }),
   reconcileRadarr: (instanceId: string, movieIds: number[], action: "use_srtl" | "import_tags") => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/reconcile`, { method: "POST", body: JSON.stringify({ movieIds, action }) }),
+  getSonarrOverview: () => request<SonarrOverview>("/api/settings/sonarr"),
+  getSonarr: (instanceId: string) => request<SonarrState>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}`),
+  getSonarrCopyDefaults: () => request<SonarrCopyDefaults>("/api/settings/sonarr/copy-defaults"),
+  createSonarrInstance: (name: string) => request<SonarrState>("/api/settings/sonarr/instances", { method: "POST", body: JSON.stringify({ name }) }),
+  renameSonarrInstance: (instanceId: string, name: string) => request<SonarrOverview>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}/rename`, { method: "POST", body: JSON.stringify({ name }) }),
+  removeSonarrInstance: (instanceId: string) => request<SonarrOverview>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}`, { method: "DELETE" }),
+  saveSonarr: (instanceId: string, body: SonarrSettingsInput) => request<SonarrState>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}`, { method: "PUT", body: JSON.stringify(body) }),
+  testSonarr: (instanceId: string, body: SonarrSettingsInput) => request<SonarrConnectionTest>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}/test`, { method: "POST", body: JSON.stringify(body) }),
+  refreshSonarr: (instanceId: string) => request<SonarrState>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}/refresh`, { method: "POST" }),
+  reconcileSonarr: (instanceId: string, seriesIds: number[], action: "use_srtl" | "import_tags") => request<SonarrState>(`/api/settings/sonarr/instances/${encodeURIComponent(instanceId)}/reconcile`, { method: "POST", body: JSON.stringify({ seriesIds, action }) }),
   saveAdvancedSettings: (body: AdvancedSettings) => request<AdvancedSettings>("/api/settings/advanced", { method: "PUT", body: JSON.stringify(body) }),
   getUserPreferences: () => request<UserPreferences>("/api/settings/user-preferences"),
   saveUserPreferences: (body: UserPreferences) => request<UserPreferences>("/api/settings/user-preferences", { method: "PUT", body: JSON.stringify(body) }),
