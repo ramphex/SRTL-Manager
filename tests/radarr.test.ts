@@ -516,7 +516,7 @@ describe("Radarr policy and webhook integration", () => {
     expect(mapRadarrMovie({ ...movie(1), path: "/library/nested/title" }, input)).toBeNull();
     expect(mapRadarrMovie({ ...movie(1), path: "/library/Title {tmdb-999}" }, input)).toBeNull();
     for (const address of ["0.0.0.0", "169.254.169.254", "::ffff:169.254.169.254", "fe80::1", "ff02::1", "::"]) expect(radarrAddressAllowed(address)).toBe(false);
-    for (const address of ["127.0.0.1", "10.0.0.107", "192.168.1.2", "::1", "fd00::1"]) expect(radarrAddressAllowed(address)).toBe(true);
+    for (const address of ["127.0.0.1", "10.20.30.40", "192.168.1.2", "::1", "fd00::1"]) expect(radarrAddressAllowed(address)).toBe(true);
     for (const url of ["file:///etc/passwd", "http://user:password@localhost", "http://localhost?key=secret"]) expect(() => normalizeRadarrUrl(url)).toThrow();
     expect(await new RadarrClient(input.baseUrl, apiKey).test()).toEqual({ version: "6.0.0", rootFolders: ["/library"] });
   });

@@ -50,7 +50,7 @@ The longest matching prefix wins, and prefixes only match whole folder names (`/
 
 ## 2. Pair users
 
-The **User pairs** tab suggests pairs whose names match once case, punctuation, and digits are ignored, such as Plex `ElJefe_03` and Jellyfin `Eljefe` (shown as "similar name") or `Friend.Bob` and `friendbob`. Check each suggestion before selecting **Pair**. Names that match more than one user are not suggested. You can also pair any two users manually.
+The **User pairs** tab suggests pairs whose names match once case, punctuation, and digits are ignored, such as Plex `alex_03` and Jellyfin `Alex` (shown as "similar name") or `Friend.Bob` and `friendbob`. Check each suggestion before selecting **Pair**. Names that match more than one user are not suggested. You can also pair any two users manually.
 
 - **One-to-many is allowed.** A Plex user can be paired with several Jellyfin users and the other way round. Each pair is independent.
 - **Direction**, per pair:

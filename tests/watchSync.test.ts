@@ -101,7 +101,7 @@ async function addJellyfin(name: string): Promise<string> {
 }
 
 // Signs in, pairs the owner with the Jellyfin user, previews, and approves with a first full sync.
-async function connectedPair(direction: WatchSyncDirection = "both", jellyfin = "jf1", jellyfinUser = "jf-jefe"): Promise<{ pairId: number; plexId: string; jellyfinId: string }> {
+async function connectedPair(direction: WatchSyncDirection = "both", jellyfin = "jf1", jellyfinUser = "jf-alex"): Promise<{ pairId: number; plexId: string; jellyfinId: string }> {
   const existing = (await state()).settings.servers;
   const plexId = existing.find((server) => server.kind === "plex")?.id ?? await signInPlex();
   const jellyfinId = existing.find((server) => server.name === jellyfin)?.id ?? await addJellyfin(jellyfin);
@@ -132,7 +132,7 @@ beforeEach(async () => {
   mock = new MockMediaServers();
   await mock.start();
   mock.items = [alpha, beta, gamma, episode, homeVideo];
-  mock.addJellyfin("jf1", { users: [{ id: "jf-jefe", name: "Eljefe" }, { id: "jf-bob", name: "friendbob" }, { id: "jf-off", name: "Old", disabled: true }] });
+  mock.addJellyfin("jf1", { users: [{ id: "jf-alex", name: "Alex" }, { id: "jf-bob", name: "friendbob" }, { id: "jf-off", name: "Old", disabled: true }] });
   await seedLinks(mock.items);
   plexEndpoints.plexTv = `${mock.base}/plextv`;
   plexEndpoints.plexApp = "https://app.plex.invalid";
@@ -192,22 +192,22 @@ describe("watch sync decisions", () => {
 
 describe("watch sync user pairing", () => {
   it("suggests pairs ignoring case, punctuation, and trailing digits", () => {
-    expect(watchSyncNameKeys("ElJefe_03")).toEqual({ exact: "eljefe03", letters: "eljefe" });
+    expect(watchSyncNameKeys("alex_03")).toEqual({ exact: "alex03", letters: "alex" });
     const plexUsers = [
-      { serverId: "p", externalId: "1", name: "ElJefe_03", username: "ElJefe_03" },
+      { serverId: "p", externalId: "1", name: "alex_03", username: "alex_03" },
       { serverId: "p", externalId: "2", name: "Friend.Bob", username: "friendbob" },
       { serverId: "p", externalId: "3", name: "Sam", username: "sam" },
       { serverId: "p", externalId: "4", name: "Kids", username: null }
     ];
     const jellyfinUsers = [
-      { serverId: "j", externalId: "a", name: "Eljefe" },
+      { serverId: "j", externalId: "a", name: "Alex" },
       { serverId: "j", externalId: "b", name: "FriendBob" },
       { serverId: "j", externalId: "c", name: "Sam1" },
       { serverId: "j", externalId: "d", name: "sam_2" }
     ];
     const suggestions = suggestPairs(plexUsers, jellyfinUsers, [{ plexServerId: "p", plexUserId: "4", jellyfinServerId: "j", jellyfinUserId: "x" }]);
     expect(suggestions.map((entry) => [entry.plexUserName, entry.jellyfinUserName, entry.match])).toEqual([
-      ["ElJefe_03", "Eljefe", "similar"],
+      ["alex_03", "Alex", "similar"],
       ["Friend.Bob", "FriendBob", "exact"]
     ]);
   });
@@ -217,14 +217,14 @@ describe("watch sync user pairing", () => {
     const current = await state();
     const users = current.users.filter((user) => user.serverId === plexId);
     expect(users.map((user) => [user.name, user.kind, user.ready]).sort()).toEqual([
-      ["ElJefe_03", "owner", true],
       ["Friend.Bob", "friend", true],
       ["Kids & Co", "managed", true],
       ["NoShare", "friend", false],
-      ["Partner", "home", true]
+      ["Partner", "home", true],
+      ["alex_03", "owner", true]
     ]);
     expect(users.find((user) => user.name === "NoShare")?.note).toContain("Share at least one library");
-    expect(current.settings.servers[0]).toMatchObject({ hasToken: true, machineIdentifier: "machine-1", accountName: "ElJefe_03", lastError: null });
+    expect(current.settings.servers[0]).toMatchObject({ hasToken: true, machineIdentifier: "machine-1", accountName: "alex_03", lastError: null });
     // Tokens are stored for each user but never sent to the browser.
     expect(JSON.stringify(current)).not.toContain("tok-bob");
     expect(JSON.stringify(current)).not.toContain(mock.ownerToken);
@@ -244,7 +244,7 @@ describe("watch sync user pairing", () => {
     await signInPlex();
     await addJellyfin("jf1");
     const suggestions = (await state()).suggestions.map((entry) => `${entry.plexUserName}->${entry.jellyfinUserName}`);
-    expect(suggestions).toEqual(expect.arrayContaining(["ElJefe_03->Eljefe", "Friend.Bob->friendbob"]));
+    expect(suggestions).toEqual(expect.arrayContaining(["alex_03->Alex", "Friend.Bob->friendbob"]));
     expect(suggestions.some((entry) => entry.endsWith("->Old"))).toBe(false);
   });
 });
@@ -254,9 +254,9 @@ describe("watch sync", () => {
     const plexId = await signInPlex();
     const jellyfinId = await addJellyfin("jf1");
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: minutesAgo(30) });
-    mock.setJellyfin("jf1", "jf-jefe", beta.jellyfinId, { watched: true, at: minutesAgo(20) });
-    mock.setJellyfin("jf1", "jf-jefe", episode.jellyfinId, { offsetMs: 1_200_000, at: minutesAgo(10) });
-    await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-jefe" });
+    mock.setJellyfin("jf1", "jf-alex", beta.jellyfinId, { watched: true, at: minutesAgo(20) });
+    mock.setJellyfin("jf1", "jf-alex", episode.jellyfinId, { offsetMs: 1_200_000, at: minutesAgo(10) });
+    await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-alex" });
     const pairId = (await state()).pairs[0]!.id;
     await expect(approveWatchSyncPair(app.database.db, pairId)).rejects.toThrow("Run a preview");
 
@@ -277,7 +277,7 @@ describe("watch sync", () => {
     await approveWatchSyncPair(app.database.db, pairId);
     await job({ mode: "reconcile", pairIds: [pairId] });
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`).sort()).toEqual(["jf1:played:a1", "plex:progress:21", "plex:scrobble:12"]);
-    expect(mock.jellyfinState("jf1", "jf-jefe", alpha.jellyfinId).watched).toBe(true);
+    expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(true);
     expect(mock.plexState(mock.ownerToken, episode.plexKey).offsetMs).toBe(1_200_000);
     // The original play time travels with the watch.
     expect(mock.writes.find((write) => write.item === "a1")?.value).toBe(new Date(Math.floor(minutesAgo(30).getTime() / 1000) * 1000).toISOString());
@@ -291,7 +291,7 @@ describe("watch sync", () => {
     const { pairId } = await connectedPair("plex_to_jellyfin");
     mock.writes = [];
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true });
-    mock.setJellyfin("jf1", "jf-jefe", beta.jellyfinId, { watched: true });
+    mock.setJellyfin("jf1", "jf-alex", beta.jellyfinId, { watched: true });
     expect(await tick()).toMatchObject({ synced: 1, failed: 0 });
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`)).toEqual(["jf1:played:a1"]);
     expect(mock.plexState(mock.ownerToken, beta.plexKey).watched).toBe(false);
@@ -305,21 +305,21 @@ describe("watch sync", () => {
     await connectedPair("jellyfin_to_plex");
     mock.writes = [];
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true });
-    mock.setJellyfin("jf1", "jf-jefe", beta.jellyfinId, { watched: true });
-    mock.setJellyfin("jf1", "jf-jefe", gamma.jellyfinId, { offsetMs: 2_400_000 });
+    mock.setJellyfin("jf1", "jf-alex", beta.jellyfinId, { watched: true });
+    mock.setJellyfin("jf1", "jf-alex", gamma.jellyfinId, { offsetMs: 2_400_000 });
     await tick();
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`).sort()).toEqual(["plex:progress:13", "plex:scrobble:12"]);
-    expect(mock.jellyfinState("jf1", "jf-jefe", alpha.jellyfinId).watched).toBe(false);
+    expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(false);
   });
 
   it("syncs both ways and lets the newest change win a conflict", async () => {
     await connectedPair("both");
     mock.writes = [];
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true });
-    mock.setJellyfin("jf1", "jf-jefe", beta.jellyfinId, { watched: true });
+    mock.setJellyfin("jf1", "jf-alex", beta.jellyfinId, { watched: true });
     // Gamma changed on both sides: a resume point on Plex, then a finished watch on Jellyfin.
     mock.setPlex(mock.ownerToken, gamma.plexKey, { offsetMs: 300_000, at: minutesAgo(3) });
-    mock.setJellyfin("jf1", "jf-jefe", gamma.jellyfinId, { watched: true, at: minutesAgo(1) });
+    mock.setJellyfin("jf1", "jf-alex", gamma.jellyfinId, { watched: true, at: minutesAgo(1) });
     await tick();
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`).sort()).toEqual(["jf1:played:a1", "plex:scrobble:12", "plex:scrobble:13"]);
     expect(mock.plexState(mock.ownerToken, gamma.plexKey).watched).toBe(true);
@@ -329,22 +329,22 @@ describe("watch sync", () => {
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true, at: minutesAgo(90) });
     mock.setPlex(mock.ownerToken, beta.plexKey, { watched: true, at: minutesAgo(90) });
     await connectedPair("both");
-    expect(mock.jellyfinState("jf1", "jf-jefe", alpha.jellyfinId).watched).toBe(true);
+    expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(true);
     mock.writes = [];
     // Jellyfin reports unplayed items through MinDateLastSavedForUser.
-    mock.setJellyfin("jf1", "jf-jefe", alpha.jellyfinId, { watched: false });
+    mock.setJellyfin("jf1", "jf-alex", alpha.jellyfinId, { watched: false });
     // Plex reports nothing when an item is marked unwatched; the rolling recheck finds it.
     mock.plexUser(mock.ownerToken).set(beta.plexKey, { viewCount: 0, viewOffset: 0, lastViewedAt: Math.floor(minutesAgo(90).getTime() / 1000) });
     await tick();
     expect(mock.writes.map((write) => `${write.server}:${write.action}:${write.item}`).sort()).toEqual(["jf1:unplayed:b2", "plex:unscrobble:11"]);
     expect(mock.plexState(mock.ownerToken, alpha.plexKey).watched).toBe(false);
-    expect(mock.jellyfinState("jf1", "jf-jefe", beta.jellyfinId).watched).toBe(false);
+    expect(mock.jellyfinState("jf1", "jf-alex", beta.jellyfinId).watched).toBe(false);
   });
 
   it("does not ping-pong its own writes", async () => {
     await connectedPair("both");
     mock.writes = [];
-    mock.setJellyfin("jf1", "jf-jefe", alpha.jellyfinId, { offsetMs: 1_800_000 });
+    mock.setJellyfin("jf1", "jf-alex", alpha.jellyfinId, { offsetMs: 1_800_000 });
     mock.setPlex(mock.ownerToken, beta.plexKey, { watched: true });
     await tick();
     expect(mock.writes).toHaveLength(2);
@@ -381,9 +381,9 @@ describe("watch sync", () => {
   });
 
   it("keeps other pairs syncing while one server is down, and backs off the failed pair", async () => {
-    mock.addJellyfin("jf2", { users: [{ id: "jf2-jefe", name: "Eljefe" }], legacyOnly: true });
+    mock.addJellyfin("jf2", { users: [{ id: "jf2-alex", name: "Alex" }], legacyOnly: true });
     const first = await connectedPair("plex_to_jellyfin", "jf1");
-    const second = await connectedPair("plex_to_jellyfin", "jf2", "jf2-jefe");
+    const second = await connectedPair("plex_to_jellyfin", "jf2", "jf2-alex");
     mock.writes = [];
     mock.jellyfin.get("jf2")!.offline = true;
     mock.setPlex(mock.ownerToken, alpha.plexKey, { watched: true });
@@ -401,14 +401,14 @@ describe("watch sync", () => {
     mock.jellyfin.get("jf2")!.offline = false;
     await app.database.db.update(schema.watchSyncPairs).set({ nextAttemptAt: null }).where(eq(schema.watchSyncPairs.id, second.pairId));
     await tick();
-    expect(mock.jellyfinState("jf2", "jf2-jefe", alpha.jellyfinId).watched).toBe(true);
+    expect(mock.jellyfinState("jf2", "jf2-alex", alpha.jellyfinId).watched).toBe(true);
     expect((await state()).pairs.find((pair) => pair.id === second.pairId)?.lastError).toBeNull();
   });
 
   it("isolates a Plex outage and a failing history endpoint", async () => {
     await connectedPair("both");
     mock.plexHistoryFails = true;
-    mock.setJellyfin("jf1", "jf-jefe", alpha.jellyfinId, { watched: true });
+    mock.setJellyfin("jf1", "jf-alex", alpha.jellyfinId, { watched: true });
     expect(await tick()).toMatchObject({ synced: 1, failed: 0 });
     expect(mock.plexState(mock.ownerToken, alpha.plexKey).watched).toBe(true);
     mock.plexOffline = true;
@@ -422,7 +422,7 @@ describe("watch sync", () => {
     const jellyfinId = (await state()).settings.servers.find((server) => server.name === "jf1")!.id;
     // One Plex user may feed several Jellyfin users.
     await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-bob" });
-    await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-jefe", direction: "plex_to_jellyfin" });
+    await createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-alex", direction: "plex_to_jellyfin" });
     await expect(createWatchSyncPair(app.database.db, { plexServerId: plexId, plexUserId: "200", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-bob" })).rejects.toThrow("already paired");
     mock.setPlex("tok-bob", beta.plexKey, { watched: true });
     const bobPair = (await state()).pairs.find((pair) => pair.plexUserId === "200" && pair.jellyfinUserId === "jf-bob")!.id;
@@ -463,8 +463,8 @@ describe("watch sync", () => {
     const backupKey = "restore:test";
     await writeCursor(app.database.db, backupKey, JSON.stringify(backup));
     await job({ mode: "restore", pairIds: [pairId], restore: { side: "jellyfin", backupKey } });
-    expect(mock.jellyfinState("jf1", "jf-jefe", alpha.jellyfinId).watched).toBe(true);
-    expect(mock.jellyfinState("jf1", "jf-jefe", gamma.jellyfinId).offsetMs).toBe(1_500_000);
+    expect(mock.jellyfinState("jf1", "jf-alex", alpha.jellyfinId).watched).toBe(true);
+    expect(mock.jellyfinState("jf1", "jf-alex", gamma.jellyfinId).offsetMs).toBe(1_500_000);
     expect(mock.writes.every((write) => write.server === "jf1")).toBe(true);
   });
 
@@ -492,7 +492,7 @@ describe("watch sync", () => {
     const plexId = await signInPlex();
     const jellyfinId = (created.json() as WatchSyncState).settings.servers[0]!.id;
     expect((await app.app.inject({ method: "POST", url: `/api/settings/watch-sync/servers/${jellyfinId}/discover`, headers: { cookie } })).statusCode).toBe(200);
-    const paired = await app.app.inject({ method: "POST", url: "/api/settings/watch-sync/pairs", headers: { cookie }, payload: { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-jefe", direction: "both" } });
+    const paired = await app.app.inject({ method: "POST", url: "/api/settings/watch-sync/pairs", headers: { cookie }, payload: { plexServerId: plexId, plexUserId: "100", jellyfinServerId: jellyfinId, jellyfinUserId: "jf-alex", direction: "both" } });
     const pairId = (paired.json() as WatchSyncState).pairs[0]!.id;
     expect((await app.app.inject({ method: "POST", url: `/api/settings/watch-sync/pairs/${pairId}/approve`, headers: { cookie } })).statusCode).toBe(400);
     const preview = await app.app.inject({ method: "POST", url: `/api/settings/watch-sync/pairs/${pairId}/preview`, headers: { cookie } });

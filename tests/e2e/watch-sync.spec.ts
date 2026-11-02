@@ -7,7 +7,7 @@ test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
 
 function pair(overrides: Partial<WatchSyncPair> = {}): WatchSyncPair {
   return {
-    id: 1, plexServerId: "plex1", plexUserId: "100", plexUserName: "ElJefe_03", jellyfinServerId: "jf1", jellyfinUserId: "u1", jellyfinUserName: "Eljefe",
+    id: 1, plexServerId: "plex1", plexUserId: "100", plexUserName: "alex_03", jellyfinServerId: "jf1", jellyfinUserId: "u1", jellyfinUserName: "Alex",
     enabled: true, paused: false, direction: "both", syncWatched: null, syncPosition: null, approvedAt: null,
     preview: {
       generatedAt: "2026-11-01T12:00:00.000Z", jobId: 9,
@@ -25,15 +25,15 @@ async function fixture(page: Page) {
     settings: {
       revision: 3, paused: false, intervalMinutes: 5, reconcileIntervalDays: 7, syncWatched: true, syncPosition: true, lastReconcileAt: null,
       servers: [
-        { id: "plex1", kind: "plex", name: "Home Plex", url: "http://plex:32400", hasToken: true, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: "/mnt/plex" }], machineIdentifier: "m1", accountName: "ElJefe_03", lastCheckedAt: "2026-11-01T11:00:00.000Z", lastError: null },
+        { id: "plex1", kind: "plex", name: "Home Plex", url: "http://plex:32400", hasToken: true, prefixMappings: [{ serverPrefix: "/data/media", srtlPrefix: "/mnt/plex" }], machineIdentifier: "m1", accountName: "alex_03", lastCheckedAt: "2026-11-01T11:00:00.000Z", lastError: null },
         { id: "jf1", kind: "jellyfin", name: "Jellyfin", url: "http://jellyfin:8096", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, lastCheckedAt: null, lastError: "Jellyfin: Jellyfin returned HTTP 503." }
       ]
     },
     users: [
-      { serverId: "plex1", externalId: "100", name: "ElJefe_03", username: "ElJefe_03", kind: "owner", ready: true, note: null },
+      { serverId: "plex1", externalId: "100", name: "alex_03", username: "alex_03", kind: "owner", ready: true, note: null },
       { serverId: "plex1", externalId: "200", name: "Friend.Bob", username: "friendbob", kind: "friend", ready: true, note: null },
       { serverId: "plex1", externalId: "500", name: "NoShare", username: "noshare", kind: "friend", ready: false, note: "No server access token." },
-      { serverId: "jf1", externalId: "u1", name: "Eljefe", username: null, kind: "user", ready: true, note: null },
+      { serverId: "jf1", externalId: "u1", name: "Alex", username: null, kind: "user", ready: true, note: null },
       { serverId: "jf1", externalId: "u2", name: "friendbob", username: null, kind: "user", ready: true, note: null }
     ],
     pairs: [pair()],
@@ -94,7 +94,7 @@ test("lists servers with their users, status, and Plex sign-in", async ({ page }
   await openWatchSync(page);
   const plex = page.getByRole("region", { name: "Plex server Home Plex" });
   await expect(plex.getByRole("button", { name: "Sign in with Plex again" })).toBeVisible();
-  await expect(plex).toContainText("Plex account ElJefe_03");
+  await expect(plex).toContainText("Plex account alex_03");
   await expect(plex).toContainText("400 SRTL items indexed");
   await expect(plex).toContainText("No server access token.");
   await expect(page.getByRole("region", { name: "Jellyfin server Jellyfin" })).toContainText("HTTP 503");
@@ -107,7 +107,7 @@ test("shows the preview and starts syncing only after approval", async ({ page }
   const { calls } = await fixture(page);
   await openWatchSync(page);
   await tab(page, "User pairs").click();
-  const card = page.getByRole("article", { name: "ElJefe_03 and Eljefe" });
+  const card = page.getByRole("article", { name: "alex_03 and Alex" });
   await expect(card).toContainText("Preview ready");
   const preview = card.getByRole("region", { name: "Preview" });
   await expect(preview).toContainText("Nothing has been written yet.");
@@ -139,7 +139,7 @@ test("fits a phone screen without horizontal scrolling", async ({ page }) => {
   await fixture(page);
   await openWatchSync(page);
   await tab(page, "User pairs").click();
-  await expect(page.getByRole("article", { name: "ElJefe_03 and Eljefe" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "alex_03 and Alex" })).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
 });

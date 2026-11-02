@@ -114,7 +114,7 @@ export class MockMediaServers {
       return { id: 77, code: "WXYZ", expiresAt: new Date(Date.now() + 900_000).toISOString(), authToken: this.pinPolls >= this.pinAuthorizedAfter ? this.ownerToken : null };
     }
     if (request.headers["x-plex-token"] !== this.ownerToken) return reply.code(401).send("unauthorized");
-    if (route === "/api/v2/user") return { id: 100, uuid: "owner-uuid", username: "ElJefe_03", title: "ElJefe_03", email: "owner@example.invalid" };
+    if (route === "/api/v2/user") return { id: 100, uuid: "owner-uuid", username: "alex_03", title: "alex_03", email: "owner@example.invalid" };
     if (route === "/api/users") {
       return reply.type("application/xml").send(`<?xml version="1.0" encoding="UTF-8"?>
 <MediaContainer friendlyName="myPlex" identifier="com.plexapp.plugins.myplex" size="5">

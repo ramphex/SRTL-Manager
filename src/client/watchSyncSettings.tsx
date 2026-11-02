@@ -317,7 +317,7 @@ function PairsTab({ state }: { state: WatchSyncState }) {
     add.mutate({ plexServerId: plex.serverId, plexUserId: plex.userId, jellyfinServerId: jellyfin.serverId, jellyfinUserId: jellyfin.userId, direction });
   };
   return <>
-    {state.suggestions.length ? <Section title="Suggested pairs" help="Users whose names match once case, punctuation, and trailing digits are ignored, such as ElJefe_03 and Eljefe. Check each one before pairing.">
+    {state.suggestions.length ? <Section title="Suggested pairs" help="Users whose names match once case, punctuation, and trailing digits are ignored, such as alex_03 and Alex. Check each one before pairing.">
       <ul className="watch-sync-suggestions">
         {state.suggestions.map((suggestion) => <li key={`${suggestion.plexServerId}:${suggestion.plexUserId}:${suggestion.jellyfinServerId}`}>
           <span><strong>{suggestion.plexUserName}</strong> (Plex) ↔ <strong>{suggestion.jellyfinUserName}</strong> (Jellyfin){suggestion.match === "similar" ? <span className="watch-sync-pill">similar name</span> : null}</span>

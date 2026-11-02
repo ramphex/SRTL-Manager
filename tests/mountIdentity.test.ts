@@ -25,7 +25,7 @@ describe("managed root mount identity", () => {
     const mounts = parseLinuxMountInfo(
       [
         "36 25 8:2 / / rw,relatime - ext4 /dev/sda2 rw",
-        "51 36 0:51 / /mnt/local/nas rw,relatime - nfs4 10.0.0.204:/mnt/Exos-Pool/media rw",
+        "51 36 0:51 / /mnt/local/nas rw,relatime - nfs4 192.168.1.20:/mnt/pool/media rw",
         "65 36 0:65 / /mnt/remote/realdebrid rw,nosuid,nodev - fuse.decypharr decypharr rw",
         "66 36 0:66 / /mnt/media\\040pool rw - fuse.example source\\040name rw"
       ].join("\n")

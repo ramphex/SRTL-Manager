@@ -361,7 +361,7 @@ export async function discoverWatchSyncUsers(db: Db, serverId: string): Promise<
   return getWatchSyncState(db);
 }
 
-// Lowercase letters and digits only, so ElJefe_03 and eljefe03 compare equal; the letters-only form also matches Eljefe.
+// Lowercase letters and digits only, so alex_03 and alex03 compare equal; the letters-only form also matches Alex.
 export function watchSyncNameKeys(name: string | null | undefined): { exact: string; letters: string } {
   const folded = (name ?? "").normalize("NFKD").replace(/[̀-ͯ]/g, "").toLowerCase();
   return { exact: folded.replace(/[^a-z0-9]/g, ""), letters: folded.replace(/[^a-z]/g, "") };
