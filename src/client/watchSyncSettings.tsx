@@ -85,14 +85,16 @@ function Section({ title, help, actions, children }: { title: string; help?: Rea
 }
 
 export function WatchSyncSettingsPanel({ active }: { active: boolean }) {
-  const query = useQuery({ queryKey: stateKey, queryFn: watchSyncApi.state, refetchInterval: active ? 5000 : false });
+  // Nothing is fetched until the tab is opened, so the other integrations never wait on watch sync.
+  const query = useQuery({ queryKey: stateKey, queryFn: watchSyncApi.state, enabled: active, refetchInterval: active ? 5000 : false });
   const [tab, setTab] = useState<Tab>(readStoredTab);
   const select = (next: Tab) => {
     setTab(next);
     try { window.localStorage.setItem(tabStorageKey, next); } catch { /* the tab still applies for this page view */ }
   };
+  if (!active && !query.data) return null;
   if (query.isLoading) return <p role="status">Loading watch sync...</p>;
-  if (!query.data) return <p className="error" role="alert">{query.error?.message ?? "Watch sync settings unavailable."}</p>;
+  if (!query.data?.settings) return <p className="error" role="alert">{query.error?.message ?? "Watch sync settings unavailable."}</p>;
   const state = query.data;
   return <div className="radarr-settings watch-sync-settings">
     <WatchSyncHeader state={state} />
