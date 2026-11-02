@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import type { Dirent } from "node:fs";
+import type { Dir, Dirent } from "node:fs";
 import path from "node:path";
 import { and, count, desc, eq, getTableColumns, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
@@ -238,6 +238,31 @@ async function throwIfScanCancelled(isCancelled?: ScanCancellationCheck): Promis
   if (isCancelled && (await isCancelled())) throw new Error("Job terminated");
 }
 
+interface DirectoryListing {
+  entries: Dirent[];
+  error: unknown;
+}
+
+// FUSE mounts can fail partway through a large listing, so entries read before an error are kept.
+async function readDirectoryEntries(dir: string, label: string, enough?: (entries: Dirent[]) => boolean): Promise<DirectoryListing> {
+  const entries: Dirent[] = [];
+  let handle: Dir | null = null;
+  try {
+    handle = await withFilesystemTimeout(fs.opendir(dir), `${label} ${dir}`);
+    for (;;) {
+      const entry = await withFilesystemTimeout(handle.read(), `${label} ${dir}`);
+      if (!entry) break;
+      entries.push(entry);
+      if (enough?.(entries)) break;
+    }
+    return { entries, error: null };
+  } catch (error) {
+    return { entries, error };
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 async function walkSymlinks(
   root: string,
   isCancelled?: ScanCancellationCheck,
@@ -352,15 +377,15 @@ async function walkStorageFilesCollecting(
 
   async function walk(dir: string): Promise<LeftoverCandidate | null> {
     await throwIfScanCancelled(isCancelled);
-    let entries: Dirent[];
-    try {
-      entries = await withFilesystemTimeout(fs.readdir(dir, { withFileTypes: true }), `Reading storage directory ${dir}`);
-    } catch (error) {
-      failedDirectories.push({ directoryPath: dir, error });
-      return null;
+    const listing = await readDirectoryEntries(dir, "Reading storage directory");
+    const entries = listing.entries;
+    // A partial listing still contributes the files it found, but the folder stays unscanned so nothing under it is marked missing.
+    if (listing.error) {
+      failedDirectories.push({ directoryPath: dir, error: listing.error });
+      if (entries.length === 0) return null;
     }
 
-    let hasMedia = false;
+    let hasMedia = Boolean(listing.error);
     const directFiles: string[] = [];
     const children: LeftoverCandidate[] = [];
     for (const entry of entries) {
@@ -553,26 +578,24 @@ async function walkLocalStorageFilesForSections(
   return result;
 }
 
-function storageRootUnavailableMessage(root: string, required: RequiredStorageRoot): string {
+function storageRootUnavailableMessage(root: string, required: RequiredStorageRoot, error: unknown): string {
   const consequences = [
     ...(required.links > 0 ? [`${required.links.toLocaleString()} ${required.rootType} ${required.links === 1 ? "symlink isn't" : "symlinks aren't"} marked broken`] : []),
     ...(required.files > 0 ? [`${required.files.toLocaleString()} ${required.files === 1 ? "file isn't" : "files aren't"} marked missing`] : [])
   ];
   const label = required.rootType === "local" ? "Local" : "Remote";
-  return `${label} storage at ${root} looks unmounted or empty; scan stopped so ${consequences.join(" and ") || "inventory isn't changed"}`;
+  const state = error ? `is unreadable (${describeError(error)})` : "looks unmounted or empty";
+  return `${label} storage at ${root} ${state}; scan stopped so ${consequences.join(" and ") || "inventory isn't changed"}`;
 }
 
 // An unmounted NFS share or FUSE mount usually leaves an empty or unreadable mount point behind.
+// One real entry proves the mount is there; later read errors are handled by the walk itself.
 async function assertStorageRootMounted(paths: PathsSettings, required: RequiredStorageRoot): Promise<void> {
   const root = required.rootType === "local" ? paths.localDir : paths.remoteDir;
-  let entries: string[] | null;
-  try {
-    entries = await withFilesystemTimeout(fs.readdir(root), `Checking ${required.rootType} storage mount ${root}`);
-  } catch {
-    entries = null;
-  }
-  if (entries?.some((name) => name !== holdingFolderName)) return;
-  throw new Error(storageRootUnavailableMessage(root, required));
+  const isLibraryEntry = (entry: Dirent) => entry.name !== holdingFolderName;
+  const listing = await readDirectoryEntries(root, `Checking ${required.rootType} storage mount`, (entries) => entries.some(isLibraryEntry));
+  if (listing.entries.some(isLibraryEntry)) return;
+  throw new Error(storageRootUnavailableMessage(root, required, listing.error));
 }
 
 export async function scanLibrary(

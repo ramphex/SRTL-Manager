@@ -623,6 +623,60 @@ describe("scanner", () => {
     }
   });
 
+  it("keeps a partial remote listing when the mount fails partway through reading a folder", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(path.join(symlinkDir, "movies"), { recursive: true });
+    await fs.mkdir(localDir, { recursive: true });
+    const remoteFiles = ["A", "B", "C"].map((name) => path.join(remoteDir, name, `${name}.mkv`));
+    for (const file of remoteFiles) {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, "remote");
+    }
+    const settings = { sections: ["movies"] };
+    const paths = { symlinkDir, localDir, remoteDir };
+    const remoteScan = { scanSymlinks: false, scanLocal: false, scanRemote: true };
+
+    const database = await openTestDatabase();
+    const realOpendir = fs.opendir.bind(fs);
+    let failAfter: number | null = null;
+    // Like the FUSE mount, the root listing returns some entries and then fails with EIO.
+    const opendirSpy = vi.spyOn(fs, "opendir").mockImplementation(async (dir, options) => {
+      const handle = await realOpendir(dir, options);
+      if (path.resolve(String(dir)) !== path.resolve(remoteDir) || failAfter === null) return handle;
+      let served = 0;
+      const limit = failAfter;
+      return Object.assign(Object.create(handle), {
+        read: async () => {
+          if (served >= limit) throw Object.assign(new Error("EIO: i/o error, readdir"), { code: "EIO" });
+          served += 1;
+          return handle.read();
+        },
+        close: () => handle.close()
+      });
+    });
+    try {
+      await persistScanResult(database.db, await scanLibrary(paths, settings, new Map(), remoteScan), 1);
+      const required = [{ rootType: "remote" as const, links: 0, files: 3 }];
+
+      failAfter = 2;
+      const partial = await scanLibrary(paths, settings, new Map(), remoteScan, undefined, undefined, required);
+      expect(partial.storageFiles).toHaveLength(2);
+      expect(partial.storageScanIssues).toEqual([expect.objectContaining({ directoryPath: remoteDir, message: expect.stringContaining("EIO") })]);
+      await persistScanResult(database.db, partial, 2);
+      expect((await listStorageFiles(database.db, "remote")).map((file) => file.filePath).sort()).toEqual([...remoteFiles].sort());
+
+      failAfter = 0;
+      await expect(scanLibrary(paths, settings, new Map(), remoteScan, undefined, undefined, required)).rejects.toThrow(
+        `Remote storage at ${remoteDir} is unreadable (EIO: i/o error, readdir); scan stopped so 3 files aren't marked missing`
+      );
+    } finally {
+      opendirSpy.mockRestore();
+      await database.close();
+    }
+  });
+
   it("runs symlink-only scans without walking local or remote storage roots", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local-not-mounted");
@@ -1163,15 +1217,15 @@ describe("scanner", () => {
     await fs.writeFile(path.join(remoteDir, "Healthy Release", "healthy.mkv"), "healthy");
     await fs.writeFile(path.join(flakyDir, "flaky.mkv"), "flaky");
 
-    const realReaddir = fs.readdir.bind(fs);
+    const realOpendir = fs.opendir.bind(fs);
     let flakyAttempts = 0;
-    const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+    const opendirSpy = vi.spyOn(fs, "opendir").mockImplementation((async (dir: unknown, options: unknown) => {
       if (String(dir) === flakyDir) {
         flakyAttempts += 1;
         if (flakyAttempts === 1) throw new Error("temporary remote read failure");
       }
-      return realReaddir(dir as never, options as never);
-    }) as typeof fs.readdir);
+      return realOpendir(dir as never, options as never);
+    }) as typeof fs.opendir);
 
     try {
       const result = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), {
@@ -1184,7 +1238,7 @@ describe("scanner", () => {
       expect(result.storageScanIssues).toHaveLength(0);
       expect(result.storageFiles.map((file) => file.relativePath).sort()).toEqual([path.join("Flaky Release", "flaky.mkv"), path.join("Healthy Release", "healthy.mkv")].sort());
     } finally {
-      readdirSpy.mockRestore();
+      opendirSpy.mockRestore();
     }
   });
 
@@ -1204,7 +1258,7 @@ describe("scanner", () => {
     await fs.writeFile(protectedFile, "protected");
 
     const database = await openTestDatabase();
-    const realReaddir = fs.readdir.bind(fs);
+    const realOpendir = fs.opendir.bind(fs);
     try {
       const firstScan = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), {
         scanSymlinks: false,
@@ -1214,10 +1268,10 @@ describe("scanner", () => {
       await persistScanResult(database.db, firstScan, 1);
       expect(await listStorageFiles(database.db, "remote")).toHaveLength(2);
 
-      const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+      const opendirSpy = vi.spyOn(fs, "opendir").mockImplementation((async (dir: unknown, options: unknown) => {
         if (String(dir) === brokenDir) throw new Error("confirmed remote read failure");
-        return realReaddir(dir as never, options as never);
-      }) as typeof fs.readdir);
+        return realOpendir(dir as never, options as never);
+      }) as typeof fs.opendir);
 
       try {
         const secondScan = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), {
@@ -1232,7 +1286,7 @@ describe("scanner", () => {
         expect((await listStorageFiles(database.db, "remote")).map((file) => file.filePath).sort()).toEqual([healthyFile, protectedFile].sort());
         expect(await listStorageFiles(database.db, "remote", false, "missing")).toHaveLength(0);
       } finally {
-        readdirSpy.mockRestore();
+        opendirSpy.mockRestore();
       }
     } finally {
       await database.close();
@@ -1259,20 +1313,20 @@ describe("scanner", () => {
     const scan = () => scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: false, localSections: ["movies"] });
 
     const database = await openTestDatabase();
-    const realReaddir = fs.readdir.bind(fs);
+    const realOpendir = fs.opendir.bind(fs);
     try {
       await persistScanResult(database.db, await scan(), 1);
       expect(await listStorageFiles(database.db, "local")).toHaveLength(3);
 
       let flakyFailures = 0;
-      const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+      const opendirSpy = vi.spyOn(fs, "opendir").mockImplementation((async (dir: unknown, options: unknown) => {
         if (String(dir) === brokenDir) throw Object.assign(new Error("Stale file handle"), { code: "ESTALE" });
         if (String(dir) === flakyDir && flakyFailures === 0) {
           flakyFailures += 1;
           throw Object.assign(new Error("Input/output error"), { code: "EIO" });
         }
-        return realReaddir(dir as never, options as never);
-      }) as typeof fs.readdir);
+        return realOpendir(dir as never, options as never);
+      }) as typeof fs.opendir);
 
       try {
         const secondScan = await scan();
@@ -1285,7 +1339,7 @@ describe("scanner", () => {
         expect(summary).toMatchObject({ missingLocalFiles: 0 });
         expect(await listStorageFiles(database.db, "local", false, "missing")).toHaveLength(0);
       } finally {
-        readdirSpy.mockRestore();
+        opendirSpy.mockRestore();
       }
     } finally {
       await database.close();
@@ -1319,11 +1373,11 @@ describe("scanner", () => {
     await write("remote/Release.Two/sample.txt");
     const settings = { sections: ["movies", "shows"] };
     const unreadable = path.join(localDir, "movies", "Broken (2006)", "Unreadable");
-    const realReaddir = fs.readdir.bind(fs);
-    const readdirSpy = vi.spyOn(fs, "readdir").mockImplementation((async (dir: unknown, options: unknown) => {
+    const realOpendir = fs.opendir.bind(fs);
+    const opendirSpy = vi.spyOn(fs, "opendir").mockImplementation((async (dir: unknown, options: unknown) => {
       if (String(dir) === unreadable) throw Object.assign(new Error("Stale file handle"), { code: "ESTALE" });
-      return realReaddir(dir as never, options as never);
-    }) as typeof fs.readdir);
+      return realOpendir(dir as never, options as never);
+    }) as typeof fs.opendir);
 
     const database = await openTestDatabase();
     try {
@@ -1362,7 +1416,7 @@ describe("scanner", () => {
       );
       expect(rows.find((folder) => folder.id === goneId)).toMatchObject({ fileCount: 3 });
     } finally {
-      readdirSpy.mockRestore();
+      opendirSpy.mockRestore();
       await database.close();
     }
   });
