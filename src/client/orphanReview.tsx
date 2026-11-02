@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { createPortal } from "react-dom";
+import { Link } from "@tanstack/react-router";
 import { Archive, Check, LoaderCircle, RotateCcw, Trash2, TriangleAlert, X } from "lucide-react";
-import type { OrphanCategory, OrphanPurgeMode, OrphanReviewItem, StorageRootType } from "../shared/types";
+import type { OrphanCategory, OrphanPurgeMode, OrphanReview, OrphanReviewItem, StorageRootType } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
-import { formatBytes, formatDate, formatNumber } from "./appShared";
+import { formatBytes, formatDate, formatNumber, useModalLifecycle } from "./appShared";
+import { purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, planPurgeAll } from "./orphanPurgePlan";
 
 const pageSize = 50;
 
@@ -20,7 +23,7 @@ function fileName(item: OrphanReviewItem): string {
   return item.relativePath.split("/").at(-1) ?? item.relativePath;
 }
 
-export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRootType; rootLabel: string }) {
+export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = false }: { rootType: StorageRootType; rootLabel: string; autoOpenPurgeAll?: boolean }) {
   const queryClient = useQueryClient();
   const review = useQuery({ queryKey: ["orphan-review", rootType], queryFn: () => api.orphanReview(rootType) });
   const held = useQuery({ queryKey: ["held-orphans"], queryFn: api.heldOrphans });
@@ -34,6 +37,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
   const [selectedFolders, setSelectedFolders] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<OrphanPurgeMode>(rootType === "local" ? "hold" : "delete");
   const [confirming, setConfirming] = useState(false);
+  const [purgeAllOpen, setPurgeAllOpen] = useState(autoOpenPurgeAll);
   const [selectedHeld, setSelectedHeld] = useState<Set<number>>(new Set());
   const refresh = () => {
     for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary", "jobs"]) void queryClient.invalidateQueries({ queryKey: [key] });
@@ -135,6 +139,9 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
               </button>
               <button type="button" className="secondary" disabled={busy || selectedCount === 0} onClick={() => { setSelected(new Set()); setSelectedFolders(new Set()); setConfirming(false); }}>
                 Clear selection
+              </button>
+              <button type="button" className="secondary" disabled={busy || stale || purgeRunning || !items.some((item) => !item.protectedReason)} onClick={() => setPurgeAllOpen(true)}>
+                <Trash2 size={14} /> Purge all eligible
               </button>
             </div>
             <div className="orphan-table-scroll" tabIndex={0} aria-label="Orphan files">
@@ -294,6 +301,23 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
           </>
         ) : null}
 
+        {purgeAllOpen && review.data
+          ? createPortal(
+              <PurgeAllDialog
+                review={review.data}
+                rootType={rootType}
+                rootLabel={rootLabel}
+                onClose={() => setPurgeAllOpen(false)}
+                onDone={() => {
+                  setSelected(new Set());
+                  setSelectedFolders(new Set());
+                  refresh();
+                }}
+              />,
+              document.body
+            )
+          : null}
+
         <section className="orphan-held" aria-labelledby={`held-${rootType}-heading`}>
           <h3 id={`held-${rootType}-heading`}>Held files on {rootLabel}</h3>
           {heldHere.length === 0 ? (
@@ -350,5 +374,128 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
         </section>
       </div>
     </Panel>
+  );
+}
+
+function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { review: OrphanReview; rootType: StorageRootType; rootLabel: string; onClose: () => void; onDone: () => void }) {
+  const dialogRef = useModalLifecycle(true, onClose);
+  const [includeFolders, setIncludeFolders] = useState(false);
+  const [mode, setMode] = useState<OrphanPurgeMode>("hold");
+  const [phrase, setPhrase] = useState("");
+  const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
+  const batches = useMemo(() => purgeBatches(plan), [plan]);
+  const eligibleFolders = review.leftoverFolders.filter((folder) => !folder.protectedReason);
+  const protectedCount = review.items.filter((item) => item.protectedReason).length;
+  const requiredPhrase = purgeConfirmationPhrase(rootType, plan.totalCount);
+  const needsPhrase = purgeNeedsPhrase(rootType, mode, plan.totalCount);
+  const stale = Boolean(review.staleWarning);
+  const start = useMutation({
+    mutationFn: async () => {
+      const jobIds: number[] = [];
+      for (const batch of batches) {
+        const result = await api.purgeOrphans({ rootType, ...batch, mode });
+        jobIds.push(result.jobId);
+      }
+      return jobIds;
+    },
+    onSettled: onDone
+  });
+  const ready = !stale && plan.totalCount > 0 && (!needsPhrase || phrase.trim() === requiredPhrase) && !start.isPending && !start.isSuccess;
+  const items = (count: number) => `${formatNumber(count)} ${count === 1 ? "item" : "items"}`;
+
+  return (
+    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && !start.isPending) onClose(); }}>
+      <section ref={dialogRef} className="audit-dialog orphan-purge-all-dialog" role="dialog" aria-modal="true" aria-labelledby="purge-all-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <span className="audit-dialog-eyebrow">{rootLabel}</span>
+            <h2 id="purge-all-title">Purge all eligible orphans</h2>
+          </div>
+          <button type="button" className="icon-button" aria-label="Close" onClick={onClose} disabled={start.isPending}>
+            <X size={16} />
+          </button>
+        </div>
+        {review.staleWarning ? (
+          <p className="panel-message action-error" role="alert">
+            <TriangleAlert size={14} /> {review.staleWarning} Purging is blocked until the symlink inventory is refreshed.
+          </p>
+        ) : null}
+        {review.storageStaleWarning ? (
+          <p className="panel-message storage-stale-warning">
+            <TriangleAlert size={14} /> {review.storageStaleWarning}
+          </p>
+        ) : null}
+        <p data-testid="purge-all-summary">
+          <strong>{items(plan.totalCount)}</strong> on {rootLabel}, <strong>{formatBytes(plan.totalBytes)}</strong>. {protectedCount > 0 ? `${formatNumber(protectedCount)} protected ${protectedCount === 1 ? "file is" : "files are"} left alone. ` : ""}Every file is rechecked right before it is touched.
+        </p>
+        <table className="orphan-purge-breakdown" aria-label="Purge breakdown by category">
+          <tbody>
+            {plan.byCategory.map((entry) => (
+              <tr key={entry.category}>
+                <th scope="row">{orphanCategoryLabels[entry.category].label}</th>
+                <td>{formatNumber(entry.count)}</td>
+                <td>{formatBytes(entry.sizeBytes)}</td>
+              </tr>
+            ))}
+            {includeFolders && plan.folderIds.length > 0 ? (
+              <tr>
+                <th scope="row">Folders with no video</th>
+                <td>{formatNumber(plan.folderIds.length)}</td>
+                <td>{formatBytes(plan.folderBytes)}</td>
+              </tr>
+            ) : null}
+          </tbody>
+        </table>
+        <label className="checkbox-row">
+          <input type="checkbox" checked={includeFolders} disabled={eligibleFolders.length === 0 || start.isPending || start.isSuccess} onChange={(event) => { setIncludeFolders(event.target.checked); setPhrase(""); }} />
+          Also include leftover folders with no video ({formatNumber(eligibleFolders.length)})
+        </label>
+        <div className="segmented" role="group" aria-label="Purge mode">
+          <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("hold"); setPhrase(""); }}>
+            <Archive size={14} /> Hold {review.holdDays} days
+          </button>
+          <button type="button" className={mode === "delete" ? "selected" : ""} aria-pressed={mode === "delete"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("delete"); setPhrase(""); }}>
+            <Trash2 size={14} /> Delete now
+          </button>
+        </div>
+        <p className="muted">
+          {mode === "hold"
+            ? `Files move to a hidden .srtl-purged folder and can be restored for ${review.holdDays} days.${rootType === "remote" ? " The remote mount may refuse holds; refused files are reported and left in place." : ""}`
+            : "Files are removed immediately. This cannot be undone."}
+          {batches.length > 1 ? ` This will be queued as ${batches.length} purge jobs.` : ""}
+        </p>
+        {needsPhrase ? (
+          <label className="orphan-phrase">
+            <span>
+              Type <code>{requiredPhrase}</code> to confirm
+            </span>
+            <input type="text" value={phrase} autoComplete="off" spellCheck={false} aria-label="Confirmation phrase" disabled={start.isPending || start.isSuccess} onChange={(event) => setPhrase(event.target.value)} />
+          </label>
+        ) : null}
+        {start.isSuccess ? (
+          <p className="panel-message success" role="status">
+            Queued {start.data.length === 1 ? "purge job" : "purge jobs"}{" "}
+            {start.data.map((jobId, index) => (
+              <span key={jobId}>
+                {index > 0 ? ", " : ""}
+                <Link to="/logs" search={{ job: jobId }}>
+                  #{jobId}
+                </Link>
+              </span>
+            ))}
+            . Follow progress there; the list refreshes when it finishes.
+          </p>
+        ) : null}
+        {start.error ? <p className="panel-message error" role="alert">{start.error.message}</p> : null}
+        <div className="orphan-toolbar">
+          <button type="button" disabled={!ready} onClick={() => start.mutate()}>
+            {start.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {mode === "hold" ? `Hold ${items(plan.totalCount)}` : `Delete ${items(plan.totalCount)}`}
+          </button>
+          <button type="button" className="secondary" onClick={onClose} disabled={start.isPending}>
+            {start.isSuccess ? "Close" : "Cancel"}
+          </button>
+        </div>
+      </section>
+    </div>
   );
 }

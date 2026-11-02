@@ -7869,3 +7869,47 @@ button.danger-button:hover:not(:disabled) {
 .watch-sync-link-button { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--secondary-bg); color: var(--secondary-text); text-decoration: none; }
 .watch-sync-link-button:hover { background: var(--secondary-hover); }
 .dashboard-damaged { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.storage-overview-link {
+  border-radius: 4px;
+  color: var(--accent, inherit);
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 3px;
+}
+
+.storage-overview-link:hover {
+  text-decoration-color: currentColor;
+}
+
+.storage-overview-link:focus-visible {
+  outline: 2px solid var(--accent, currentColor);
+  outline-offset: 2px;
+}
+
+.orphan-purge-breakdown {
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+  width: 100%;
+}
+
+.orphan-purge-breakdown th,
+.orphan-purge-breakdown td {
+  border-bottom: 1px solid var(--border);
+  padding: 6px 8px;
+  text-align: left;
+}
+
+.orphan-purge-breakdown td {
+  text-align: right;
+}
+
+.orphan-phrase {
+  display: grid;
+  gap: 6px;
+}
+
+.orphan-purge-all-dialog .checkbox-row {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+}
