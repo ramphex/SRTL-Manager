@@ -2093,6 +2093,43 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   margin-left: auto;
 }
 
+.job-group-toggle {
+  align-items: center;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: inline-flex;
+  font: inherit;
+  gap: 6px;
+  padding: 2px 4px;
+}
+
+.job-group-toggle:focus-visible {
+  outline: 2px solid currentColor;
+  outline-offset: 2px;
+}
+
+.job-group-count {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.job-group-summary {
+  color: var(--muted);
+  display: block;
+  font-size: 11px;
+}
+
+.job-group-row.has-failures .job-group-summary {
+  color: var(--bad);
+  font-weight: 800;
+}
+
+.job-group-child > td:first-child {
+  padding-left: 28px;
+}
+
 .recent-jobs-filter {
   align-items: center;
   color: var(--muted);
@@ -7882,7 +7919,7 @@ button.danger-button:hover:not(:disabled) {
 }
 
 .storage-overview-link:focus-visible {
-  outline: 2px solid var(--accent, currentColor);
+  outline: 2px solid currentColor;
   outline-offset: 2px;
 }
 

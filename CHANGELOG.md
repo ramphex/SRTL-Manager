@@ -6,6 +6,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Added
 
+- Recent Jobs now collapses back-to-back finished jobs for the same title (for example repeated webhook-triggered rescans) into one row with a count, a combined status summary such as "3 jobs · 1 failed", and a chevron that expands the individual jobs with their usual actions. Only adjacent jobs of the same type and exactly one title created within 30 minutes of each other are grouped; running and queued jobs, multi-title jobs and whole-section jobs are never grouped.
 - Added an optional Radarr integration: two configurable policy tags follow SRTL storage policies (only those tags are added or removed), automatic or manual folder mapping, a policy preview with review and import actions, and optional webhook-triggered title rescans. See the [integration guide](docs/radarr.md).
 - Added source media checks before every copy, in every verification profile: header and container signature, zero-filled start, end, and sampled regions, hollow (sparse placeholder) files, and a bounded ffprobe that requires a video stream, a duration, and a plausible bitrate. Junk sources fail before any bytes are transferred.
 - Added Radarr size and runtime checks for mapped movies: a source smaller than Radarr's recorded file or under half of the movie's runtime is rejected as incomplete or a sample.

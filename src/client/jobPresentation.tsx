@@ -1,13 +1,14 @@
-import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
+import { Activity, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogData, jobProgressChips } from "./logDisplay";
 import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./jobScopeLocks";
 import { jobEventCountLabel } from "./jobEvents";
+import { groupAdjacentJobs } from "./jobGrouping";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
@@ -1735,6 +1736,7 @@ export function JobsTable({
   const { timeFormat } = preferences;
   const queryClient = useQueryClient();
   const [terminatePrompt, setTerminatePrompt] = useState<JobRecord | null>(null);
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(() => new Set());
   const terminateJob = useTerminateJobMutation(() => setTerminatePrompt(null));
   const saveRecentJobsFilter = useMutation({
     mutationFn: api.saveUserPreferences,
@@ -1744,6 +1746,7 @@ export function JobsTable({
   });
   const completedWindowMinutes = normalizeRecentJobsCompletedWindowMinutes(preferences.recentJobsCompletedWindowMinutes);
   const visibleJobs = visibleDashboardJobs(jobs, completedWindowMinutes);
+  const jobEntries = useMemo(() => groupAdjacentJobs(visibleJobs), [visibleJobs]);
   const selectedJobLinkIds = useMemo(() => selectedLinkIdsFromJobs(visibleJobs), [visibleJobs]);
   const selectedJobLinkRows = useQuery({
     queryKey: ["media-links-by-ids", selectedJobLinkIds],
@@ -1752,6 +1755,71 @@ export function JobsTable({
     staleTime: 5000
   });
   const selectedJobLinkRowsById = useMemo(() => new Map((selectedJobLinkRows.data ?? []).map((link) => [link.id, link])), [selectedJobLinkRows.data]);
+  const renderJobScope = (job: JobRecord) => (
+    <JobScope
+      job={job}
+      sections={sections}
+      linkRowsById={selectedJobLinkRowsById}
+      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
+      linkRowsError={selectedJobLinkRows.error?.message ?? null}
+    />
+  );
+  const renderJobRow = (job: JobRecord, className?: string) => {
+    const canViewScanJob = job.type === "scan" && Boolean(onScanJobSelect);
+    const canViewAuditJob = job.type === "audit" && Boolean(onAuditJobSelect);
+    const canViewCopyJob = job.type === "copy" && Boolean(onCopyJobSelect);
+    const canTerminate = canTerminateJob(job);
+    const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
+    return (
+      <tr key={job.id} className={`mobile-card-row${className ? ` ${className}` : ""}`}>
+        <td className="mobile-card-primary" data-label="ID">#{job.id}</td>
+        <td className="mobile-card-detail" data-label="Type">{formatJobType(job.type)}</td>
+        <td className="mobile-card-detail" data-label="Scope">
+          {renderJobScope(job)}
+        </td>
+        <td className="mobile-card-status" data-label="Status">
+          <StatusPill value={job.status} />
+        </td>
+        <td className="mobile-card-detail" data-label="Started">{formatDate(job.startedAt, timeFormat)}</td>
+        <td className="mobile-card-detail" data-label="Finished">{formatDate(job.finishedAt, timeFormat)}</td>
+        <td className="actions-cell mobile-card-actions" data-label="Actions">
+          <span className="table-action-buttons">
+            {canViewScanJob && onScanJobSelect ? (
+              <button type="button" className="icon-button" title={`View scan status for job #${job.id}`} aria-label={`View scan status for job #${job.id}`} onClick={() => onScanJobSelect(job)}>
+                <Search size={15} />
+              </button>
+            ) : null}
+            {canViewAuditJob && onAuditJobSelect ? (
+              <button type="button" className="icon-button" title={`View audit status for job #${job.id}`} aria-label={`View audit status for job #${job.id}`} onClick={() => onAuditJobSelect(job)}>
+                <ListChecks size={15} />
+              </button>
+            ) : null}
+            {canViewCopyJob && onCopyJobSelect ? (
+              <button type="button" className="icon-button" title={`View copy progress for job #${job.id}`} aria-label={`View copy progress for job #${job.id}`} onClick={() => onCopyJobSelect(job)}>
+                <Activity size={15} />
+              </button>
+            ) : null}
+            {canTerminate ? (
+              <button
+                type="button"
+                className="table-action-button danger terminate"
+                title={`Terminate job #${job.id}`}
+                aria-label={`Terminate job #${job.id}`}
+                disabled={terminateJob.isPending}
+                onClick={() => setTerminatePrompt(job)}
+              >
+                <OctagonX size={15} />
+                <span>Terminate</span>
+              </button>
+            ) : null}
+            {!hasActions ? (
+              <span className="muted-cell">-</span>
+            ) : null}
+          </span>
+        </td>
+      </tr>
+    );
+  };
   return (
     <Panel
       title="Recent Jobs"
@@ -1794,66 +1862,48 @@ export function JobsTable({
             </tr>
           </thead>
           <tbody>
-            {visibleJobs.map((job) => {
-              const canViewScanJob = job.type === "scan" && Boolean(onScanJobSelect);
-              const canViewAuditJob = job.type === "audit" && Boolean(onAuditJobSelect);
-              const canViewCopyJob = job.type === "copy" && Boolean(onCopyJobSelect);
-              const canTerminate = canTerminateJob(job);
-              const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
+            {jobEntries.map((entry) => {
+              if (entry.kind === "job") return renderJobRow(entry.job);
+              const newest = entry.jobs[0];
+              const expanded = expandedGroups.has(entry.key);
+              const { summary } = entry;
+              const groupLabel = `${summary.label} for ${formatJobType(newest.type)}`;
               return (
-                <tr key={job.id} className="mobile-card-row">
-                  <td className="mobile-card-primary" data-label="ID">#{job.id}</td>
-                  <td className="mobile-card-detail" data-label="Type">{formatJobType(job.type)}</td>
-                  <td className="mobile-card-detail" data-label="Scope">
-                    <JobScope
-                      job={job}
-                      sections={sections}
-                      linkRowsById={selectedJobLinkRowsById}
-                      linkRowsLoading={selectedJobLinkRows.isLoading || selectedJobLinkRows.isFetching}
-                      linkRowsError={selectedJobLinkRows.error?.message ?? null}
-                    />
-                  </td>
-                  <td className="mobile-card-status" data-label="Status">
-                    <StatusPill value={job.status} />
-                  </td>
-                  <td className="mobile-card-detail" data-label="Started">{formatDate(job.startedAt, timeFormat)}</td>
-                  <td className="mobile-card-detail" data-label="Finished">{formatDate(job.finishedAt, timeFormat)}</td>
-                  <td className="actions-cell mobile-card-actions" data-label="Actions">
-                    <span className="table-action-buttons">
-                      {canViewScanJob && onScanJobSelect ? (
-                        <button type="button" className="icon-button" title={`View scan status for job #${job.id}`} aria-label={`View scan status for job #${job.id}`} onClick={() => onScanJobSelect(job)}>
-                          <Search size={15} />
-                        </button>
-                      ) : null}
-                      {canViewAuditJob && onAuditJobSelect ? (
-                        <button type="button" className="icon-button" title={`View audit status for job #${job.id}`} aria-label={`View audit status for job #${job.id}`} onClick={() => onAuditJobSelect(job)}>
-                          <ListChecks size={15} />
-                        </button>
-                      ) : null}
-                      {canViewCopyJob && onCopyJobSelect ? (
-                        <button type="button" className="icon-button" title={`View copy progress for job #${job.id}`} aria-label={`View copy progress for job #${job.id}`} onClick={() => onCopyJobSelect(job)}>
-                          <Activity size={15} />
-                        </button>
-                      ) : null}
-                      {canTerminate ? (
-                        <button
-                          type="button"
-                          className="table-action-button danger terminate"
-                          title={`Terminate job #${job.id}`}
-                          aria-label={`Terminate job #${job.id}`}
-                          disabled={terminateJob.isPending}
-                          onClick={() => setTerminatePrompt(job)}
-                        >
-                          <OctagonX size={15} />
-                          <span>Terminate</span>
-                        </button>
-                      ) : null}
-                      {!hasActions ? (
-                        <span className="muted-cell">-</span>
-                      ) : null}
-                    </span>
-                  </td>
-                </tr>
+                <Fragment key={entry.key}>
+                  <tr className={`mobile-card-row job-group-row${summary.failed > 0 ? " has-failures" : ""}`}>
+                    <td className="mobile-card-primary" data-label="ID">
+                      <button
+                        type="button"
+                        className="job-group-toggle"
+                        aria-expanded={expanded}
+                        aria-label={`${expanded ? "Collapse" : "Expand"} ${groupLabel}`}
+                        onClick={() =>
+                          setExpandedGroups((current) => {
+                            const next = new Set(current);
+                            if (!next.delete(entry.key)) next.add(entry.key);
+                            return next;
+                          })
+                        }
+                      >
+                        {expanded ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+                        <span>#{newest.id}</span>
+                        <span className="job-group-count">×{summary.total}</span>
+                      </button>
+                    </td>
+                    <td className="mobile-card-detail" data-label="Type">{formatJobType(newest.type)}</td>
+                    <td className="mobile-card-detail" data-label="Scope">{renderJobScope(newest)}</td>
+                    <td className="mobile-card-status" data-label="Status">
+                      <StatusPill value={summary.failed > 0 ? "failed" : newest.status} />
+                      <small className="job-group-summary">{summary.label}</small>
+                    </td>
+                    <td className="mobile-card-detail" data-label="Started">{formatDate(newest.startedAt, timeFormat)}</td>
+                    <td className="mobile-card-detail" data-label="Finished">{formatDate(newest.finishedAt, timeFormat)}</td>
+                    <td className="actions-cell mobile-card-actions" data-label="Actions">
+                      <span className="muted-cell">{expanded ? "Showing each job" : "Expand for actions"}</span>
+                    </td>
+                  </tr>
+                  {expanded ? entry.jobs.map((job) => renderJobRow(job, "job-group-child")) : null}
+                </Fragment>
               );
             })}
           </tbody>
