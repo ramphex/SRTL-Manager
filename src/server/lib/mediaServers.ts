@@ -169,7 +169,8 @@ export async function updateMediaServer(db: Db, serverId: string, input: MediaSe
   return getMediaServer(db, serverId);
 }
 
-// What still depends on a server. Watch sync pairs block removal; Now Playing and Invitations add their checks here.
+// What still depends on a server. Watch sync pairs block removal; Invitations add their checks here. Now Playing
+// keeps nothing per server, so it never blocks removal.
 export async function mediaServerUsage(db: Db, serverId: string): Promise<string[]> {
   const pairs = await db.select().from(schema.watchSyncPairs)
     .where(or(eq(schema.watchSyncPairs.plexServerId, serverId), eq(schema.watchSyncPairs.jellyfinServerId, serverId)))

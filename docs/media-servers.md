@@ -1,6 +1,6 @@
 # Media Servers (Plex and Jellyfin)
 
-**Settings > Media servers** holds SRTL's connections to Plex and Jellyfin. Each server is added once and shared by every feature that reads media servers: [watch sync](watch-sync.md) today, and Now Playing and invitations as they arrive. Radarr and Sonarr stay in **Settings > Integrations**.
+**Settings > Media servers** holds SRTL's connections to Plex and Jellyfin. Each server is added once and shared by every feature that reads media servers: [watch sync](watch-sync.md) and [Now Playing](now-playing.md) today, and invitations as they arrive. Radarr and Sonarr stay in **Settings > Integrations**.
 
 Each server shows its type, URL, status (connected, error, not checked, or not signed in), the server version, and, for Plex, the plex.tv account it is signed in as. Both the SRTL API and the worker need network access to the servers.
 
