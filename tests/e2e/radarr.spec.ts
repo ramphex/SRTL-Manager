@@ -288,8 +288,9 @@ test("integration tabs isolate settings and preserve edits with mouse and keyboa
   await expect(radarr).toBeFocused();
   await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toHaveValue("home");
   await radarr.press("End");
-  await expect(sonarr).toBeFocused();
-  await sonarr.press("Home");
+  const watchSync = page.getByRole("tab", { name: "Watch sync", exact: true });
+  await expect(watchSync).toBeFocused();
+  await watchSync.press("Home");
   await expect(radarr).toBeFocused();
   expect(saves).toHaveLength(0);
   for (const width of [1440, 390, 320]) {

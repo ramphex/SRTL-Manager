@@ -5,6 +5,7 @@ import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg
 import * as schema from "./schema";
 import type { SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
+import { applyWatchSyncMigration } from "./watchSyncMigration";
 
 export type Db = NodePgDatabase<typeof schema>;
 export type DbExecutor = Db;
@@ -22,7 +23,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 21;
+export const currentSchemaVersion = 22;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -768,6 +769,17 @@ async function initializeDatabase(pool: Pool): Promise<void> {
           END IF;
         END $$`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (21, 'sonarr_integration', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(22)) {
+      await client.query("BEGIN");
+      try {
+        await applyWatchSyncMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (22, 'watch_sync', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

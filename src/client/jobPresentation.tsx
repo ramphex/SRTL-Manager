@@ -1536,6 +1536,18 @@ export function JobScope({
     );
   }
 
+  if (job.type === "watch_sync") {
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
+    const pairs = Array.isArray(options?.pairIds) ? options.pairIds.length : 0;
+    const mode = options?.mode === "preview" ? "Preview" : options?.mode === "restore" ? "Restore" : "Full reconciliation";
+    return (
+      <span className="job-scope-cell">
+        <span>{mode}</span>
+        <small>{pairs === 1 ? "1 user pair" : `${formatNumber(pairs)} user pairs`}</small>
+      </span>
+    );
+  }
+
   if (job.type === "path_migration") {
     const progress = recordFromUnknown(job.progress);
     const migrationId = finiteNumberFromUnknown(progress?.migrationId);

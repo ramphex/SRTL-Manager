@@ -2,10 +2,12 @@ import { useState } from "react";
 import { RadarrSettingsPanel } from "./radarrSettings";
 import { SettingsTabs } from "./settingsTabs";
 import { SonarrSettingsPanel } from "./sonarrSettings";
+import { WatchSyncSettingsPanel } from "./watchSyncSettings";
 
 const integrations = [
   { key: "Radarr", label: "Radarr" },
-  { key: "Sonarr", label: "Sonarr" }
+  { key: "Sonarr", label: "Sonarr" },
+  { key: "WatchSync", label: "Watch sync" }
 ] as const;
 
 export function IntegrationSettings() {
@@ -23,6 +25,9 @@ export function IntegrationSettings() {
     </div>
     <div role="tabpanel" id="integration-panel-Sonarr" aria-labelledby="integration-tab-Sonarr" hidden={active !== "Sonarr"}>
       {sonarrOpened ? <SonarrSettingsPanel active={active === "Sonarr"} /> : null}
+    </div>
+    <div role="tabpanel" id="integration-panel-WatchSync" aria-labelledby="integration-tab-WatchSync" hidden={active !== "WatchSync"}>
+      <WatchSyncSettingsPanel active={active === "WatchSync"} />
     </div>
   </div>;
 }

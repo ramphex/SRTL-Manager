@@ -556,3 +556,5 @@ export const auditResults = pgTable(
   },
   (table) => [index("audit_results_run_id_idx").on(table.auditRunId, table.id)]
 );
+
+export * from "./watchSyncSchema";

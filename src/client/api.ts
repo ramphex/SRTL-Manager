@@ -53,7 +53,7 @@ type ApiErrorPayload = {
   issues?: Array<{ message?: string }>;
 };
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers);
   if (init.body != null && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
