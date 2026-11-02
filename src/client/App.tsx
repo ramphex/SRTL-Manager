@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
+import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
 import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdateReadyEvent, type PwaUpdateReadyDetail } from "./pwa";
 import { formatJobType, jobProgressChips } from "./logDisplay";
@@ -287,7 +287,9 @@ function RootLayout() {
   const isSettingsActive = pathname === "/settings" || pathname.startsWith("/settings/");
   const pageTitle = pathname === "/"
     ? "Dashboard"
-    : pathname === "/library"
+    : pathname === "/now-playing"
+      ? "Now Playing"
+      : pathname === "/library"
       ? "Library"
       : pathname === "/logs"
         ? "Activity"
@@ -307,6 +309,7 @@ function RootLayout() {
 
   const nav = [
     { to: "/", label: "Dashboard", icon: Gauge },
+    { to: "/now-playing", label: "Now Playing", icon: MonitorPlay },
     { to: "/library", label: "Library", icon: Library },
     { to: "/logs", label: "Logs", icon: FileText }
   ];
@@ -1540,7 +1543,9 @@ const LibraryPage = lazyRouteComponent(loadLibraryRoutes, "LibraryPage");
 const RunsPage = lazyRouteComponent(loadOperationsRoutes, "RunsPage");
 const SettingsPage = lazyRouteComponent(loadOperationsRoutes, "SettingsPage");
 const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
+const NowPlayingPage = lazyRouteComponent(() => import("./nowPlaying"), "NowPlayingPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
+const nowPlayingRoute = createRoute({ getParentRoute: () => rootRoute, path: "/now-playing", component: NowPlayingPage });
 const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies"] as const;
 const libraryRoute = createRoute({
   getParentRoute: () => rootRoute,
@@ -1562,6 +1567,7 @@ const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
 const routeTree = rootRoute.addChildren([
   indexRoute,
+  nowPlayingRoute,
   libraryRoute,
   scansRoute,
   auditsRoute,

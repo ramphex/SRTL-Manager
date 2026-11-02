@@ -40,6 +40,10 @@ function toItem(raw: unknown): JellyfinItem | null {
   };
 }
 
+export function jellyfinHeaders(apiKey: string, deviceId: string): Record<string, string> {
+  return { Authorization: `MediaBrowser Client="SRTL Manager", Device="SRTL Manager", DeviceId="${deviceId}", Version="${packageJson.version}", Token="${apiKey}"` };
+}
+
 const itemFields = "Recursive=true&IncludeItemTypes=Movie,Episode&Fields=Path&EnableImages=false&EnableUserData=true";
 
 export class JellyfinClient {
@@ -49,7 +53,7 @@ export class JellyfinClient {
   }
 
   private headers(): Record<string, string> {
-    return { Authorization: `MediaBrowser Client="SRTL Manager", Device="SRTL Manager", DeviceId="${this.deviceId}", Version="${packageJson.version}", Token="${this.apiKey}"` };
+    return jellyfinHeaders(this.apiKey, this.deviceId);
   }
 
   private async get(path: string, timeoutMs?: number) {
