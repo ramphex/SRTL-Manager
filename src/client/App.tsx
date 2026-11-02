@@ -1539,7 +1539,16 @@ const RunsPage = lazyRouteComponent(loadOperationsRoutes, "RunsPage");
 const SettingsPage = lazyRouteComponent(loadOperationsRoutes, "SettingsPage");
 const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
-const libraryRoute = createRoute({ getParentRoute: () => rootRoute, path: "/library", component: LibraryPage });
+const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies"] as const;
+const libraryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/library",
+  validateSearch: (search: Record<string, unknown>): { view?: (typeof libraryViews)[number]; purge?: boolean } => ({
+    ...(libraryViews.find((view) => view === search.view) ? { view: libraryViews.find((view) => view === search.view)! } : {}),
+    ...(search.purge === true || search.purge === "1" ? { purge: true } : {})
+  }),
+  component: LibraryPage
+});
 const scansRoute = createRoute({ getParentRoute: () => rootRoute, path: "/scans", component: () => <RunsPage type="scan" /> });
 const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audits", component: () => <RunsPage type="audit" /> });
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });

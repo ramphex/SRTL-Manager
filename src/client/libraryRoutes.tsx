@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Link, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
@@ -268,6 +269,14 @@ export function DashboardPage() {
   const dashboardAttentionCount = policyNeededTotal + copyToLocalTotal + copyToRemoteTotal + totals.brokenLinks;
   const dashboardAttentionState = dashboardInventoryLoading ? "loading" : dashboardAttentionCount > 0 ? "attention" : "clear";
   const dashboardMetric = (value: number) => (dashboardInventoryLoading ? "..." : formatNumber(value));
+  const orphanLink = (view: "local-orphans" | "remote-orphans", count: number, name: string) =>
+    dashboardInventoryLoading || count === 0 ? (
+      dashboardMetric(count)
+    ) : (
+      <Link to="/library" search={{ view }} className="storage-overview-link" aria-label={`Review ${formatNumber(count)} ${name}orphans`}>
+        {formatNumber(count)}
+      </Link>
+    );
   const actionError =
     startScan.error ?? copyConflictCheck.error ?? startCopySilently.error ?? paths.error ?? sectionSettings.error ?? scanSettings.error ?? auditSettings.error ?? advancedSettings.error ?? saveScanSettings.error ?? saveAuditSettings.error;
   const actionMessage = startCopySilently.data
@@ -433,7 +442,7 @@ export function DashboardPage() {
                 </th>
                 <td>{dashboardMetric(totals.localLinks)}</td>
                 <td>{dashboardMetric(totals.localFiles)}</td>
-                <td>{dashboardMetric(totals.localOrphanFiles)}</td>
+                <td>{orphanLink("local-orphans", totals.localOrphanFiles, `${localName} `)}</td>
               </tr>
               <tr>
                 <th scope="row">
@@ -442,7 +451,7 @@ export function DashboardPage() {
                 </th>
                 <td>{dashboardMetric(totals.remoteLinks)}</td>
                 <td>{dashboardMetric(totals.remoteFiles)}</td>
-                <td>{dashboardMetric(totals.remoteOrphanFiles)}</td>
+                <td>{orphanLink("remote-orphans", totals.remoteOrphanFiles, `${remoteName} `)}</td>
               </tr>
               <tr className="storage-overview-total">
                 <th scope="row">
@@ -451,7 +460,7 @@ export function DashboardPage() {
                 </th>
                 <td>{dashboardMetric(totalDestinationSymlinks)}</td>
                 <td>{dashboardMetric(totalStorageFiles)}</td>
-                <td>{dashboardMetric(totalOrphanFiles)}</td>
+                <td>{orphanLink("local-orphans", totalOrphanFiles, "")}</td>
               </tr>
             </tbody>
           </table>
@@ -1808,7 +1817,8 @@ export function LibraryPage() {
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
-  const [view, setView] = useState<LibraryView>("overview");
+  const routeSearch = useSearch({ strict: false }) as { view?: LibraryView; purge?: boolean };
+  const [view, setView] = useState<LibraryView>(routeSearch.view ?? "overview");
   const [kind, setKind] = useState<SymlinkKindFilter>("all");
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
   const [selectedLibraryWork, setSelectedLibraryWork] = useState<SectionWorkSelection | null>(null);
@@ -2029,7 +2039,7 @@ export function LibraryPage() {
         />
       ) : (
         <>
-        {orphanOnly ? <OrphanReviewPanel rootType={storageRoot} rootLabel={storageRoot === "local" ? localName : remoteName} /> : null}
+        {orphanOnly ? <OrphanReviewPanel key={storageRoot} rootType={storageRoot} rootLabel={storageRoot === "local" ? localName : remoteName} autoOpenPurgeAll={Boolean(routeSearch.purge) && routeSearch.view === view} /> : null}
         <StorageFileBrowser
           rootType={storageRoot}
           orphanOnly={orphanOnly}
