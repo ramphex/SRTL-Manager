@@ -3430,6 +3430,10 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-heading-identity .icon-only { height: 32px; width: 32px; min-height: 32px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
 .radarr-rename { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; flex: 1 1 320px; }
 .radarr-rename input { flex: 1 1 180px; min-width: 0; height: 38px; }
+.radarr-generated-secret { display: grid; gap: 7px; min-width: 0; font-size: 13px; border-left: 2px solid var(--warn); padding-left: 12px; }
+.radarr-generated-secret label { color: var(--text-strong); font-weight: 600; }
+.radarr-generated-secret input { flex: 1 1 260px; font-family: var(--mono, ui-monospace, monospace); }
+.radarr-generated-secret .muted { margin: 0; max-width: 75ch; }
 .radarr-settings .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
 .radarr-integration-header { display: grid; gap: 12px; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
 .radarr-integration-header .radarr-heading { margin-bottom: 0; }

@@ -753,3 +753,41 @@ for (const width of [1440, 390, 320]) {
     await page.screenshot({ path: testInfo.outputPath(`radarr-instances-${width}.png`), fullPage: true });
   });
 }
+
+test("generate secret fills the webhook secret once, marks it unsaved, and clears after saving", async ({ page, context }) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const { state, saves } = await fixture(page);
+  state.settings.hasWebhookSecret = false;
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Webhooks");
+  await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
+  await page.getByRole("button", { name: "Generate secret", exact: true }).click();
+  const generated = page.getByLabel("Generated secret", { exact: true });
+  const first = await generated.inputValue();
+  expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveValue(first);
+  await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
+  await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("SRTL only stores a hash and can't show it again.");
+  await expect(page.getByRole("group", { name: "Generated webhook secret" })).not.toContainText("replaces the current secret");
+  await page.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(first);
+  await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
+  const second = await generated.inputValue();
+  expect(second).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(second).not.toBe(first);
+  // Typing over it falls back to manual entry and hides the generated value.
+  await page.getByLabel("X-SRTL-Webhook-Secret", { exact: true }).fill("typed_by_hand_secret_value_123");
+  await expect(generated).toHaveCount(0);
+  await page.getByRole("button", { name: "Generate secret", exact: true }).click();
+  const third = await generated.inputValue();
+  await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
+  await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
+  expect(saves[0]?.webhookSecret).toBe(third);
+  await expect(generated).toHaveCount(0);
+  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveAttribute("placeholder", "Saved; leave blank to keep");
+  // With a saved secret, generating warns that Radarr needs the replacement.
+  await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
+  await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("Saving replaces the current secret, so Radarr must be updated with this new value.");
+});

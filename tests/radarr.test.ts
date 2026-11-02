@@ -11,12 +11,12 @@ import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall, onboardingSettingKey } from "../src/server/lib/onboarding";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
-import { authenticateRadarrWebhook, createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, mapRadarrMovie, processRadarrWork, radarrMediaExpectation, radarrTagPolicy, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, saveRadarrSettings, startRadarrWork, testRadarrConnection } from "../src/server/lib/radarr";
+import { authenticateRadarrWebhook, createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, mapRadarrMovie, processRadarrWork, radarrMediaExpectation, radarrSettingsSchema, radarrTagPolicy, radarrWebhookSecretSchema, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, saveRadarrSettings, startRadarrWork, testRadarrConnection } from "../src/server/lib/radarr";
 import { RadarrClient, normalizeRadarrUrl, radarrAddressAllowed, type RadarrMovie } from "../src/server/lib/radarrClient";
 import { defaultCopyRunner } from "../src/server/lib/copier";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
-import type { RadarrOverview, RadarrSettingsInput } from "../src/shared/radarr";
+import { generateRadarrWebhookSecret, type RadarrOverview, type RadarrSettingsInput } from "../src/shared/radarr";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 
 let app: AppContext;
@@ -905,5 +905,16 @@ describe("multiple Radarr instances", () => {
     expect((await app.app.inject({ method: "POST", url: "/api/integrations/radarr/webhook", headers: { "x-srtl-webhook-secret": "wrong-secret-with-enough-characters" }, payload: { eventType: "Test" } })).statusCode).toBe(401);
     const migratedSecond = await createRadarrInstance(app.database.db, "Radarr 4K");
     expect(migratedSecond.settings.legacyWebhook).toBe(false);
+  });
+});
+
+describe("generated webhook secrets", () => {
+  it("are URL-safe, accepted by the secret rules, and differ each time", () => {
+    const first = generateRadarrWebhookSecret();
+    const second = generateRadarrWebhookSecret();
+    expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(radarrWebhookSecretSchema.safeParse(first).success).toBe(true);
+    expect(radarrSettingsSchema.safeParse({ ...input, webhookSecret: first }).success).toBe(true);
+    expect(second).not.toBe(first);
   });
 });

@@ -18,6 +18,13 @@ export interface RadarrSettingsInput {
   mappings: RadarrPathMapping[];
 }
 
+// 32 random bytes as unpadded URL-safe base64: 43 characters that satisfy the webhook secret rules.
+export function generateRadarrWebhookSecret(): string {
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
+  return btoa(String.fromCharCode(...bytes)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
 // A sanity cap on stored instances, not a design limit.
 export const radarrInstanceLimit = 25;
 

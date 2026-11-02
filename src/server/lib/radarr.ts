@@ -24,7 +24,7 @@ const eventBatchSize = 10;
 const catalogRefreshIntervalMs = 30 * 60_000;
 const historyRetentionMs = 30 * 86400_000;
 const tagsSchema = z.array(z.string());
-const secretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
+export const radarrWebhookSecretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
 const policyTagSchema = z.string().trim().regex(/^(?:[a-z0-9][a-z0-9-]{0,99})?$/, "Use a lowercase tag with letters, numbers, or hyphens.");
 const absolutePath = z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/") && !/[\\\0]/.test(value) && path.posix.normalize(value) === value, "Use an absolute path without parent-directory segments.");
 export const radarrInstanceIdSchema = z.string().regex(/^[a-z0-9]{1,40}$/, "Unknown Radarr instance.");
@@ -33,7 +33,7 @@ export const radarrSettingsSchema = z.object({
   revision: z.number().int().nonnegative(),
   baseUrl: z.string().trim().min(1).max(2000).transform(normalizeRadarrUrl),
   apiKey: z.string().trim().max(256).regex(/^[A-Za-z0-9]*$/).optional(),
-  webhookSecret: z.union([z.literal(""), secretSchema]).optional(),
+  webhookSecret: z.union([z.literal(""), radarrWebhookSecretSchema]).optional(),
   enabled: z.boolean(),
   localTag: policyTagSchema,
   remoteTag: policyTagSchema,
@@ -528,7 +528,7 @@ async function webhookInstance(db: Db, instanceId: string | null): Promise<Store
 
 export async function authenticateRadarrWebhook(db: Db, instanceId: string | null, token: string | undefined): Promise<boolean> {
   const config = await webhookInstance(db, instanceId);
-  if (!config?.webhookSecretHash || !token || !secretSchema.safeParse(token).success) return false;
+  if (!config?.webhookSecretHash || !token || !radarrWebhookSecretSchema.safeParse(token).success) return false;
   const actual = Buffer.from(digest(token), "hex");
   const expected = Buffer.from(config.webhookSecretHash, "hex");
   return actual.length === expected.length && timingSafeEqual(actual, expected);
