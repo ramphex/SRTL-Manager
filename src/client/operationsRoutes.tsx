@@ -5,6 +5,7 @@ import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus,
 import { api } from "./api";
 import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
+import { MediaServerSettingsPanel } from "./mediaServerSettings";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
 import { normalizeAuditTargets } from "./jobScopeLocks";
@@ -455,8 +456,10 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
       ? "Name storage locations, review mounted paths, and manage library sections."
       : activeView === "advanced"
         ? "Tune job behavior and verification defaults."
-        : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences and account access.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "integrations" ? "Integrations" : "User settings";
+        : activeView === "media-servers"
+          ? "Plex and Jellyfin connections shared by watch sync and other features."
+          : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences and account access.";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -486,6 +489,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
         </>
       ) : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
+      {activeView === "media-servers" ? <MediaServerSettingsPanel /> : null}
       {activeView === "integrations" ? <IntegrationSettings /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
     </Page>

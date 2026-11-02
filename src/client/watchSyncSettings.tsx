@@ -1,6 +1,8 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowLeftRight, Check, Download, Eye, KeyRound, LoaderCircle, LogIn, Pause, Play, Plus, RefreshCw, Save, Trash2, Upload, Users, X } from "lucide-react";
+import { Link } from "@tanstack/react-router";
+import { ArrowLeftRight, Check, Download, Eye, KeyRound, LoaderCircle, Pause, Play, Plus, RefreshCw, Save, Settings, Trash2, Upload, Users } from "lucide-react";
+import { mediaServerKindLabels, type MediaServer } from "../shared/mediaServers";
 import {
   watchSyncDirectionLabels,
   type WatchSyncActivityPage,
@@ -9,12 +11,6 @@ import {
   type WatchSyncPair,
   type WatchSyncPairInput,
   type WatchSyncPairUpdate,
-  type WatchSyncPinStatus,
-  type WatchSyncPlexPin,
-  type WatchSyncPrefixMapping,
-  type WatchSyncServer,
-  type WatchSyncServerInput,
-  type WatchSyncServerKind,
   type WatchSyncSettingsInput,
   type WatchSyncState,
   type WatchSyncUser
@@ -22,6 +18,8 @@ import {
 import { request } from "./api";
 import { InfoTooltip } from "./App";
 import { formatDate } from "./appShared";
+import { mediaServerStatus, mediaServersKey } from "./mediaServerApi";
+import { MediaServersRequired } from "./mediaServersRequired";
 import { SettingsTabs } from "./settingsTabs";
 
 const base = "/api/settings/watch-sync";
@@ -33,12 +31,7 @@ const watchSyncApi = {
   pause: (paused: boolean) => post<WatchSyncState>("/pause", { paused }),
   reconcileAll: () => post<{ jobId: number | null }>("/reconcile"),
   activity: (pairId: number | null) => request<WatchSyncActivityPage>(`${base}/activity?limit=200${pairId ? `&pairId=${pairId}` : ""}`),
-  addServer: (kind: WatchSyncServerKind, body: WatchSyncServerInput) => post<WatchSyncState>("/servers", { kind, ...body }),
-  updateServer: (id: string, body: WatchSyncServerInput) => request<WatchSyncState>(`${base}/servers/${encodeURIComponent(id)}`, { method: "PUT", body: JSON.stringify(body) }),
-  removeServer: (id: string) => request<WatchSyncState>(`${base}/servers/${encodeURIComponent(id)}`, { method: "DELETE" }),
   discover: (id: string) => post<WatchSyncState>(`/servers/${encodeURIComponent(id)}/discover`),
-  startPin: (id: string) => post<WatchSyncPlexPin>(`/servers/${encodeURIComponent(id)}/plex-pin`),
-  checkPin: (id: string, pinId: number) => post<WatchSyncPinStatus>(`/servers/${encodeURIComponent(id)}/plex-pin/${pinId}`),
   addPair: (body: WatchSyncPairInput) => post<WatchSyncState>("/pairs", body),
   updatePair: (id: number, body: WatchSyncPairUpdate) => request<WatchSyncState>(`${base}/pairs/${id}`, { method: "PUT", body: JSON.stringify(body) }),
   removePair: (id: number) => request<WatchSyncState>(`${base}/pairs/${id}`, { method: "DELETE" }),
@@ -49,7 +42,7 @@ const watchSyncApi = {
 };
 
 const tabs = [
-  { key: "servers", label: "Servers" },
+  { key: "users", label: "Users" },
   { key: "pairs", label: "User pairs" },
   { key: "options", label: "Options" },
   { key: "activity", label: "Activity" }
@@ -60,13 +53,12 @@ const tabStorageKey = "srtl-watch-sync-tab";
 function readStoredTab(): Tab {
   try {
     const stored = window.localStorage.getItem(tabStorageKey);
-    return tabs.find((tab) => tab.key === stored)?.key ?? "servers";
+    return tabs.find((tab) => tab.key === stored)?.key ?? "users";
   } catch {
-    return "servers";
+    return "users";
   }
 }
 
-const kindLabel = (kind: WatchSyncServerKind) => kind === "plex" ? "Plex" : "Jellyfin";
 const userKindLabels: Record<WatchSyncUser["kind"], string> = { owner: "Owner", home: "Plex Home", managed: "Managed", friend: "Friend", user: "User" };
 
 function useStateUpdate() {
@@ -96,12 +88,20 @@ export function WatchSyncSettingsPanel({ active }: { active: boolean }) {
   if (query.isLoading) return <p role="status">Loading watch sync...</p>;
   if (!query.data?.settings) return <p className="error" role="alert">{query.error?.message ?? "Watch sync settings unavailable."}</p>;
   const state = query.data;
+  // Connections live in Settings > Media servers; without one, there is nothing to sync yet.
+  if (!state.servers.some((server) => server.hasToken) && !state.pairs.length) {
+    return <div className="radarr-settings watch-sync-settings">
+      <MediaServersRequired title="Watch sync needs a media server">
+        <p className="muted">Watch sync pairs Plex users with Jellyfin users, so connect at least one Plex server and one Jellyfin server.</p>
+      </MediaServersRequired>
+    </div>;
+  }
   return <div className="radarr-settings watch-sync-settings">
     <WatchSyncHeader state={state} />
     {query.error ? <p className="error" role="alert">{query.error.message}</p> : null}
     <div className="radarr-tabs-area">
       <SettingsTabs label="Watch sync" idPrefix="watch-sync" className="radarr-tabs" tabs={tabs} active={tab} onSelect={select} />
-      <div role="tabpanel" id="watch-sync-panel-servers" aria-labelledby="watch-sync-tab-servers" hidden={tab !== "servers"} className="radarr-tab-panel"><ServersTab state={state} /></div>
+      <div role="tabpanel" id="watch-sync-panel-users" aria-labelledby="watch-sync-tab-users" hidden={tab !== "users"} className="radarr-tab-panel"><UsersTab state={state} /></div>
       <div role="tabpanel" id="watch-sync-panel-pairs" aria-labelledby="watch-sync-tab-pairs" hidden={tab !== "pairs"} className="radarr-tab-panel"><PairsTab state={state} /></div>
       <div role="tabpanel" id="watch-sync-panel-options" aria-labelledby="watch-sync-tab-options" hidden={tab !== "options"} className="radarr-tab-panel"><OptionsTab key={state.settings.revision} state={state} /></div>
       <div role="tabpanel" id="watch-sync-panel-activity" aria-labelledby="watch-sync-tab-activity" hidden={tab !== "activity"} className="radarr-tab-panel">{tab === "activity" ? <ActivityTab state={state} /> : null}</div>
@@ -137,174 +137,60 @@ function WatchSyncHeader({ state }: { state: WatchSyncState }) {
   </div>;
 }
 
-function ServersTab({ state }: { state: WatchSyncState }) {
-  const [adding, setAdding] = useState<WatchSyncServerKind | null>(null);
+function UsersTab({ state }: { state: WatchSyncState }) {
   return <>
-    <Section title="Media servers" help="Add each Plex and Jellyfin server whose users should stay in sync. Plex signs in through plex.tv; Jellyfin uses an API key from Dashboard > API Keys." actions={<>
-      <button type="button" className="secondary" disabled={adding !== null} onClick={() => setAdding("plex")}><Plus size={16} />Add Plex server</button>
-      <button type="button" className="secondary" disabled={adding !== null} onClick={() => setAdding("jellyfin")}><Plus size={16} />Add Jellyfin server</button>
-    </>}>
-      <p className="radarr-lede">Both servers must read the same SRTL symlinks. If a server sees the library under a different folder than SRTL does, add a path prefix mapping, for example <code>/data/media</code> on the server is <code>/mnt/plex</code> in SRTL.</p>
-      {adding ? <ServerForm kind={adding} onDone={() => setAdding(null)} /> : null}
-      {!state.settings.servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex server and a Jellyfin server to start.</p> : null}
+    <Section title="Server users" help="Watch sync uses the Plex and Jellyfin servers connected in Settings > Media servers. Discover users to list everyone who can use each server; Plex discovery also refreshes each user's own access token.">
+      <p className="radarr-lede">Add, edit, sign in to, and test servers in <Link to="/settings/media-servers">Settings &gt; Media servers</Link>. Both servers must read the same SRTL symlinks; path prefix mappings are set there too.</p>
     </Section>
-    {state.settings.servers.map((server) => <ServerCard key={`${server.id}:${state.settings.revision}`} server={server} state={state} />)}
+    {state.servers.map((server) => <ServerUsers key={server.id} server={server} state={state} />)}
   </>;
 }
 
-function PrefixMappings({ value, onChange, disabled }: { value: WatchSyncPrefixMapping[]; onChange: (next: WatchSyncPrefixMapping[]) => void; disabled?: boolean }) {
-  return <div className="watch-sync-prefixes">
-    <div className="radarr-field-label"><span className="watch-sync-label">Path prefix mappings</span><InfoTooltip label="About path prefix mappings">Optional. When this server lists a file under a different folder than SRTL's symlink folder, map the server's prefix to SRTL's. The longest matching prefix is used.</InfoTooltip></div>
-    {value.map((mapping, index) => <div key={index} className="radarr-toolbar watch-sync-prefix">
-      <input aria-label="Server path prefix" placeholder="/data/media" value={mapping.serverPrefix} disabled={disabled} onChange={(event) => onChange(value.map((entry, position) => position === index ? { ...entry, serverPrefix: event.target.value } : entry))} />
-      <span aria-hidden="true">→</span>
-      <input aria-label="SRTL path prefix" placeholder="/mnt/plex" value={mapping.srtlPrefix} disabled={disabled} onChange={(event) => onChange(value.map((entry, position) => position === index ? { ...entry, srtlPrefix: event.target.value } : entry))} />
-      <button type="button" className="secondary icon-only" aria-label="Remove mapping" disabled={disabled} onClick={() => onChange(value.filter((_entry, position) => position !== index))}><X size={16} /></button>
-    </div>)}
-    <button type="button" className="link-button" disabled={disabled || value.length >= 20} onClick={() => onChange([...value, { serverPrefix: "", srtlPrefix: "" }])}><Plus size={14} />Add mapping</button>
-  </div>;
-}
-
-function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: WatchSyncServerKind; draft: WatchSyncServerInput; setDraft: (draft: WatchSyncServerInput) => void; hasToken: boolean; disabled: boolean }) {
-  const tokenId = useId();
-  const tokenLabel = kind === "plex" ? "Plex token (optional)" : "API key";
-  const tokenHelp = kind === "plex"
-    ? "Use Sign in with Plex instead when you can. If you paste a token, use your account's token, never the PlexOnlineToken from the server's Preferences.xml."
-    : "Create one in Jellyfin under Dashboard > API Keys. It is stored on the SRTL server and never shown again.";
-  return <fieldset className="radarr-fields" disabled={disabled}>
-    <div className="radarr-grid">
-      <label>Name<input required maxLength={60} value={draft.name} placeholder={kind === "plex" ? "Home Plex" : "Jellyfin"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-      <label>Server URL<input required value={draft.url} placeholder={kind === "plex" ? "http://192.168.1.10:32400" : "http://192.168.1.10:8096"} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
-    </div>
-    <div className="radarr-field">
-      <div className="radarr-field-label"><label htmlFor={tokenId}>{tokenLabel}</label><InfoTooltip label={`About the ${tokenLabel}`}>{tokenHelp}</InfoTooltip></div>
-      <input id={tokenId} type="password" autoComplete="off" value={draft.token ?? ""} placeholder={hasToken ? "Saved. Leave empty to keep it." : ""} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />
-    </div>
-    <PrefixMappings value={draft.prefixMappings} onChange={(prefixMappings) => setDraft({ ...draft, prefixMappings })} />
-  </fieldset>;
-}
-
-function cleanMappings(draft: WatchSyncServerInput): WatchSyncServerInput {
-  return { ...draft, prefixMappings: draft.prefixMappings.filter((mapping) => mapping.serverPrefix.trim() || mapping.srtlPrefix.trim()) };
-}
-
-function ServerForm({ kind, onDone }: { kind: WatchSyncServerKind; onDone: () => void }) {
+function ServerUsers({ server, state }: { server: MediaServer; state: WatchSyncState }) {
   const setState = useStateUpdate();
-  const [draft, setDraft] = useState<WatchSyncServerInput>({ name: "", url: "", token: "", prefixMappings: [] });
-  const add = useMutation({ mutationFn: () => watchSyncApi.addServer(kind, cleanMappings(draft)), onSuccess: (state) => { setState(state); onDone(); } });
-  const submit = (event: FormEvent) => { event.preventDefault(); if (!add.isPending) add.mutate(); };
-  return <form className="watch-sync-card" aria-label={`Add ${kindLabel(kind)} server`} onSubmit={submit}>
-    <h3>Add a {kindLabel(kind)} server</h3>
-    <ServerFields kind={kind} draft={draft} setDraft={setDraft} hasToken={false} disabled={add.isPending} />
-    {kind === "plex" ? <p className="muted">After adding it, use <strong>Sign in with Plex</strong> to connect as the server owner.</p> : null}
-    <div className="radarr-toolbar">
-      <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />}Add server</button>
-      <button type="button" className="secondary" disabled={add.isPending} onClick={onDone}><X size={16} />Cancel</button>
-    </div>
-    {add.error ? <p className="error" role="alert">{add.error.message}</p> : null}
-  </form>;
-}
-
-function PlexSignIn({ server }: { server: WatchSyncServer }) {
-  const setState = useStateUpdate();
-  const [pin, setPin] = useState<WatchSyncPlexPin | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
-  const start = useMutation({
-    mutationFn: () => watchSyncApi.startPin(server.id),
-    onSuccess: (created) => {
-      setPin(created);
-      setMessage(null);
-      window.open(created.authUrl, "_blank", "noopener");
-    }
+  const queryClient = useQueryClient();
+  const discover = useMutation({
+    mutationFn: () => watchSyncApi.discover(server.id),
+    onSuccess: setState,
+    // Discovery records the connection status on the shared server either way.
+    onSettled: () => queryClient.invalidateQueries({ queryKey: mediaServersKey })
   });
-  useEffect(() => {
-    if (!pin) return undefined;
-    let stopped = false;
-    const timer = window.setInterval(() => {
-      watchSyncApi.checkPin(server.id, pin.pinId).then((status) => {
-        if (stopped) return;
-        if (status.status === "authorized") {
-          if (status.state) setState(status.state);
-          setPin(null);
-          setMessage("Signed in. Users were discovered.");
-        } else if (status.status === "expired") {
-          setPin(null);
-          setMessage("The sign-in expired. Start it again.");
-        }
-      }).catch((error: unknown) => {
-        if (stopped) return;
-        setPin(null);
-        setMessage(error instanceof Error ? error.message : "Sign-in failed.");
-      });
-    }, 3000);
-    return () => { stopped = true; window.clearInterval(timer); };
-  }, [pin, server.id, setState]);
-  return <div className="watch-sync-signin">
-    <button type="button" disabled={start.isPending || Boolean(pin)} onClick={() => start.mutate()}>{pin ? <LoaderCircle size={16} className="spin-icon" /> : <LogIn size={16} />}{server.hasToken ? "Sign in with Plex again" : "Sign in with Plex"}</button>
-    {pin ? <p className="muted" role="status">Waiting for plex.tv. Approve the sign-in in the window that opened, or <a href={pin.authUrl} target="_blank" rel="noopener noreferrer">open it here</a> (code {pin.code}).</p> : null}
-    {message ? <p className={message.startsWith("Signed in") ? "success" : "error"} role="status">{message}</p> : null}
-    {start.error ? <p className="error" role="alert">{start.error.message}</p> : null}
-  </div>;
-}
-
-function ServerCard({ server, state }: { server: WatchSyncServer; state: WatchSyncState }) {
-  const setState = useStateUpdate();
-  const [draft, setDraft] = useState<WatchSyncServerInput>({ name: server.name, url: server.url, token: "", prefixMappings: server.prefixMappings });
-  const [confirmRemove, setConfirmRemove] = useState(false);
-  const save = useMutation({ mutationFn: () => watchSyncApi.updateServer(server.id, cleanMappings(draft)), onSuccess: setState });
-  const discover = useMutation({ mutationFn: () => watchSyncApi.discover(server.id), onSuccess: setState });
-  const remove = useMutation({ mutationFn: () => watchSyncApi.removeServer(server.id), onSuccess: setState });
   const users = state.users.filter((user) => user.serverId === server.id);
-  const busy = save.isPending || discover.isPending || remove.isPending;
-  const changed = draft.name !== server.name || draft.url !== server.url || Boolean(draft.token) || JSON.stringify(draft.prefixMappings) !== JSON.stringify(server.prefixMappings);
-  return <section className="radarr-section watch-sync-server" aria-label={`${kindLabel(server.kind)} server ${server.name}`}>
+  const kind = mediaServerKindLabels[server.kind];
+  const status = mediaServerStatus(server);
+  return <section className="radarr-section watch-sync-server" aria-label={`${kind} server ${server.name}`}>
     <div className="radarr-heading">
-      <h2>{server.name}<span className="watch-sync-pill">{kindLabel(server.kind)}</span></h2>
+      <h2>{server.name}<span className="watch-sync-pill">{kind}</span></h2>
       <div className="radarr-toolbar">
-        <button type="button" className="secondary" disabled={busy || !server.hasToken} onClick={() => discover.mutate()}>{discover.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Users size={16} />}Test and discover users</button>
-        <button type="button" className="secondary icon-only" aria-label={`Remove ${server.name}`} disabled={busy} onClick={() => setConfirmRemove(true)}><Trash2 size={16} /></button>
+        <button type="button" className="secondary" disabled={discover.isPending || !server.hasToken} onClick={() => discover.mutate()}>{discover.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Users size={16} />}Discover users</button>
+        <Link to="/settings/media-servers" className="watch-sync-link-button" aria-label={`Edit ${server.name} in Media servers`}><Settings size={16} />Connection</Link>
       </div>
     </div>
     <p className={server.lastError ? "radarr-state error" : "radarr-state"}>
-      {server.lastError ?? (server.lastCheckedAt ? `Connected, checked ${formatDate(server.lastCheckedAt)}` : server.hasToken ? "Not checked yet" : server.kind === "plex" ? "Not signed in" : "No API key")}
+      {server.lastError ?? (server.lastCheckedAt ? `Connected, checked ${formatDate(server.lastCheckedAt)}` : status.label)}
       {server.accountName ? ` · Plex account ${server.accountName}` : ""}
       {` · ${users.length} user${users.length === 1 ? "" : "s"} · ${state.indexedItems[server.id] ?? 0} SRTL items indexed`}
     </p>
-    {confirmRemove ? <div className="radarr-confirmation" role="group" aria-label={`Confirm removing ${server.name}`}>
-      <p>Remove {server.name}? SRTL forgets its users, pairs, item index, and saved watch snapshots. Nothing changes on the server.</p>
-      <div className="radarr-toolbar">
-        <button type="button" className="danger" disabled={remove.isPending} onClick={() => remove.mutate()}><Trash2 size={16} />Remove</button>
-        <button type="button" className="secondary" onClick={() => setConfirmRemove(false)}>Cancel</button>
-      </div>
-    </div> : null}
-    {server.kind === "plex" ? <PlexSignIn server={server} /> : null}
-    <details className="radarr-setup watch-sync-edit">
-      <summary>Connection and path mappings</summary>
-      <form onSubmit={(event) => { event.preventDefault(); if (!busy) save.mutate(); }}>
-        <ServerFields kind={server.kind} draft={draft} setDraft={setDraft} hasToken={server.hasToken} disabled={busy} />
-        <div className="radarr-toolbar"><button type="submit" disabled={busy || !changed}>{save.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Save size={16} />}Save</button></div>
-      </form>
-    </details>
     {users.length ? <ul className="watch-sync-users">
       {users.map((user) => <li key={user.externalId} className={user.ready ? undefined : "muted"} title={user.note ?? undefined}>
         <strong>{user.name}</strong>{user.username && user.username !== user.name ? ` (${user.username})` : ""} <span className="watch-sync-pill">{userKindLabels[user.kind]}</span>
         {user.ready ? null : <span className="watch-sync-note"> {user.note ?? "Not available"}</span>}
       </li>)}
-    </ul> : null}
-    {[save.error, discover.error, remove.error].map((error, index) => error ? <p key={index} className="error" role="alert">{error.message}</p> : null)}
+    </ul> : <p className="muted">{server.hasToken ? "No users discovered yet." : server.kind === "plex" ? "Sign in with Plex in Settings > Media servers first." : "Add an API key in Settings > Media servers first."}</p>}
+    {discover.error ? <p className="error" role="alert">{discover.error.message}</p> : null}
   </section>;
 }
 
 function userLabel(state: WatchSyncState, serverId: string, user: WatchSyncUser) {
-  const servers = state.settings.servers.filter((server) => server.kind === state.settings.servers.find((entry) => entry.id === serverId)?.kind);
-  const server = state.settings.servers.find((entry) => entry.id === serverId);
+  const servers = state.servers.filter((server) => server.kind === state.servers.find((entry) => entry.id === serverId)?.kind);
+  const server = state.servers.find((entry) => entry.id === serverId);
   return servers.length > 1 && server ? `${user.name} (${server.name})` : user.name;
 }
 
 function PairsTab({ state }: { state: WatchSyncState }) {
   const setState = useStateUpdate();
-  const plexUsers = state.users.filter((user) => state.settings.servers.some((server) => server.id === user.serverId && server.kind === "plex"));
-  const jellyfinUsers = state.users.filter((user) => user.ready && state.settings.servers.some((server) => server.id === user.serverId && server.kind === "jellyfin"));
+  const plexUsers = state.users.filter((user) => state.servers.some((server) => server.id === user.serverId && server.kind === "plex"));
+  const jellyfinUsers = state.users.filter((user) => user.ready && state.servers.some((server) => server.id === user.serverId && server.kind === "jellyfin"));
   const [plexChoice, setPlexChoice] = useState("");
   const [jellyfinChoice, setJellyfinChoice] = useState("");
   const [direction, setDirection] = useState<WatchSyncDirection>("both");
@@ -326,7 +212,7 @@ function PairsTab({ state }: { state: WatchSyncState }) {
       </ul>
     </Section> : null}
     <Section title="Pair users" help="A Plex user may be paired with several Jellyfin users, and the other way round. Each pair has its own direction.">
-      {!plexUsers.length || !jellyfinUsers.length ? <p className="muted">Connect a Plex and a Jellyfin server and discover their users first.</p> : <form className="radarr-toolbar watch-sync-pair-form" onSubmit={submit}>
+      {!plexUsers.length || !jellyfinUsers.length ? <p className="muted">Connect a Plex and a Jellyfin server in <Link to="/settings/media-servers">Settings &gt; Media servers</Link>, then discover their users on the Users tab.</p> : <form className="radarr-toolbar watch-sync-pair-form" onSubmit={submit}>
         <select aria-label="Plex user" required value={plexChoice} onChange={(event) => setPlexChoice(event.target.value)}>
           <option value="">Plex user...</option>
           {plexUsers.map((user) => <option key={`${user.serverId}:${user.externalId}`} value={`${user.serverId}\0${user.externalId}`} disabled={!user.ready}>{userLabel(state, user.serverId, user)}{user.ready ? "" : " (no access token)"}</option>)}
@@ -494,6 +380,6 @@ function ActivityTab({ state }: { state: WatchSyncState }) {
         </tr>)}
       </tbody></table>
     </div> : activity.isLoading ? <p role="status">Loading activity...</p> : <p className="muted">No activity yet. Changes appear here as they are synced, kept for 30 days.</p>}
-    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored only on the SRTL server.</p>
+    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored only on the SRTL server, in Settings &gt; Media servers.</p>
   </Section>;
 }

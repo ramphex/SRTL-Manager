@@ -7905,6 +7905,26 @@ button.danger-button:hover:not(:disabled) {
 .watch-sync-samples { max-height: 320px; overflow: auto; }
 .watch-sync-link-button { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--secondary-bg); color: var(--secondary-text); text-decoration: none; }
 .watch-sync-link-button:hover { background: var(--secondary-hover); }
+
+/* Settings > Media servers, shared by watch sync and other media server features. */
+.media-server-settings h3 { font-size: 15px; margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
+.media-server-list { display: grid; gap: 12px; }
+.media-server-list .watch-sync-card { margin-top: 0; }
+.media-server-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 20px; margin: 0; font-size: 13px; }
+.media-server-facts div { min-width: 0; }
+.media-server-facts dt { color: var(--muted); font-size: 12px; }
+.media-server-facts dd { margin: 2px 0 0; color: var(--text-strong); overflow-wrap: anywhere; }
+.media-server-card .watch-sync-signin { margin: 0; }
+.media-server-edit { display: grid; gap: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
+.media-servers-required { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px 14px; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; padding: 18px 20px; color: var(--muted); }
+.media-servers-required h2 { margin: 0 0 4px; font-size: 16px; color: var(--text-strong); }
+.media-servers-required p { margin: 0 0 6px; font-size: 13px; line-height: 1.5; }
+.media-servers-required-link { grid-column: 2; justify-self: start; display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--primary); border-radius: 7px; background: var(--primary); color: var(--primary-text); text-decoration: none; }
+.media-servers-required-link:hover { background: var(--primary-hover); }
+@media (max-width: 640px) {
+  .media-servers-required { grid-template-columns: 1fr; }
+  .media-servers-required-link { grid-column: 1; }
+}
 .dashboard-damaged { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .storage-overview-link {
   border-radius: 4px;
