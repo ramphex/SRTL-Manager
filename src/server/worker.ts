@@ -12,6 +12,7 @@ import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRete
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
 import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
+import { runWatchSyncWork } from "./lib/watchSyncEngine";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
@@ -87,6 +88,8 @@ let radarrTimer: NodeJS.Timeout | null = null;
 let radarrRun: Promise<void> | null = null;
 // One entry per Radarr instance with work in flight; each instance runs on its own schedule.
 const radarrInstanceRuns = new Map<string, Promise<void>>();
+let watchSyncTimer: NodeJS.Timeout | null = null;
+let watchSyncRun: Promise<void> | null = null;
 let scheduledScanTimer: NodeJS.Timeout | null = null;
 let scheduledScanRun: Promise<void> | null = null;
 const scheduledScanRunner = new JobRunner(database.db);
@@ -102,6 +105,14 @@ try {
         .finally(() => { radarrRun = null; });
     }, 5000);
     radarrTimer.unref();
+    // Each pair keeps its own interval; this only checks what is due.
+    watchSyncTimer = setInterval(() => {
+      if (shuttingDown || watchSyncRun) return;
+      watchSyncRun = runWatchSyncWork(database.db, (options) => scheduledScanRunner.startWatchSync(options))
+        .catch((error: unknown) => { console.error("Watch sync could not run; it will be retried.", error); })
+        .finally(() => { watchSyncRun = null; });
+    }, 30_000);
+    watchSyncTimer.unref();
     scheduledScanTimer = setInterval(() => {
       if (shuttingDown || scheduledScanRun) return;
       scheduledScanRun = startScheduledInventoryScan(database.db, scheduledScanRunner)
@@ -146,6 +157,7 @@ try {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   if (radarrTimer) clearInterval(radarrTimer);
+  if (watchSyncTimer) clearInterval(watchSyncTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
@@ -153,6 +165,7 @@ try {
   await radarrRun;
   await Promise.allSettled([...radarrInstanceRuns.values()]);
   await scheduledScanRun;
+  await watchSyncRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);
   });

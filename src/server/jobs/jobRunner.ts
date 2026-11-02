@@ -34,6 +34,7 @@ import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresol
 import { discardPartialCopy, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
 import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
+import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
 import type {
   AuditMode,
   AuditOptions,
@@ -2743,6 +2744,15 @@ export class JobRunner {
     });
   }
 
+  async startWatchSync(options: WatchSyncJobOptions): Promise<number> {
+    return this.enqueuePreparedJob("watch_sync", async () => ({
+      progress: { options, current: 0, total: options.pairIds.length, stage: "queued", message: "Waiting to sync watch state" },
+      options,
+      exclusive: false,
+      claims: []
+    }));
+  }
+
   async copyFailures(jobId: number): Promise<CopyFailureList> {
     return (await resolveCopyFailures(this.db, jobId)).list;
   }
@@ -3507,6 +3517,12 @@ export class JobWorker {
     }
     if (job.type === "orphan_purge") {
       await this.runOrphanPurgeJob(ctx);
+      return;
+    }
+    if (job.type === "watch_sync") {
+      const result = await runWatchSyncJob(this.db, jobProgressOptions<WatchSyncJobOptions>(job) ?? { mode: "reconcile", pairIds: [] }, ctx);
+      if (result.failedPairs > 0) throw new PartialJobFailureError(result.summary);
+      await ctx.event("info", result.summary);
       return;
     }
     if (job.type === "path_migration") {
