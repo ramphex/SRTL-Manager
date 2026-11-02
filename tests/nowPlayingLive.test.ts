@@ -1,3 +1,6 @@
+import { createHash } from "node:crypto";
+import type { IncomingMessage } from "node:http";
+import type { Duplex } from "node:stream";
 import fastify, { type FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { MediaServerRecord } from "../src/server/lib/mediaServers";
@@ -23,8 +26,68 @@ class MockLiveServers {
   jellyfinOffline = false;
   requests: string[] = [];
   geoLookups: string[] = [];
+  // Websockets: off by default, so the servers fall back to polling.
+  sockets = false;
+  socketHeaderAuth = true;
+  socketLog: string[] = [];
+  socketReceived: string[] = [];
+  socketMessages = new Map<string, unknown[]>();
+  private openSockets = new Set<Duplex>();
+
+  // A minimal RFC 6455 server: the handshake, unmasked text frames out, and small masked text frames in.
+  private upgrade(request: IncomingMessage, socket: Duplex): void {
+    const url = new URL(request.url ?? "/", "http://mock");
+    const plex = url.pathname === "/pms/:/websockets/notifications";
+    const jellyfin = url.pathname === "/jf/socket";
+    const viaHeader = plex ? request.headers["x-plex-token"] === this.plexToken : String(request.headers.authorization ?? "").includes(`Token="${this.jellyfinKey}"`);
+    const viaQuery = plex ? url.searchParams.get("X-Plex-Token") === this.plexToken : url.searchParams.get("api_key") === this.jellyfinKey;
+    const authorized = (viaHeader && this.socketHeaderAuth) || viaQuery;
+    if (!this.sockets || !(plex || jellyfin) || !authorized) {
+      socket.end(`HTTP/1.1 ${this.sockets && (plex || jellyfin) ? "401 Unauthorized" : "404 Not Found"}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
+      return;
+    }
+    this.socketLog.push(`${plex ? "plex" : "jellyfin"}:${viaHeader && this.socketHeaderAuth ? "header" : "query"}`);
+    const accept = createHash("sha1").update(`${request.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+    this.openSockets.add(socket);
+    socket.on("close", () => this.openSockets.delete(socket));
+    socket.on("error", () => undefined);
+    socket.on("data", (chunk: Buffer) => {
+      if ((chunk[0]! & 0x0f) !== 1 || (chunk[1]! & 0x7f) >= 126) return;
+      const length = chunk[1]! & 0x7f;
+      const mask = chunk.subarray(2, 6);
+      this.socketReceived.push(Buffer.from(chunk.subarray(6, 6 + length).map((byte, index) => byte ^ mask[index % 4]!)).toString("utf8"));
+    });
+    setTimeout(() => {
+      for (const message of this.socketMessages.get(plex ? "plex" : "jellyfin") ?? []) MockLiveServers.sendFrame(socket, JSON.stringify(message));
+    }, 150);
+  }
+
+  static sendFrame(socket: Duplex, text: string): void {
+    const payload = Buffer.from(text);
+    let header: Buffer;
+    if (payload.length < 126) header = Buffer.from([0x81, payload.length]);
+    else if (payload.length < 65_536) {
+      header = Buffer.alloc(4);
+      header[0] = 0x81;
+      header[1] = 126;
+      header.writeUInt16BE(payload.length, 2);
+    } else {
+      header = Buffer.alloc(10);
+      header[0] = 0x81;
+      header[1] = 127;
+      header.writeBigUInt64BE(BigInt(payload.length), 2);
+    }
+    socket.write(Buffer.concat([header, payload]));
+  }
+
+  async stop(): Promise<void> {
+    for (const socket of this.openSockets) socket.destroy();
+    await this.app.close();
+  }
 
   async start(): Promise<void> {
+    this.app.server.on("upgrade", (request: IncomingMessage, socket: Duplex) => this.upgrade(request, socket));
     this.app.all("/*", async (request, reply) => {
       const url = new URL(request.url, "http://mock");
       const route = url.pathname;
@@ -118,7 +181,7 @@ describe("Now Playing hub against mocked servers", () => {
     hub?.close();
     hub = null;
     plexEndpoints.plexTv = originalPlexTv;
-    await mock.app.close();
+    await mock.stop();
   });
 
   const createHub = (options: { geoLookup?: boolean } = {}) => {
@@ -156,6 +219,32 @@ describe("Now Playing hub against mocked servers", () => {
     const withExtras = await waitFor(() => view.latest()?.servers[0]?.bandwidth && view.latest());
     expect(withExtras.servers[0]!.bandwidth!.lanBps).toBeGreaterThan(withExtras.servers[0]!.bandwidth!.wanBps);
     expect(withExtras.servers[0]!.resources).toEqual({ hostCpu: 12.3, processCpu: 4.5, hostMemory: 40, processMemory: 3 });
+    view.unsubscribe();
+  });
+
+  it("takes change events from the Plex and Jellyfin sockets, authenticating with headers rather than URLs", async () => {
+    mock.sockets = true;
+    mock.plexSessions = [plexDirectPlayMovie()];
+    // Jellyfin's socket pushes the session list itself; the safety poll answers with the same list.
+    mock.jellyfinSessions = [jellyfinDirectPlay()];
+    mock.socketMessages.set("jellyfin", [{ MessageType: "ForceKeepAlive", Data: 60 }, { MessageType: "Sessions", Data: [jellyfinDirectPlay(), jellyfinVideoTranscodeWithBurnIn()] }]);
+    mock.socketMessages.set("plex", [{ NotificationContainer: { type: "playing", size: 1, PlaySessionStateNotification: [{ sessionKey: "12", state: "playing", viewOffset: 777_000, ratingKey: "101" }] } }]);
+    const view = watch(createHub());
+    const snapshot = await waitFor(() => view.latest()?.servers.every((server) => server.status === "live" && server.transport === "socket") && view.latest()!.streams.length === 3
+      && view.latest()!.streams.find((stream) => stream.sessionKey === "12")?.positionMs === 777_000 && view.latest());
+    expect(snapshot.streams.map((stream) => stream.sessionKey)).toEqual(["12", "jf-session-1", "jf-session-2"]);
+    expect(mock.socketLog.sort()).toEqual(["jellyfin:header", "plex:header"]);
+    expect(mock.socketReceived).toContain(JSON.stringify({ MessageType: "SessionsStart", Data: "0,2000" }));
+    view.unsubscribe();
+  });
+
+  it("falls back to the token in the socket URL for servers that ignore headers there", async () => {
+    mock.sockets = true;
+    mock.socketHeaderAuth = false;
+    servers = servers.filter((server) => server.kind === "plex");
+    const view = watch(createHub());
+    await waitFor(() => view.latest()?.servers[0]?.status === "live");
+    expect(mock.socketLog).toEqual(["plex:query"]);
     view.unsubscribe();
   });
 

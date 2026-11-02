@@ -62,13 +62,31 @@ export function socketUrl(baseUrl: string, path: string, query: Record<string, s
   return url.toString();
 }
 
-// The socket host is checked against the same address rules as every other media server request.
-async function openWebSocket(url: string, service: string, handlers: SocketHandlers, onOpen: (socket: WebSocket) => void, onMessage: (data: string, socket: WebSocket) => void): Promise<() => void> {
-  await resolveAllowed(new URL(url).hostname.replace(/^\[|\]$/g, ""), service);
+// Node's WebSocket accepts request headers, so credentials need not appear in the URL.
+const NodeWebSocket = WebSocket as unknown as new (url: string, init?: { headers?: Record<string, string> }) => WebSocket;
+
+export interface SocketAttempt { url: string; headers?: Record<string, string> }
+
+// Tries each way of authenticating in turn: headers first, then the token in the query string that some servers
+// expect. The socket host is checked against the same address rules as every other media server request.
+async function openWebSocket(attempts: SocketAttempt[], service: string, handlers: SocketHandlers, onOpen: (socket: WebSocket) => void, onMessage: (data: string, socket: WebSocket) => void): Promise<() => void> {
+  let lastError: unknown = new NowPlayingError(`${service} socket could not be opened.`);
+  for (const attempt of attempts) {
+    try {
+      return await openWebSocketOnce(attempt, service, handlers, onOpen, onMessage);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
+async function openWebSocketOnce(attempt: SocketAttempt, service: string, handlers: SocketHandlers, onOpen: (socket: WebSocket) => void, onMessage: (data: string, socket: WebSocket) => void): Promise<() => void> {
+  await resolveAllowed(new URL(attempt.url).hostname.replace(/^\[|\]$/g, ""), service);
   return new Promise((resolve, reject) => {
     let opened = false;
     let closed = false;
-    const socket = new WebSocket(url);
+    const socket = new NodeWebSocket(attempt.url, attempt.headers ? { headers: attempt.headers } : undefined);
     const timer = setTimeout(() => {
       if (opened) return;
       closed = true;
@@ -227,8 +245,11 @@ export class PlexLiveAdapter implements LiveAdapter {
   }
 
   async openSocket(handlers: SocketHandlers): Promise<() => void> {
-    const url = socketUrl(this.config.url, "/:/websockets/notifications", { "X-Plex-Token": this.config.token });
-    return openWebSocket(url, "Plex", handlers, () => undefined, (data) => {
+    const attempts = [
+      { url: socketUrl(this.config.url, "/:/websockets/notifications", {}), headers: this.headers() },
+      { url: socketUrl(this.config.url, "/:/websockets/notifications", { "X-Plex-Token": this.config.token }) }
+    ];
+    return openWebSocket(attempts, "Plex", handlers, () => undefined, (data) => {
       let message: { NotificationContainer?: { type?: unknown; PlaySessionStateNotification?: unknown } };
       try { message = JSON.parse(data) as typeof message; } catch { return; }
       const container = message.NotificationContainer;
@@ -307,9 +328,12 @@ export class JellyfinLiveAdapter implements LiveAdapter {
   }
 
   async openSocket(handlers: SocketHandlers): Promise<() => void> {
-    const url = socketUrl(this.config.url, "/socket", { api_key: this.config.token, deviceId: this.config.clientIdentifier });
+    const attempts = [
+      { url: socketUrl(this.config.url, "/socket", { deviceId: this.config.clientIdentifier }), headers: this.headers() },
+      { url: socketUrl(this.config.url, "/socket", { api_key: this.config.token, deviceId: this.config.clientIdentifier }) }
+    ];
     let keepAlive: NodeJS.Timeout | null = null;
-    const close = await openWebSocket(url, "Jellyfin", {
+    const close = await openWebSocket(attempts, "Jellyfin", {
       onEvent: handlers.onEvent,
       onClose: (reason) => {
         if (keepAlive) clearInterval(keepAlive);
