@@ -16,6 +16,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Required path-change review before different configured roots or storage mount sources can affect managed links.
 - Editable storage-location names while deployment paths remain environment-managed.
 - Optional Radarr integration: policy tags that follow SRTL storage policies, optional unmonitoring after copies to local storage, webhook-triggered title rescans, and automatic or manual folder mapping. No policy tags are preselected; copies stay manual. See the [integration guide](docs/radarr.md).
+- Optional Sonarr integration, the TV counterpart: policy tags on series, per-episode unmonitoring after copies to local storage (the series stays monitored), webhook-triggered series rescans, and any number of instances. See the [Sonarr guide](docs/sonarr.md).
 - Postgres-backed API and worker services in a hardened container stack.
 - Dark, light, and system themes with responsive administration views.
 
