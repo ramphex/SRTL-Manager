@@ -185,9 +185,9 @@ export interface JobWorkerOptions {
   dispatchConcurrency?: number;
   // Optional external facts about a source file (for example Radarr's recorded size and runtime).
   mediaExpectations?: (link: MediaLinkRow) => Promise<MediaExpectation | undefined>;
-  // Called for copies that update Radarr monitoring, with titles whose files may all have reached the destination.
+  // Called for copies that update Radarr or Sonarr monitoring, with titles whose files may all have reached the destination.
   // The callee checks which titles are complete, so calling it again for the same title is harmless.
-  copiedTitles?: (copy: { jobId: number; direction: CopyOptions["direction"] }, titles: Array<{ section: string; itemName: string }>) => Promise<void>;
+  copiedTitles?: (copy: { jobId: number; direction: CopyOptions["direction"]; radarrMonitoring: boolean; sonarrMonitoring: boolean }, titles: Array<{ section: string; itemName: string }>) => Promise<void>;
 }
 
 function normalizeSelectedSections(selectedSections: string[] | undefined, configuredSections: string[], label: string): string[] {
@@ -427,7 +427,8 @@ async function normalizeCopyOptions(db: Db, options: CopyOptions): Promise<CopyO
     ...(normalizeRelativePrefix(options.relativePathPrefix) ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
     ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
     ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
-    ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {})
+    ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {}),
+    ...(options.sonarrMonitoring === true ? { sonarrMonitoring: true } : {})
   };
   if (!normalized.linkIds?.length && !normalized.section && !normalized.itemName) throw new Error("Copy requires link IDs, a folder scope, or a title");
   return normalized;
@@ -460,6 +461,7 @@ function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCop
     ...(options.localConflictStrategy === "keep_both" || options.localConflictStrategy === "replace" ? { localConflictStrategy: options.localConflictStrategy } : {}),
     ...(options.allowSourceTitleMismatch === true ? { allowSourceTitleMismatch: true } : {}),
     ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {}),
+    ...(options.sonarrMonitoring === true ? { sonarrMonitoring: true } : {}),
     ...(behavior ? { behavior } : {}),
     ...(options.deleteRemoteSource === true && options.direction === "to_local" ? { deleteRemoteSource: true } : {})
   };
@@ -4417,15 +4419,17 @@ export class JobWorker {
       return progressWrite;
     };
 
-    // Each title is reported as soon as its files are committed, so Radarr monitoring changes while the rest of
+    // Each title is reported as soon as its files are committed, so Radarr and Sonarr monitoring change while the rest of
     // the batch copies. A failure here only delays the change to the end-of-job pass.
     const reportCopiedTitles = async (titleLinks: MediaLinkRow[]) => {
-      if (!normalizedOptions.radarrMonitoring || !this.copiedTitles || titleLinks.length === 0 || (await ctx.isCancelled())) return;
+      const radarrMonitoring = normalizedOptions.radarrMonitoring === true;
+      const sonarrMonitoring = normalizedOptions.sonarrMonitoring === true;
+      if ((!radarrMonitoring && !sonarrMonitoring) || !this.copiedTitles || titleLinks.length === 0 || (await ctx.isCancelled())) return;
       const titles = new Map(titleLinks.map((link) => [`${link.section}\0${link.itemName}`, { section: link.section, itemName: link.itemName }]));
       try {
-        await this.copiedTitles({ jobId: ctx.jobId, direction: normalizedOptions.direction }, [...titles.values()]);
+        await this.copiedTitles({ jobId: ctx.jobId, direction: normalizedOptions.direction, radarrMonitoring, sonarrMonitoring }, [...titles.values()]);
       } catch (error: unknown) {
-        await ctx.event("warn", "Radarr monitoring will be updated when the copy job ends", { error: errorMessage(error) });
+        await ctx.event("warn", `${radarrMonitoring && sonarrMonitoring ? "Radarr and Sonarr" : radarrMonitoring ? "Radarr" : "Sonarr"} monitoring will be updated when the copy job ends`, { error: errorMessage(error) });
       }
     };
     // Titles committed before a restart, or already at the destination, are reported before copying resumes.

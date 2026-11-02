@@ -304,6 +304,7 @@ export interface CopyOptions {
   localConflictStrategy?: CopyLocalConflictStrategy;
   allowSourceTitleMismatch?: boolean;
   radarrMonitoring?: boolean;
+  sonarrMonitoring?: boolean;
 }
 
 export type CopyFailureSymlinkStatus =

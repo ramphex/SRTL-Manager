@@ -11,6 +11,7 @@ import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
 import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
+import { queueCopiedSonarrEpisodes, sonarrMediaExpectation, startSonarrWork } from "./lib/sonarr";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 
 // Media outputs must remain readable by services running under a different account.
@@ -54,8 +55,16 @@ const worker = new JobWorker(database.db, {
   concurrency: config.jobConcurrency,
   copyTransferLimiter,
   dispatchConcurrency: config.jobConcurrency.maxRunningJobs,
-  mediaExpectations: (link) => radarrMediaExpectation(database.db, link),
-  copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(database.db, copy, titles)
+  // A folder belongs to a Radarr or a Sonarr instance, never both, so at most one of them answers.
+  mediaExpectations: async (link) => await radarrMediaExpectation(database.db, link) ?? await sonarrMediaExpectation(database.db, link),
+  copiedTitles: async (copy, titles) => {
+    const results = await Promise.allSettled([
+      copy.radarrMonitoring ? queueCopiedTitleMonitorUpdates(database.db, copy, titles) : undefined,
+      copy.sonarrMonitoring ? queueCopiedSonarrEpisodes(database.db, copy, titles) : undefined
+    ]);
+    const failed = results.find((result) => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
 });
 
 async function recordHeartbeat(status: "running" | "stopped"): Promise<void> {
@@ -87,6 +96,10 @@ let radarrTimer: NodeJS.Timeout | null = null;
 let radarrRun: Promise<void> | null = null;
 // One entry per Radarr instance with work in flight; each instance runs on its own schedule.
 const radarrInstanceRuns = new Map<string, Promise<void>>();
+let sonarrTimer: NodeJS.Timeout | null = null;
+let sonarrRun: Promise<void> | null = null;
+// Sonarr instances run the same way, independently of each other and of Radarr.
+const sonarrInstanceRuns = new Map<string, Promise<void>>();
 let scheduledScanTimer: NodeJS.Timeout | null = null;
 let scheduledScanRun: Promise<void> | null = null;
 const scheduledScanRunner = new JobRunner(database.db);
@@ -102,6 +115,13 @@ try {
         .finally(() => { radarrRun = null; });
     }, 5000);
     radarrTimer.unref();
+    sonarrTimer = setInterval(() => {
+      if (shuttingDown || sonarrRun) return;
+      sonarrRun = startSonarrWork(database.db, sonarrInstanceRuns, (name) => { console.error(`Sonarr synchronization for ${name} could not finish; pending work will be retried.`); })
+        .catch(() => { console.error("Sonarr synchronization could not start; pending work will be retried."); })
+        .finally(() => { sonarrRun = null; });
+    }, 5000);
+    sonarrTimer.unref();
     scheduledScanTimer = setInterval(() => {
       if (shuttingDown || scheduledScanRun) return;
       scheduledScanRun = startScheduledInventoryScan(database.db, scheduledScanRunner)
@@ -146,12 +166,15 @@ try {
   if (heartbeatTimer) clearInterval(heartbeatTimer);
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   if (radarrTimer) clearInterval(radarrTimer);
+  if (sonarrTimer) clearInterval(sonarrTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
   await maintenanceRun;
   await radarrRun;
   await Promise.allSettled([...radarrInstanceRuns.values()]);
+  await sonarrRun;
+  await Promise.allSettled([...sonarrInstanceRuns.values()]);
   await scheduledScanRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);

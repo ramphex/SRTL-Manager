@@ -22,7 +22,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 20;
+export const currentSchemaVersion = 21;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -713,6 +713,61 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS radarr_monitor_updates_copy_movie_idx
           ON radarr_monitor_updates(copy_job_id, instance_id, movie_id, monitored) WHERE copy_job_id IS NOT NULL`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (20, 'radarr_per_title_monitoring', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(21)) {
+      await client.query("BEGIN");
+      try {
+        // Sonarr instances keep their settings under the sonarrInstances setting; these tables hold their series and work.
+        await client.query(`CREATE TABLE IF NOT EXISTS sonarr_series (
+          instance_id TEXT NOT NULL, series_id INTEGER NOT NULL, tvdb_id INTEGER NOT NULL, title TEXT NOT NULL,
+          folder_path TEXT NOT NULL, section TEXT, item_name TEXT, tags TEXT NOT NULL,
+          managed BOOLEAN NOT NULL DEFAULT false, synced_policy TEXT, synced_at TEXT, last_error TEXT,
+          next_attempt_at TEXT, attempts INTEGER NOT NULL DEFAULT 0, observed_policy_marker TEXT, monitored BOOLEAN,
+          PRIMARY KEY (instance_id, series_id)
+        )`);
+        await client.query(`CREATE INDEX IF NOT EXISTS sonarr_series_section_item_idx ON sonarr_series(section, item_name)`);
+        await client.query(`CREATE TABLE IF NOT EXISTS sonarr_events (
+          id SERIAL PRIMARY KEY, instance_id TEXT NOT NULL, fingerprint TEXT NOT NULL, series_id INTEGER NOT NULL,
+          episode_file_id INTEGER, title TEXT NOT NULL, event_type TEXT NOT NULL, received_at TEXT NOT NULL,
+          processed_at TEXT, next_attempt_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT, job_id INTEGER
+        )`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS sonarr_events_instance_fingerprint_idx ON sonarr_events(instance_id, fingerprint)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS sonarr_events_pending_idx ON sonarr_events(next_attempt_at, id) WHERE processed_at IS NULL`);
+        await client.query(`CREATE TABLE IF NOT EXISTS sonarr_copy_jobs (
+          instance_id TEXT NOT NULL, job_id INTEGER NOT NULL, handled_at TEXT NOT NULL,
+          PRIMARY KEY (instance_id, job_id)
+        )`);
+        await client.query(`CREATE TABLE IF NOT EXISTS sonarr_copied_files (
+          id SERIAL PRIMARY KEY, instance_id TEXT NOT NULL, copy_job_id INTEGER NOT NULL,
+          series_id INTEGER NOT NULL, media_link_id INTEGER NOT NULL, relative_path TEXT NOT NULL, monitored BOOLEAN NOT NULL,
+          skip_reason TEXT, created_at TEXT NOT NULL, resolved_at TEXT, next_attempt_at TEXT NOT NULL,
+          attempts INTEGER NOT NULL DEFAULT 0, error TEXT
+        )`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS sonarr_copied_files_copy_link_idx ON sonarr_copied_files(copy_job_id, instance_id, media_link_id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS sonarr_copied_files_pending_idx ON sonarr_copied_files(next_attempt_at, id) WHERE resolved_at IS NULL`);
+        await client.query(`CREATE TABLE IF NOT EXISTS sonarr_monitor_updates (
+          id SERIAL PRIMARY KEY, instance_id TEXT NOT NULL, copy_job_id INTEGER,
+          series_id INTEGER NOT NULL, episode_id INTEGER NOT NULL, media_link_id INTEGER, title TEXT NOT NULL,
+          monitored BOOLEAN NOT NULL, previous_monitored BOOLEAN, created_at TEXT NOT NULL, processed_at TEXT,
+          next_attempt_at TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, error TEXT
+        )`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS sonarr_monitor_updates_copy_episode_idx
+          ON sonarr_monitor_updates(copy_job_id, instance_id, episode_id, monitored) WHERE copy_job_id IS NOT NULL`);
+        await client.query(`CREATE INDEX IF NOT EXISTS sonarr_monitor_updates_pending_idx ON sonarr_monitor_updates(next_attempt_at, id) WHERE processed_at IS NULL`);
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.jobs') IS NOT NULL THEN
+            ALTER TABLE sonarr_events ADD CONSTRAINT sonarr_events_job_fk FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE SET NULL;
+            ALTER TABLE sonarr_copy_jobs ADD CONSTRAINT sonarr_copy_jobs_job_fk FOREIGN KEY(job_id) REFERENCES jobs(id) ON DELETE CASCADE;
+            ALTER TABLE sonarr_copied_files ADD CONSTRAINT sonarr_copied_files_job_fk FOREIGN KEY(copy_job_id) REFERENCES jobs(id) ON DELETE CASCADE;
+            ALTER TABLE sonarr_monitor_updates ADD CONSTRAINT sonarr_monitor_updates_job_fk FOREIGN KEY(copy_job_id) REFERENCES jobs(id) ON DELETE SET NULL;
+          END IF;
+        END $$`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (21, 'sonarr_integration', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

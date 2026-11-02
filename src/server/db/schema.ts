@@ -70,6 +70,90 @@ export const radarrEvents = pgTable("radarr_events", {
   jobId: integer("job_id").references(() => jobs.id, { onDelete: "set null" })
 }, (table) => [uniqueIndex("radarr_events_instance_fingerprint_idx").on(table.instanceId, table.fingerprint)]);
 
+// Sonarr series ids are only unique within one Sonarr instance.
+export const sonarrSeries = pgTable("sonarr_series", {
+  instanceId: text("instance_id").notNull(),
+  seriesId: integer("series_id").notNull(),
+  tvdbId: integer("tvdb_id").notNull(),
+  title: text("title").notNull(),
+  folderPath: text("folder_path").notNull(),
+  section: text("section"),
+  itemName: text("item_name"),
+  tags: text("tags").notNull(),
+  managed: boolean("managed").notNull().default(false),
+  syncedPolicy: text("synced_policy"),
+  syncedAt: text("synced_at"),
+  lastError: text("last_error"),
+  nextAttemptAt: text("next_attempt_at"),
+  attempts: integer("attempts").notNull().default(0),
+  observedPolicyMarker: text("observed_policy_marker"),
+  monitored: boolean("monitored")
+}, (table) => [
+  primaryKey({ columns: [table.instanceId, table.seriesId] }),
+  index("sonarr_series_section_item_idx").on(table.section, table.itemName)
+]);
+
+export const sonarrCopyJobs = pgTable("sonarr_copy_jobs", {
+  instanceId: text("instance_id").notNull(),
+  jobId: integer("job_id").notNull().references(() => jobs.id, { onDelete: "cascade" }),
+  handledAt: text("handled_at").notNull()
+}, (table) => [primaryKey({ columns: [table.instanceId, table.jobId] })]);
+
+// Episode files a copy committed (or, with a skip reason, did not), waiting to be matched to Sonarr episode ids.
+export const sonarrCopiedFiles = pgTable("sonarr_copied_files", {
+  id: serial("id").primaryKey(),
+  instanceId: text("instance_id").notNull(),
+  copyJobId: integer("copy_job_id").notNull().references(() => jobs.id, { onDelete: "cascade" }),
+  seriesId: integer("series_id").notNull(),
+  mediaLinkId: integer("media_link_id").notNull(),
+  // Relative to the series folder, as Sonarr reports episode file paths.
+  relativePath: text("relative_path").notNull(),
+  monitored: boolean("monitored").notNull(),
+  skipReason: text("skip_reason"),
+  createdAt: text("created_at").notNull(),
+  resolvedAt: text("resolved_at"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error")
+}, (table) => [uniqueIndex("sonarr_copied_files_copy_link_idx").on(table.copyJobId, table.instanceId, table.mediaLinkId)]);
+
+export const sonarrMonitorUpdates = pgTable("sonarr_monitor_updates", {
+  id: serial("id").primaryKey(),
+  instanceId: text("instance_id").notNull(),
+  copyJobId: integer("copy_job_id").references(() => jobs.id, { onDelete: "set null" }),
+  seriesId: integer("series_id").notNull(),
+  episodeId: integer("episode_id").notNull(),
+  mediaLinkId: integer("media_link_id"),
+  title: text("title").notNull(),
+  monitored: boolean("monitored").notNull(),
+  // The episode's monitored state in Sonarr when the update was queued, restored if a cancelled copy is rolled back.
+  previousMonitored: boolean("previous_monitored"),
+  createdAt: text("created_at").notNull(),
+  processedAt: text("processed_at"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error")
+}, (table) => [
+  // A copy changes an episode's monitoring once, and restores it at most once if the copy is rolled back.
+  uniqueIndex("sonarr_monitor_updates_copy_episode_idx").on(table.copyJobId, table.instanceId, table.episodeId, table.monitored).where(sql`copy_job_id is not null`)
+]);
+
+export const sonarrEvents = pgTable("sonarr_events", {
+  id: serial("id").primaryKey(),
+  instanceId: text("instance_id").notNull(),
+  fingerprint: text("fingerprint").notNull(),
+  seriesId: integer("series_id").notNull(),
+  episodeFileId: integer("episode_file_id"),
+  title: text("title").notNull(),
+  eventType: text("event_type").notNull(),
+  receivedAt: text("received_at").notNull(),
+  processedAt: text("processed_at"),
+  nextAttemptAt: text("next_attempt_at").notNull(),
+  attempts: integer("attempts").notNull().default(0),
+  error: text("error"),
+  jobId: integer("job_id").references(() => jobs.id, { onDelete: "set null" })
+}, (table) => [uniqueIndex("sonarr_events_instance_fingerprint_idx").on(table.instanceId, table.fingerprint)]);
+
 export const pathConfigurations = pgTable("path_configurations", {
   id: serial("id").primaryKey(),
   status: text("status").notNull(),
