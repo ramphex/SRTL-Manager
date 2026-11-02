@@ -57,47 +57,102 @@ async function fixture(page: Page, options: { empty?: boolean; failure?: boolean
   return { state, writes, saves };
 }
 
-test("settings and related activity are grouped by purpose with one configuration form", async ({ page }) => {
+function radarrTab(page: Page, name: string) {
+  return page.getByRole("tablist", { name: "Radarr settings" }).getByRole("tab", { name });
+}
+
+async function openTab(page: Page, name: string) {
+  await radarrTab(page, name).click();
+  await expect(radarrTab(page, name)).toHaveAttribute("aria-selected", "true");
+}
+
+test("settings are split into tabs that share one configuration form", async ({ page }) => {
   await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
-  await expect(page.locator(".radarr-section > .radarr-heading h2")).toHaveText(["Connection", "Folder mappings", "Policy synchronization", "Copy monitoring", "Webhooks"]);
-  const connection = page.getByRole("region", { name: "Connection", exact: true });
+  await expect(page.getByRole("tablist", { name: "Radarr settings" }).getByRole("tab")).toHaveText(["Connection", "Folder mappings", "Policy sync", "Copy monitoring", "Webhooks", "Activity"]);
+  await expect(radarrTab(page, "Connection")).toHaveAttribute("aria-selected", "true");
+  const connection = page.getByRole("tabpanel", { name: "Connection" });
   await expect(connection.getByLabel("Radarr URL", { exact: true })).toBeVisible();
   await expect(connection.getByLabel("API key", { exact: true })).toBeVisible();
-  await expect(connection.getByLabel("Home NAS policy tag", { exact: true })).toHaveCount(0);
-  const policy = page.getByRole("region", { name: "Policy synchronization", exact: true });
+  await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toBeHidden();
+  await openTab(page, "Policy sync");
+  const policy = page.getByRole("tabpanel", { name: "Policy sync" });
+  await expect(policy.getByRole("heading")).toHaveText(["Policy tags", "Policy synchronization"]);
   await expect(policy.getByLabel("Home NAS policy tag", { exact: true })).toBeVisible();
   await expect(policy.getByLabel("Archive policy tag", { exact: true })).toBeVisible();
   await expect(policy.getByLabel("Radarr policy preview")).toBeVisible();
-  const monitoring = page.getByRole("region", { name: "Copy monitoring", exact: true });
+  await expect(page.getByLabel("Radarr URL", { exact: true })).toBeHidden();
+  await openTab(page, "Copy monitoring");
+  const monitoring = page.getByRole("tabpanel", { name: "Copy monitoring" });
   await expect(monitoring.getByLabel("Update Radarr monitoring after copies by default")).not.toBeChecked();
-  expect(await monitoring.getByLabel("Update Radarr monitoring after copies by default").evaluate((field: HTMLInputElement) => field.form?.id)).toBe("radarr-settings-form");
-  await expect(monitoring.getByLabel("Recent Radarr monitoring updates")).toContainText("Unmonitor");
-  await expect(monitoring.getByLabel("Recent Radarr monitoring updates")).toContainText("#77");
-  const webhooks = page.getByRole("region", { name: "Webhooks", exact: true });
+  await openTab(page, "Webhooks");
+  const webhooks = page.getByRole("tabpanel", { name: "Webhooks" });
   await expect(webhooks.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toBeVisible();
-  await expect(webhooks.getByLabel("Recent Radarr events")).toBeVisible();
   await webhooks.getByText("Webhook setup", { exact: true }).click();
   await expect(webhooks.locator("details")).toContainText("Select On Import, On Upgrade, and On Rename");
+  await openTab(page, "Activity");
+  const activity = page.getByRole("tabpanel", { name: "Activity" });
+  await expect(activity.getByRole("heading")).toHaveText(["Webhook events", "Monitoring updates"]);
+  await expect(activity.getByLabel("Recent Radarr events")).toBeVisible();
+  await expect(activity.getByLabel("Recent Radarr monitoring updates")).toContainText("Unmonitor");
+  await expect(activity.getByLabel("Recent Radarr monitoring updates")).toContainText("#77");
   await expect(page.locator(".radarr-integration-header").getByLabel("Enable integration", { exact: true })).toBeVisible();
+  await expect(page.locator(".radarr-integration-header").getByRole("button", { name: "Save Radarr settings", exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Save Radarr settings", exact: true })).toHaveCount(1);
   for (const id of ["radarr-url", "radarr-api-key", "radarr-local-tag", "radarr-remote-tag", "radarr-webhook-secret"]) {
     expect(await page.locator(`#${id}`).evaluate((field: HTMLInputElement) => field.form?.id)).toBe("radarr-settings-form");
   }
-  expect(await policy.getByLabel("Search Radarr titles").evaluate((field: HTMLInputElement) => field.form)).toBeNull();
+  expect(await page.getByLabel("Update Radarr monitoring after copies by default").evaluate((field: HTMLInputElement) => field.form?.id)).toBe("radarr-settings-form");
+  expect(await page.getByLabel("Search Radarr titles").evaluate((field: HTMLInputElement) => field.form)).toBeNull();
+});
+
+test("Radarr tabs follow arrow keys, remember the selection, and mark unsaved edits", async ({ page }) => {
+  await fixture(page);
+  await page.goto(`${baseUrl}/settings/integrations`);
+  const connection = radarrTab(page, "Connection");
+  await connection.focus();
+  await connection.press("ArrowRight");
+  await expect(radarrTab(page, "Folder mappings")).toBeFocused();
+  await expect(radarrTab(page, "Folder mappings")).toHaveAttribute("aria-selected", "true");
+  await radarrTab(page, "Folder mappings").press("End");
+  await expect(radarrTab(page, "Activity")).toBeFocused();
+  await radarrTab(page, "Activity").press("ArrowRight");
+  await expect(connection).toBeFocused();
+  await connection.press("ArrowLeft");
+  await expect(radarrTab(page, "Activity")).toHaveAttribute("aria-selected", "true");
+  await radarrTab(page, "Activity").press("Home");
+  await expect(connection).toHaveAttribute("aria-selected", "true");
+  await openTab(page, "Webhooks");
+  await page.getByLabel("X-SRTL-Webhook-Secret", { exact: true }).fill("fixture_only_webhook_secret_1234");
+  await openTab(page, "Connection");
+  await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
+  await expect(connection).toHaveAccessibleName("Connection");
+  await expect(page.locator(".radarr-save-status")).toHaveText("Unsaved changes");
+  await openTab(page, "Activity");
+  await page.setViewportSize({ width: 320, height: 800 });
+  await page.reload();
+  await expect(radarrTab(page, "Activity")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Recent Radarr events")).toBeVisible();
+  const tab = await radarrTab(page, "Activity").boundingBox();
+  expect(tab!.x).toBeGreaterThanOrEqual(0);
+  expect(tab!.x + tab!.width).toBeLessThanOrEqual(320);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
 });
 
 test("unsaved edits are visible and policy actions never submit or use draft settings", async ({ page }) => {
   const { saves, writes } = await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   const status = page.locator(".radarr-save-status");
   await expect(status).toHaveText("No unsaved changes");
   const tag = page.getByLabel("Home NAS policy tag", { exact: true });
   await tag.fill("home");
   await expect(status).toHaveText("Unsaved changes");
+  await expect(radarrTab(page, "Policy sync")).toHaveAccessibleName("Policy sync (unsaved changes)");
   await expect(page.locator(".radarr-draft-notice")).toContainText("use saved settings");
   await tag.fill("local");
   await expect(status).toHaveText("No unsaved changes");
+  await expect(radarrTab(page, "Policy sync")).toHaveAccessibleName("Policy sync");
   await tag.fill("home");
   await page.getByLabel("Enable integration", { exact: true }).check();
   await expect(page.locator(".radarr-state")).toHaveText("Current: Paused");
@@ -122,6 +177,7 @@ test("unsaved edits are visible and policy actions never submit or use draft set
   await expect(status).toHaveText("No unsaved changes");
   await expect(page.locator(".radarr-state")).toHaveText("Current: Enabled");
   await expect(page.locator(".radarr-draft-notice")).toHaveCount(0);
+  await expect(radarrTab(page, "Policy sync")).toHaveAttribute("aria-selected", "true");
   expect(saves).toHaveLength(1);
   expect(saves[0]).toMatchObject({ enabled: true, localTag: "home" });
 });
@@ -130,6 +186,7 @@ test("failed saves keep the draft and unsaved marker until retry succeeds", asyn
   const options = { saveFailure: true };
   const { saves } = await fixture(page, options);
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await page.getByLabel("Archive policy tag", { exact: true }).fill("archive");
   await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Radarr rejected the API key.");
@@ -137,6 +194,7 @@ test("failed saves keep the draft and unsaved marker until retry succeeds", asyn
   await expect(page.getByLabel("Archive policy tag", { exact: true })).toHaveValue("archive");
   await page.getByRole("tab", { name: "Sonarr Coming soon", exact: true }).click();
   await page.getByRole("tab", { name: "Radarr", exact: true }).click();
+  await expect(radarrTab(page, "Policy sync")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByLabel("Archive policy tag", { exact: true })).toHaveValue("archive");
   options.saveFailure = false;
   await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
@@ -144,23 +202,30 @@ test("failed saves keep the draft and unsaved marker until retry succeeds", asyn
   expect(saves).toHaveLength(2);
 });
 
-test("the shared save validates mapping fields and keeps the webhook secret optional", async ({ page }) => {
+test("the shared save reveals invalid fields on hidden tabs and keeps the webhook secret optional", async ({ page }) => {
   const { state, saves } = await fixture(page);
   state.settings.hasWebhookSecret = false;
   await page.goto(`${baseUrl}/settings/integrations`);
   await page.getByLabel("Enable integration", { exact: true }).check();
   const save = page.getByRole("button", { name: "Save Radarr settings", exact: true });
+  await openTab(page, "Webhooks");
   const secret = page.getByLabel("X-SRTL-Webhook-Secret", { exact: true });
   expect(await secret.evaluate((field: HTMLInputElement) => field.validity.valueMissing)).toBe(false);
   await secret.fill("fixture_only_webhook_secret_1234");
+  await openTab(page, "Folder mappings");
   const root = page.getByLabel("Radarr root folder");
   await root.fill("");
+  await expect(radarrTab(page, "Folder mappings")).toHaveAccessibleName("Folder mappings (unsaved changes)");
+  await openTab(page, "Webhooks");
   await save.click();
   expect(saves).toHaveLength(0);
+  await expect(radarrTab(page, "Folder mappings")).toHaveAttribute("aria-selected", "true");
+  await expect(root).toBeFocused();
   expect(await root.evaluate((field: HTMLInputElement) => field.validity.valueMissing)).toBe(true);
   await root.fill("/library");
   await save.click();
   await expect.poll(() => saves.length).toBe(1);
+  await openTab(page, "Webhooks");
   await expect(secret).toHaveValue("");
   await expect(secret).toHaveAttribute("placeholder", "Saved; leave blank to keep");
 });
@@ -171,6 +236,7 @@ test("integration tabs isolate settings and preserve edits with mouse and keyboa
   const radarr = page.getByRole("tab", { name: "Radarr", exact: true });
   const sonarr = page.getByRole("tab", { name: "Sonarr Coming soon", exact: true });
   await expect(radarr).toHaveAttribute("aria-selected", "true");
+  await openTab(page, "Policy sync");
   await page.getByLabel("Home NAS policy tag", { exact: true }).fill("home");
   await sonarr.click();
   await expect(page.getByRole("tabpanel", { name: "Radarr" })).toBeHidden();
@@ -199,9 +265,11 @@ test("automatic mapping previews exact matches and manual mode keeps editable va
   state.settings.mappingMode = "auto";
   state.settings.mappings = [];
   await page.goto(`${baseUrl}/settings/integrations`);
+  await page.getByRole("button", { name: "Test connection", exact: true }).click();
+  await expect(page.getByText("Radarr 6.0.0 connected")).toBeVisible();
+  await openTab(page, "Folder mappings");
   await expect(page.getByRole("button", { name: "Automatic", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByLabel("Radarr root folder")).toHaveCount(0);
-  await page.getByRole("button", { name: "Test connection", exact: true }).click();
   const preview = page.getByRole("region", { name: "Automatic folder matches" });
   await expect(preview).toContainText("Family Films");
   await expect(preview).toContainText("/library4k");
@@ -227,6 +295,7 @@ test("automatic mapping previews exact matches and manual mode keeps editable va
   await expect.poll(() => saves.length).toBe(2);
   expect(saves[1]?.mappingMode).toBe("auto");
   await page.reload();
+  await expect(radarrTab(page, "Folder mappings")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("button", { name: "Automatic", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(preview).toContainText("Saved matches");
 });
@@ -234,16 +303,24 @@ test("automatic mapping previews exact matches and manual mode keeps editable va
 test("automatic mapping exposes no-match and connection failure states without stale matches", async ({ page }) => {
   await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Folder mappings");
   await page.getByRole("button", { name: "Automatic", exact: true }).click();
+  await openTab(page, "Connection");
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
+  await openTab(page, "Folder mappings");
   const preview = page.getByRole("region", { name: "Automatic folder matches" });
   await expect(preview).toContainText("Family Films");
+  await openTab(page, "Connection");
   await page.getByLabel("Radarr URL", { exact: true }).fill("http://different:7878");
+  await openTab(page, "Folder mappings");
   await expect(preview).not.toContainText("Family Films");
+  await openTab(page, "Connection");
   await page.getByLabel("API key", { exact: true }).fill("newtestkey");
   await page.route("**/api/settings/radarr/test", (route) => route.fulfill({ json: { version: "6.0.0", rootFolders: ["/different/movies"], automaticMappings: [], unmatchedRootFolders: ["/different/movies"] } }));
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
+  await openTab(page, "Folder mappings");
   await expect(preview).toContainText("No exact folder matches found.");
+  await openTab(page, "Connection");
   await page.route("**/api/settings/radarr/test", (route) => route.fulfill({ status: 400, json: { error: "Radarr connection failed or timed out." } }));
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Radarr connection failed or timed out.");
@@ -255,10 +332,14 @@ test("connection preserves saved secrets and only applies edits after saving", a
   await page.goto(`${baseUrl}/settings/integrations`);
   await expect(page.getByRole("heading", { name: "Settings > Integrations" })).toBeVisible();
   await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
+  await openTab(page, "Folder mappings");
   await expect(page.getByLabel("SRTL symlink section").locator("option")).toHaveText(["Select section", "Family Films"]);
+  await openTab(page, "Policy sync");
   await page.getByLabel("Home NAS policy tag", { exact: true }).fill("home");
+  await openTab(page, "Connection");
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await expect(page.getByText("Radarr 6.0.0 connected")).toBeVisible();
+  await openTab(page, "Policy sync");
   await page.getByRole("button", { name: "Refresh preview" }).click();
   await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toHaveValue("home");
   expect(saves).toHaveLength(0);
@@ -266,6 +347,7 @@ test("connection preserves saved secrets and only applies edits after saving", a
   await page.getByRole("button", { name: "Save Radarr settings" }).click();
   await expect(page.locator(".radarr-state")).toHaveText("Current: Enabled");
   expect(saves[0]).toMatchObject({ localTag: "home", apiKey: "", webhookSecret: "", enabled: true });
+  await openTab(page, "Connection");
   await expect(page.getByLabel("API key", { exact: true })).toHaveValue("");
 });
 
@@ -274,17 +356,20 @@ test("unconfigured policy tags stay empty with examples and cannot enable sync",
   state.settings.localTag = "";
   state.settings.remoteTag = "";
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   const localTag = page.getByLabel("Home NAS policy tag", { exact: true });
   const remoteTag = page.getByLabel("Archive policy tag", { exact: true });
   await expect(localTag).toHaveValue("");
   await expect(localTag).toHaveAttribute("placeholder", "local");
   await expect(remoteTag).toHaveValue("");
   await expect(remoteTag).toHaveAttribute("placeholder", "remote");
+  await openTab(page, "Connection");
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await expect(page.getByText("Radarr 6.0.0 connected")).toBeVisible();
   await page.getByRole("button", { name: "Save Radarr settings" }).click();
   await expect.poll(() => saves.length).toBe(1);
   expect(saves[0]).toMatchObject({ localTag: "", remoteTag: "", enabled: false });
+  await openTab(page, "Policy sync");
   await page.getByRole("checkbox", { name: "Select My First Wedding (2020)" }).check();
   await expect(page.getByRole("button", { name: "Use SRTL policies" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Import existing tags" })).toBeDisabled();
@@ -375,6 +460,7 @@ for (const theme of ["dark", "light"]) {
 test("policy changes require selection and confirmation and show immediate progress", async ({ page }) => {
   const { writes } = await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await expect(page.getByRole("button", { name: "Use SRTL policies" })).toBeDisabled();
   await page.getByRole("checkbox", { name: "Select My First Wedding (2020)" }).check();
   await page.getByRole("button", { name: "Import existing tags" }).click();
@@ -396,6 +482,7 @@ test("policy changes require selection and confirmation and show immediate progr
 test("failed reconciliation retains selected titles and displays the error", async ({ page }) => {
   await fixture(page, { failure: true });
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await page.getByRole("checkbox", { name: "Select My First Wedding (2020)" }).check();
   await page.getByRole("button", { name: "Import existing tags" }).click();
   await page.getByRole("button", { name: "Confirm", exact: true }).click();
@@ -407,6 +494,7 @@ test("selection survives pagination and the requested batch excludes unchecked t
   const { state, writes } = await fixture(page);
   state.movies = Array.from({ length: 30 }, (_, index) => movie(index + 1, `Wedding Recording ${String(index + 1).padStart(2, "0")}`));
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await page.getByRole("button", { name: "Select page" }).click();
   await expect(page.getByText("25 selected", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Next page" }).click();
@@ -425,19 +513,23 @@ test("selection survives pagination and the requested batch excludes unchecked t
 test("copy monitoring default is saved with the shared configuration form", async ({ page }) => {
   const { saves } = await fixture(page);
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Copy monitoring");
   const toggle = page.getByLabel("Update Radarr monitoring after copies by default");
   await toggle.check();
   await expect(page.locator(".radarr-save-status")).toHaveText("Unsaved changes");
+  await expect(radarrTab(page, "Copy monitoring")).toHaveAccessibleName("Copy monitoring (unsaved changes)");
   await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
   await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
   expect(saves[0]).toMatchObject({ monitorOnCopy: true });
   await expect(toggle).toBeChecked();
+  await expect(radarrTab(page, "Copy monitoring")).toHaveAccessibleName("Copy monitoring");
 });
 
 test("select all matching selects every mapped filtered title across pages", async ({ page }) => {
   const { state } = await fixture(page);
   state.movies = [...Array.from({ length: 30 }, (_, index) => movie(index + 1, `Wedding Recording ${String(index + 1).padStart(2, "0")}`)), { ...movie(31, "Wedding Recording Unmapped"), section: null, itemName: null, status: "unmapped" }];
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await page.getByRole("button", { name: "Select all matching" }).click();
   await expect(page.getByText("30 selected", { exact: true })).toBeVisible();
 });
@@ -445,16 +537,19 @@ test("select all matching selects every mapped filtered title across pages", asy
 test("empty integration remains usable", async ({ page }) => {
   await fixture(page, { empty: true });
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Policy sync");
   await expect(page.getByText("No titles loaded.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Select page" })).toBeDisabled();
+  await openTab(page, "Activity");
   await expect(page.getByText("No webhook events received.")).toBeVisible();
   await expect(page.getByText("No monitoring updates yet.")).toBeVisible();
-  await expect(page.getByRole("button", { name: "Select page" })).toBeDisabled();
 });
 
 test("webhook activity opens the standard scan status window", async ({ page }) => {
   const { state } = await fixture(page);
   state.events[0] = { ...state.events[0]!, error: null, processedAt: "2026-09-01T12:00:01.000Z", jobId: 42, jobStatus: "completed" };
   await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Activity");
   await page.getByRole("button", { name: "View scan job #42" }).click();
   await expect(page.getByRole("dialog")).toContainText("Job #42");
   await expect(page.getByRole("dialog")).toContainText("Completed");
@@ -469,17 +564,26 @@ for (const theme of ["dark", "light"]) {
     for (const width of [1440, 390, 320]) {
       await page.setViewportSize({ width, height: 1000 });
       await page.goto(`${baseUrl}/settings/integrations`);
-      await expect(page.getByRole("heading", { name: "Policy synchronization" })).toBeVisible();
-      expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-      const fieldBounds = await page.locator(".radarr-fields input:not([type=checkbox]), .radarr-fields select").evaluateAll((fields) => fields.map((field) => {
-        const box = field.getBoundingClientRect();
-        return { left: box.left, right: box.right, width: box.width, height: box.height };
-      }));
-      expect(fieldBounds.every((box) => box.left >= 0 && box.right <= width && box.width >= 100 && box.height >= 38)).toBe(true);
-      const previous = await page.getByRole("button", { name: "Previous page" }).boundingBox();
-      const next = await page.getByRole("button", { name: "Next page" }).boundingBox();
-      expect(previous?.y).toBe(next?.y);
-      await page.screenshot({ path: testInfo.outputPath(`radarr-${theme}-${width}.png`), fullPage: true });
+      const tablist = await page.getByRole("tablist", { name: "Radarr settings" }).boundingBox();
+      expect(tablist!.x).toBeGreaterThanOrEqual(0);
+      expect(tablist!.x + tablist!.width).toBeLessThanOrEqual(width);
+      for (const name of ["Connection", "Folder mappings", "Policy sync", "Copy monitoring", "Webhooks", "Activity"]) {
+        await openTab(page, name);
+        await expect(page.getByRole("button", { name: "Save Radarr settings", exact: true })).toBeVisible();
+        expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+        const fieldBounds = await page.locator(".radarr-fields input:not([type=checkbox]):visible, .radarr-fields select:visible").evaluateAll((fields) => fields.map((field) => {
+          const box = field.getBoundingClientRect();
+          return { left: box.left, right: box.right, width: box.width, height: box.height };
+        }));
+        expect(fieldBounds.every((box) => box.left >= 0 && box.right <= width && box.width >= 100 && box.height >= 38)).toBe(true);
+        if (name === "Policy sync") {
+          await expect(page.getByRole("heading", { name: "Policy synchronization" })).toBeVisible();
+          const previous = await page.getByRole("button", { name: "Previous page" }).boundingBox();
+          const next = await page.getByRole("button", { name: "Next page" }).boundingBox();
+          expect(previous?.y).toBe(next?.y);
+        }
+        await page.screenshot({ path: testInfo.outputPath(`radarr-${theme}-${width}-${name.toLowerCase().replaceAll(" ", "-")}.png`), fullPage: true });
+      }
     }
   });
 }

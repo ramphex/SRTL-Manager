@@ -3398,26 +3398,46 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 }
 
 .integration-settings { min-width: 0; }
-.integration-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; }
-.integration-tabs button { min-height: 44px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 16px; }
-.integration-tabs button[aria-selected="true"] { color: var(--text-strong); border-bottom-color: var(--good); }
-.integration-tabs small { font-size: 11px; font-weight: 400; }
+.settings-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; overflow-x: auto; scrollbar-width: thin; }
+.settings-tabs button { flex: 0 0 auto; min-height: 44px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 16px; white-space: nowrap; }
+.settings-tabs button:hover { background: transparent; color: var(--text-strong); }
+.settings-tabs button[aria-selected="true"] { color: var(--text-strong); border-bottom-color: var(--good); }
+.settings-tabs small { font-size: 11px; font-weight: 400; }
+.settings-tab-unsaved { flex: 0 0 auto; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
 .integration-settings > [role="tabpanel"] > h2 { font-size: 17px; }
-.radarr-settings { display: grid; gap: 28px; min-width: 0; }
+.radarr-settings { display: grid; gap: 24px; min-width: 0; }
+.radarr-settings .muted { color: var(--muted); font-size: 13px; line-height: 1.5; }
+.radarr-integration-header { display: grid; gap: 12px; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 16px; }
+.radarr-integration-header .radarr-heading { margin-bottom: 0; }
 .radarr-integration-header h2 { display: flex; align-items: center; gap: 8px; font-size: 18px; margin: 0; }
+.radarr-integration-header .error { margin: 0; }
 .radarr-heading-identity { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
 .radarr-integration-header .radarr-setup { margin-bottom: 0; }
-.radarr-section { min-width: 0; border-top: 1px solid var(--border); padding-top: 20px; }
-.radarr-section h2 { display: flex; align-items: center; gap: 8px; font-size: 17px; margin: 0; }
-.radarr-section h3 { font-size: 14px; margin: 4px 0 0; }
-.radarr-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 16px; }
+.radarr-enable { position: relative; }
+/* Anchor the help to the row, not the trigger, so it opens rightward from the left edge at every width. */
+.radarr-enable .info-tooltip { position: static; }
+.radarr-integration-header .radarr-enable .info-tooltip-panel { left: 0; right: auto; }
+.radarr-enable .radarr-toggle { color: var(--text-strong); font-weight: 600; }
+.radarr-tabs-area { min-width: 0; }
+.radarr-tabs { margin-bottom: 4px; }
+.radarr-tabs button { display: inline-flex; align-items: center; gap: 7px; min-height: 42px; padding: 9px 14px; font-size: 14px; }
+.radarr-tab-panel { min-width: 0; }
+.radarr-section { min-width: 0; padding-top: 20px; }
+.radarr-section + .radarr-section { border-top: 1px solid var(--border); margin-top: 28px; padding-top: 24px; }
+.radarr-section h2 { display: flex; align-items: center; gap: 8px; font-size: 16px; color: var(--text-strong); margin: 0; }
+.radarr-heading { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; margin-bottom: 4px; }
+.radarr-lede { color: var(--muted); font-size: 13px; line-height: 1.5; margin: 0 0 18px; max-width: 75ch; }
+.radarr-option { display: grid; gap: 6px; }
+.radarr-option .muted { margin: 0 0 0 28px; max-width: 75ch; }
 .radarr-state { color: var(--muted); font-size: 13px; }
 .radarr-fields { display: grid; min-width: 0; padding: 0; margin: 0; border: 0; gap: 16px; }
 .radarr-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .radarr-fields label { display: grid; min-width: 0; gap: 7px; font-size: 13px; }
 .radarr-field { display: grid; gap: 7px; min-width: 0; }
 .radarr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
-.radarr-fields .radarr-field-label label { display: block; }
+.radarr-fields .radarr-field-label label { display: block; color: var(--text-strong); font-weight: 600; }
+.radarr-mapping label { color: var(--text-strong); font-weight: 600; }
+.radarr-mapping label :is(input, select) { font-weight: 400; }
 .radarr-help-heading { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 .radarr-settings .info-tooltip-trigger { height: 28px; min-height: 28px; width: 28px; background: transparent; border-color: transparent; }
 .radarr-settings .info-tooltip-panel { font-weight: 400; }
@@ -3429,7 +3449,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-setup li + li { margin-top: 8px; }
 .radarr-setup code { overflow-wrap: anywhere; }
 .radarr-fields input:not([type="checkbox"]), .radarr-fields select { width: 100%; min-width: 0; height: 40px; }
-.radarr-toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.radarr-toggle, .radarr-fields .radarr-toggle { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--text-strong); }
 .radarr-toggle input { flex: 0 0 auto; }
 .radarr-copy-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; }
 .radarr-copy-toggle input { flex: 0 0 auto; margin: 0; }
@@ -3465,14 +3485,13 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-pagination-controls { display: flex; flex: 0 0 auto; gap: 8px; margin-left: auto; }
 .radarr-confirmation { border-left: 3px solid var(--border); padding: 0 14px; margin-top: 16px; }
 .radarr-confirmation p { font-size: 14px; line-height: 1.5; }
-.radarr-policy-fields { margin-bottom: 16px; }
 .radarr-draft-notice { border-left: 2px solid var(--warn); padding-left: 10px; font-size: 13px; color: var(--muted-strong); }
 .radarr-webhook-setup { margin: 16px 0; }
 .radarr-webhook-setup p { max-width: 85ch; }
-.radarr-webhook-activity { margin-top: 24px; }
-.radarr-save-area { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; border-top: 1px solid var(--border); padding-top: 20px; }
-.radarr-save-status { font-size: 13px; color: var(--muted-strong); }
-.radarr-save-area .error { flex-basis: 100%; margin: 0; }
+.radarr-save-area { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
+.radarr-save-status { font-size: 13px; color: var(--muted); }
+.radarr-save-status-unsaved { display: inline-flex; align-items: center; gap: 7px; color: var(--warn); font-weight: 600; }
+.radarr-save-status-unsaved::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 
 @media (max-width: 700px) {
   .radarr-grid { grid-template-columns: minmax(0, 1fr); }
