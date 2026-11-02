@@ -294,6 +294,7 @@ test("automatic mapping previews exact matches and manual mode keeps editable va
   await page.getByRole("button", { name: "Save Radarr settings" }).click();
   await expect.poll(() => saves.length).toBe(2);
   expect(saves[1]?.mappingMode).toBe("auto");
+  await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
   await page.reload();
   await expect(radarrTab(page, "Folder mappings")).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("button", { name: "Automatic", exact: true })).toHaveAttribute("aria-pressed", "true");
