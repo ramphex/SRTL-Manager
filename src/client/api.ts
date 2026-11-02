@@ -45,7 +45,7 @@ import type {
   OrphanReview
 } from "../shared/types";
 
-import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrSettingsInput, RadarrState } from "../shared/radarr";
+import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 
 type ApiErrorPayload = {
   error?: string;
@@ -111,12 +111,16 @@ export const api = {
   getAuditSettings: () => request<AuditSettings>("/api/settings/audit"),
   saveAuditSettings: (body: AuditSettings) => request<AuditSettings>("/api/settings/audit", { method: "PUT", body: JSON.stringify(body) }),
   getAdvancedSettings: () => request<AdvancedSettings>("/api/settings/advanced"),
-  getRadarr: () => request<RadarrState>("/api/settings/radarr"),
+  getRadarrOverview: () => request<RadarrOverview>("/api/settings/radarr"),
+  getRadarr: (instanceId: string) => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}`),
   getRadarrCopyDefaults: () => request<RadarrCopyDefaults>("/api/settings/radarr/copy-defaults"),
-  saveRadarr: (body: RadarrSettingsInput) => request<RadarrState>("/api/settings/radarr", { method: "PUT", body: JSON.stringify(body) }),
-  testRadarr: (body: RadarrSettingsInput) => request<RadarrConnectionTest>("/api/settings/radarr/test", { method: "POST", body: JSON.stringify(body) }),
-  refreshRadarr: () => request<RadarrState>("/api/settings/radarr/refresh", { method: "POST" }),
-  reconcileRadarr: (movieIds: number[], action: "use_srtl" | "import_tags") => request<RadarrState>("/api/settings/radarr/reconcile", { method: "POST", body: JSON.stringify({ movieIds, action }) }),
+  createRadarrInstance: (name: string) => request<RadarrState>("/api/settings/radarr/instances", { method: "POST", body: JSON.stringify({ name }) }),
+  renameRadarrInstance: (instanceId: string, name: string) => request<RadarrOverview>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/rename`, { method: "POST", body: JSON.stringify({ name }) }),
+  removeRadarrInstance: (instanceId: string) => request<RadarrOverview>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}`, { method: "DELETE" }),
+  saveRadarr: (instanceId: string, body: RadarrSettingsInput) => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}`, { method: "PUT", body: JSON.stringify(body) }),
+  testRadarr: (instanceId: string, body: RadarrSettingsInput) => request<RadarrConnectionTest>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/test`, { method: "POST", body: JSON.stringify(body) }),
+  refreshRadarr: (instanceId: string) => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/refresh`, { method: "POST" }),
+  reconcileRadarr: (instanceId: string, movieIds: number[], action: "use_srtl" | "import_tags") => request<RadarrState>(`/api/settings/radarr/instances/${encodeURIComponent(instanceId)}/reconcile`, { method: "POST", body: JSON.stringify({ movieIds, action }) }),
   saveAdvancedSettings: (body: AdvancedSettings) => request<AdvancedSettings>("/api/settings/advanced", { method: "PUT", body: JSON.stringify(body) }),
   getUserPreferences: () => request<UserPreferences>("/api/settings/user-preferences"),
   saveUserPreferences: (body: UserPreferences) => request<UserPreferences>("/api/settings/user-preferences", { method: "PUT", body: JSON.stringify(body) }),

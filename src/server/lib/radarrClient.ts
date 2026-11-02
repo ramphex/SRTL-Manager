@@ -5,7 +5,7 @@ import { isIP } from "node:net";
 import { z } from "zod";
 
 export class RadarrError extends Error {
-  readonly statusCode = 400;
+  readonly statusCode: number = 400;
 }
 
 export const radarrMovieSchema = z.object({

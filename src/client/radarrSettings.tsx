@@ -1,8 +1,8 @@
-import { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { useRef, useState, type FormEvent, type MouseEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import { useIsMutating, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronLeft, ChevronRight, Eye, LoaderCircle, Plug, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
-import type { RadarrMovieStatus, RadarrSettingsInput, RadarrState } from "../shared/radarr";
+import { ArrowDownToLine, ArrowUpFromLine, Check, ChevronLeft, ChevronRight, Eye, LoaderCircle, Pencil, Plug, Plus, RefreshCw, Save, Trash2, X } from "lucide-react";
+import type { RadarrInstanceSummary, RadarrMovieStatus, RadarrOverview, RadarrSettings, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 import type { SectionSettings } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip } from "./App";
@@ -10,7 +10,8 @@ import { formatDate, storagePolicyLabel, useStorageLocations, type ScanStatusPro
 import { ScanStatusDialog } from "./jobPresentation";
 import { SettingsTabs } from "./settingsTabs";
 
-const queryKey = ["radarr"];
+const overviewKey = ["radarr"];
+const instanceKey = (instanceId: string) => ["radarr", "instance", instanceId];
 const policyMutationKey = ["radarr", "policies"];
 const settingsFormId = "radarr-settings-form";
 const selectionLimit = 1000;
@@ -40,12 +41,61 @@ function readStoredTab(): RadarrTab {
   }
 }
 
+const instanceStorageKey = "srtl-radarr-instance";
+
+function readStoredInstance(): string | null {
+  try {
+    return window.localStorage.getItem(instanceStorageKey);
+  } catch {
+    return null;
+  }
+}
+
+function storeInstance(instanceId: string) {
+  try {
+    window.localStorage.setItem(instanceStorageKey, instanceId);
+  } catch {
+    // The selection still applies for this page view when storage is restricted.
+  }
+}
+
+function sameMappings(left: RadarrSettingsInput["mappings"], right: RadarrSettingsInput["mappings"]) {
+  return left.length === right.length && left.every((mapping, index) => mapping.rootPath === right[index]?.rootPath && mapping.section === right[index]?.section);
+}
+
+function unsavedTabsFor(draft: RadarrSettingsInput, settings: RadarrSettings): Record<RadarrTab, boolean> {
+  return {
+    connection: draft.baseUrl !== settings.baseUrl || Boolean(draft.apiKey),
+    mappings: draft.mappingMode !== settings.mappingMode || (draft.mappingMode === "manual" && !sameMappings(draft.mappings, settings.mappings)),
+    policy: draft.localTag !== settings.localTag || draft.remoteTag !== settings.remoteTag,
+    monitoring: draft.monitorOnCopy !== settings.monitorOnCopy,
+    webhooks: Boolean(draft.webhookSecret),
+    activity: false
+  };
+}
+
+function hasUnsavedDraft(draft: RadarrSettingsInput | undefined, settings: RadarrSettings) {
+  return Boolean(draft && draft.revision === settings.revision && (draft.enabled !== settings.enabled || Object.values(unsavedTabsFor(draft, settings)).some(Boolean)));
+}
+
+function UnsavedMarker() {
+  return <span className="settings-tab-unsaved" title="Unsaved changes"><span className="sr-only">(unsaved changes)</span></span>;
+}
+
 export function RadarrSettingsPanel({ active }: { active: boolean }) {
-  const state = useQuery({ queryKey, queryFn: api.getRadarr, refetchInterval: active ? 5000 : false });
+  const queryClient = useQueryClient();
+  const overview = useQuery({ queryKey: overviewKey, queryFn: api.getRadarrOverview, refetchInterval: active ? 5000 : false });
   const sections = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
   const [scanPrompt, setScanPrompt] = useState<ScanStatusPrompt | null>(null);
+  const [requestedInstance, setRequestedInstance] = useState<string | null>(readStoredInstance);
+  // Drafts live here so switching instances keeps each one's unsaved edits; a draft only applies to the revision it was made from.
+  const [drafts, setDrafts] = useState<Record<string, RadarrSettingsInput>>({});
   // Held above the configuration because saving remounts it with the new revision.
   const [tab, setTab] = useState<RadarrTab>(readStoredTab);
+  const instances = overview.data?.instances ?? [];
+  const selected = instances.find((instance) => instance.settings.id === requestedInstance) ?? instances[0];
+  const selectedId = selected?.settings.id ?? null;
+  const state = useQuery({ queryKey: instanceKey(selectedId ?? ""), queryFn: () => api.getRadarr(selectedId!), enabled: Boolean(selectedId), refetchInterval: active ? 5000 : false });
   const selectTab = (next: RadarrTab) => {
     setTab(next);
     try {
@@ -54,51 +104,146 @@ export function RadarrSettingsPanel({ active }: { active: boolean }) {
       // The selected tab still applies for this page view when storage is restricted.
     }
   };
-  if (state.isLoading || sections.isLoading) return <p role="status">Loading integrations...</p>;
-  if (!state.data || !sections.data) return <p className="error" role="alert">{state.error?.message ?? sections.error?.message ?? "Integration settings unavailable."}</p>;
-  return <>
-    {state.error ? <p className="error" role="alert">{state.error.message}</p> : null}
-    <RadarrConfiguration key={state.data.settings.revision} state={state.data} sections={sections.data} tab={tab} onTabSelect={selectTab} onScanJobSelect={setScanPrompt} />
+  const selectInstance = (instanceId: string) => {
+    setRequestedInstance(instanceId);
+    storeInstance(instanceId);
+  };
+  const forgetInstance = (instanceId: string) => {
+    setDrafts(({ [instanceId]: _removed, ...rest }) => rest);
+    queryClient.removeQueries({ queryKey: instanceKey(instanceId) });
+  };
+  if (overview.isLoading || sections.isLoading) return <p role="status">Loading integrations...</p>;
+  if (!overview.data || !sections.data) return <p className="error" role="alert">{overview.error?.message ?? sections.error?.message ?? "Integration settings unavailable."}</p>;
+  const current = state.data && state.data.settings.id === selectedId ? state.data : null;
+  return <div className="radarr-settings">
+    {overview.error ? <p className="error" role="alert">{overview.error.message}</p> : null}
+    <RadarrInstanceList overview={overview.data} sections={sections.data} selectedId={selectedId} drafts={drafts} onSelect={selectInstance} onCreated={(created) => { selectInstance(created.settings.id); selectTab("connection"); }} />
+    {selected && current ? <>
+      {state.error ? <p className="error" role="alert">{state.error.message}</p> : null}
+      <RadarrConfiguration
+        key={`${current.settings.id}:${current.settings.revision}`}
+        state={current}
+        instances={instances}
+        sections={sections.data}
+        draft={drafts[current.settings.id]?.revision === current.settings.revision ? drafts[current.settings.id]! : null}
+        onDraftChange={(draft) => setDrafts((all) => ({ ...all, [current.settings.id]: draft }))}
+        onSaved={() => setDrafts(({ [current.settings.id]: _saved, ...rest }) => rest)}
+        onRemoved={(next) => { forgetInstance(current.settings.id); const remaining = next.instances[0]?.settings.id; if (remaining) selectInstance(remaining); }}
+        tab={tab}
+        onTabSelect={selectTab}
+        onScanJobSelect={setScanPrompt}
+      />
+    </> : selected ? state.error ? <p className="error" role="alert">{state.error.message}</p> : <p role="status">Loading {selected.settings.name}...</p> : null}
     <ScanStatusDialog prompt={scanPrompt} onClose={() => setScanPrompt(null)} />
-  </>;
+  </div>;
+}
+
+function instanceStatus(summary: RadarrInstanceSummary): { label: string; kind: "enabled" | "paused" | "error" | "new" } {
+  const { settings } = summary;
+  if (settings.lastError) return { label: "Error", kind: "error" };
+  if (settings.enabled) return { label: "Enabled", kind: "enabled" };
+  return settings.hasApiKey ? { label: "Paused", kind: "paused" } : { label: "Not connected", kind: "new" };
+}
+
+function RadarrInstanceList({ overview, sections, selectedId, drafts, onSelect, onCreated }: { overview: RadarrOverview; sections: SectionSettings; selectedId: string | null; drafts: Record<string, RadarrSettingsInput>; onSelect: (instanceId: string) => void; onCreated: (state: RadarrState) => void }) {
+  const queryClient = useQueryClient();
+  const [adding, setAdding] = useState(false);
+  const [name, setName] = useState("");
+  const create = useMutation({
+    mutationFn: () => api.createRadarrInstance(name.trim()),
+    onSuccess: (state) => {
+      queryClient.setQueryData(instanceKey(state.settings.id), state);
+      void queryClient.invalidateQueries({ queryKey: overviewKey, exact: true });
+      setAdding(false);
+      setName("");
+      onCreated(state);
+    }
+  });
+  const atLimit = overview.instances.length >= overview.limit;
+  const submit = (event: FormEvent) => { event.preventDefault(); if (!create.isPending) create.mutate(); };
+  return <section className="radarr-instances" aria-labelledby="radarr-instances-heading">
+    <div className="radarr-heading">
+      <div className="radarr-help-heading"><h2 id="radarr-instances-heading"><Plug size={18} />Radarr instances</h2><InfoTooltip label="About Radarr instances">Connect each Radarr you run, such as 1080p, 4K, anime, or remuxes. Every instance has its own connection, policy tags, and webhook, and owns the SRTL folders mapped to it. A folder can belong to only one instance. Storage policies belong to titles, so every instance holding a title tags it the same way.</InfoTooltip></div>
+      <button type="button" className="secondary" disabled={atLimit || adding} title={atLimit ? `Up to ${overview.limit} instances are supported` : undefined} onClick={() => { setAdding(true); create.reset(); }}><Plus size={16} />Add instance</button>
+    </div>
+    {adding ? <form className="radarr-instance-form" aria-label="Add Radarr instance" onSubmit={submit}>
+      <label htmlFor="radarr-new-instance-name">Instance name</label>
+      <div className="radarr-toolbar">
+        <input id="radarr-new-instance-name" required maxLength={60} autoFocus value={name} placeholder="Radarr 4K" onChange={(event) => setName(event.target.value)} />
+        <button type="submit" disabled={create.isPending || !name.trim()}>{create.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />}Add</button>
+        <button type="button" className="secondary" disabled={create.isPending} onClick={() => { setAdding(false); setName(""); }}><X size={16} />Cancel</button>
+      </div>
+      {create.error ? <p className="error" role="alert">{create.error.message}</p> : null}
+    </form> : null}
+    {overview.instances.length ? <ul className="radarr-instance-list">
+      {overview.instances.map((summary) => {
+        const { settings } = summary;
+        const status = instanceStatus(summary);
+        const folders = settings.mappings.map((mapping) => sections.sectionTitles?.[mapping.section] ?? mapping.section);
+        const unsaved = hasUnsavedDraft(drafts[settings.id], settings);
+        return <li key={settings.id}>
+          <button type="button" className="radarr-instance" aria-current={settings.id === selectedId ? "true" : undefined} onClick={() => onSelect(settings.id)}>
+            <span className="radarr-instance-title"><span className="radarr-instance-name" title={settings.name}>{settings.name}</span>{unsaved ? <UnsavedMarker /> : null}<span className={`radarr-instance-status radarr-instance-status-${status.kind}`}>{status.label}</span></span>
+            <span className="radarr-instance-detail">{folders.length ? folders.join(", ") : "No folders mapped"}</span>
+            <span className={`radarr-instance-detail${settings.lastError ? " error" : ""}`}>{settings.lastError ?? (settings.lastRefreshAt ? `Synced ${formatDate(settings.lastRefreshAt)}` : "Not synced yet")}{!settings.lastError && summary.review ? ` - ${summary.review} need review` : ""}</span>
+          </button>
+        </li>;
+      })}
+    </ul> : <p className="muted">No Radarr instances yet. Add one for each Radarr you run, such as 1080p, 4K, or anime.</p>}
+    {atLimit ? <p className="muted">SRTL supports up to {overview.limit} Radarr instances.</p> : null}
+  </section>;
 }
 
 function RadarrTabPanel({ tab, active, children }: { tab: RadarrTab; active: RadarrTab; children: ReactNode }) {
   return <div role="tabpanel" id={`radarr-panel-${tab}`} aria-labelledby={`radarr-tab-${tab}`} data-tab={tab} hidden={tab !== active} className="radarr-tab-panel">{children}</div>;
 }
 
-function RadarrConfiguration({ state, sections, tab, onTabSelect, onScanJobSelect }: { state: RadarrState; sections: SectionSettings; tab: RadarrTab; onTabSelect: (tab: RadarrTab) => void; onScanJobSelect: (prompt: ScanStatusPrompt) => void }) {
+function RadarrConfiguration({ state, instances, sections, draft: savedDraft, onDraftChange, onSaved, onRemoved, tab, onTabSelect, onScanJobSelect }: { state: RadarrState; instances: RadarrInstanceSummary[]; sections: SectionSettings; draft: RadarrSettingsInput | null; onDraftChange: (draft: RadarrSettingsInput) => void; onSaved: () => void; onRemoved: (overview: RadarrOverview) => void; tab: RadarrTab; onTabSelect: (tab: RadarrTab) => void; onScanJobSelect: (prompt: ScanStatusPrompt) => void }) {
   const { settings } = state;
   const queryClient = useQueryClient();
   const locations = useStorageLocations();
   const policyBusy = useIsMutating({ mutationKey: policyMutationKey }) > 0;
   const formRef = useRef<HTMLFormElement>(null);
-  const [draft, setDraft] = useState<RadarrSettingsInput>({ ...settings, apiKey: "", webhookSecret: "" });
+  const draft: RadarrSettingsInput = savedDraft ?? { ...settings, apiKey: "", webhookSecret: "" };
+  const setDraft = (change: (current: RadarrSettingsInput) => RadarrSettingsInput) => onDraftChange(change(draft));
   const update = <K extends keyof RadarrSettingsInput>(key: K, value: RadarrSettingsInput[K]) => {
     if (key === "baseUrl" || key === "apiKey") testConnection.reset();
     setDraft((current) => ({ ...current, [key]: value }));
   };
   const input = { ...draft, mappings: draft.mappingMode === "auto" ? settings.mappings : draft.mappings };
-  const testConnection = useMutation({ mutationFn: () => api.testRadarr({ ...input, enabled: false }) });
-  const save = useMutation({ mutationFn: () => api.saveRadarr(input), onSuccess: (state) => {
-    queryClient.setQueryData(queryKey, state);
+  const testConnection = useMutation({ mutationFn: () => api.testRadarr(settings.id, { ...input, enabled: false }) });
+  const save = useMutation({ mutationFn: () => api.saveRadarr(settings.id, input), onSuccess: (state) => {
+    onSaved();
+    queryClient.setQueryData(instanceKey(settings.id), state);
+    void queryClient.invalidateQueries({ queryKey: overviewKey, exact: true });
     void queryClient.invalidateQueries({ queryKey: ["radarr-copy-defaults"] });
   } });
-  const busy = save.isPending || testConnection.isPending;
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const rename = useMutation({ mutationFn: (name: string) => api.renameRadarrInstance(settings.id, name), onSuccess: (overview) => {
+    queryClient.setQueryData(overviewKey, overview);
+    void queryClient.invalidateQueries({ queryKey: instanceKey(settings.id) });
+    void queryClient.invalidateQueries({ queryKey: ["radarr-copy-defaults"] });
+    setRenaming(null);
+  } });
+  const [confirmRemove, setConfirmRemove] = useState(false);
+  const remove = useMutation({ mutationFn: () => api.removeRadarrInstance(settings.id), onSuccess: (overview) => {
+    queryClient.setQueryData(overviewKey, overview);
+    void queryClient.invalidateQueries({ queryKey: ["radarr-copy-defaults"] });
+    onRemoved(overview);
+  } });
+  const busy = save.isPending || testConnection.isPending || rename.isPending || remove.isPending;
   const fieldsDisabled = busy || policyBusy;
-  const unsavedTabs: Record<RadarrTab, boolean> = {
-    connection: draft.baseUrl !== settings.baseUrl || Boolean(draft.apiKey),
-    mappings: draft.mappingMode !== settings.mappingMode || (draft.mappingMode === "manual" && (draft.mappings.length !== settings.mappings.length || draft.mappings.some((mapping, index) => mapping.rootPath !== settings.mappings[index]?.rootPath || mapping.section !== settings.mappings[index]?.section))),
-    policy: draft.localTag !== settings.localTag || draft.remoteTag !== settings.remoteTag,
-    monitoring: draft.monitorOnCopy !== settings.monitorOnCopy,
-    webhooks: Boolean(draft.webhookSecret),
-    activity: false
-  };
+  const unsavedTabs = unsavedTabsFor(draft, settings);
   const hasUnsavedChanges = draft.enabled !== settings.enabled || Object.values(unsavedTabs).some(Boolean);
-  const tabs = radarrTabs.map(({ key, label }) => ({ key, label: <>{label}{unsavedTabs[key] ? <span className="settings-tab-unsaved" title="Unsaved changes"><span className="sr-only">(unsaved changes)</span></span> : null}</> }));
+  const tabs = radarrTabs.map(({ key, label }) => ({ key, label: <>{label}{unsavedTabs[key] ? <UnsavedMarker /> : null}</> }));
   const configuredSections = sections.sections.filter((section) => sections.sectionTypes?.[section] === "movies");
+  // Folders mapped by other instances cannot be mapped here.
+  const owners = new Map(instances.filter((instance) => instance.settings.id !== settings.id).flatMap((instance) => instance.settings.mappings.map((mapping) => [mapping.section, instance.settings.name] as const)));
+  const availableSections = configuredSections.filter((section) => !owners.has(section));
+  const sectionTitle = (section: string) => sections.sectionTitles?.[section] ?? section;
   const detectedMappings = testConnection.data?.automaticMappings ?? (settings.mappingMode === "auto" && draft.baseUrl === settings.baseUrl && !draft.apiKey ? settings.mappings : []);
-  const webhookUrl = `${window.location.origin}/api/integrations/radarr/webhook`;
+  const webhookPath = `/api/integrations/radarr/${settings.id}/webhook`;
+  const webhookUrl = `${window.location.origin}${webhookPath}`;
   const revealInvalidField = (event: MouseEvent<HTMLButtonElement>) => {
     const field = Array.from(formRef.current?.elements ?? []).find((element): element is HTMLInputElement | HTMLSelectElement => (element instanceof HTMLInputElement || element instanceof HTMLSelectElement) && element.willValidate && !element.validity.valid);
     const panel = field?.closest<HTMLElement>('[role="tabpanel"]');
@@ -109,27 +254,43 @@ function RadarrConfiguration({ state, sections, tab, onTabSelect, onScanJobSelec
     field.focus();
     field.reportValidity();
   };
-  return <div className="radarr-settings">
+  return <div className="radarr-instance-settings">
     {/* Only configuration controls belong to this form; policy actions remain independent. */}
     <form ref={formRef} id={settingsFormId} hidden onSubmit={(event) => { event.preventDefault(); if (!fieldsDisabled) save.mutate(); }} />
     <header className="radarr-integration-header">
       <div className="radarr-heading">
-        <div className="radarr-heading-identity"><h2><Plug size={18} />Radarr</h2><span className="radarr-state">Current: {settings.enabled ? "Enabled" : settings.hasApiKey ? "Paused" : "Not connected"}</span></div>
+        {renaming !== null ? <form className="radarr-rename" aria-label={`Rename ${settings.name}`} onSubmit={(event) => { event.preventDefault(); if (!busy) rename.mutate(renaming.trim()); }}>
+          <label className="sr-only" htmlFor="radarr-instance-name">Instance name</label>
+          <input id="radarr-instance-name" required maxLength={60} autoFocus value={renaming} onChange={(event) => setRenaming(event.target.value)} />
+          <button type="submit" disabled={busy || !renaming.trim()}>{rename.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />}Save name</button>
+          <button type="button" className="secondary" disabled={rename.isPending} onClick={() => { setRenaming(null); rename.reset(); }}><X size={16} />Cancel</button>
+        </form> : <div className="radarr-heading-identity">
+          <h2><Plug size={18} />{settings.name}</h2>
+          <span className="radarr-state">Current: {settings.enabled ? "Enabled" : settings.hasApiKey ? "Paused" : "Not connected"}</span>
+          <button type="button" className="secondary icon-only" title={`Rename ${settings.name}`} aria-label={`Rename ${settings.name}`} disabled={busy} onClick={() => { setRenaming(settings.name); setConfirmRemove(false); }}><Pencil size={16} /></button>
+          <button type="button" className="secondary icon-only" title={`Remove ${settings.name}`} aria-label={`Remove ${settings.name}`} disabled={busy} onClick={() => { setConfirmRemove(true); setRenaming(null); }}><Trash2 size={16} /></button>
+        </div>}
         <div className="radarr-save-area">
           <span className={`radarr-save-status${hasUnsavedChanges && !save.isPending ? " radarr-save-status-unsaved" : ""}`} role="status">{save.isPending ? "Saving settings..." : hasUnsavedChanges ? "Unsaved changes" : settings.hasApiKey ? "No unsaved changes" : "Not configured"}</span>
-          <button type="submit" form={settingsFormId} disabled={fieldsDisabled} onClick={revealInvalidField}>{save.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Save size={16} />}Save Radarr settings</button>
+          <button type="submit" form={settingsFormId} disabled={fieldsDisabled} onClick={revealInvalidField}>{save.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Save size={16} />}Save {settings.name} settings</button>
         </div>
       </div>
+      {rename.error ? <p className="error" role="alert">{rename.error.message}</p> : null}
+      {confirmRemove ? <div className="radarr-confirmation" role="group" aria-label={`Confirm removing ${settings.name}`}>
+        <p>Remove {settings.name}? SRTL forgets its connection, folder mappings, preview, and activity, and stops updating it. Tags and monitoring in Radarr stay exactly as they are. Its folders become free for another instance.</p>
+        <div className="radarr-toolbar"><button type="button" className="danger" disabled={busy} onClick={() => remove.mutate()}>{remove.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Trash2 size={16} />}Remove instance</button><button type="button" className="secondary" disabled={remove.isPending} onClick={() => { setConfirmRemove(false); remove.reset(); }}><X size={16} />Cancel</button></div>
+        {remove.error ? <p className="error" role="alert">{remove.error.message}</p> : null}
+      </div> : null}
       {save.error ? <p className="error" role="alert">{save.error.message}</p> : null}
-      <div className="radarr-help-heading radarr-enable"><label className="radarr-toggle"><input form={settingsFormId} type="checkbox" disabled={fieldsDisabled} checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} />Enable integration</label><InfoTooltip label="About enabling integration">Off by default. Save Radarr settings to apply this change. Enabling keeps your two policy tags in Radarr matched to SRTL policies, applies copy monitoring updates, and processes webhooks when a secret is saved. Pausing stops future processing, but does not terminate scan jobs already queued.</InfoTooltip></div>
+      <div className="radarr-help-heading radarr-enable"><label className="radarr-toggle"><input form={settingsFormId} type="checkbox" disabled={fieldsDisabled} checked={draft.enabled} onChange={(event) => update("enabled", event.target.checked)} />Enable integration</label><InfoTooltip label="About enabling integration">Off by default. Save this instance's settings to apply this change. Enabling keeps its two policy tags in Radarr matched to SRTL policies, applies copy monitoring updates, and processes webhooks when a secret is saved. Pausing stops future processing, but does not terminate scan jobs already queued.</InfoTooltip></div>
       <details className="radarr-setup">
         <summary>Setup guide and requirements</summary>
         <ol>
           <li><strong>Connect:</strong> enter a URL reachable from the SRTL API and worker, plus the API key from Radarr Settings &gt; General &gt; Security. These are required to test or save a paused connection.</li>
-          <li><strong>Prepare synchronization:</strong> Automatic mapping detects identical root paths when you test or save. Review the matches, or select Manual if container paths differ. At least one mapping and two distinct policy tags are required before enabling. Tag placeholders are examples, not active settings.</li>
+          <li><strong>Prepare synchronization:</strong> Automatic mapping detects identical root paths when you test or save, skipping folders another instance already maps. Review the matches, or select Manual if container paths differ. At least one mapping and two distinct policy tags are required before enabling. Tag placeholders are examples, not active settings.</li>
           <li><strong>Enable:</strong> titles without either policy tag are tagged from their SRTL policy right away. Titles that already carry the other policy tag wait in Needs review: change their policy in SRTL, or select them and choose Use SRTL policies or Import existing tags. Every policy you set afterward updates Radarr. Other tags are never removed, and no files are copied.</li>
           <li><strong>Choose copy monitoring:</strong> copying a movie to local can unmonitor it in Radarr, and copying it back to remote monitors it again. Pick the default here; each copy can override it.</li>
-          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, add a webhook secret, then in Radarr Settings &gt; Connect &gt; Webhook use POST with the URL below. Add the custom header <code>X-SRTL-Webhook-Secret</code> with the same secret. Select On Import, On Upgrade, and On Rename, then test and save. The URL must be reachable from Radarr.</li>
+          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, add a webhook secret, then in Radarr Settings &gt; Connect &gt; Webhook use POST with this instance's URL from the Webhooks tab. Add the custom header <code>X-SRTL-Webhook-Secret</code> with the same secret. Select On Import, On Upgrade, and On Rename, then test and save. The URL must be reachable from Radarr.</li>
         </ol>
       </details>
     </header>
@@ -155,7 +316,7 @@ function RadarrConfiguration({ state, sections, tab, onTabSelect, onScanJobSelec
       <RadarrTabPanel tab="mappings" active={tab}>
         <section className="radarr-section" aria-labelledby="radarr-mapping-heading">
           <div className="radarr-heading"><div className="radarr-help-heading"><h2 id="radarr-mapping-heading">Folder mappings</h2><InfoTooltip label="About folder mappings">Automatic matches full Radarr root paths against movie-type sections under SRTL's configured symlink directory. It never guesses from similar names. Use Manual when container paths differ. Title-folder names beneath the roots must still match exactly. Only mapped titles are eligible; no mounts or files are changed.</InfoTooltip></div></div>
-          <p className="radarr-lede">Pairs Radarr root folders with SRTL Movies sections. Only titles under a mapped folder are synchronized.</p>
+          <p className="radarr-lede">Pairs this instance's Radarr root folders with SRTL Movies sections. Only titles under a mapped folder are synchronized.</p>
           <fieldset disabled={fieldsDisabled} className="radarr-fields">
             <div className="segmented radarr-mapping-mode" role="group" aria-labelledby="radarr-mapping-heading">
               <button type="button" className={draft.mappingMode === "auto" ? "selected" : ""} aria-pressed={draft.mappingMode === "auto"} onClick={() => update("mappingMode", "auto")}>Automatic</button>
@@ -163,17 +324,19 @@ function RadarrConfiguration({ state, sections, tab, onTabSelect, onScanJobSelec
             </div>
             {draft.mappingMode === "auto" ? <div className="radarr-auto-mappings" role="region" aria-label="Automatic folder matches">
               {detectedMappings.length ? <><p className="muted">{testConnection.data ? "Detected matches" : "Saved matches"}</p><dl>{detectedMappings.map((mapping) => <div key={mapping.rootPath}><dt>{mapping.rootPath}</dt><dd>{sections.sectionTitles?.[mapping.section] ?? mapping.section}</dd></div>)}</dl></> : <p className="muted">{testConnection.data ? "No exact folder matches found. Select Manual to map different container paths." : "Test the connection to detect matching folders."}</p>}
+              {testConnection.data?.conflictingRootFolders.length ? <div className="radarr-unmatched"><p>Folders mapped by another instance</p><ul>{testConnection.data.conflictingRootFolders.map((conflict) => <li key={conflict.rootPath}>{conflict.rootPath}: {sectionTitle(conflict.section)} belongs to {conflict.instanceName}</li>)}</ul><p className="muted">Excluded here. Each folder belongs to one instance; remove it from the other instance first to map it here.</p></div> : null}
               {testConnection.data?.unmatchedRootFolders.length ? <div className="radarr-unmatched"><p>Unmatched Radarr roots</p><ul>{testConnection.data.unmatchedRootFolders.map((root) => <li key={root}>{root}</li>)}</ul><p className="muted">Excluded from synchronization. Use Manual to include them.</p></div> : null}
             </div> : <>
             <div className="radarr-mappings">{draft.mappings.map((mapping, index) => <div className="radarr-mapping" key={index}>
               <label>Radarr root folder<input form={settingsFormId} required list="radarr-roots" value={mapping.rootPath} onChange={(event) => update("mappings", draft.mappings.map((item, position) => position === index ? { ...item, rootPath: event.target.value } : item))} /></label>
-              <label>SRTL symlink section<select form={settingsFormId} required value={mapping.section} onChange={(event) => update("mappings", draft.mappings.map((item, position) => position === index ? { ...item, section: event.target.value } : item))}><option value="">Select section</option>{configuredSections.map((section) => <option key={section} value={section}>{sections.sectionTitles?.[section] ?? section}</option>)}</select></label>
+              <label>SRTL symlink section<select form={settingsFormId} required value={mapping.section} onChange={(event) => update("mappings", draft.mappings.map((item, position) => position === index ? { ...item, section: event.target.value } : item))}><option value="">Select section</option>{configuredSections.map((section) => <option key={section} value={section} disabled={owners.has(section)}>{sectionTitle(section)}{owners.has(section) ? ` (mapped by ${owners.get(section)})` : ""}</option>)}</select></label>
               <button type="button" className="secondary icon-only" title={`Remove mapping ${index + 1}`} onClick={() => update("mappings", draft.mappings.filter((_, position) => position !== index))}><Trash2 size={16} /></button>
             </div>)}</div>
             <datalist id="radarr-roots">{testConnection.data?.rootFolders.map((root) => <option key={root} value={root} />)}</datalist>
-            <div><button type="button" className="secondary" disabled={!configuredSections.length || draft.mappings.length >= configuredSections.length} onClick={() => update("mappings", [...draft.mappings, { rootPath: "", section: configuredSections.find((section) => !draft.mappings.some((mapping) => mapping.section === section)) ?? "" }])}><Plus size={16} />Add mapping</button></div>
+            <div><button type="button" className="secondary" disabled={!availableSections.length || draft.mappings.length >= availableSections.length} onClick={() => update("mappings", [...draft.mappings, { rootPath: "", section: availableSections.find((section) => !draft.mappings.some((mapping) => mapping.section === section)) ?? "" }])}><Plus size={16} />Add mapping</button></div>
             </>}
             {!configuredSections.length ? <p className="muted">No Movies sections configured in Settings &gt; Library.</p> : null}
+            {owners.size ? <p className="muted">Mapped by other instances: {[...owners].map(([section, name]) => `${sectionTitle(section)} (${name})`).join(", ")}. Each folder belongs to one instance.</p> : null}
           </fieldset>
         </section>
       </RadarrTabPanel>
@@ -208,7 +371,7 @@ function RadarrConfiguration({ state, sections, tab, onTabSelect, onScanJobSelec
           <p className="radarr-lede">Optional. Lets Radarr queue a title rescan after imports, upgrades, and renames.</p>
           <fieldset disabled={fieldsDisabled} className="radarr-fields">
             <div className="radarr-grid">
-              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="Use this as the POST URL in Radarr Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} /></div>
+              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} />{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
               <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-secret" label="X-SRTL-Webhook-Secret" help="Optional; required only to accept webhooks. Enter your own 24-256 character secret using letters, numbers, hyphens, or underscores. Add the same value as a custom header in Radarr. Save it securely: SRTL cannot display it again. Leave blank to keep a saved secret." /><input form={settingsFormId} id="radarr-webhook-secret" type="password" autoComplete="new-password" minLength={24} maxLength={256} pattern={"[A-Za-z0-9_\\-]+"} value={draft.webhookSecret} placeholder={settings.hasWebhookSecret ? "Saved; leave blank to keep" : "Your secret, at least 24 characters"} onChange={(event) => update("webhookSecret", event.target.value)} /></div>
             </div>
           </fieldset>
@@ -265,12 +428,17 @@ function RadarrPolicies({ state, disabled, hasUnsavedChanges }: { state: RadarrS
   const [filter, setFilter] = useState("all");
   const [page, setPage] = useState(0);
   const [confirmation, setConfirmation] = useState<"use_srtl" | "import_tags" | null>(null);
-  const refresh = useMutation({ mutationKey: policyMutationKey, mutationFn: api.refreshRadarr, onSuccess: (data) => queryClient.setQueryData(queryKey, data) });
+  const instanceId = state.settings.id;
+  const refresh = useMutation({ mutationKey: policyMutationKey, mutationFn: () => api.refreshRadarr(instanceId), onSuccess: (data) => {
+    queryClient.setQueryData(instanceKey(instanceId), data);
+    void queryClient.invalidateQueries({ queryKey: overviewKey, exact: true });
+  } });
   const reconcile = useMutation({
     mutationKey: policyMutationKey,
-    mutationFn: (action: "use_srtl" | "import_tags") => api.reconcileRadarr(selected, action),
+    mutationFn: (action: "use_srtl" | "import_tags") => api.reconcileRadarr(instanceId, selected, action),
     onSuccess: (data) => {
-      queryClient.setQueryData(queryKey, data);
+      queryClient.setQueryData(instanceKey(instanceId), data);
+      void queryClient.invalidateQueries({ queryKey: overviewKey, exact: true });
       for (const key of ["storage-policies", "sections", "inventory-summary", "media-links", "media-links-page", "media-link-tree", "dashboard-remote-work-links", "storage-files"]) {
         void queryClient.invalidateQueries({ queryKey: [key] });
       }

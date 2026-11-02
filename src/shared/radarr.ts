@@ -18,7 +18,14 @@ export interface RadarrSettingsInput {
   mappings: RadarrPathMapping[];
 }
 
+// A sanity cap on stored instances, not a design limit.
+export const radarrInstanceLimit = 25;
+
 export interface RadarrSettings extends Omit<RadarrSettingsInput, "apiKey" | "webhookSecret"> {
+  id: string;
+  name: string;
+  // The migrated first instance also answers the original webhook URL without an instance id.
+  legacyWebhook: boolean;
   hasApiKey: boolean;
   hasWebhookSecret: boolean;
   lastRefreshAt: string | null;
@@ -72,10 +79,36 @@ export interface RadarrState {
   monitorUpdates: RadarrMonitorUpdateStatus[];
 }
 
-export interface RadarrCopyDefaults {
-  available: boolean;
+export interface RadarrInstanceSummary {
+  settings: RadarrSettings;
+  movies: number;
+  mapped: number;
+  review: number;
+  errors: number;
+}
+
+export interface RadarrOverview {
+  instances: RadarrInstanceSummary[];
+  limit: number;
+}
+
+// Each mapped Movies section of an enabled instance, with the copy monitoring default of the instance that owns it.
+export interface RadarrCopySection {
+  section: string;
+  instanceId: string;
+  instanceName: string;
   monitorOnCopy: boolean;
-  sections: string[];
+}
+
+export interface RadarrCopyDefaults {
+  sections: RadarrCopySection[];
+}
+
+export interface RadarrRootConflict {
+  rootPath: string;
+  section: string;
+  instanceId: string;
+  instanceName: string;
 }
 
 export interface RadarrConnectionTest {
@@ -83,4 +116,6 @@ export interface RadarrConnectionTest {
   rootFolders: string[];
   automaticMappings: RadarrPathMapping[];
   unmatchedRootFolders: string[];
+  // Roots that match a section already mapped by another instance.
+  conflictingRootFolders: RadarrRootConflict[];
 }

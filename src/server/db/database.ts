@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { eq, type SQL } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
@@ -21,7 +22,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 18;
+export const currentSchemaVersion = 19;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -647,6 +648,53 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`DROP INDEX IF EXISTS orphan_purge_operations_job_file_idx`);
         await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS orphan_purge_operations_job_target_idx ON orphan_purge_operations(job_id, target_kind, storage_file_id)`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (18, 'scan_inventory_health', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(19)) {
+      await client.query("BEGIN");
+      try {
+        // The single Radarr connection becomes the first of a list of instances, keeping its key,
+        // webhook secret hash, and sync state. Its rows move to that instance; the original
+        // webhook URL keeps working for it.
+        let migratedId: string | null = null;
+        if ((await client.query(`SELECT to_regclass('public.app_settings') AS name`)).rows[0]?.name) {
+          const legacy = await client.query<{ value: string }>(`SELECT value FROM app_settings WHERE key = 'radarr'`);
+          const existing = await client.query(`SELECT 1 FROM app_settings WHERE key = 'radarrInstances'`);
+          if (legacy.rows[0] && !existing.rows.length) {
+            let saved: Record<string, unknown> | null = null;
+            try { saved = JSON.parse(legacy.rows[0].value) as Record<string, unknown>; } catch { saved = null; }
+            if (saved && typeof saved === "object" && !Array.isArray(saved)) {
+              migratedId = randomBytes(6).toString("hex");
+              const instance = { ...saved, id: migratedId, name: "Radarr", mappingMode: saved.mappingMode ?? "manual", monitorOnCopy: saved.monitorOnCopy ?? false, copyJobFloor: 0 };
+              await client.query(`INSERT INTO app_settings (key, value, updated_at) VALUES ('radarrInstances', $1, $2)`, [JSON.stringify({ instances: [instance], legacyWebhookInstanceId: migratedId }), nowIso()]);
+              await client.query(`DELETE FROM app_settings WHERE key = 'radarr'`);
+            }
+          }
+        }
+        for (const table of ["radarr_movies", "radarr_events", "radarr_monitor_updates", "radarr_copy_jobs"]) {
+          await client.query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS instance_id TEXT`);
+          if (migratedId) await client.query(`UPDATE ${table} SET instance_id = $1 WHERE instance_id IS NULL`, [migratedId]);
+          else await client.query(`DELETE FROM ${table} WHERE instance_id IS NULL`);
+          await client.query(`ALTER TABLE ${table} ALTER COLUMN instance_id SET NOT NULL`);
+        }
+        // Radarr movie ids repeat across instances, so the single-column keys are replaced whatever they are named.
+        await client.query(`DO $$ DECLARE existing record; BEGIN
+          FOR existing IN SELECT conname, conrelid::regclass AS relation FROM pg_constraint
+            WHERE (contype = 'p' AND conrelid IN ('radarr_movies'::regclass, 'radarr_copy_jobs'::regclass))
+               OR (contype = 'u' AND conrelid = 'radarr_events'::regclass)
+          LOOP
+            EXECUTE format('ALTER TABLE %s DROP CONSTRAINT %I', existing.relation, existing.conname);
+          END LOOP;
+        END $$`);
+        await client.query(`ALTER TABLE radarr_movies ADD CONSTRAINT radarr_movies_pkey PRIMARY KEY (instance_id, movie_id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS radarr_movies_section_item_idx ON radarr_movies(section, item_name)`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS radarr_events_instance_fingerprint_idx ON radarr_events(instance_id, fingerprint)`);
+        await client.query(`ALTER TABLE radarr_copy_jobs ADD CONSTRAINT radarr_copy_jobs_pkey PRIMARY KEY (instance_id, job_id)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (19, 'radarr_instances', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { bigint, boolean, check, index, integer, pgTable, serial, text, uniqueIndex } from "drizzle-orm/pg-core";
+import { bigint, boolean, check, index, integer, pgTable, primaryKey, serial, text, uniqueIndex } from "drizzle-orm/pg-core";
 
 export const appSettings = pgTable("app_settings", {
   key: text("key").primaryKey(),
@@ -7,8 +7,10 @@ export const appSettings = pgTable("app_settings", {
   updatedAt: text("updated_at").notNull()
 });
 
+// Radarr movie ids are only unique within one Radarr instance.
 export const radarrMovies = pgTable("radarr_movies", {
-  movieId: integer("movie_id").primaryKey(),
+  instanceId: text("instance_id").notNull(),
+  movieId: integer("movie_id").notNull(),
   tmdbId: integer("tmdb_id").notNull(),
   title: text("title").notNull(),
   folderPath: text("folder_path").notNull(),
@@ -23,15 +25,20 @@ export const radarrMovies = pgTable("radarr_movies", {
   attempts: integer("attempts").notNull().default(0),
   observedPolicyMarker: text("observed_policy_marker"),
   monitored: boolean("monitored")
-});
+}, (table) => [
+  primaryKey({ columns: [table.instanceId, table.movieId] }),
+  index("radarr_movies_section_item_idx").on(table.section, table.itemName)
+]);
 
 export const radarrCopyJobs = pgTable("radarr_copy_jobs", {
-  jobId: integer("job_id").primaryKey().references(() => jobs.id, { onDelete: "cascade" }),
+  instanceId: text("instance_id").notNull(),
+  jobId: integer("job_id").notNull().references(() => jobs.id, { onDelete: "cascade" }),
   handledAt: text("handled_at").notNull()
-});
+}, (table) => [primaryKey({ columns: [table.instanceId, table.jobId] })]);
 
 export const radarrMonitorUpdates = pgTable("radarr_monitor_updates", {
   id: serial("id").primaryKey(),
+  instanceId: text("instance_id").notNull(),
   copyJobId: integer("copy_job_id").references(() => jobs.id, { onDelete: "set null" }),
   movieId: integer("movie_id").notNull(),
   title: text("title").notNull(),
@@ -45,7 +52,8 @@ export const radarrMonitorUpdates = pgTable("radarr_monitor_updates", {
 
 export const radarrEvents = pgTable("radarr_events", {
   id: serial("id").primaryKey(),
-  fingerprint: text("fingerprint").notNull().unique(),
+  instanceId: text("instance_id").notNull(),
+  fingerprint: text("fingerprint").notNull(),
   movieId: integer("movie_id").notNull(),
   title: text("title").notNull(),
   eventType: text("event_type").notNull(),
@@ -55,7 +63,7 @@ export const radarrEvents = pgTable("radarr_events", {
   attempts: integer("attempts").notNull().default(0),
   error: text("error"),
   jobId: integer("job_id").references(() => jobs.id, { onDelete: "set null" })
-});
+}, (table) => [uniqueIndex("radarr_events_instance_fingerprint_idx").on(table.instanceId, table.fingerprint)]);
 
 export const pathConfigurations = pgTable("path_configurations", {
   id: serial("id").primaryKey(),

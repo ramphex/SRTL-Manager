@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import type { RadarrMovieStatus, RadarrSettingsInput, RadarrState } from "../../src/shared/radarr";
+import type { RadarrMovieStatus, RadarrOverview, RadarrSettings, RadarrSettingsInput, RadarrState } from "../../src/shared/radarr";
 
 const baseUrl = process.env.SRTL_E2E_BASE_URL;
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
@@ -8,53 +8,79 @@ function movie(id: number, title: string): RadarrMovieStatus {
   return { movieId: id, tmdbId: id + 100, title, folderPath: `/library/${title}`, section: "movies", itemName: title, tags: ["family", "local"], monitored: true, policy: "unassigned", tagPolicy: "location_1", managed: false, status: "review", message: null, syncedAt: null };
 }
 
-async function fixture(page: Page, options: { empty?: boolean; failure?: boolean; saveFailure?: boolean } = {}) {
+type FixtureOptions = { empty?: boolean; failure?: boolean; saveFailure?: boolean; extraInstances?: Array<Partial<RadarrSettings> & { id: string; name: string }> };
+
+function instanceState(settings: Partial<RadarrSettings> & { id: string; name: string }): RadarrState {
+  return { settings: { revision: 1, legacyWebhook: false, baseUrl: "", enabled: false, localTag: "", remoteTag: "", monitorOnCopy: false, mappingMode: "auto", mappings: [], hasApiKey: false, hasWebhookSecret: false, lastRefreshAt: null, lastError: null, ...settings }, movies: [], events: [], monitorUpdates: [] };
+}
+
+async function fixture(page: Page, options: FixtureOptions = {}) {
   const state: RadarrState = {
-    settings: { revision: 1, baseUrl: "http://radarr:7878", enabled: false, localTag: "local", remoteTag: "ignored", monitorOnCopy: false, mappingMode: "manual", mappings: [{ rootPath: "/library", section: "movies" }], hasApiKey: true, hasWebhookSecret: true, lastRefreshAt: "2026-09-01T12:00:00.000Z", lastError: null },
+    settings: { id: "a1b2c3d4e5f6", name: "Radarr", legacyWebhook: true, revision: 1, baseUrl: "http://radarr:7878", enabled: false, localTag: "local", remoteTag: "ignored", monitorOnCopy: false, mappingMode: "manual", mappings: [{ rootPath: "/library", section: "movies" }], hasApiKey: true, hasWebhookSecret: true, lastRefreshAt: "2026-09-01T12:00:00.000Z", lastError: null },
     movies: options.empty ? [] : [movie(1, "Family Vacation in Burma (2020)"), movie(2, "My First Wedding (2020)"), { ...movie(3, "My Second Wedding (2021)"), tags: ["local", "ignored"], tagPolicy: "conflict" }, { ...movie(4, "My Third Wedding (2022)"), section: null, itemName: null, status: "unmapped" }],
     events: options.empty ? [] : [{ id: 1, movieId: 1, title: "Family Vacation in Burma (2020)", eventType: "Download", receivedAt: "2026-09-01T12:00:00.000Z", processedAt: null, error: "Imported symlink is not available at the mapped path yet. Waiting to rescan.", jobId: null, jobStatus: null }],
     monitorUpdates: options.empty ? [] : [{ id: 1, movieId: 2, title: "My First Wedding (2020)", monitored: false, copyJobId: 77, createdAt: "2026-09-01T12:05:00.000Z", processedAt: "2026-09-01T12:05:05.000Z", error: null }]
   };
+  const instances: RadarrState[] = [state, ...(options.extraInstances ?? []).map(instanceState)];
   const writes: Array<{ movieIds: number[]; action: string }> = [];
   const saves: RadarrSettingsInput[] = [];
+  const savedIds: string[] = [];
+  const removed: string[] = [];
+  const overview = (): RadarrOverview => ({ limit: 25, instances: instances.map((entry) => ({ settings: entry.settings, movies: entry.movies.length, mapped: entry.movies.filter((item) => item.section).length, review: entry.movies.filter((item) => item.status === "review").length, errors: entry.movies.filter((item) => item.status === "error").length })) });
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
+    const instanceRoute = url.pathname.match(/^\/api\/settings\/radarr\/instances\/([^/]+)(?:\/(test|refresh|reconcile|rename))?$/);
+    const target = instanceRoute ? instances.find((entry) => entry.settings.id === instanceRoute[1]) : undefined;
     let body: unknown = [];
     if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test" } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Archive", path: "/remote" }] };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
-    else if (url.pathname === "/api/settings/sections") body = { sections: ["movies", "shows"], sectionTitles: { movies: "Family Films", shows: "Recordings" }, sectionTypes: { movies: "movies", shows: "shows" } };
+    else if (url.pathname === "/api/settings/sections") body = options.extraInstances ? { sections: ["movies", "movies4k", "anime", "shows"], sectionTitles: { movies: "Family Films", movies4k: "Family Films 4K", anime: "Cartoons", shows: "Recordings" }, sectionTypes: { movies: "movies", movies4k: "movies", anime: "movies", shows: "shows" } } : { sections: ["movies", "shows"], sectionTitles: { movies: "Family Films", shows: "Recordings" }, sectionTypes: { movies: "movies", shows: "shows" } };
     else if (url.pathname === "/api/jobs/42") body = { id: 42, type: "scan", status: "completed", progress: { options: { scanSymlinks: true, scanLocal: false, scanRemote: false, titleScopes: [{ section: "movies", itemName: "My First Wedding (2020)" }] } }, startedAt: "2026-09-01T12:00:00.000Z", finishedAt: "2026-09-01T12:00:01.000Z" };
     else if (url.pathname === "/api/jobs/42/events/page") body = { events: [], total: 0, hasMore: false, nextBeforeId: null };
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
-    } else if (url.pathname === "/api/settings/radarr/test") body = { version: "6.0.0", rootFolders: ["/library", "/library4k"], automaticMappings: [{ rootPath: "/library", section: "movies" }], unmatchedRootFolders: ["/library4k"] };
-    else if (url.pathname === "/api/settings/radarr/reconcile") {
+    } else if (url.pathname === "/api/settings/radarr") body = overview();
+    else if (url.pathname === "/api/settings/radarr/copy-defaults") body = { sections: instances.filter((entry) => entry.settings.enabled).flatMap((entry) => entry.settings.mappings.map((mapping) => ({ section: mapping.section, instanceId: entry.settings.id, instanceName: entry.settings.name, monitorOnCopy: entry.settings.monitorOnCopy }))) };
+    else if (url.pathname === "/api/settings/radarr/instances" && request.method() === "POST") {
+      const created = instanceState({ id: `new${instances.length}instance`, name: (request.postDataJSON() as { name: string }).name.trim() });
+      instances.push(created);
+      body = created;
+    } else if (instanceRoute && !target) return route.fulfill({ status: 404, json: { error: "This Radarr instance no longer exists. Reload the integration settings." } });
+    else if (target && instanceRoute?.[2] === "test") body = { version: "6.0.0", rootFolders: ["/library", "/library4k"], automaticMappings: [{ rootPath: "/library", section: "movies" }], unmatchedRootFolders: ["/library4k"], conflictingRootFolders: [] };
+    else if (target && instanceRoute?.[2] === "reconcile") {
       const input: { movieIds: number[]; action: string } = request.postDataJSON();
       writes.push(input);
       await new Promise((resolve) => setTimeout(resolve, 250));
       if (options.failure) return route.fulfill({ status: 409, json: { error: "Storage policy cannot be changed while a copy job is running." } });
-      for (const item of state.movies.filter((entry) => input.movieIds.includes(entry.movieId))) { item.managed = true; item.status = "pending"; }
-      body = state;
-    } else if (url.pathname === "/api/settings/radarr/refresh") body = state;
-    else if (url.pathname === "/api/settings/radarr/copy-defaults") body = { available: state.settings.enabled, monitorOnCopy: state.settings.monitorOnCopy, sections: state.settings.enabled ? state.settings.mappings.map((mapping) => mapping.section) : [] };
-    else if (url.pathname === "/api/settings/radarr") {
+      for (const item of target.movies.filter((entry) => input.movieIds.includes(entry.movieId))) { item.managed = true; item.status = "pending"; }
+      body = target;
+    } else if (target && instanceRoute?.[2] === "refresh") body = target;
+    else if (target && instanceRoute?.[2] === "rename") {
+      target.settings = { ...target.settings, name: (request.postDataJSON() as { name: string }).name };
+      body = overview();
+    } else if (target && request.method() === "DELETE") {
+      removed.push(target.settings.id);
+      instances.splice(instances.indexOf(target), 1);
+      body = overview();
+    } else if (target) {
       if (request.method() === "PUT") {
         const input: RadarrSettingsInput = request.postDataJSON();
         saves.push(input);
+        savedIds.push(target.settings.id);
         await new Promise((resolve) => setTimeout(resolve, 250));
         if (options.saveFailure) return route.fulfill({ status: 400, json: { error: "Radarr rejected the API key." } });
-        state.settings = { ...state.settings, revision: state.settings.revision + 1, baseUrl: input.baseUrl, localTag: input.localTag, remoteTag: input.remoteTag, enabled: input.enabled, monitorOnCopy: input.monitorOnCopy, hasApiKey: state.settings.hasApiKey || Boolean(input.apiKey), hasWebhookSecret: state.settings.hasWebhookSecret || Boolean(input.webhookSecret), mappingMode: input.mappingMode, mappings: input.mappingMode === "auto" ? [{ rootPath: "/library", section: "movies" }] : input.mappings };
+        target.settings = { ...target.settings, revision: target.settings.revision + 1, baseUrl: input.baseUrl, localTag: input.localTag, remoteTag: input.remoteTag, enabled: input.enabled, monitorOnCopy: input.monitorOnCopy, hasApiKey: target.settings.hasApiKey || Boolean(input.apiKey), hasWebhookSecret: target.settings.hasWebhookSecret || Boolean(input.webhookSecret), mappingMode: input.mappingMode, mappings: input.mappingMode === "auto" ? [{ rootPath: "/library", section: "movies" }] : input.mappings };
       }
-      body = state;
+      body = target;
     }
     await route.fulfill({ json: body });
   });
-  return { state, writes, saves };
+  return { state, instances, writes, saves, savedIds, removed };
 }
 
 function radarrTab(page: Page, name: string) {
@@ -316,12 +342,12 @@ test("automatic mapping exposes no-match and connection failure states without s
   await expect(preview).not.toContainText("Family Films");
   await openTab(page, "Connection");
   await page.getByLabel("API key", { exact: true }).fill("newtestkey");
-  await page.route("**/api/settings/radarr/test", (route) => route.fulfill({ json: { version: "6.0.0", rootFolders: ["/different/movies"], automaticMappings: [], unmatchedRootFolders: ["/different/movies"] } }));
+  await page.route("**/api/settings/radarr/instances/*/test", (route) => route.fulfill({ json: { version: "6.0.0", rootFolders: ["/different/movies"], automaticMappings: [], unmatchedRootFolders: ["/different/movies"], conflictingRootFolders: [] } }));
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await openTab(page, "Folder mappings");
   await expect(preview).toContainText("No exact folder matches found.");
   await openTab(page, "Connection");
-  await page.route("**/api/settings/radarr/test", (route) => route.fulfill({ status: 400, json: { error: "Radarr connection failed or timed out." } }));
+  await page.route("**/api/settings/radarr/instances/*/test", (route) => route.fulfill({ status: 400, json: { error: "Radarr connection failed or timed out." } }));
   await page.getByRole("button", { name: "Test connection", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Radarr connection failed or timed out.");
   await expect(page.getByText("Radarr 6.0.0 connected")).toHaveCount(0);
@@ -421,7 +447,7 @@ for (const theme of ["dark", "light"]) {
     await fixture(page);
     await page.goto(`${baseUrl}/settings/integrations`);
     const help = page.getByRole("button", { name: "About enabling integration", exact: true });
-    const tooltip = page.getByRole("tooltip").filter({ hasText: "Save Radarr settings to apply this change" });
+    const tooltip = page.getByRole("tooltip").filter({ hasText: "Save this instance's settings to apply this change" });
     const assertContained = async () => {
       await expect(tooltip).toBeVisible();
       const bounds = await tooltip.boundingBox();
@@ -585,5 +611,145 @@ for (const theme of ["dark", "light"]) {
         await page.screenshot({ path: testInfo.outputPath(`radarr-${theme}-${width}-${name.toLowerCase().replaceAll(" ", "-")}.png`), fullPage: true });
       }
     }
+  });
+}
+
+const otherInstances = [
+  { id: "b2c3d4e5f6a1", name: "Radarr 4K", baseUrl: "http://radarr4k:7878", hasApiKey: true, localTag: "keep", remoteTag: "cloud", mappingMode: "manual" as const, mappings: [{ rootPath: "/library4k", section: "movies4k" }], lastRefreshAt: "2026-09-01T12:10:00.000Z", lastError: "Radarr returned HTTP 503." },
+  { id: "c3d4e5f6a1b2", name: "Anime" }
+];
+
+function instanceList(page: Page) {
+  return page.getByRole("region", { name: "Radarr instances" }).getByRole("listitem");
+}
+
+function instanceButton(page: Page, name: string) {
+  return page.getByRole("region", { name: "Radarr instances" }).locator(".radarr-instance").filter({ has: page.locator(".radarr-instance-name").getByText(name, { exact: true }) });
+}
+
+test("instances are listed with status and folders, and each keeps its own settings and draft", async ({ page }) => {
+  const { saves, savedIds } = await fixture(page, { extraInstances: otherInstances });
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await expect(instanceList(page)).toHaveCount(3);
+  await expect(instanceList(page).nth(0)).toContainText("Radarr");
+  await expect(instanceList(page).nth(0)).toContainText("Paused");
+  await expect(instanceList(page).nth(0)).toContainText("Family Films");
+  await expect(instanceList(page).nth(0)).toContainText("3 need review");
+  await expect(instanceList(page).nth(1)).toContainText("Error");
+  await expect(instanceList(page).nth(1)).toContainText("Family Films 4K");
+  await expect(instanceList(page).nth(1)).toContainText("Radarr returned HTTP 503.");
+  await expect(instanceList(page).nth(2)).toContainText("Not connected");
+  await expect(instanceList(page).nth(2)).toContainText("No folders mapped");
+  await expect(instanceButton(page, "Radarr")).toHaveAttribute("aria-current", "true");
+
+  await openTab(page, "Policy sync");
+  await page.getByLabel("Home NAS policy tag", { exact: true }).fill("home");
+  await instanceButton(page, "Radarr 4K").click();
+  await expect(instanceButton(page, "Radarr 4K")).toHaveAttribute("aria-current", "true");
+  await expect(page.locator(".radarr-integration-header h2")).toHaveText("Radarr 4K");
+  await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toHaveValue("keep");
+  await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
+  await expect(instanceButton(page, "Radarr")).toHaveAccessibleName(/unsaved changes/);
+  await expect(page.getByText("No titles loaded.")).toBeVisible();
+  await openTab(page, "Webhooks");
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(/\/api\/integrations\/radarr\/b2c3d4e5f6a1\/webhook$/);
+  await expect(page.getByText("keeps working for this instance")).toHaveCount(0);
+
+  await instanceButton(page, "Radarr").click();
+  await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(/\/api\/integrations\/radarr\/a1b2c3d4e5f6\/webhook$/);
+  await expect(page.getByText("The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.")).toBeVisible();
+  await openTab(page, "Policy sync");
+  await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toHaveValue("home");
+  await expect(page.locator(".radarr-save-status")).toHaveText("Unsaved changes");
+  await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
+  await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
+  expect(saves).toHaveLength(1);
+  expect(savedIds).toEqual(["a1b2c3d4e5f6"]);
+  expect(saves[0]).toMatchObject({ localTag: "home" });
+  await expect(instanceButton(page, "Radarr")).not.toHaveAccessibleName(/unsaved changes/);
+
+  // The selected instance is remembered across reloads.
+  await instanceButton(page, "Anime").click();
+  await page.reload();
+  await expect(instanceButton(page, "Anime")).toHaveAttribute("aria-current", "true");
+  await expect(page.locator(".radarr-state")).toHaveText("Current: Not connected");
+});
+
+test("folder mappings show folders owned by other instances", async ({ page }) => {
+  await fixture(page, { extraInstances: otherInstances });
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Folder mappings");
+  const options = page.getByLabel("SRTL symlink section").locator("option");
+  await expect(options).toHaveText(["Select section", "Family Films", "Family Films 4K (mapped by Radarr 4K)", "Cartoons"]);
+  expect(await options.evaluateAll((items) => items.map((item) => (item as HTMLOptionElement).disabled))).toEqual([false, false, true, false]);
+  await expect(page.getByText("Mapped by other instances: Family Films 4K (Radarr 4K).")).toBeVisible();
+  await instanceButton(page, "Anime").click();
+  await page.route("**/api/settings/radarr/instances/*/test", (route) => route.fulfill({ json: { version: "6.0.0", rootFolders: ["/library", "/anime"], automaticMappings: [{ rootPath: "/anime", section: "anime" }], unmatchedRootFolders: [], conflictingRootFolders: [{ rootPath: "/library", section: "movies", instanceId: "a1b2c3d4e5f6", instanceName: "Radarr" }] } }));
+  await openTab(page, "Connection");
+  await page.getByLabel("Radarr URL", { exact: true }).fill("http://anime:7878");
+  await page.getByLabel("API key", { exact: true }).fill("animekey");
+  await page.getByRole("button", { name: "Test connection", exact: true }).click();
+  await openTab(page, "Folder mappings");
+  const preview = page.getByRole("region", { name: "Automatic folder matches" });
+  await expect(preview).toContainText("Cartoons");
+  await expect(preview).toContainText("Folders mapped by another instance");
+  await expect(preview).toContainText("/library: Family Films belongs to Radarr");
+});
+
+test("instances can be added, renamed, and removed with confirmation", async ({ page }) => {
+  const { removed, instances } = await fixture(page);
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await expect(instanceList(page)).toHaveCount(1);
+  await page.getByRole("button", { name: "Add instance", exact: true }).click();
+  await page.getByLabel("Instance name", { exact: true }).fill("Radarr 4K");
+  await page.getByRole("button", { name: "Add", exact: true }).click();
+  await expect(instanceList(page)).toHaveCount(2);
+  await expect(instanceButton(page, "Radarr 4K")).toHaveAttribute("aria-current", "true");
+  await expect(radarrTab(page, "Connection")).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Radarr URL", { exact: true })).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Save Radarr 4K settings", exact: true })).toBeVisible();
+
+  await page.getByRole("button", { name: "Rename Radarr 4K", exact: true }).click();
+  await page.getByLabel("Instance name", { exact: true }).fill("Radarr UHD");
+  await page.getByRole("button", { name: "Save name", exact: true }).click();
+  await expect(page.locator(".radarr-integration-header h2")).toHaveText("Radarr UHD");
+  await expect(instanceButton(page, "Radarr UHD")).toBeVisible();
+
+  await page.getByRole("button", { name: "Remove Radarr UHD", exact: true }).click();
+  const confirmation = page.getByRole("group", { name: "Confirm removing Radarr UHD" });
+  await expect(confirmation).toContainText("Tags and monitoring in Radarr stay exactly as they are.");
+  await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
+  expect(removed).toEqual([]);
+  await page.getByRole("button", { name: "Remove Radarr UHD", exact: true }).click();
+  await page.getByRole("button", { name: "Remove instance", exact: true }).click();
+  await expect(instanceList(page)).toHaveCount(1);
+  await expect(instanceButton(page, "Radarr")).toHaveAttribute("aria-current", "true");
+  expect(removed).toHaveLength(1);
+  expect(instances.map((entry) => entry.settings.name)).toEqual(["Radarr"]);
+});
+
+test("no instances shows an empty state with Add instance", async ({ page }) => {
+  const { instances } = await fixture(page);
+  instances.splice(0);
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await expect(page.getByText("No Radarr instances yet.")).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "Radarr settings" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Add instance", exact: true })).toBeEnabled();
+});
+
+for (const width of [1440, 390, 320]) {
+  test(`ten instances stay usable at ${width}px`, async ({ page }, testInfo) => {
+    const many = Array.from({ length: 9 }, (_, index) => ({ id: `e${index}e${index}e${index}`, name: `Radarr instance with a long name ${index + 2}`, enabled: index % 2 === 0, hasApiKey: true, mappings: index === 0 ? [{ rootPath: "/library4k", section: "movies4k" }] : [] }));
+    await fixture(page, { extraInstances: many });
+    await page.setViewportSize({ width, height: 1000 });
+    await page.goto(`${baseUrl}/settings/integrations`);
+    await expect(instanceList(page)).toHaveCount(10);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    const boxes = await instanceList(page).evaluateAll((items) => items.map((item) => item.getBoundingClientRect()).map((box) => ({ left: box.left, right: box.right, height: box.height })));
+    expect(boxes.every((box) => box.left >= 0 && box.right <= width && box.height >= 44)).toBe(true);
+    await instanceButton(page, "Radarr instance with a long name 10").click();
+    await expect(page.locator(".radarr-integration-header h2")).toHaveText("Radarr instance with a long name 10");
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+    await page.screenshot({ path: testInfo.outputPath(`radarr-instances-${width}.png`), fullPage: true });
   });
 }

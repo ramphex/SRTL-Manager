@@ -17,6 +17,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Added hollow file detection to storage scans: files of 50 MB or more with almost nothing stored on disk show a Hollow pill in storage views and are counted in the orphan review.
 - Added "Folders with no video" to the orphan review: folders left with only subtitles, artwork, samples, or nothing at all. They can be held or deleted with the same purge job, which walks each folder again right before touching it and skips it if a video, symlink, unfinished copy, or recent change appears.
 - The orphan review now warns when the storage inventory is unknown or more than 24 hours old. The warning does not block purges, which re-check every file.
+- Added support for any number of Radarr instances, such as 1080p, 4K, anime, and remuxes. Each instance has its own connection, policy tag names, copy monitoring default, webhook URL and secret, preview, and activity, and owns the SRTL folders mapped to it; a folder can belong to only one instance. Instances synchronize independently, so one offline Radarr never delays the others. Copy monitoring and media checks use the instance that owns the copied folder. Settings > Integrations > Radarr lists all instances with their status, folders, and last sync, and can add, rename, and remove them. Removing an instance only forgets SRTL's records; tags and monitoring in Radarr are left unchanged. An existing Radarr connection becomes the first instance with its key, secret, and sync state intact, and its webhook URL keeps working.
 
 ### Fixed
 

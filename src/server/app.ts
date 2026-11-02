@@ -28,7 +28,7 @@ import { registerJobRoutes } from "./routes/jobRoutes";
 import { registerSystemRoutes } from "./routes/systemRoutes";
 import { registerPathConfigurationRoutes } from "./routes/pathConfigurationRoutes";
 import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
-import { radarrWebhookPath, registerRadarrRoutes } from "./routes/radarrRoutes";
+import { radarrInstanceWebhookPath, radarrWebhookPath, registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 
@@ -166,10 +166,11 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     const documentationRequest = config.apiDocsEnabled && request.url.startsWith("/documentation");
     if (!request.url.startsWith("/api/") && !documentationRequest) return;
     if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
-    const radarrWebhook = request.method === "POST" && request.routeOptions.url === radarrWebhookPath;
+    const radarrWebhook = request.method === "POST" && (request.routeOptions.url === radarrWebhookPath || request.routeOptions.url === radarrInstanceWebhookPath);
     if (radarrWebhook) {
       const token = request.headers["x-srtl-webhook-secret"];
-      if (!(await authenticateRadarrWebhook(database.db, typeof token === "string" ? token : undefined))) {
+      const instanceId = (() => { try { return webhookInstanceId(request); } catch { return undefined; } })();
+      if (instanceId === undefined || !(await authenticateRadarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined))) {
         await reply.code(401).send({ error: "Invalid webhook credentials" });
       }
     } else {

@@ -10,7 +10,7 @@ import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
-import { processRadarrWork, radarrMediaExpectation } from "./lib/radarr";
+import { radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 
 // Media outputs must remain readable by services running under a different account.
@@ -84,6 +84,8 @@ let maintenanceRun: Promise<void> | null = null;
 let workerRun: Promise<void> | null = null;
 let radarrTimer: NodeJS.Timeout | null = null;
 let radarrRun: Promise<void> | null = null;
+// One entry per Radarr instance with work in flight; each instance runs on its own schedule.
+const radarrInstanceRuns = new Map<string, Promise<void>>();
 let scheduledScanTimer: NodeJS.Timeout | null = null;
 let scheduledScanRun: Promise<void> | null = null;
 const scheduledScanRunner = new JobRunner(database.db);
@@ -94,8 +96,8 @@ try {
   if (!shuttingDown) {
     radarrTimer = setInterval(() => {
       if (shuttingDown || radarrRun) return;
-      radarrRun = processRadarrWork(database.db)
-        .catch(() => { console.error("Radarr synchronization could not finish; pending work will be retried."); })
+      radarrRun = startRadarrWork(database.db, radarrInstanceRuns, (name) => { console.error(`Radarr synchronization for ${name} could not finish; pending work will be retried.`); })
+        .catch(() => { console.error("Radarr synchronization could not start; pending work will be retried."); })
         .finally(() => { radarrRun = null; });
     }, 5000);
     radarrTimer.unref();
@@ -148,6 +150,7 @@ try {
   await heartbeatRun;
   await maintenanceRun;
   await radarrRun;
+  await Promise.allSettled([...radarrInstanceRuns.values()]);
   await scheduledScanRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);
