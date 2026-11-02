@@ -12,7 +12,8 @@ import { applyPendingOnboardingPolicy } from "./onboarding";
 import { holdingFolderName, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
-import { isHollowAllocation } from "./mediaIntegrity";
+import { effectiveIntegrity } from "./mediaIntegrity";
+import { assessLocalIntegrity, integrityStateEqual, integrityStateOf, type ZeroSampler } from "./storageIntegrity";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -989,7 +990,12 @@ function excludedColumns(table: PgTable, keep: string[] = []): Record<string, SQ
   );
 }
 
-export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck): Promise<InventorySummary> {
+export interface PersistScanOptions {
+  zeroSampler?: ZeroSampler;
+  integrityConcurrency?: number;
+}
+
+export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck, persistOptions: PersistScanOptions = {}): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
@@ -1014,6 +1020,13 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   const existingStorageFiles = await db.select().from(schema.storageFiles);
   const existingStorageFileByPath = new Map(existingStorageFiles.map((file) => [file.filePath, file]));
 
+  // Only files the storage walk just read are classified; link-only sightings keep the verdict they have.
+  const integrityByPath = await assessLocalIntegrity(
+    filesToReconcile.filter((file) => seenStorageFilePaths.has(file.filePath)),
+    existingStorageFileByPath,
+    { sampler: persistOptions.zeroSampler, concurrency: persistOptions.integrityConcurrency, isCancelled, now: timestamp }
+  );
+
   const storageFileWrites: Array<typeof schema.storageFiles.$inferInsert> = [];
   const unchangedStorageFileIds: number[] = [];
   for (const file of filesToReconcile) {
@@ -1026,15 +1039,17 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       storagePolicy: normalizeStoragePolicy(existing?.storagePolicy),
       allocatedBytes: file.allocatedBytes ?? existing?.allocatedBytes ?? null
     };
+    const integrity = integrityByPath.get(file.filePath) ?? integrityStateOf(existing);
     const changed = storageFileChanged(existing, persistedFile);
-    // Allocation is refreshed without counting as a content change.
-    if (existing && !changed && !existing.missingSince && existing.allocatedBytes === persistedFile.allocatedBytes) {
+    // Allocation and integrity are refreshed without counting as a content change.
+    if (existing && !changed && !existing.missingSince && existing.allocatedBytes === persistedFile.allocatedBytes && integrityStateEqual(integrity, integrityStateOf(existing))) {
       unchangedStorageFileIds.push(existing.id);
       affectedStorageFilePolicyIds.add(existing.id);
       continue;
     }
     storageFileWrites.push({
       ...persistedFile,
+      ...integrity,
       firstSeenAt: existing?.firstSeenAt ?? timestamp,
       lastSeenAt: timestamp,
       lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? timestamp,
@@ -1693,7 +1708,10 @@ export async function listStorageFiles(db: Db, rootType?: StorageRootType, orpha
         sizeBytes: row.sizeBytes,
         mtimeMs: row.mtimeMs,
         allocatedBytes: row.allocatedBytes,
-        hollow: isHollowAllocation(row.sizeBytes, row.allocatedBytes),
+        hollow: effectiveIntegrity(row.sizeBytes, row.allocatedBytes, row.integrity) === "hollow",
+        integrity: effectiveIntegrity(row.sizeBytes, row.allocatedBytes, row.integrity),
+        zeroSamples: row.integrityZeroSamples,
+        integrityCheckedAt: row.integrityCheckedAt,
         firstSeenAt: row.firstSeenAt,
         lastSeenAt: row.lastSeenAt,
         lastChangedAt: row.lastChangedAt,
@@ -1734,6 +1752,9 @@ type RawStorageFileRow = {
   sizeBytes: number;
   mtimeMs: number;
   allocatedBytes: number | string | null;
+  integrity: string | null;
+  integrityZeroSamples: number | null;
+  integrityCheckedAt: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -1757,7 +1778,10 @@ function serializeRawStorageFile(row: RawStorageFileRow): StorageFileRow {
     sizeBytes: row.sizeBytes,
     mtimeMs: row.mtimeMs,
     allocatedBytes: allocatedBytes,
-    hollow: isHollowAllocation(Number(row.sizeBytes), allocatedBytes),
+    hollow: effectiveIntegrity(Number(row.sizeBytes), allocatedBytes, row.integrity) === "hollow",
+    integrity: effectiveIntegrity(Number(row.sizeBytes), allocatedBytes, row.integrity),
+    zeroSamples: row.integrityZeroSamples == null ? null : Number(row.integrityZeroSamples),
+    integrityCheckedAt: row.integrityCheckedAt,
     firstSeenAt: row.firstSeenAt,
     lastSeenAt: row.lastSeenAt,
     lastChangedAt: row.lastChangedAt,
@@ -1861,6 +1885,9 @@ async function listStorageFileTreeRows(
       sf.size_bytes as "sizeBytes",
       sf.mtime_ms as "mtimeMs",
       sf.allocated_bytes as "allocatedBytes",
+      sf.integrity,
+      sf.integrity_zero_samples as "integrityZeroSamples",
+      sf.integrity_checked_at as "integrityCheckedAt",
       sf.first_seen_at as "firstSeenAt",
       sf.last_seen_at as "lastSeenAt",
       sf.last_changed_at as "lastChangedAt",

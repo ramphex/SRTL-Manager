@@ -22,7 +22,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 20;
+export const currentSchemaVersion = 23;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -713,6 +713,29 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS radarr_monitor_updates_copy_movie_idx
           ON radarr_monitor_updates(copy_job_id, instance_id, movie_id, monitored) WHERE copy_job_id IS NOT NULL`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (20, 'radarr_per_title_monitoring', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(23)) {
+      await client.query("BEGIN");
+      try {
+        // Scans zero-sample suspect local files and keep the verdict, so partially hollow files are found without re-reading the NAS.
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.storage_files') IS NOT NULL THEN
+            ALTER TABLE storage_files ADD COLUMN IF NOT EXISTS integrity TEXT;
+            ALTER TABLE storage_files ADD COLUMN IF NOT EXISTS integrity_zero_samples INTEGER;
+            ALTER TABLE storage_files ADD COLUMN IF NOT EXISTS integrity_checked_at TEXT;
+            IF (SELECT count(*) FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'storage_files' AND column_name IN ('root_type', 'size_bytes')) = 2 THEN
+              CREATE INDEX IF NOT EXISTS storage_files_damaged_idx ON storage_files(root_type) WHERE integrity IN ('hollow', 'partial_hollow');
+              UPDATE storage_files SET integrity = 'hollow'
+                WHERE integrity IS NULL AND size_bytes >= 52428800 AND allocated_bytes > 0 AND allocated_bytes < size_bytes * 0.01;
+            END IF;
+          END IF;
+        END $$`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (23, 'storage_file_integrity', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -86,6 +86,19 @@ describe("source content inspection", () => {
     expect(result.problems.join()).toMatch(/hollow|starts with zero-filled/);
   });
 
+  it("rejects files with large zero-filled gaps using the same classifier as scans", async () => {
+    const filePath = path.join(root, "partial.mkv");
+    const handle = await fs.open(filePath, "w");
+    await handle.write(mkvLike(32 * 1024 * 1024), 0, 32 * 1024 * 1024, 0);
+    await handle.truncate(64 * 1024 * 1024);
+    await handle.close();
+    const stat = await fs.stat(filePath);
+    if (stat.blocks * 512 >= stat.size * 0.9) return;
+    const result = await inspectMediaContent(filePath, { prober: healthyProbe });
+    expect(result.status).toBe("fail");
+    expect(result.problems.join()).toMatch(/File is partially hollow: \d+ of 24 sampled regions are zero-filled/);
+  });
+
   it("rejects missing video, implausible bitrate, and failed probes", async () => {
     const filePath = await writeFile("probed.mkv", mkvLike(1024 * 1024));
     expect((await inspectMediaContent(filePath, { prober: async () => ({ ok: true, error: "", durationSeconds: 60, streamTypes: ["audio"] }) })).problems).toContain("No video stream found");

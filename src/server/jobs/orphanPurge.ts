@@ -6,7 +6,7 @@ import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/data
 import * as schema from "../db/schema";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
-import { isHollowAllocation } from "../lib/mediaIntegrity";
+import { effectiveIntegrity } from "../lib/mediaIntegrity";
 import { getInventoryScanTimestamps } from "../lib/scanner";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
@@ -30,6 +30,8 @@ type OrphanRow = {
   size_bytes: number | string;
   mtime_ms: number | string;
   allocated_bytes: number | string | null;
+  integrity: string | null;
+  integrity_zero_samples: number | null;
   copy_leftover: boolean;
   active_copy: boolean;
 };
@@ -62,7 +64,7 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
         from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
         where ${unfinishedCopyCondition} and p is not null
       )
-      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes,
+      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples,
         cs.path is not null as copy_leftover,
         ap.path is not null as active_copy
       from storage_files sf
@@ -102,6 +104,10 @@ function classify(row: OrphanRow, keys: { titles: Set<string>; episodes: Set<str
   const episode = episodeKey(row.relative_path);
   // A movie folder or episode that still has a linked file means this one is an older or duplicate version.
   return !episode || keys.episodes.has(`${title}\0${episode}`) ? "superseded" : "not_in_library";
+}
+
+function integrityOf(row: OrphanRow) {
+  return effectiveIntegrity(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes), row.integrity);
 }
 
 function protectedReason(row: OrphanRow, now: number): string | null {
@@ -231,7 +237,9 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     mtimeMs: Number(row.mtime_ms),
     category: classify(row, keys),
     protectedReason: protectedReason(row, now),
-    hollow: isHollowAllocation(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes))
+    hollow: integrityOf(row) === "hollow",
+    integrity: integrityOf(row),
+    zeroSamples: row.integrity_zero_samples
   }));
   const categories: OrphanCategory[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "unlinked"];
   const summary = categories
@@ -246,7 +254,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     })
     .filter((entry) => entry.count > 0);
   const hollowCount = items.filter((item) => item.hollow).length;
-  return { rootType, items, leftoverFolders, summary, hollowCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
+  const damagedCount = items.filter((item) => item.integrity === "partial_hollow").length;
+  return { rootType, items, leftoverFolders, summary, hollowCount, damagedCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.
