@@ -16,6 +16,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Required path-change review before different configured roots or storage mount sources can affect managed links.
 - Editable storage-location names while deployment paths remain environment-managed.
 - Optional Radarr integration: policy tags that follow SRTL storage policies, optional unmonitoring after copies to local storage, webhook-triggered title rescans, and automatic or manual folder mapping. No policy tags are preselected; copies stay manual. See the [integration guide](docs/radarr.md).
+- Optional watch sync between Plex and Jellyfin: watched state and resume positions per user pair, one way or both ways, matched by exact SRTL path. See the [watch sync guide](docs/watch-sync.md).
 - Postgres-backed API and worker services in a hardened container stack.
 - Dark, light, and system themes with responsive administration views.
 
