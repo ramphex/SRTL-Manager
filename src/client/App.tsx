@@ -1516,7 +1516,7 @@ export function StatusPill({ value, toneValue }: { value: string; toneValue?: st
   const normalized = (toneValue ?? value).toLowerCase();
   const className = normalized.replace(/[\s_]+/g, "-");
   const icon =
-    normalized.includes("fail") || normalized === "broken" || normalized === "orphan" || normalized === "hollow" || normalized.includes("copy to") || normalized === "unassigned" ? (
+    normalized.includes("fail") || normalized === "broken" || normalized === "orphan" || normalized === "hollow" || normalized === "damaged" || normalized.includes("copy to") || normalized === "unassigned" ? (
       <TriangleAlert size={13} />
     ) : normalized.includes("complete") || normalized === "local" || normalized === "location_1" || normalized === "linked" ? (
       <CheckCircle2 size={13} />

@@ -6,6 +6,7 @@ import type {
   AdvancedSettings,
   AppVersionInfo,
   CopyConflictPreview,
+  DamagedFileRow,
   CopyFailureList,
   CopyReconciliationState,
   InventorySummary,
@@ -154,6 +155,8 @@ export const api = {
     return request<MediaLinkTree>(`/api/media-links/tree?${search.toString()}`);
   },
   storageFiles: (rootType: StorageRootType, orphan = false) => request<StorageFileRow[]>(`/api/storage-files?rootType=${rootType}${orphan ? "&orphan=true" : ""}`),
+  damagedFiles: () => request<DamagedFileRow[]>("/api/damaged-files"),
+  damagedFilesCsvUrl: "/api/damaged-files.csv",
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
   purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),

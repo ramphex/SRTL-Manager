@@ -1,5 +1,6 @@
 import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
+import { Link } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
 import { api } from "./api";
@@ -12,6 +13,8 @@ import { type AuditOptions, type AuditSettings, type InventorySummary, type JobR
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
+import { DamageIntegrityPill, DamagedFilesPanel } from "./damagedFiles";
+import { useDamagedFiles } from "./damagedFilesQuery";
 import { OrphanReviewPanel } from "./orphanReview";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
 
@@ -82,6 +85,7 @@ export function DashboardPage() {
   const [scanOptionsExpanded, setScanOptionsExpanded] = useState(false);
   const [auditOptionsExpanded, setAuditOptionsExpanded] = useState(false);
   const sectionSummaries = useQuery({ queryKey: ["sections"], queryFn: api.sections, refetchInterval: 5000 });
+  const damagedFiles = useDamagedFiles();
   const sectionSettings = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths });
   const scanSettings = useQuery({ queryKey: ["scan-settings"], queryFn: api.getScanSettings });
@@ -457,6 +461,12 @@ export function DashboardPage() {
           </table>
         </section>
       </div>
+      {damagedFiles.data?.length ? (
+        <p className="panel-message dashboard-damaged">
+          <TriangleAlert size={14} aria-hidden="true" /> {formatNumber(damagedFiles.data.length)} damaged {localName} files (hollow or with zero-filled gaps).{" "}
+          <Link to="/library">Library &rarr; Damaged files</Link>
+        </p>
+      ) : null}
       <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
       <section className="dashboard-task-section" aria-labelledby="dashboard-task-section-title">
         <div className="dashboard-region-heading">
@@ -1800,7 +1810,7 @@ function JobLockBadge({ jobs, className = "" }: { jobs: JobRecord[]; className?:
   );
 }
 
-type LibraryView = "overview" | "links" | "local" | "remote" | "local-orphans" | "remote-orphans" | "policies";
+type LibraryView = "overview" | "links" | "local" | "remote" | "local-orphans" | "remote-orphans" | "policies" | "damaged";
 
 export function LibraryPage() {
   const queryClient = useQueryClient();
@@ -1938,7 +1948,8 @@ export function LibraryPage() {
           { value: "remote", label: `${remoteName} files`, icon: HardDriveDownload },
           { value: "local-orphans", label: `${localName} orphans`, icon: Unlink },
           { value: "remote-orphans", label: `${remoteName} orphans`, icon: Unlink },
-          { value: "policies", label: "Storage Policies", icon: Shield }
+          { value: "policies", label: "Storage Policies", icon: Shield },
+          { value: "damaged", label: "Damaged files", icon: TriangleAlert }
         ].map((option) => {
           const Icon = option.icon;
           return (
@@ -1996,6 +2007,8 @@ export function LibraryPage() {
             onRescanTitle={(section, itemName) => startTitleScan.mutate(titleRescanOptions([{ section, itemName }]))}
           />
         </>
+      ) : view === "damaged" ? (
+        <DamagedFilesPanel rootLabel={localName} />
       ) : view === "policies" ? (
         <StoragePoliciesPanel
           items={storagePolicies.data ?? []}
@@ -2061,6 +2074,7 @@ function LibraryOverview({
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
+  const damaged = useDamagedFiles();
   const cards = [
     {
       value: "links",
@@ -2103,6 +2117,13 @@ function LibraryOverview({
       icon: Shield,
       count: summary ? inventoryPolicyNeededCount(summary) : 0,
       detail: `${formatNumber(summary ? inventoryCopyToLocalCount(summary) : 0)} copy to ${localName} / ${formatNumber(summary ? inventoryCopyToRemoteCount(summary) : 0)} copy to ${remoteName}`
+    },
+    {
+      value: "damaged",
+      label: "Damaged files",
+      icon: TriangleAlert,
+      count: damaged.data?.length,
+      detail: "Hollow or zero-filled"
     }
   ] as const;
 
@@ -2659,9 +2680,9 @@ function StorageFileStatus({ file, fallbackLinked }: { file: StorageFileRow | nu
           <StatusPill value={storageStatusDisplayLabel(policyLabel, storageLocations)} toneValue={policyLabel} />
         </span>
       ) : null}
-      {file?.hollow ? (
-        <span className="status-count" title="Almost none of this file is stored on disk; it may be a placeholder or an interrupted copy">
-          <StatusPill value="Hollow" />
+      {file && (file.integrity === "hollow" || file.integrity === "partial_hollow") ? (
+        <span className="status-count">
+          <DamageIntegrityPill integrity={file.integrity} />
         </span>
       ) : null}
     </div>

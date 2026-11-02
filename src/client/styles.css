@@ -2614,6 +2614,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .pill-failed,
 .pill-orphan,
 .pill-hollow,
+.pill-damaged,
 .pill-error {
   background: var(--pill-bad-bg);
   color: var(--pill-bad-text);
@@ -7814,3 +7815,5 @@ button.danger-button:hover:not(:disabled) {
   .orphan-categories { grid-template-columns: 1fr; }
   .orphan-table-scroll td:nth-child(5), .orphan-table-scroll th:nth-child(5) { display: none; }
 }
+
+.dashboard-damaged { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }

@@ -117,6 +117,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
                 <small>
                   {files(items.length)}, {formatBytes(items.reduce((total, item) => total + item.sizeBytes, 0))}
                   {review.data.hollowCount ? `, ${formatNumber(review.data.hollowCount)} hollow` : ""}
+                  {review.data.damagedCount ? `, ${formatNumber(review.data.damagedCount)} damaged` : ""}
                 </small>
               </button>
               {review.data.summary.map((entry) => (
@@ -157,6 +158,7 @@ export function OrphanReviewPanel({ rootType, rootLabel }: { rootType: StorageRo
                         <strong>{fileName(item)}</strong>
                         <span className="orphan-path">{item.relativePath}</span>
                         {item.hollow ? <span className="orphan-protected">Hollow: almost none of this file is stored on disk</span> : null}
+                        {item.integrity === "partial_hollow" ? <span className="orphan-protected">Damaged: {item.zeroSamples ?? "several"} of 24 sampled regions are zero-filled</span> : null}
                         {item.protectedReason ? <span className="orphan-protected">Protected: {item.protectedReason}</span> : null}
                       </td>
                       <td>{orphanCategoryLabels[item.category].label}</td>
