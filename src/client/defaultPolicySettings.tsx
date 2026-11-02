@@ -124,7 +124,7 @@ export function DefaultPolicySettings({ settings }: { settings: SectionSettings 
             <div className="default-policy-row" key={section}>
               <span className="default-policy-name">{settings.sectionTitles?.[section] ?? section}</span>
               <select aria-label={`Default policy for new titles in ${section}`} value={drafts[section] ?? "none"} onChange={(event) => setDrafts((current) => ({ ...current, [section]: event.target.value as DraftPolicy }))}>
-                <option value="none">None — leave new titles unassigned</option>
+                <option value="none">None (leave unassigned)</option>
                 <option value="location_1">{localName} (Location 1)</option>
                 <option value="location_2">{remoteName} (Location 2)</option>
               </select>
