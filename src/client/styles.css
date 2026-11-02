@@ -3398,7 +3398,8 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 }
 
 .integration-settings { min-width: 0; }
-.settings-tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; overflow-x: auto; scrollbar-width: thin; }
+/* position: relative keeps the tabs' absolutely positioned screen-reader text inside the scroll area; otherwise it widens the page on phones. */
+.settings-tabs { position: relative; display: flex; gap: 8px; border-bottom: 1px solid var(--border); margin-bottom: 24px; overflow-x: auto; scrollbar-width: thin; }
 .settings-tabs button { flex: 0 0 auto; min-height: 44px; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--muted); padding: 10px 16px; white-space: nowrap; }
 .settings-tabs button:hover { background: transparent; color: var(--text-strong); }
 .settings-tabs button[aria-selected="true"] { color: var(--text-strong); border-bottom-color: var(--good); }
@@ -3463,6 +3464,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-fields label { display: grid; min-width: 0; gap: 7px; font-size: 13px; }
 /* Fields share a grid row; without align-content a shorter field spreads its label and input apart. */
 .radarr-field { display: grid; gap: 7px; min-width: 0; align-content: start; }
+.radarr-field-wide { grid-column: 1 / -1; }
 .radarr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .radarr-fields .radarr-field-label label { display: block; color: var(--text-strong); font-weight: 600; }
 .radarr-mapping label { color: var(--text-strong); font-weight: 600; }
@@ -3519,7 +3521,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-confirmation p { font-size: 14px; line-height: 1.5; }
 .radarr-draft-notice { border-left: 2px solid var(--warn); padding-left: 10px; font-size: 13px; color: var(--muted-strong); }
 .radarr-webhook-setup { margin: 16px 0; }
-.radarr-webhook-setup p { max-width: 85ch; }
+.radarr-setup .radarr-webhook-steps { margin: 8px 0 0; }
 .radarr-save-area { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .radarr-save-status { font-size: 13px; color: var(--muted); }
 .radarr-save-status-unsaved { display: inline-flex; align-items: center; gap: 7px; color: var(--warn); font-weight: 600; }

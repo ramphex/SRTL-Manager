@@ -113,9 +113,14 @@ test("settings are split into tabs that share one configuration form", async ({ 
   await expect(monitoring.getByLabel("Update Radarr monitoring after copies by default")).not.toBeChecked();
   await openTab(page, "Webhooks");
   const webhooks = page.getByRole("tabpanel", { name: "Webhooks" });
-  await expect(webhooks.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toBeVisible();
+  await expect(webhooks.getByLabel("Header value (secret)", { exact: true })).toBeVisible();
+  await expect(webhooks.getByLabel("Header key", { exact: true })).toHaveValue("X-SRTL-Webhook-Secret");
+  // Same order as Radarr's form: URL, then the header key, then its value.
+  expect(await webhooks.locator("input").evaluateAll((inputs) => inputs.map((input) => input.id))).toEqual(["radarr-webhook-url", "radarr-webhook-header", "radarr-webhook-secret"]);
   await webhooks.getByText("Webhook setup", { exact: true }).click();
-  await expect(webhooks.locator("details")).toContainText("Select On Import, On Upgrade, and On Rename");
+  await expect(webhooks.locator("details")).toContainText("key X-SRTL-Webhook-Secret (copy it from the Header key field), value = your saved secret");
+  await expect(webhooks.locator("details")).toContainText("On File Import, On File Upgrade, On Rename, On Movie Added, On Movie Delete, On Movie File Delete");
+  await expect(webhooks.locator("details")).toContainText("SRTL rejects event types it doesn't handle");
   await openTab(page, "Activity");
   const activity = page.getByRole("tabpanel", { name: "Activity" });
   await expect(activity.getByRole("heading")).toHaveText(["Webhook events", "Monitoring updates"]);
@@ -149,7 +154,7 @@ test("Radarr tabs follow arrow keys, remember the selection, and mark unsaved ed
   await radarrTab(page, "Activity").press("Home");
   await expect(connection).toHaveAttribute("aria-selected", "true");
   await openTab(page, "Webhooks");
-  await page.getByLabel("X-SRTL-Webhook-Secret", { exact: true }).fill("fixture_only_webhook_secret_1234");
+  await page.getByLabel("Header value (secret)", { exact: true }).fill("fixture_only_webhook_secret_1234");
   await openTab(page, "Connection");
   await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
   await expect(connection).toHaveAccessibleName("Connection");
@@ -235,7 +240,7 @@ test("the shared save reveals invalid fields on hidden tabs and keeps the webhoo
   await page.getByLabel("Enable integration", { exact: true }).check();
   const save = page.getByRole("button", { name: "Save Radarr settings", exact: true });
   await openTab(page, "Webhooks");
-  const secret = page.getByLabel("X-SRTL-Webhook-Secret", { exact: true });
+  const secret = page.getByLabel("Header value (secret)", { exact: true });
   expect(await secret.evaluate((field: HTMLInputElement) => field.validity.valueMissing)).toBe(false);
   await secret.fill("fixture_only_webhook_secret_1234");
   await openTab(page, "Folder mappings");
@@ -418,7 +423,7 @@ test("setup help is readable on hover, keyboard focus, and touch without clippin
     await page.getByText("Setup guide and requirements", { exact: true }).click();
     const setupGuide = page.locator("details").filter({ has: page.getByText("Setup guide and requirements", { exact: true }) });
     await expect(setupGuide).toContainText("These are required to test or save a paused connection.");
-    await expect(setupGuide).toContainText("On Import, On Upgrade, and On Rename");
+    await expect(setupGuide).toContainText("On File Import, On File Upgrade, On Rename, On Movie Added, On Movie Delete, On Movie File Delete");
     await page.getByText("Setup guide and requirements", { exact: true }).click();
     const help = page.getByRole("button", { name: "About API key", exact: true });
     if (width === 1440) {
@@ -766,19 +771,24 @@ test("generate secret fills the webhook secret once, marks it unsaved, and clear
   const generated = page.getByLabel("Generated secret", { exact: true });
   const first = await generated.inputValue();
   expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
-  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveValue(first);
+  await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveValue(first);
   await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
   await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("SRTL only stores a hash and can't show it again.");
   await expect(page.getByRole("group", { name: "Generated webhook secret" })).not.toContainText("replaces the current secret");
-  await page.getByRole("button", { name: "Copy", exact: true }).click();
-  await expect(page.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  const generatedGroup = page.getByRole("group", { name: "Generated webhook secret" });
+  await generatedGroup.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(generatedGroup.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(first);
+  const headerKey = page.locator(".radarr-field").filter({ has: page.getByLabel("Header key", { exact: true }) });
+  await headerKey.getByRole("button", { name: "Copy", exact: true }).click();
+  await expect(headerKey.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("X-SRTL-Webhook-Secret");
   await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
   const second = await generated.inputValue();
   expect(second).toMatch(/^[A-Za-z0-9_-]{43}$/);
   expect(second).not.toBe(first);
   // Typing over it falls back to manual entry and hides the generated value.
-  await page.getByLabel("X-SRTL-Webhook-Secret", { exact: true }).fill("typed_by_hand_secret_value_123");
+  await page.getByLabel("Header value (secret)", { exact: true }).fill("typed_by_hand_secret_value_123");
   await expect(generated).toHaveCount(0);
   await page.getByRole("button", { name: "Generate secret", exact: true }).click();
   const third = await generated.inputValue();
@@ -786,9 +796,26 @@ test("generate secret fills the webhook secret once, marks it unsaved, and clear
   await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
   expect(saves[0]?.webhookSecret).toBe(third);
   await expect(generated).toHaveCount(0);
-  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveValue("");
-  await expect(page.getByLabel("X-SRTL-Webhook-Secret", { exact: true })).toHaveAttribute("placeholder", "Saved; leave blank to keep");
+  await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveValue("");
+  await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveAttribute("placeholder", "Saved; leave blank to keep");
   // With a saved secret, generating warns that Radarr needs the replacement.
   await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
   await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("Saving replaces the current secret, so Radarr must be updated with this new value.");
+});
+
+test("the Webhooks tab with unsaved changes fits a phone-width page", async ({ page }) => {
+  const { state } = await fixture(page);
+  state.settings.hasWebhookSecret = false;
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto(`${baseUrl}/settings/integrations`);
+  await openTab(page, "Webhooks");
+  await page.getByRole("button", { name: "Generate secret", exact: true }).click();
+  await page.getByText("Webhook setup", { exact: true }).click();
+  await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const id of ["radarr-webhook-url", "radarr-webhook-header", "radarr-webhook-secret", "radarr-generated-secret"]) {
+    const box = await page.locator(`#${id}`).boundingBox();
+    expect(box!.x).toBeGreaterThanOrEqual(0);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(390);
+  }
 });

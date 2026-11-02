@@ -22,6 +22,7 @@ function RadarrFieldLabel({ id, label, help }: { id: string; label: string; help
   return <div className="radarr-field-label"><label htmlFor={id}>{label}</label><InfoTooltip label={`About ${label}`}>{help}</InfoTooltip></div>;
 }
 
+const webhookHeaderName = "X-SRTL-Webhook-Secret";
 const tabStorageKey = "srtl-radarr-settings-tab";
 const radarrTabs = [
   { key: "connection", label: "Connection" },
@@ -299,7 +300,7 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
           <li><strong>Prepare synchronization:</strong> Automatic mapping detects identical root paths when you test or save, skipping folders another instance already maps. Review the matches, or select Manual if container paths differ. At least one mapping and two distinct policy tags are required before enabling. Tag placeholders are examples, not active settings.</li>
           <li><strong>Enable:</strong> titles without either policy tag are tagged from their SRTL policy right away. Titles that already carry the other policy tag wait in Needs review: change their policy in SRTL, or select them and choose Use SRTL policies or Import existing tags. Every policy you set afterward updates Radarr. Other tags are never removed, and no files are copied.</li>
           <li><strong>Choose copy monitoring:</strong> copying a movie to local can unmonitor it in Radarr, and copying it back to remote monitors it again. Pick the default here; each copy can override it.</li>
-          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, add a webhook secret, then in Radarr Settings &gt; Connect &gt; Webhook use POST with this instance's URL from the Webhooks tab. Add the custom header <code>X-SRTL-Webhook-Secret</code> with the same secret. Select On Import, On Upgrade, and On Rename, then test and save. The URL must be reachable from Radarr.</li>
+          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, save a webhook secret in the Webhooks tab, then add a Webhook connection in Radarr:<RadarrWebhookSteps urlSource="this instance's URL from the Webhooks tab" /></li>
         </ol>
       </details>
     </header>
@@ -380,8 +381,9 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
           <p className="radarr-lede">Optional. Lets Radarr queue a title rescan after imports, upgrades, and renames.</p>
           <fieldset disabled={fieldsDisabled} className="radarr-fields">
             <div className="radarr-grid">
-              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><div className="radarr-input-action"><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} /><CopyButton text={webhookUrl} fallbackInputId="radarr-webhook-url" /></div>{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
-              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-secret" label="X-SRTL-Webhook-Secret" help="Optional; required only to accept webhooks. Enter your own 24-256 character secret using letters, numbers, hyphens, or underscores. Add the same value as a custom header in Radarr. Save it securely: SRTL cannot display it again. Leave blank to keep a saved secret." /><input form={settingsFormId} id="radarr-webhook-secret" type="password" autoComplete="new-password" minLength={24} maxLength={256} pattern={"[A-Za-z0-9_\\-]+"} value={draft.webhookSecret} placeholder={settings.hasWebhookSecret ? "Saved; leave blank to keep" : "Your secret, at least 24 characters"} onChange={(event) => update("webhookSecret", event.target.value)} /><div className="radarr-toolbar"><button type="button" className="secondary" onClick={generateSecret}><KeyRound size={16} />{settings.hasWebhookSecret || showGeneratedSecret ? "Generate new secret" : "Generate secret"}</button></div></div>
+              <div className="radarr-field radarr-field-wide"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><div className="radarr-input-action"><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} /><CopyButton text={webhookUrl} fallbackInputId="radarr-webhook-url" /></div>{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
+              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-header" label="Header key" help="Radarr sends the secret in a custom header. In the webhook's Headers, add a key/value pair: this is the key. Copy it exactly." /><div className="radarr-input-action"><input id="radarr-webhook-header" readOnly value={webhookHeaderName} spellCheck={false} onFocus={(event) => event.target.select()} /><CopyButton text={webhookHeaderName} fallbackInputId="radarr-webhook-header" /></div></div>
+              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-secret" label="Header value (secret)" help={`Optional; required only to accept webhooks. Enter your own 24-256 character secret using letters, numbers, hyphens, or underscores, or generate one. Use it as the value of the ${webhookHeaderName} header in Radarr. Save it securely: SRTL cannot display it again. Leave blank to keep a saved secret.`} /><input form={settingsFormId} id="radarr-webhook-secret" type="password" autoComplete="new-password" minLength={24} maxLength={256} pattern={"[A-Za-z0-9_\\-]+"} value={draft.webhookSecret} placeholder={settings.hasWebhookSecret ? "Saved; leave blank to keep" : "Your secret, at least 24 characters"} onChange={(event) => update("webhookSecret", event.target.value)} /><div className="radarr-toolbar"><button type="button" className="secondary" onClick={generateSecret}><KeyRound size={16} />{settings.hasWebhookSecret || showGeneratedSecret ? "Generate new secret" : "Generate secret"}</button></div></div>
             </div>
             {showGeneratedSecret ? <div className="radarr-generated-secret" role="group" aria-label="Generated webhook secret">
               <label htmlFor="radarr-generated-secret">Generated secret</label>
@@ -389,10 +391,10 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
                 <input id="radarr-generated-secret" readOnly value={generatedSecret} spellCheck={false} onFocus={(event) => event.target.select()} />
                 <CopyButton text={generatedSecret} fallbackInputId="radarr-generated-secret" />
               </div>
-              <p className="muted">Copy this into Radarr's X-SRTL-Webhook-Secret header now. SRTL only stores a hash and can't show it again.{settings.hasWebhookSecret ? " Saving replaces the current secret, so Radarr must be updated with this new value." : ""} It applies after you save.</p>
+              <p className="muted">Copy this into Radarr now as the {webhookHeaderName} header value. SRTL only stores a hash and can't show it again.{settings.hasWebhookSecret ? " Saving replaces the current secret, so Radarr must be updated with this new value." : ""} It applies after you save.</p>
             </div> : null}
           </fieldset>
-          <details className="radarr-setup radarr-webhook-setup"><summary>Webhook setup</summary><p>In Radarr Settings &gt; Connect &gt; Webhook, use POST with the URL above. Add the custom header <code>X-SRTL-Webhook-Secret</code> with your saved secret. Select On Import, On Upgrade, and On Rename, then test and save. The URL must be reachable from Radarr.</p></details>
+          <details className="radarr-setup radarr-webhook-setup"><summary>Webhook setup</summary><RadarrWebhookSteps /></details>
         </section>
       </RadarrTabPanel>
       <RadarrTabPanel tab="activity" active={tab}>
@@ -401,6 +403,18 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
       </RadarrTabPanel>
     </div>
   </div>;
+}
+
+const webhookTriggers = ["On File Import", "On File Upgrade", "On Rename", "On Movie Added", "On Movie Delete", "On Movie File Delete"];
+
+function RadarrWebhookSteps({ urlSource = "the Webhook URL above" }: { urlSource?: string }) {
+  return <ol className="radarr-webhook-steps">
+    <li>In Radarr Settings &gt; Connect, add a Webhook. Set the method to POST and paste {urlSource}. The URL must be reachable from Radarr.</li>
+    <li>Under Headers, add a key/value pair: key <code>{webhookHeaderName}</code> (copy it from the Header key field), value = your saved secret.</li>
+    <li>Turn on these triggers: {webhookTriggers.join(", ")}.</li>
+    <li>Leave every other trigger off, including On Grab, On Health Issue, On Application Update, On Manual Interaction Required, and On Movie File Delete For Upgrade. SRTL rejects event types it doesn't handle, and a file deleted for an upgrade is already covered by On File Upgrade.</li>
+    <li>Test, then save.</li>
+  </ol>;
 }
 
 function RadarrWebhookActivity({ events, onScanJobSelect }: { events: RadarrState["events"]; onScanJobSelect: (prompt: ScanStatusPrompt) => void }) {
