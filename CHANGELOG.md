@@ -19,6 +19,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 - The orphan review now warns when the storage inventory is unknown or more than 24 hours old. The warning does not block purges, which re-check every file.
 - Added support for any number of Radarr instances, such as 1080p, 4K, anime, and remuxes. Each instance has its own connection, policy tag names, copy monitoring default, webhook URL and secret, preview, and activity, and owns the SRTL folders mapped to it; a folder can belong to only one instance. Instances synchronize independently, so one offline Radarr never delays the others. Copy monitoring and media checks use the instance that owns the copied folder. Settings > Integrations > Radarr lists all instances with their status, folders, and last sync, and can add, rename, and remove them. Removing an instance only forgets SRTL's records; tags and monitoring in Radarr are left unchanged. An existing Radarr connection becomes the first instance with its key, secret, and sync state intact, and its webhook URL keeps working.
 - Added **Generate secret** to each Radarr instance's Webhooks tab. It fills in a random 43-character webhook secret, shows it once with a Copy button, and applies it when you save. Typing your own secret still works.
+- Added a copyable `X-SRTL-Webhook-Secret` header key to each Radarr instance's Webhooks tab, next to the webhook URL and the secret value, each with its own Copy button.
+- Turned Radarr webhook setup into seven numbered steps with inline Copy buttons, in the order the work is done. The steps stay open until the instance has a saved secret, then collapse, and the setup guide and `docs/radarr.md` list the same steps and the six triggers to enable.
+- Copy buttons now work on plain HTTP installs, where the browser's clipboard API is unavailable, and the webhook URL has its own Copy button.
+- Added a per-operation **Discard partial copy** action to Settings > Advanced > Copy recovery for copies interrupted mid-transfer. It previews the temporary file and its size, requires confirmation, and the server re-checks that no active job touches the media before deleting anything.
 
 ### Fixed
 
@@ -26,6 +30,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - A read error on the NAS no longer fails a local storage scan. Unreadable folders are retried once at the end, reported as warnings, and their files are not marked missing.
 - Links added after the last storage scan now resolve to a storage file: every symlink scan records the files its links point to, without marking any unseen file missing.
 - Copy jobs that partially failed no longer leave the replaced local versions of their successful copies behind; upgrades now clean up the previous local file even when another item in the same job fails. Year-numbered seasons such as `S1941E38` are now matched when detecting earlier local versions.
+- Mount checks now accept a FUSE or NFS mount whose listing fails partway through a large directory, since one readable entry proves it is mounted. The error is reported instead of the mount being treated as unmounted or empty, and storage walks keep the entries they read before the error without marking anything under the unscanned folder as missing.
 
 ### Changed
 
@@ -33,6 +38,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
 - Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
 - Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
+- Split the Radarr settings into tabs (Connection, Folder mappings, Policy sync, Copy monitoring, Webhooks, and Activity) under one persistent header with the status, enable toggle, and a single Save. Tabs with unsaved edits show a marker, a save blocked by an invalid field on a hidden tab switches to that tab, and the selected tab is remembered per browser.
+- Sped up the orphan review on large libraries. Review queries now use set-based joins with indexed path columns, so a library with about 19,000 remote files and 72,000 links loads in under a second instead of about three minutes.
+
+### Security
+
+- Cleared the critical and high npm advisories for Fastify, Zod, undici, the router's serializer, Vite, and related packages by updating runtime and development dependencies and refreshing the lockfile.
+- Upgraded Vitest to 5 and jsdom to 30; jsdom 30 requires Node.js 24.15 or newer, which CI and release workflows already use.
+- Pinned GitHub Actions to their newer releases, each checked against its release tag, and refreshed the Node 24 base image to clear fixable Debian CVEs that failed the container image scan.
 
 ### Security
 
