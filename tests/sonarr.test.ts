@@ -116,7 +116,7 @@ async function scan(titles: Array<{ section: string; itemName: string }>) {
   await new JobWorker(app.database.db, { workerId: "sonarr-scan", logger: quiet }).runOnce();
 }
 
-async function dueEvents() { await app.database.db.update(schema.sonarrEvents).set({ nextAttemptAt: "2000-01-01T00:00:00.000Z" }); }
+async function dueEvents() { await app.database.db.update(schema.sonarrEvents).set({ receivedAt: "2000-01-01T00:00:00.000Z", nextAttemptAt: "2000-01-01T00:00:00.000Z" }); }
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-sonarr-test-"));
@@ -454,6 +454,111 @@ describe("Sonarr webhooks", () => {
     await new JobWorker(app.database.db, { workerId: "sonarr-webhook-scan", logger: quiet }).runOnce();
     expect((await app.database.db.select().from(schema.mediaLinks)).map((link) => link.relativePath).sort()).toEqual([`${itemName}/Season 01/Alpha - S01E01.mkv`, `${itemName}/Season 01/Alpha - S01E02.mkv`]);
     expect((await getSonarrState(app.database.db, id)).events[0]?.jobStatus).toBe("completed");
+  });
+
+  describe("title event batching", () => {
+    const past = "2000-01-01T00:00:00.000Z";
+    const deliver = (id: string, seriesId: number, title: string, eventType: string, extra: Record<string, unknown> = {}) => receiveSonarrWebhook(app.database.db, id, { eventType, series: { id: seriesId, title }, ...extra });
+    const events = async () => (await app.database.db.select().from(schema.sonarrEvents)).sort((a, b) => a.id - b.id);
+    // Backdates received events (oldest first) by the given ages and makes them all due for an attempt.
+    const ageEvents = async (agesMs: number[]) => {
+      for (const [index, row] of (await events()).entries()) await app.database.db.update(schema.sonarrEvents).set({ receivedAt: new Date(Date.now() - (agesMs[index] ?? 0)).toISOString(), nextAttemptAt: past }).where(eq(schema.sonarrEvents.id, row.id));
+    };
+
+    it("turns ten rapid episode deletions into one scan job", async () => {
+      const { id } = await connected();
+      for (let episode = 1; episode <= 10; episode += 1) await post(id, { eventType: "EpisodeFileDelete", series: { id: 1, title: "Alpha" }, episodeFile: { id: 100 + episode }, episodes: [{ id: 100 + episode, seasonNumber: 1, episodeNumber: episode }] });
+      // Inside the quiet period nothing is queued, even once the 3 second delay has passed.
+      await app.database.db.update(schema.sonarrEvents).set({ nextAttemptAt: past });
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+
+      await ageEvents(Array.from({ length: 10 }, (_, index) => 20_000 - index * 100));
+      await processSonarrWork(app.database.db);
+      const jobs = await app.jobs.listJobs();
+      expect(jobs).toHaveLength(1);
+      expect((await events()).map((event) => event.jobId)).toEqual(Array(10).fill(jobs[0]!.id));
+      expect((await events()).every((event) => event.processedAt && !event.error)).toBe(true);
+      expect((await app.jobs.listEvents(jobs[0]!.id)).map((event) => event.message)).toContain("Title refresh requested by Sonarr (10 events)");
+    });
+
+    it("queues one job per series when several series share a burst", async () => {
+      const { hd, id } = await connected();
+      hd.series.push(show(2, "Bravo", "/tv"));
+      for (const [index, [seriesId, title]] of ([[1, "Alpha"], [2, "Bravo"], [1, "Alpha"], [2, "Bravo"]] as const).entries()) await deliver(id, seriesId, title, "EpisodeFileDelete", { episodeFile: { id: 300 + index } });
+      await ageEvents([30_000, 30_000, 30_000, 30_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(2);
+      const rows = await events();
+      expect(rows[0]!.jobId).toBe(rows[2]!.jobId);
+      expect(rows[1]!.jobId).toBe(rows[3]!.jobId);
+      expect(rows[0]!.jobId).not.toBe(rows[1]!.jobId);
+    });
+
+    it("still scans a stream that never goes quiet once the maximum wait has passed", async () => {
+      const { id } = await connected();
+      for (const fileId of [201, 202, 203]) await deliver(id, 1, "Alpha", "EpisodeFileDelete", { episodeFile: { id: fileId } });
+      await ageEvents([50_000, 20_000, 2_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      await ageEvents([61_000, 20_000, 2_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(1);
+      expect((await events()).every((event) => event.processedAt)).toBe(true);
+    });
+
+    it("records an added series without files in the catalog and queues no scan", async () => {
+      const { hd, id } = await connected();
+      hd.series.push(show(2, "Bravo", "/tv"));
+      await deliver(id, 2, "Bravo", "SeriesAdd");
+      await ageEvents([30_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      expect((await events())[0]).toMatchObject({ jobId: null, error: expect.stringContaining("No rescan queued") });
+      expect((await events())[0]!.processedAt).not.toBeNull();
+      expect((await getSonarrState(app.database.db, id)).series.map((entry) => entry.seriesId)).toContain(2);
+    });
+
+    it("scans an added series whose folder already holds media symlinks", async () => {
+      const { id } = await connected();
+      await episodeLink("shows", itemName, "Season 01/Alpha - S01E01.mkv");
+      await deliver(id, 1, "Alpha", "SeriesAdd");
+      await ageEvents([30_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(1);
+      expect((await events())[0]).toMatchObject({ error: null });
+      expect((await events())[0]!.jobId).not.toBeNull();
+    });
+
+    it("holds every event of a series back until a pending import's symlink exists", async () => {
+      const { id } = await connected();
+      await deliver(id, 1, "Alpha", "Download", { episodeFile: { id: 101 } });
+      await deliver(id, 1, "Alpha", "EpisodeFileDelete", { episodeFile: { id: 105 } });
+      await ageEvents([30_000, 30_000]);
+      await processSonarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      expect((await events()).map((event) => [event.attempts, event.processedAt])).toEqual([[1, null], [1, null]]);
+      expect((await events())[1]!.error).toContain("not available");
+      await episodeLink("shows", itemName, "Season 01/Alpha - S01E01.mkv");
+      await ageEvents([30_000, 30_000]);
+      await processSonarrWork(app.database.db);
+      const jobs = await app.jobs.listJobs();
+      expect(jobs).toHaveLength(1);
+      expect((await events()).map((event) => event.jobId)).toEqual([jobs[0]!.id, jobs[0]!.id]);
+    });
+
+    it("backs off a failed batch and treats a repeated delivery as a duplicate", async () => {
+      const { id } = await connected();
+      const body = { episodeFile: { id: 101 } };
+      await deliver(id, 1, "Alpha", "Download", body);
+      await ageEvents([30_000]);
+      await processSonarrWork(app.database.db);
+      const [failed] = await events();
+      expect(failed).toMatchObject({ attempts: 1, processedAt: null });
+      expect(Date.parse(failed!.nextAttemptAt!)).toBeGreaterThan(Date.now());
+      expect(await deliver(id, 1, "Alpha", "Download", body)).toMatchObject({ duplicate: true });
+      expect(await events()).toHaveLength(1);
+    });
   });
 
   it("uses stored identity for series deletion and ignores series outside the mappings", async () => {

@@ -8,7 +8,7 @@ import { dbAll, first, getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
-import { arrAbsolutePath, arrCurrentPolicy, arrDigest, arrMapLimit, arrPolicyLookup, arrPolicyMarkers, arrPolicyTag, arrRetryAt, arrTagPolicy, createArrInstanceStore, sameArrMappings, type ArrStoredSettings } from "./arrInstances";
+import { arrAbsolutePath, arrCurrentPolicy, arrDigest, arrMapLimit, arrPolicyLookup, arrPolicyMarkers, arrPolicyTag, arrReadyEventGroups, arrRefreshMessage, arrRetryAt, arrTitleHasMediaSymlinks, arrTagPolicy, createArrInstanceStore, sameArrMappings, type ArrStoredSettings } from "./arrInstances";
 import { assertPathParentInside, withFilesystemTimeout } from "./filesystemSafety";
 import type { MediaExpectation } from "./mediaIntegrity";
 import { isOnboardingComplete } from "./onboarding";
@@ -22,7 +22,9 @@ const monitorBatchSize = 500;
 const monitorRequestSize = 200;
 const resolveSeriesBatchSize = 20;
 const resolveFileBatchSize = 2000;
+// Series handled per pass; each takes all of its pending events at once.
 const eventBatchSize = 10;
+const pendingEventLimit = 2000;
 const catalogRefreshIntervalMs = 30 * 60_000;
 const historyRetentionMs = 30 * 86400_000;
 const expectationCacheMs = 60_000;
@@ -419,45 +421,67 @@ async function queuedRescan(db: Db, config: StoredSettings, seriesId: number, sc
   return null;
 }
 
-async function processEvent(db: Db, config: StoredSettings, event: typeof schema.sonarrEvents.$inferSelect): Promise<void> {
-  const old = await first(db.select().from(schema.sonarrSeries).where(seriesIdsIn(config, [event.seriesId])).limit(1));
+type SonarrEvent = typeof schema.sonarrEvents.$inferSelect;
+
+const addedOnlyMessage = "Added to the catalog. No rescan queued: the series folder has no media yet.";
+
+// All pending events of one series are handled together, so a season pack or a mass delete becomes one rescan.
+async function processSeriesEvents(db: Db, config: StoredSettings, events: SonarrEvent[]): Promise<void> {
+  const seriesId = events[0]!.seriesId;
+  const eventIds = events.map((event) => event.id);
+  const markProcessed = (transaction: Db, error: string | null, jobId: number | null = null) => transaction.update(schema.sonarrEvents).set({ processedAt: nowIso(), error, jobId }).where(inArray(schema.sonarrEvents.id, eventIds));
+  const old = await first(db.select().from(schema.sonarrSeries).where(seriesIdsIn(config, [seriesId])).limit(1));
   const scopes: ScanTitleScope[] = [];
   if (old?.section && old.itemName) scopes.push({ section: old.section, itemName: old.itemName });
+  // Sonarr no longer knows a deleted series, so its stored folder is the only scope left.
+  const deleted = events[events.length - 1]!.eventType === "SeriesDelete";
   let fetched: { series: SonarrSeries; tags: Catalog["tags"] } | null = null;
-  if (event.eventType !== "SeriesDelete") {
+  if (!deleted) {
     const connection = client(config);
-    const series = await connection.seriesById(event.seriesId);
+    const series = await connection.seriesById(seriesId);
     const scope = mapSonarrSeries(series, config);
     if (!scope) {
-      await commitCurrent(db, config, (transaction) => transaction.update(schema.sonarrEvents).set({ processedAt: nowIso(), error: "Ignored: series is outside the configured folder mappings." }).where(eq(schema.sonarrEvents.id, event.id)));
+      await commitCurrent(db, config, (transaction) => markProcessed(transaction, "Ignored: series is outside the configured folder mappings."));
       return;
     }
     if (old && old.tvdbId !== series.tvdbId) throw new SonarrError("Series identifier changed. Refresh and review its mapping.");
-    if (event.eventType === "Download") await assertImportedSymlink(db, connection, scope, event);
-    if (!scopes.some((entry) => entry.section === scope.section && entry.itemName === scope.itemName)) scopes.push(scope);
+    for (const event of events) if (event.eventType === "Download") await assertImportedSymlink(db, connection, scope, event);
     fetched = { series, tags: await connection.tags() };
+    // A series added without files has nothing to scan; its Download events do the real rescan.
+    if (events.every((event) => event.eventType === "SeriesAdd")) {
+      const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+      if (!await arrTitleHasMediaSymlinks(paths.symlinkDir, scope)) {
+        await commitCurrent(db, config, async (transaction) => {
+          await storeSeries(transaction, [series], fetched!.tags, config);
+          await markProcessed(transaction, addedOnlyMessage);
+        });
+        return;
+      }
+    }
+    if (!scopes.some((entry) => entry.section === scope.section && entry.itemName === scope.itemName)) scopes.push(scope);
   }
   await commitCurrent(db, config, async (transaction) => {
     if (fetched) await storeSeries(transaction, [fetched.series], fetched.tags, config);
     if (!scopes.length) {
-      await transaction.update(schema.sonarrEvents).set({ processedAt: nowIso(), error: "Ignored: no confirmed SRTL mapping is available for this event." }).where(eq(schema.sonarrEvents.id, event.id));
+      await markProcessed(transaction, "Ignored: no confirmed SRTL mapping is available for this event.");
       return;
     }
-    const pending = scopes.length === 1 ? await queuedRescan(transaction, config, event.seriesId, scopes[0]!) : null;
+    // A rescan from an earlier batch that has not started yet already covers this one.
+    const pending = scopes.length === 1 ? await queuedRescan(transaction, config, seriesId, scopes[0]!) : null;
     const jobId = pending ?? await new JobRunner(transaction).startExternalTitleScan(scopes);
-    if (!pending) await transaction.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level: "info", message: `Title refresh requested by ${config.name}`, data: JSON.stringify({ instanceId: config.id, seriesId: event.seriesId, eventType: event.eventType }) });
-    await transaction.update(schema.sonarrEvents).set({ processedAt: nowIso(), error: null, jobId }).where(eq(schema.sonarrEvents.id, event.id));
-    if (event.eventType === "SeriesDelete") await transaction.delete(schema.sonarrSeries).where(seriesIdsIn(config, [event.seriesId]));
+    if (!pending) await transaction.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level: "info", message: arrRefreshMessage(config.name, events.length), data: JSON.stringify({ instanceId: config.id, seriesId, eventTypes: [...new Set(events.map((event) => event.eventType))], events: events.length }) });
+    await markProcessed(transaction, null, jobId);
+    if (deleted) await transaction.delete(schema.sonarrSeries).where(seriesIdsIn(config, [seriesId]));
   });
 }
 
 async function processEvents(db: Db, config: StoredSettings): Promise<void> {
-  const events = await db.select().from(schema.sonarrEvents).where(and(eq(schema.sonarrEvents.instanceId, config.id), isNull(schema.sonarrEvents.processedAt), lte(schema.sonarrEvents.nextAttemptAt, nowIso()))).orderBy(asc(schema.sonarrEvents.nextAttemptAt), asc(schema.sonarrEvents.id)).limit(eventBatchSize);
-  for (const event of events) {
-    try { await processEvent(db, config, event); }
+  const pending = await db.select().from(schema.sonarrEvents).where(and(eq(schema.sonarrEvents.instanceId, config.id), isNull(schema.sonarrEvents.processedAt))).orderBy(asc(schema.sonarrEvents.id)).limit(pendingEventLimit);
+  for (const events of arrReadyEventGroups(pending, (event) => event.seriesId).slice(0, eventBatchSize)) {
+    try { await processSeriesEvents(db, config, events); }
     catch (error) {
       const message = error instanceof SonarrError ? error.message : "Title refresh could not be queued. It will retry after active work or storage maintenance finishes.";
-      await db.update(schema.sonarrEvents).set({ error: message, attempts: event.attempts + 1, nextAttemptAt: arrRetryAt(event.attempts) }).where(eq(schema.sonarrEvents.id, event.id));
+      for (const event of events) await db.update(schema.sonarrEvents).set({ error: message, attempts: event.attempts + 1, nextAttemptAt: arrRetryAt(event.attempts) }).where(eq(schema.sonarrEvents.id, event.id));
     }
   }
 }

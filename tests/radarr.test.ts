@@ -39,7 +39,7 @@ function movie(id: number, title = "My First Wedding", assignedTags: number[] = 
 }
 
 async function connected() { await saveRadarrSettings(app.database.db, instanceId, input); }
-async function dueEvents() { await app.database.db.update(schema.radarrEvents).set({ nextAttemptAt: "2000-01-01T00:00:00.000Z" }); }
+async function dueEvents() { await app.database.db.update(schema.radarrEvents).set({ receivedAt: "2000-01-01T00:00:00.000Z", nextAttemptAt: "2000-01-01T00:00:00.000Z" }); }
 async function symlinkFor(item: RadarrMovie) {
   const target = path.join(root, "remote", `${item.id}.mkv`);
   const folder = path.join(root, "links", "movies", path.posix.basename(item.path));
@@ -337,6 +337,118 @@ describe("Radarr policy and webhook integration", () => {
     await dueEvents();
     await processRadarrWork(app.database.db);
     expect(await app.jobs.listJobs()).toHaveLength(1);
+  });
+
+  describe("title event batching", () => {
+    const past = "2000-01-01T00:00:00.000Z";
+    const deliver = (id: number, title: string, eventType: string, extra: Record<string, unknown> = {}) => receiveRadarrWebhook(app.database.db, instanceId, { eventType, movie: { id, title }, ...extra });
+    const events = async () => (await app.database.db.select().from(schema.radarrEvents)).sort((a, b) => a.id - b.id);
+    // Backdates received events (oldest first) by the given ages and makes them all due for an attempt.
+    const ageEvents = async (agesMs: number[]) => {
+      const rows = await events();
+      for (const [index, row] of rows.entries()) await app.database.db.update(schema.radarrEvents).set({ receivedAt: new Date(Date.now() - (agesMs[index] ?? 0)).toISOString(), nextAttemptAt: past }).where(eq(schema.radarrEvents.id, row.id));
+    };
+
+    it("turns a burst of events for one movie into one scan job shared by every event", async () => {
+      await connected();
+      await symlinkFor(movies[0]!);
+      for (const id of [11, 12, 13, 14, 15]) await deliver(1, "My First Wedding", "MovieFileDelete", { movieFile: { id } });
+      // Still inside the quiet period: nothing happens yet, even though the 3 second delay has passed.
+      await app.database.db.update(schema.radarrEvents).set({ nextAttemptAt: past });
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+
+      await ageEvents([20_000, 18_000, 16_000, 14_000, 12_000]);
+      await processRadarrWork(app.database.db);
+      const jobs = await app.jobs.listJobs();
+      expect(jobs).toHaveLength(1);
+      expect((await events()).map((event) => event.jobId)).toEqual(Array(5).fill(jobs[0]!.id));
+      expect((await events()).every((event) => event.processedAt && !event.error)).toBe(true);
+      expect((await app.jobs.listEvents(jobs[0]!.id)).map((event) => event.message)).toContain("Title refresh requested by Radarr (5 events)");
+    });
+
+    it("queues one job per movie when several movies share a burst", async () => {
+      await connected();
+      movies.push(movie(2, "My Second Wedding"));
+      await symlinkFor(movies[0]!);
+      await symlinkFor(movies[1]!);
+      for (const [index, [id, title]] of ([[1, "My First Wedding"], [2, "My Second Wedding"], [1, "My First Wedding"], [2, "My Second Wedding"]] as const).entries()) await deliver(id, title, "Rename", { renamedMovieFiles: [{ relativePath: `renamed-${index}.mkv` }] });
+      await ageEvents([30_000, 30_000, 30_000, 30_000]);
+      await processRadarrWork(app.database.db);
+      const jobs = await app.jobs.listJobs();
+      expect(jobs).toHaveLength(2);
+      const rows = await events();
+      expect(rows[0]!.jobId).toBe(rows[2]!.jobId);
+      expect(rows[1]!.jobId).toBe(rows[3]!.jobId);
+      expect(rows[0]!.jobId).not.toBe(rows[1]!.jobId);
+    });
+
+    it("still scans a stream that never goes quiet once the maximum wait has passed", async () => {
+      await connected();
+      await symlinkFor(movies[0]!);
+      for (const id of [21, 22, 23]) await deliver(1, "My First Wedding", "MovieFileDelete", { movieFile: { id } });
+      // The newest event is seconds old, so the title is not quiet, and the oldest has waited less than a minute.
+      await ageEvents([50_000, 20_000, 2_000]);
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      await ageEvents([61_000, 20_000, 2_000]);
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(1);
+      expect((await events()).every((event) => event.processedAt)).toBe(true);
+    });
+
+    it("records an added movie without files in the catalog and queues no scan", async () => {
+      await connected();
+      movies.push(movie(2, "My Second Wedding"));
+      await deliver(2, "My Second Wedding", "MovieAdded");
+      await ageEvents([30_000]);
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      expect((await events())[0]).toMatchObject({ jobId: null, error: expect.stringContaining("No rescan queued") });
+      expect((await events())[0]!.processedAt).not.toBeNull();
+      expect((await getRadarrState(app.database.db, instanceId)).movies.map((entry) => entry.movieId)).toContain(2);
+    });
+
+    it("scans an added movie whose folder already holds media symlinks", async () => {
+      await connected();
+      movies.push(movie(2, "My Second Wedding"));
+      await symlinkFor(movies[1]!);
+      await deliver(2, "My Second Wedding", "MovieAdded");
+      await ageEvents([30_000]);
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(1);
+      expect((await events())[0]).toMatchObject({ error: null });
+      expect((await events())[0]!.jobId).not.toBeNull();
+    });
+
+    it("holds every event of a movie back until a pending import's symlink exists", async () => {
+      await connected();
+      await deliver(1, "My First Wedding", "Download");
+      await deliver(1, "My First Wedding", "Rename", { renamedMovieFiles: [{ relativePath: "x" }] });
+      await ageEvents([30_000, 30_000]);
+      await processRadarrWork(app.database.db);
+      expect(await app.jobs.listJobs()).toHaveLength(0);
+      expect((await events()).map((event) => [event.attempts, event.processedAt])).toEqual([[1, null], [1, null]]);
+      expect((await events())[1]!.error).toContain("not available");
+      await symlinkFor(movies[0]!);
+      await ageEvents([30_000, 30_000]);
+      await processRadarrWork(app.database.db);
+      const jobs = await app.jobs.listJobs();
+      expect(jobs).toHaveLength(1);
+      expect((await events()).map((event) => event.jobId)).toEqual([jobs[0]!.id, jobs[0]!.id]);
+    });
+
+    it("keeps backing off failed batches and re-accepts a repeated delivery only after it was processed", async () => {
+      await connected();
+      await deliver(1, "My First Wedding", "Download");
+      await ageEvents([30_000]);
+      await processRadarrWork(app.database.db);
+      const [failed] = await events();
+      expect(failed).toMatchObject({ attempts: 1, processedAt: null });
+      expect(Date.parse(failed!.nextAttemptAt!)).toBeGreaterThan(Date.now());
+      expect(await deliver(1, "My First Wedding", "Download")).toMatchObject({ duplicate: true });
+      expect(await events()).toHaveLength(1);
+    });
   });
 
   it("uses stored identity for deletion and ignores untrusted paths in webhook bodies", async () => {

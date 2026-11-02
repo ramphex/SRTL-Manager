@@ -8,7 +8,7 @@ import { dbAll, first, getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
-import { arrAbsolutePath, arrCurrentPolicy, arrDigest, arrMapLimit, arrPolicyLookup, arrPolicyMarkers, arrPolicyTag, arrRetryAt, arrTagPolicy, arrWebhookSecretSchema, createArrInstanceStore, sameArrMappings, type ArrStoredSettings } from "./arrInstances";
+import { arrAbsolutePath, arrCurrentPolicy, arrDigest, arrMapLimit, arrPolicyLookup, arrPolicyMarkers, arrPolicyTag, arrReadyEventGroups, arrRefreshMessage, arrRetryAt, arrTitleHasMediaSymlinks, arrTagPolicy, arrWebhookSecretSchema, createArrInstanceStore, sameArrMappings, type ArrStoredSettings } from "./arrInstances";
 import { isOnboardingComplete } from "./onboarding";
 import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { RadarrClient, RadarrError, normalizeRadarrUrl, type RadarrMovie } from "./radarrClient";
@@ -18,7 +18,9 @@ import type { MediaExpectation } from "./mediaIntegrity";
 
 const tagSyncBatchSize = 50;
 const monitorBatchSize = 50;
+// Titles handled per pass; each takes all of its pending events at once.
 const eventBatchSize = 10;
+const pendingEventLimit = 2000;
 const catalogRefreshIntervalMs = 30 * 60_000;
 const historyRetentionMs = 30 * 86400_000;
 const tagsSchema = z.array(z.string());
@@ -362,22 +364,32 @@ export async function receiveRadarrWebhook(db: Db, instanceId: string | null, pa
   return { accepted: true, duplicate: inserted.length === 0 };
 }
 
-async function processEvent(db: Db, config: StoredSettings, event: typeof schema.radarrEvents.$inferSelect): Promise<void> {
-  const old = await first(db.select().from(schema.radarrMovies).where(movieIdsIn(config, [event.movieId])).limit(1));
+type RadarrEvent = typeof schema.radarrEvents.$inferSelect;
+
+const addedOnlyMessage = "Added to the catalog. No rescan queued: the title folder has no media yet.";
+
+// All pending events of one movie are handled together, so a burst becomes one rescan of the title.
+async function processMovieEvents(db: Db, config: StoredSettings, events: RadarrEvent[]): Promise<void> {
+  const movieId = events[0]!.movieId;
+  const eventIds = events.map((event) => event.id);
+  const markProcessed = (transaction: Db, error: string | null, jobId: number | null = null) => transaction.update(schema.radarrEvents).set({ processedAt: nowIso(), error, jobId }).where(inArray(schema.radarrEvents.id, eventIds));
+  const old = await first(db.select().from(schema.radarrMovies).where(movieIdsIn(config, [movieId])).limit(1));
   const scopes: ScanTitleScope[] = [];
   if (old?.section && old.itemName) scopes.push({ section: old.section, itemName: old.itemName });
+  // Radarr no longer knows a deleted movie, so its stored folder is the only scope left.
+  const deleted = events[events.length - 1]!.eventType === "MovieDelete";
   let fetched: { movie: RadarrMovie; tags: Catalog["tags"] } | null = null;
-  if (event.eventType !== "MovieDelete") {
+  if (!deleted) {
     const connection = client(config);
-    const movie = await connection.movie(event.movieId);
+    const movie = await connection.movie(movieId);
     const scope = mapRadarrMovie(movie, config);
     if (!scope) {
-      await commitCurrent(db, config, (transaction) => transaction.update(schema.radarrEvents).set({ processedAt: nowIso(), error: "Ignored: movie is outside the configured folder mappings." }).where(eq(schema.radarrEvents.id, event.id)));
+      await commitCurrent(db, config, (transaction) => markProcessed(transaction, "Ignored: movie is outside the configured folder mappings."));
       return;
     }
     if (old && old.tmdbId !== movie.tmdbId) throw new RadarrError("Movie identifier changed. Refresh and review its mapping.");
-    if (event.eventType === "Download") {
-      const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (events.some((event) => event.eventType === "Download")) {
       const relative = movie.movieFile?.relativePath;
       if (!relative || path.posix.isAbsolute(relative) || relative.split(/[\\/]/).some((part) => part === ".." || part === "." || part === "")) throw new RadarrError("Radarr has not reported a usable imported file yet.");
       const filePath = path.join(paths.symlinkDir, scope.section, scope.itemName, relative);
@@ -386,29 +398,37 @@ async function processEvent(db: Db, config: StoredSettings, event: typeof schema
       const stat = await withFilesystemTimeout(fs.lstat(filePath), "Imported symlink check").catch(() => null);
       if (!stat?.isSymbolicLink()) throw new RadarrError("Imported symlink is not available at the mapped path yet. Waiting to rescan.");
     }
-    if (!scopes.some((entry) => entry.section === scope.section && entry.itemName === scope.itemName)) scopes.push(scope);
     fetched = { movie, tags: await connection.tags() };
+    // A movie added without a file has nothing to scan; its Download event does the real rescan.
+    if (events.every((event) => event.eventType === "MovieAdded") && !await arrTitleHasMediaSymlinks(paths.symlinkDir, scope)) {
+      await commitCurrent(db, config, async (transaction) => {
+        await storeMovies(transaction, [movie], fetched!.tags, config);
+        await markProcessed(transaction, addedOnlyMessage);
+      });
+      return;
+    }
+    if (!scopes.some((entry) => entry.section === scope.section && entry.itemName === scope.itemName)) scopes.push(scope);
   }
   await commitCurrent(db, config, async (transaction) => {
     if (fetched) await storeMovies(transaction, [fetched.movie], fetched.tags, config);
     if (!scopes.length) {
-      await transaction.update(schema.radarrEvents).set({ processedAt: nowIso(), error: "Ignored: no confirmed SRTL mapping is available for this event." }).where(eq(schema.radarrEvents.id, event.id));
+      await markProcessed(transaction, "Ignored: no confirmed SRTL mapping is available for this event.");
       return;
     }
     const jobId = await new JobRunner(transaction).startExternalTitleScan(scopes);
-    await transaction.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level: "info", message: `Title refresh requested by ${config.name}`, data: JSON.stringify({ instanceId: config.id, movieId: event.movieId, eventType: event.eventType }) });
-    await transaction.update(schema.radarrEvents).set({ processedAt: nowIso(), error: null, jobId }).where(eq(schema.radarrEvents.id, event.id));
-    if (event.eventType === "MovieDelete") await transaction.delete(schema.radarrMovies).where(movieIdsIn(config, [event.movieId]));
+    await transaction.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level: "info", message: arrRefreshMessage(config.name, events.length), data: JSON.stringify({ instanceId: config.id, movieId, eventTypes: [...new Set(events.map((event) => event.eventType))], events: events.length }) });
+    await markProcessed(transaction, null, jobId);
+    if (deleted) await transaction.delete(schema.radarrMovies).where(movieIdsIn(config, [movieId]));
   });
 }
 
 async function processEvents(db: Db, config: StoredSettings): Promise<void> {
-  const events = await db.select().from(schema.radarrEvents).where(and(eq(schema.radarrEvents.instanceId, config.id), isNull(schema.radarrEvents.processedAt), lte(schema.radarrEvents.nextAttemptAt, nowIso()))).orderBy(asc(schema.radarrEvents.nextAttemptAt), asc(schema.radarrEvents.id)).limit(eventBatchSize);
-  for (const event of events) {
-    try { await processEvent(db, config, event); }
+  const pending = await db.select().from(schema.radarrEvents).where(and(eq(schema.radarrEvents.instanceId, config.id), isNull(schema.radarrEvents.processedAt))).orderBy(asc(schema.radarrEvents.id)).limit(pendingEventLimit);
+  for (const events of arrReadyEventGroups(pending, (event) => event.movieId).slice(0, eventBatchSize)) {
+    try { await processMovieEvents(db, config, events); }
     catch (error) {
       const message = error instanceof RadarrError ? error.message : "Title refresh could not be queued. It will retry after active work or storage maintenance finishes.";
-      await db.update(schema.radarrEvents).set({ error: message, attempts: event.attempts + 1, nextAttemptAt: retryAt(event.attempts) }).where(eq(schema.radarrEvents.id, event.id));
+      for (const event of events) await db.update(schema.radarrEvents).set({ error: message, attempts: event.attempts + 1, nextAttemptAt: retryAt(event.attempts) }).where(eq(schema.radarrEvents.id, event.id));
     }
   }
 }

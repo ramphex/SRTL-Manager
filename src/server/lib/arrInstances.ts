@@ -1,6 +1,7 @@
 // Instance settings shared by the Radarr and Sonarr integrations: stored connections, folder ownership,
 // automatic mapping, and webhook authentication. Each integration keeps its own setting key and lock.
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import fs from "node:fs/promises";
 import path from "node:path";
 import { sql } from "drizzle-orm";
 import { z } from "zod";
@@ -8,6 +9,8 @@ import { arrInstanceLimit, type ArrCopyDefaults, type ArrPathMapping, type ArrRo
 import type { PathsSettings, SectionContentType, StoragePolicyKind } from "../../shared/types";
 import { first, getJsonSetting, getSectionSettings, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { withFilesystemTimeout } from "./filesystemSafety";
+import { isMediaFile } from "./media";
 import { canonicalTitleKey } from "./storagePolicies";
 
 export const arrWebhookSecretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
@@ -82,6 +85,42 @@ export function arrCurrentPolicy(row: { itemName: string | null }, policies: Map
 }
 
 export function arrRetryAt(attempts: number): string { return new Date(Date.now() + Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6))).toISOString(); }
+
+// A title's webhook events wait until it has been quiet for this long, but never longer than the maximum
+// wait counted from its first pending event, so a long stream still gets scanned.
+export const arrEventQuietMs = 10_000;
+export const arrEventMaxWaitMs = 60_000;
+
+// Groups the pending events by title and returns the groups ready to process: at least one event is due for
+// an attempt and the title is either quiet or has waited the maximum time. Oldest groups come first.
+export function arrReadyEventGroups<T extends { id: number; receivedAt: string; nextAttemptAt: string | null }>(events: readonly T[], titleOf: (event: T) => number, now = Date.now()): T[][] {
+  const groups = new Map<number, T[]>();
+  for (const event of events) groups.set(titleOf(event), [...(groups.get(titleOf(event)) ?? []), event]);
+  const ready: T[][] = [];
+  for (const group of groups.values()) {
+    const received = group.map((event) => Date.parse(event.receivedAt));
+    const due = group.some((event) => !event.nextAttemptAt || Date.parse(event.nextAttemptAt) <= now);
+    if (due && (now - Math.max(...received) >= arrEventQuietMs || now - Math.min(...received) >= arrEventMaxWaitMs)) ready.push(group.sort((a, b) => a.id - b.id));
+  }
+  return ready.sort((a, b) => a[0]!.id - b[0]!.id);
+}
+
+// "Title refresh requested by Sonarr (10 events)" for a shared scan, the plain sentence for a single event.
+export function arrRefreshMessage(instanceName: string, eventCount: number): string {
+  return `Title refresh requested by ${instanceName}${eventCount > 1 ? ` (${eventCount} events)` : ""}`;
+}
+
+// Whether the title folder already holds media symlinks, so an "added" event for it is worth a rescan.
+export async function arrTitleHasMediaSymlinks(symlinkDir: string, scope: { section: string; itemName: string }): Promise<boolean> {
+  const walk = async (directory: string, depth: number): Promise<boolean> => {
+    const entries = await withFilesystemTimeout(fs.readdir(directory, { withFileTypes: true }), "Title folder check").catch(() => []);
+    if (entries.some((entry) => entry.isSymbolicLink() && isMediaFile(entry.name))) return true;
+    if (depth >= 3) return false;
+    for (const entry of entries) if (entry.isDirectory() && await walk(path.join(directory, entry.name), depth + 1)) return true;
+    return false;
+  };
+  return symlinkDir ? walk(path.join(symlinkDir, scope.section, scope.itemName), 0) : false;
+}
 
 export async function arrMapLimit<T, R>(items: readonly T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
   const results: R[] = new Array<R>(items.length);
