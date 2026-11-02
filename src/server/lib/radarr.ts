@@ -218,6 +218,23 @@ export function radarrTagPolicy(tags: string[], config: Pick<StoredSettings, "lo
   return local && remote ? "conflict" : local ? "location_1" : remote ? "location_2" : "unassigned";
 }
 
+// Titles whose Radarr tags already carry a policy other than `policy`. A default assignment leaves these for review.
+export async function radarrTagConflictTitles(db: Db, itemNames: string[], policy: StoragePolicyKind): Promise<Set<string>> {
+  const conflicts = new Set<string>();
+  if (!itemNames.length) return conflicts;
+  for (const config of (await storedInstances(db)).instances) {
+    if (!config.enabled || !config.localTag || !config.remoteTag) continue;
+    for (let offset = 0; offset < itemNames.length; offset += 500) {
+      const rows = await db.select().from(schema.radarrMovies).where(and(forInstance(config), inArray(schema.radarrMovies.itemName, itemNames.slice(offset, offset + 500))));
+      for (const row of rows) {
+        const tagPolicy = radarrTagPolicy(parseTags(row.tags), config);
+        if (row.itemName && tagPolicy !== "unassigned" && tagPolicy !== policy) conflicts.add(canonicalTitleKey(row.itemName));
+      }
+    }
+  }
+  return conflicts;
+}
+
 function policyTag(policy: StoragePolicyKind, config: Pick<StoredSettings, "localTag" | "remoteTag">): string | null {
   return policy === "location_1" ? config.localTag : policy === "location_2" ? config.remoteTag : null;
 }

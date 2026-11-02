@@ -5,6 +5,7 @@ import { first, getJsonSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
+import { applyDefaultPolicyToUnassigned, listUnassignedSectionTitles, previewDefaultPolicyForUnassigned } from "../lib/defaultPolicy";
 import {
   findStoragePolicyCandidateTitle,
   findStoragePolicyCandidateTitles,
@@ -349,6 +350,19 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
           })
       };
     });
+  });
+
+  app.get("/api/storage-policies/default-preview", async (request) => {
+    const query = z.object({ section: z.string().trim().min(1).max(200) }).parse(request.query);
+    return previewDefaultPolicyForUnassigned(db, query.section);
+  });
+
+  app.post("/api/storage-policies/default-apply", async (request) => {
+    const body = z.object({ section: z.string().trim().min(1).max(200) }).parse(request.body);
+    return withResourceMutationGuard(db, async (transaction) => ({
+      resources: await storagePolicyMutationResources(transaction, await listUnassignedSectionTitles(transaction, body.section)),
+      mutate: () => applyDefaultPolicyToUnassigned(transaction, body.section)
+    }));
   });
 
   app.delete("/api/storage-policies/:id", async (request) => {

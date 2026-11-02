@@ -3,7 +3,7 @@ import { eq, type SQL } from "drizzle-orm";
 import { drizzle, type NodePgDatabase } from "drizzle-orm/node-postgres";
 import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg";
 import * as schema from "./schema";
-import type { SectionContentType, SectionSettings } from "../../shared/types";
+import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 
 export type Db = NodePgDatabase<typeof schema>;
@@ -819,13 +819,15 @@ function normalizeSectionTitle(value: unknown): string | null {
 }
 
 export function normalizeSectionSettings(value: unknown): SectionSettings {
-  const input = value && typeof value === "object" ? (value as { sections?: unknown; sectionTitles?: unknown; sectionTypes?: unknown }) : {};
+  const input = value && typeof value === "object" ? (value as { sections?: unknown; sectionTitles?: unknown; sectionTypes?: unknown; sectionDefaultPolicies?: unknown }) : {};
   const rawSections = Array.isArray(input.sections) ? input.sections : [];
   const rawTitleMap = input.sectionTitles && typeof input.sectionTitles === "object" ? (input.sectionTitles as Record<string, unknown>) : {};
   const rawTypeMap = input.sectionTypes && typeof input.sectionTypes === "object" ? (input.sectionTypes as Record<string, unknown>) : {};
   const sections: string[] = [];
   const sectionTitles: Record<string, string> = {};
   const sectionTypes: Record<string, SectionContentType> = {};
+  const rawDefaultPolicyMap = input.sectionDefaultPolicies && typeof input.sectionDefaultPolicies === "object" ? (input.sectionDefaultPolicies as Record<string, unknown>) : {};
+  const sectionDefaultPolicies: Record<string, DefaultStoragePolicy> = {};
   const seen = new Set<string>();
 
   for (const rawSection of rawSections) {
@@ -844,9 +846,12 @@ export function normalizeSectionSettings(value: unknown): SectionSettings {
         ? normalizeSectionContentType((rawSection as { type?: unknown; contentType?: unknown }).type ?? (rawSection as { contentType?: unknown }).contentType)
         : null;
     sectionTypes[name] = normalizeSectionContentType(rawTypeMap[name]) ?? inlineType ?? inferSectionContentType(name);
+
+    const defaultPolicy = rawDefaultPolicyMap[name];
+    if (defaultPolicy === "location_1" || defaultPolicy === "location_2") sectionDefaultPolicies[name] = defaultPolicy;
   }
 
-  return { sections, sectionTitles, sectionTypes };
+  return { sections, sectionTitles, sectionTypes, ...(Object.keys(sectionDefaultPolicies).length > 0 ? { sectionDefaultPolicies } : {}) };
 }
 
 export async function getSectionSettings(db: Db): Promise<SectionSettings> {

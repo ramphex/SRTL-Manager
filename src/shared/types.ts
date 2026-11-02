@@ -131,10 +131,14 @@ export interface PathConfigurationState {
   migration: PathMigrationRecord | null;
 }
 
+export type DefaultStoragePolicy = Exclude<StoragePolicyKind, "unassigned">;
+
 export interface SectionSettings {
   sections: string[];
   sectionTitles?: Record<string, string>;
   sectionTypes?: Record<string, SectionContentType>;
+  // Policy given to titles first seen in a folder after it was set. A folder without an entry assigns nothing.
+  sectionDefaultPolicies?: Record<string, DefaultStoragePolicy>;
 }
 
 export interface OnboardingPathCheck {
@@ -439,6 +443,20 @@ export interface StoragePolicyBulkResult {
   updated: number;
   policy: StoragePolicyKind;
   items: StoragePolicyTitle[];
+}
+
+export interface DefaultPolicyPreview {
+  section: string;
+  policy: DefaultStoragePolicy;
+  unassignedTitles: number;
+  radarrReviewTitles: number;
+}
+
+export interface DefaultPolicyApplyResult {
+  section: string;
+  policy: DefaultStoragePolicy;
+  assigned: number;
+  skippedForRadarrReview: number;
 }
 
 export interface StoragePolicyCandidate {
