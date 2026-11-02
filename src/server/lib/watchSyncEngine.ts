@@ -531,8 +531,8 @@ function epochSeconds(date: Date | null): number {
   return Math.floor((date ?? new Date()).getTime() / 1000);
 }
 
-// Everything that may have changed for this pair since its cursors, plus a rolling slice of the Plex index:
-// Plex reports no change when an item is marked unwatched, so each pass re-reads a few hundred items.
+// Everything that may have changed for this pair since its cursors, plus a rolling slice of its synced items:
+// Plex reports no change when an item is marked unwatched, so each pass re-reads a few hundred of them.
 async function collectIncremental(db: Db, rt: PairRuntime): Promise<{ collected: Collected; plexCursor: string; jellyfinCursor: string; recheckCursor: string }> {
   const collected = emptyCollected();
   const noop = async () => undefined;
@@ -568,10 +568,11 @@ async function collectIncremental(db: Db, rt: PairRuntime): Promise<{ collected:
     }
     await addPlexIds(db, rt, collected, history);
   }
-  const recheck = await db.select().from(schema.watchSyncItems)
-    .where(and(eq(schema.watchSyncItems.serverId, rt.plexServer.id), gt(schema.watchSyncItems.linkPath, rt.pair.recheckCursor ?? "")))
-    .orderBy(asc(schema.watchSyncItems.linkPath)).limit(recheckBatchSize);
-  for (const row of recheck) observation(collected, row.linkPath, path.posix.basename(row.linkPath)).plexId ??= row.itemId;
+  // Only items this pair has synced can be un-watched or lose their position, so the recheck walks its snapshots.
+  const recheck = await db.select({ linkPath: schema.watchSyncState.linkPath }).from(schema.watchSyncState)
+    .where(and(eq(schema.watchSyncState.pairId, rt.pair.id), gt(schema.watchSyncState.linkPath, rt.pair.recheckCursor ?? "")))
+    .orderBy(asc(schema.watchSyncState.linkPath)).limit(recheckBatchSize);
+  for (const row of recheck) observation(collected, row.linkPath, path.posix.basename(row.linkPath));
   const recheckCursor = recheck.length < recheckBatchSize ? "" : recheck[recheck.length - 1]!.linkPath;
 
   const jellyfinTime = await listJellyfinLibrary(db, rt, collected, noop, { minDateLastSavedForUser: jellyfinSince });
