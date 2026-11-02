@@ -31,6 +31,8 @@ import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
 import { radarrInstanceWebhookPath, radarrWebhookPath, registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
+import { authenticateSonarrWebhook } from "./lib/sonarr";
+import { registerSonarrRoutes, sonarrWebhookInstanceId, sonarrWebhookPath } from "./routes/sonarrRoutes";
 
 export interface AppContext {
   app: FastifyInstance;
@@ -167,10 +169,17 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     if (!request.url.startsWith("/api/") && !documentationRequest) return;
     if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
     const radarrWebhook = request.method === "POST" && (request.routeOptions.url === radarrWebhookPath || request.routeOptions.url === radarrInstanceWebhookPath);
+    const sonarrWebhook = request.method === "POST" && request.routeOptions.url === sonarrWebhookPath;
     if (radarrWebhook) {
       const token = request.headers["x-srtl-webhook-secret"];
       const instanceId = (() => { try { return webhookInstanceId(request); } catch { return undefined; } })();
       if (instanceId === undefined || !(await authenticateRadarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined))) {
+        await reply.code(401).send({ error: "Invalid webhook credentials" });
+      }
+    } else if (sonarrWebhook) {
+      const token = request.headers["x-srtl-webhook-secret"];
+      const instanceId = (() => { try { return sonarrWebhookInstanceId(request); } catch { return undefined; } })();
+      if (instanceId === undefined || !(await authenticateSonarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined))) {
         await reply.code(401).send({ error: "Invalid webhook credentials" });
       }
     } else {
@@ -193,6 +202,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerOnboardingRoutes(app, database.db);
   registerSettingsRoutes(app, database.db);
   registerRadarrRoutes(app, database.db);
+  registerSonarrRoutes(app, database.db);
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
   registerOrphanRoutes(app, database.db, jobs);

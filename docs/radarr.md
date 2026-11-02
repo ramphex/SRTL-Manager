@@ -1,6 +1,6 @@
 # Radarr Integration
 
-The optional Radarr adapter keeps two Radarr tags matched to SRTL storage policies, can update Radarr monitoring after copies, and can rescan titles when Radarr imports files. It works with any number of Radarr instances, for example one each for 1080p, 4K, anime, and remuxes. Tags describe **intended storage policy**, not proof of a successful copy. Copies remain manual, and existing transfer verification and rollback safeguards are unchanged. Sonarr is not connected by this adapter.
+The optional Radarr adapter keeps two Radarr tags matched to SRTL storage policies, can update Radarr monitoring after copies, and can rescan titles when Radarr imports files. It works with any number of Radarr instances, for example one each for 1080p, 4K, anime, and remuxes. Tags describe **intended storage policy**, not proof of a successful copy. Copies remain manual, and existing transfer verification and rollback safeguards are unchanged. Sonarr has its own integration; see the [Sonarr guide](sonarr.md).
 
 ## Instances
 
@@ -18,7 +18,7 @@ Upgrading from a version with a single Radarr connection turns that connection i
 
 ## Connect
 
-1. Open **Settings > Integrations > Radarr**, then add an instance or select one. Enter the Radarr URL and API key, then test the connection. Both the API and worker need network access to Radarr. Each integration has its own tab; Sonarr is marked coming soon, without active settings.
+1. Open **Settings > Integrations > Radarr**, then add an instance or select one. Enter the Radarr URL and API key, then test the connection. Both the API and worker need network access to Radarr. Each integration has its own tab; Sonarr is set up the same way in its own tab.
 2. Choose **Automatic** or **Manual** folder mapping. New connections default to Automatic: testing or saving matches full Radarr root paths against movie-type sections beneath SRTL's configured symlink directory. Unmatched roots are shown and excluded, never guessed from similar names. Use Manual when container paths differ; for example, Radarr's `/library/films` can map to SRTL's `films` section. Each root and section can be mapped only once, a section can belong to only one instance, and title-folder names must match exactly in either mode. Existing mappings remain Manual. Saving rechecks automatic matches; changed mappings require another policy review.
 3. Choose the two policy tags, for example `local` and `ignored`. Each instance has its own tag names. They start empty: the placeholders are examples, not enabled defaults. Use distinct lowercase names; the UI labels the fields with your storage locations' friendly names. Missing tags are created in Radarr when first needed.
 4. Optionally choose whether copies update Radarr monitoring by default (see below).

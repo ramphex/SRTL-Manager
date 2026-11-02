@@ -86,7 +86,8 @@ const copyInputSchema = z
     relativePathPrefix: z.string().trim().min(1).max(2000).optional(),
     localConflictStrategy: z.enum(["keep_both", "replace"]).optional(),
     allowSourceTitleMismatch: z.boolean().optional(),
-    radarrMonitoring: z.boolean().optional()
+    radarrMonitoring: z.boolean().optional(),
+    sonarrMonitoring: z.boolean().optional()
   })
   .refine((value) => Boolean(value.linkIds?.length || value.section || value.itemName), { message: "Copy requires link IDs, a folder scope, or a title" });
 

@@ -1,14 +1,14 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
-import { radarrInstanceLimit, type RadarrConnectionTest, type RadarrCopyDefaults, type RadarrMovieStatus, type RadarrOverview, type RadarrPathMapping, type RadarrRootConflict, type RadarrSettings, type RadarrSettingsInput, type RadarrState } from "../../shared/radarr";
+import { radarrInstanceLimit, type RadarrConnectionTest, type RadarrCopyDefaults, type RadarrMovieStatus, type RadarrOverview, type RadarrSettingsInput, type RadarrState } from "../../shared/radarr";
 import type { CopyOptions, JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind, StorageRootType } from "../../shared/types";
-import { dbAll, first, getJsonSetting, getSectionSettings, nowIso, setSetting, type Db } from "../db/database";
+import { dbAll, first, getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
+import { arrAbsolutePath, arrCurrentPolicy, arrDigest, arrMapLimit, arrPolicyLookup, arrPolicyMarkers, arrPolicyTag, arrRetryAt, arrTagPolicy, arrWebhookSecretSchema, createArrInstanceStore, sameArrMappings, type ArrStoredSettings } from "./arrInstances";
 import { isOnboardingComplete } from "./onboarding";
 import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { RadarrClient, RadarrError, normalizeRadarrUrl, type RadarrMovie } from "./radarrClient";
@@ -16,49 +16,14 @@ import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
 import { assertPathParentInside, withFilesystemTimeout } from "./filesystemSafety";
 import type { MediaExpectation } from "./mediaIntegrity";
 
-const radarrLock = 781_889_451;
-const settingKey = "radarrInstances";
 const tagSyncBatchSize = 50;
 const monitorBatchSize = 50;
 const eventBatchSize = 10;
 const catalogRefreshIntervalMs = 30 * 60_000;
 const historyRetentionMs = 30 * 86400_000;
 const tagsSchema = z.array(z.string());
-export const radarrWebhookSecretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
-const policyTagSchema = z.string().trim().regex(/^(?:[a-z0-9][a-z0-9-]{0,99})?$/, "Use a lowercase tag with letters, numbers, or hyphens.");
-const absolutePath = z.string().trim().min(1).max(4096).refine((value) => value.startsWith("/") && !/[\\\0]/.test(value) && path.posix.normalize(value) === value, "Use an absolute path without parent-directory segments.");
-export const radarrInstanceIdSchema = z.string().regex(/^[a-z0-9]{1,40}$/, "Unknown Radarr instance.");
-export const radarrInstanceNameSchema = z.string().trim().min(1, "Enter a name for this Radarr instance.").max(60, "Use at most 60 characters for the instance name.").refine((value) => [...value].every((character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) !== 127), "Instance names cannot contain control characters.");
-export const radarrSettingsSchema = z.object({
-  revision: z.number().int().nonnegative(),
-  baseUrl: z.string().trim().min(1).max(2000).transform(normalizeRadarrUrl),
-  apiKey: z.string().trim().max(256).regex(/^[A-Za-z0-9]*$/).optional(),
-  webhookSecret: z.union([z.literal(""), radarrWebhookSecretSchema]).optional(),
-  enabled: z.boolean(),
-  localTag: policyTagSchema,
-  remoteTag: policyTagSchema,
-  monitorOnCopy: z.boolean().default(false),
-  mappingMode: z.enum(["auto", "manual"]).default("manual"),
-  mappings: z.array(z.object({ rootPath: absolutePath, section: z.string().min(1).max(200) })).max(50)
-}).refine((value) => !value.localTag || !value.remoteTag || value.localTag !== value.remoteTag, "Local and Remote tags must be different.")
-  .refine((value) => !value.enabled || Boolean(value.localTag && value.remoteTag), "Choose both policy tags before enabling synchronization.")
-  .refine((value) => new Set(value.mappings.map((mapping) => mapping.rootPath)).size === value.mappings.length && new Set(value.mappings.map((mapping) => mapping.section)).size === value.mappings.length, "Map each Radarr root and SRTL section only once.");
 
-interface StoredSettings extends Omit<RadarrSettingsInput, "apiKey" | "webhookSecret"> {
-  id: string;
-  name: string;
-  apiKey: string;
-  webhookSecretHash: string;
-  lastRefreshAt: string | null;
-  lastError: string | null;
-  // Copy jobs up to this id predate the instance and never change its monitoring.
-  copyJobFloor: number;
-}
-
-interface StoredInstances {
-  instances: StoredSettings[];
-  legacyWebhookInstanceId: string | null;
-}
+type StoredSettings = ArrStoredSettings;
 
 interface Catalog {
   movies: RadarrMovie[];
@@ -70,126 +35,31 @@ class RadarrInstanceNotFound extends RadarrError {
   constructor() { super("This Radarr instance no longer exists. Reload the integration settings."); }
 }
 
-const defaultSettings: Omit<StoredSettings, "id" | "name" | "copyJobFloor"> = { revision: 0, baseUrl: "", apiKey: "", webhookSecretHash: "", enabled: false, localTag: "", remoteTag: "", monitorOnCopy: false, mappingMode: "auto", mappings: [], lastRefreshAt: null, lastError: null };
+const store = createArrInstanceStore({ name: "Radarr", settingKey: "radarrInstances", lock: 781_889_451, sectionType: "movies", sectionTypeLabel: "Movies", error: (message) => new RadarrError(message), notFound: () => new RadarrInstanceNotFound(), normalizeUrl: normalizeRadarrUrl });
+const { storedInstances, settings, writeSettings, locked, commitCurrent, candidateSettings, automaticMappings, assertSectionsAvailable, publicSettings, sectionOwner, webhookInstance } = store;
+export const radarrWebhookSecretSchema = arrWebhookSecretSchema;
+export const radarrInstanceIdSchema = store.instanceIdSchema;
+export const radarrInstanceNameSchema = store.instanceNameSchema;
+export const radarrSettingsSchema = store.settingsSchema;
 type MovieRow = typeof schema.radarrMovies.$inferSelect;
-
-async function storedInstances(db: Db): Promise<StoredInstances> {
-  const saved = await getJsonSetting<Partial<StoredInstances>>(db, settingKey, {});
-  return {
-    instances: (saved.instances ?? []).map((instance) => ({ ...instance, mappingMode: instance.mappingMode ?? "manual", monitorOnCopy: instance.monitorOnCopy ?? false, copyJobFloor: instance.copyJobFloor ?? 0 })),
-    legacyWebhookInstanceId: saved.legacyWebhookInstanceId ?? null
-  };
-}
-
-async function settings(db: Db, instanceId: string): Promise<StoredSettings> {
-  const config = (await storedInstances(db)).instances.find((instance) => instance.id === instanceId);
-  if (!config) throw new RadarrInstanceNotFound();
-  return config;
-}
-
-// Callers hold the Radarr lock, so the list cannot change between this read and write.
-async function writeSettings(db: Db, config: StoredSettings): Promise<void> {
-  const stored = await storedInstances(db);
-  await setSetting(db, settingKey, { ...stored, instances: stored.instances.map((instance) => instance.id === config.id ? config : instance) });
-}
-
-async function locked<T>(db: Db, action: (transaction: Db) => Promise<T>): Promise<T> {
-  return db.transaction(async (transaction) => {
-    await transaction.execute(sql`select pg_advisory_xact_lock(${radarrLock})`);
-    return action(transaction);
-  });
-}
-
-// Radarr requests run outside transactions; results are committed only if the instance's settings did not change meanwhile.
-async function commitCurrent<T>(db: Db, config: Pick<StoredSettings, "id" | "revision">, action: (transaction: Db, config: StoredSettings) => Promise<T>): Promise<T | undefined> {
-  return locked(db, async (transaction) => {
-    const current = (await storedInstances(transaction)).instances.find((instance) => instance.id === config.id);
-    return current?.revision === config.revision ? action(transaction, current) : undefined;
-  });
-}
+const mapLimit = arrMapLimit;
+const digest = arrDigest;
+const sameMappings = sameArrMappings;
+const policyLookup = arrPolicyLookup;
+const policyMarkers = arrPolicyMarkers;
+const policyTag = arrPolicyTag;
+const currentPolicy = arrCurrentPolicy;
+const retryAt = arrRetryAt;
+export const radarrTagPolicy = arrTagPolicy;
 
 const forInstance = (config: Pick<StoredSettings, "id">) => eq(schema.radarrMovies.instanceId, config.id);
-
-async function mapLimit<T, R>(items: readonly T[], limit: number, action: (item: T) => Promise<R>): Promise<R[]> {
-  const results: R[] = new Array<R>(items.length);
-  let next = 0;
-  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
-    while (next < items.length) {
-      const index = next++;
-      results[index] = await action(items[index]!);
-    }
-  }));
-  return results;
-}
 
 function client(config: StoredSettings): RadarrClient {
   if (!config.apiKey || !config.baseUrl) throw new RadarrError("Save a Radarr connection first.");
   return new RadarrClient(config.baseUrl, config.apiKey);
 }
 
-function digest(value: string): string { return createHash("sha256").update(value).digest("hex"); }
 function parseTags(value: string): string[] { return tagsSchema.parse(JSON.parse(value)); }
-
-// Each SRTL folder belongs to at most one instance.
-function sectionOwners(stored: StoredInstances, exceptId: string): Map<string, StoredSettings> {
-  const owners = new Map<string, StoredSettings>();
-  for (const instance of stored.instances) {
-    if (instance.id === exceptId) continue;
-    for (const mapping of instance.mappings) owners.set(mapping.section, instance);
-  }
-  return owners;
-}
-
-async function assertSectionsAvailable(db: Db, config: Pick<StoredSettings, "id" | "mappings">): Promise<void> {
-  const owners = sectionOwners(await storedInstances(db), config.id);
-  const sections = await getSectionSettings(db);
-  for (const mapping of config.mappings) {
-    const owner = owners.get(mapping.section);
-    if (owner) throw new RadarrError(`The ${sections.sectionTitles?.[mapping.section] ?? mapping.section} folder is already mapped by ${owner.name}. Remove it from that instance first, or map a different folder.`);
-  }
-}
-
-async function candidateSettings(db: Db, current: StoredSettings, input: RadarrSettingsInput): Promise<StoredSettings> {
-  const draft = radarrSettingsSchema.parse(input);
-  if (draft.revision !== current.revision) throw new RadarrError("Radarr settings changed. Reload before saving.");
-  if (draft.baseUrl !== current.baseUrl && !draft.apiKey) throw new RadarrError("Enter the API key when changing the Radarr address.");
-  const apiKey = draft.apiKey || current.apiKey;
-  if (!apiKey) throw new RadarrError("Enter a Radarr API key.");
-  const sections = await getSectionSettings(db);
-  if (draft.mappingMode === "manual") {
-    for (const mapping of draft.mappings) {
-      if (!sections.sections.includes(mapping.section) || sections.sectionTypes?.[mapping.section] !== "movies") {
-        throw new RadarrError("Radarr roots must map to configured Movies sections.");
-      }
-    }
-    await assertSectionsAvailable(db, { id: current.id, mappings: draft.mappings });
-  }
-  const webhookSecretHash = draft.webhookSecret ? digest(draft.webhookSecret) : current.webhookSecretHash;
-  return { ...current, baseUrl: draft.baseUrl, apiKey, webhookSecretHash, enabled: draft.enabled, localTag: draft.localTag, remoteTag: draft.remoteTag, monitorOnCopy: draft.monitorOnCopy, mappingMode: draft.mappingMode, mappings: draft.mappings, lastError: null };
-}
-
-// Matches full Radarr roots to Movies folders under the symlink directory. Folders another instance maps are reported, never taken.
-async function automaticMappings(db: Db, instanceId: string, rootFolders: string[]): Promise<{ mappings: RadarrPathMapping[]; conflicts: RadarrRootConflict[] }> {
-  const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-  const sections = await getSectionSettings(db);
-  if (!absolutePath.safeParse(paths.symlinkDir).success) return { mappings: [], conflicts: [] };
-  const roots = new Set(rootFolders.filter((root) => absolutePath.safeParse(root).success));
-  const owners = sectionOwners(await storedInstances(db), instanceId);
-  const matches = sections.sections.filter((section) => sections.sectionTypes?.[section] === "movies")
-    .map((section) => ({ section, rootPath: path.posix.join(paths.symlinkDir, section) }))
-    .filter((mapping) => roots.has(mapping.rootPath));
-  return {
-    mappings: matches.filter((mapping) => !owners.has(mapping.section)),
-    conflicts: matches.flatMap((mapping) => {
-      const owner = owners.get(mapping.section);
-      return owner ? [{ ...mapping, instanceId: owner.id, instanceName: owner.name }] : [];
-    })
-  };
-}
-
-function sameMappings(left: RadarrPathMapping[], right: RadarrPathMapping[]): boolean {
-  return left.length === right.length && left.every((mapping) => right.some((other) => mapping.rootPath === other.rootPath && mapping.section === other.section));
-}
 
 async function inspectConnection(db: Db, config: StoredSettings): Promise<RadarrConnectionTest> {
   const connection = await client(config).test();
@@ -203,45 +73,13 @@ export async function testRadarrConnection(db: Db, instanceId: string, input: Ra
 }
 
 export function mapRadarrMovie(movie: RadarrMovie, config: Pick<StoredSettings, "mappings">): ScanTitleScope | null {
-  if (!absolutePath.safeParse(movie.path).success) return null;
+  if (!arrAbsolutePath.safeParse(movie.path).success) return null;
   const mapping = config.mappings.find((entry) => path.posix.dirname(movie.path) === entry.rootPath);
   const itemName = path.posix.basename(movie.path);
   if (!mapping || !itemName || itemName === "." || itemName === "..") return null;
   const tmdb = itemName.match(/\{tmdb-(\d+)\}/i);
   if (tmdb && Number(tmdb[1]) !== movie.tmdbId) return null;
   return { section: mapping.section, itemName };
-}
-
-export function radarrTagPolicy(tags: string[], config: Pick<StoredSettings, "localTag" | "remoteTag">): StoragePolicyKind | "conflict" {
-  const local = Boolean(config.localTag) && tags.includes(config.localTag);
-  const remote = Boolean(config.remoteTag) && tags.includes(config.remoteTag);
-  return local && remote ? "conflict" : local ? "location_1" : remote ? "location_2" : "unassigned";
-}
-
-function policyTag(policy: StoragePolicyKind, config: Pick<StoredSettings, "localTag" | "remoteTag">): string | null {
-  return policy === "location_1" ? config.localTag : policy === "location_2" ? config.remoteTag : null;
-}
-
-async function policyLookup(db: Db): Promise<Map<string, StoragePolicyKind>> {
-  const policies = await db.select().from(schema.storagePolicies);
-  const result = new Map<string, StoragePolicyKind>();
-  for (const row of policies) {
-    if (row.policy === "location_1" || row.policy === "location_2") result.set(canonicalTitleKey(row.title), row.policy);
-  }
-  return result;
-}
-
-// Re-assigning a policy refreshes its timestamp, so the marker also changes when the same policy is chosen again.
-async function policyMarkers(db: Db): Promise<Map<string, string>> {
-  const result = new Map<string, string>();
-  for (const row of await db.select().from(schema.storagePolicies)) {
-    if (row.policy === "location_1" || row.policy === "location_2") result.set(canonicalTitleKey(row.title), `${row.policy}@${row.updatedAt}`);
-  }
-  return result;
-}
-
-function currentPolicy(movie: Pick<MovieRow, "itemName">, policies: Map<string, StoragePolicyKind>): StoragePolicyKind {
-  return movie.itemName ? policies.get(canonicalTitleKey(movie.itemName)) ?? "unassigned" : "unassigned";
 }
 
 function movieIdsIn(config: Pick<StoredSettings, "id">, movieIds: number[]) {
@@ -295,10 +133,6 @@ async function refreshCatalog(db: Db, config: StoredSettings, resetRetries: bool
   });
 }
 
-function publicSettings(config: StoredSettings, stored: StoredInstances): RadarrSettings {
-  return { id: config.id, name: config.name, legacyWebhook: stored.legacyWebhookInstanceId === config.id, revision: config.revision, baseUrl: config.baseUrl, enabled: config.enabled, localTag: config.localTag, remoteTag: config.remoteTag, monitorOnCopy: config.monitorOnCopy, mappingMode: config.mappingMode, mappings: config.mappings, hasApiKey: Boolean(config.apiKey), hasWebhookSecret: Boolean(config.webhookSecretHash), lastRefreshAt: config.lastRefreshAt, lastError: config.lastError };
-}
-
 export async function getRadarrOverview(db: Db): Promise<RadarrOverview> {
   const stored = await storedInstances(db);
   const counts = await dbAll<{ instance_id: string; movies: number; mapped: number; review: number; errors: number }>(db, sql`
@@ -316,52 +150,22 @@ export async function getRadarrOverview(db: Db): Promise<RadarrOverview> {
   };
 }
 
-async function assertNameAvailable(stored: StoredInstances, name: string, exceptId: string | null): Promise<void> {
-  if (stored.instances.some((instance) => instance.id !== exceptId && instance.name.toLocaleLowerCase() === name.toLocaleLowerCase())) {
-    throw new RadarrError(`Another Radarr instance is already named ${name}. Choose a different name.`);
-  }
-}
-
 export async function createRadarrInstance(db: Db, name: string): Promise<RadarrState> {
-  const created = await locked(db, async (transaction) => {
-    const stored = await storedInstances(transaction);
-    if (stored.instances.length >= radarrInstanceLimit) throw new RadarrError(`SRTL supports up to ${radarrInstanceLimit} Radarr instances. Remove one before adding another.`);
-    await assertNameAvailable(stored, name, null);
-    let id: string;
-    do { id = randomBytes(6).toString("hex"); } while (stored.instances.some((instance) => instance.id === id));
-    // Copies finished before the instance existed were never requested from it.
-    const floor = await first(transaction.select({ id: sql<number>`coalesce(max(${schema.jobs.id}), 0)::int` }).from(schema.jobs));
-    const instance: StoredSettings = { ...defaultSettings, id, name, copyJobFloor: floor?.id ?? 0 };
-    await setSetting(transaction, settingKey, { ...stored, instances: [...stored.instances, instance] });
-    return instance;
-  });
-  return getRadarrState(db, created.id);
+  return getRadarrState(db, await store.createInstance(db, name));
 }
 
 export async function renameRadarrInstance(db: Db, instanceId: string, name: string): Promise<RadarrOverview> {
-  await locked(db, async (transaction) => {
-    const stored = await storedInstances(transaction);
-    const config = stored.instances.find((instance) => instance.id === instanceId);
-    if (!config) throw new RadarrInstanceNotFound();
-    await assertNameAvailable(stored, name, instanceId);
-    await writeSettings(transaction, { ...config, name });
-  });
+  await store.renameInstance(db, instanceId, name);
   return getRadarrOverview(db);
 }
 
 // Removal forgets SRTL's own records only. Tags and monitoring in Radarr stay as they are.
 export async function removeRadarrInstance(db: Db, instanceId: string): Promise<RadarrOverview> {
-  await locked(db, async (transaction) => {
-    const stored = await storedInstances(transaction);
-    if (!stored.instances.some((instance) => instance.id === instanceId)) throw new RadarrInstanceNotFound();
+  await store.removeInstance(db, instanceId, async (transaction) => {
     await transaction.delete(schema.radarrMovies).where(eq(schema.radarrMovies.instanceId, instanceId));
     await transaction.delete(schema.radarrEvents).where(eq(schema.radarrEvents.instanceId, instanceId));
     await transaction.delete(schema.radarrMonitorUpdates).where(eq(schema.radarrMonitorUpdates.instanceId, instanceId));
     await transaction.delete(schema.radarrCopyJobs).where(eq(schema.radarrCopyJobs.instanceId, instanceId));
-    await setSetting(transaction, settingKey, {
-      instances: stored.instances.filter((instance) => instance.id !== instanceId),
-      legacyWebhookInstanceId: stored.legacyWebhookInstanceId === instanceId ? null : stored.legacyWebhookInstanceId
-    });
   });
   return getRadarrOverview(db);
 }
@@ -411,12 +215,7 @@ export async function refreshRadarr(db: Db, instanceId: string): Promise<RadarrS
 }
 
 export async function getRadarrCopyDefaults(db: Db): Promise<RadarrCopyDefaults> {
-  const { instances } = await storedInstances(db);
-  return { sections: instances.filter((config) => config.enabled).flatMap((config) => config.mappings.map((mapping) => ({ section: mapping.section, instanceId: config.id, instanceName: config.name, monitorOnCopy: config.monitorOnCopy }))) };
-}
-
-function sectionOwner(stored: StoredInstances, section: string): StoredSettings | undefined {
-  return stored.instances.find((config) => config.mappings.some((mapping) => mapping.section === section));
+  return store.copyDefaults(db);
 }
 
 // Radarr's recorded size and runtime for the exact file a link points to, used to reject partial or sample files before copying.
@@ -519,19 +318,8 @@ export async function reconcileRadarrMovies(db: Db, instanceId: string, movieIds
   return getRadarrState(db, instanceId);
 }
 
-// A null instance id is the original webhook URL, which serves the instance migrated from the single-connection settings.
-async function webhookInstance(db: Db, instanceId: string | null): Promise<StoredSettings | undefined> {
-  const stored = await storedInstances(db);
-  const id = instanceId ?? stored.legacyWebhookInstanceId;
-  return id ? stored.instances.find((instance) => instance.id === id) : undefined;
-}
-
 export async function authenticateRadarrWebhook(db: Db, instanceId: string | null, token: string | undefined): Promise<boolean> {
-  const config = await webhookInstance(db, instanceId);
-  if (!config?.webhookSecretHash || !token || !radarrWebhookSecretSchema.safeParse(token).success) return false;
-  const actual = Buffer.from(digest(token), "hex");
-  const expected = Buffer.from(config.webhookSecretHash, "hex");
-  return actual.length === expected.length && timingSafeEqual(actual, expected);
+  return store.authenticateWebhook(db, instanceId, token);
 }
 
 const webhookSchema = z.object({
@@ -556,8 +344,6 @@ export async function receiveRadarrWebhook(db: Db, instanceId: string | null, pa
   const inserted = await db.insert(schema.radarrEvents).values({ instanceId: config.id, fingerprint, movieId: body.movie.id, title: body.movie.title, eventType: body.eventType, receivedAt: timestamp, nextAttemptAt: new Date(Date.now() + 3000).toISOString() }).onConflictDoUpdate({ target: [schema.radarrEvents.instanceId, schema.radarrEvents.fingerprint], set: { receivedAt: timestamp, processedAt: null, nextAttemptAt: new Date(Date.now() + 3000).toISOString(), attempts: 0, error: null, jobId: null }, setWhere: and(sql`radarr_events.received_at < ${cutoff}`, sql`radarr_events.processed_at IS NOT NULL`) }).returning({ id: schema.radarrEvents.id });
   return { accepted: true, duplicate: inserted.length === 0 };
 }
-
-function retryAt(attempts: number): string { return new Date(Date.now() + Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6))).toISOString(); }
 
 async function processEvent(db: Db, config: StoredSettings, event: typeof schema.radarrEvents.$inferSelect): Promise<void> {
   const old = await first(db.select().from(schema.radarrMovies).where(movieIdsIn(config, [event.movieId])).limit(1));
@@ -850,13 +636,9 @@ async function applyMonitorUpdates(db: Db, config: StoredSettings): Promise<void
 async function processInstance(db: Db, instanceId: string): Promise<void> {
   const config = (await storedInstances(db)).instances.find((instance) => instance.id === instanceId);
   if (!config?.enabled) return;
-  const sections = await getSectionSettings(db);
-  if (config.mappings.some((mapping) => !sections.sections.includes(mapping.section) || sections.sectionTypes?.[mapping.section] !== "movies")) {
-    await commitCurrent(db, config, (transaction, current) => writeSettings(transaction, { ...current, lastError: "A mapped Movies section changed. Review the Radarr folder mappings." }));
-    return;
-  }
-  if (config.mappingMode === "auto" && !sameMappings((await automaticMappings(db, config.id, config.mappings.map((mapping) => mapping.rootPath))).mappings, config.mappings)) {
-    await commitCurrent(db, config, (transaction, current) => writeSettings(transaction, { ...current, lastError: "Automatic folder matches changed. Review and save the Radarr connection again." }));
+  const problem = await store.mappingProblem(db, config);
+  if (problem) {
+    await commitCurrent(db, config, (transaction, current) => writeSettings(transaction, { ...current, lastError: problem }));
     return;
   }
   await processEvents(db, config);

@@ -992,8 +992,9 @@ function RemoteWorkLinksTable({
   });
   const jobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
   const radarrCopyDefaults = useQuery({ queryKey: ["radarr-copy-defaults"], queryFn: api.getRadarrCopyDefaults, staleTime: 30_000 });
+  const sonarrCopyDefaults = useQuery({ queryKey: ["sonarr-copy-defaults"], queryFn: api.getSonarrCopyDefaults, staleTime: 30_000 });
   // An override applies only to the copy direction it was chosen for.
-  const [radarrMonitoringChoice, setRadarrMonitoringChoice] = useState<{ section: string; direction: CopyDirection; monitor: boolean } | null>(null);
+  const [monitoringChoice, setMonitoringChoice] = useState<{ section: string; direction: CopyDirection; monitor: boolean } | null>(null);
   const invalidateWorkData = () => {
     queryClient.invalidateQueries({ queryKey: ["jobs"] });
     queryClient.invalidateQueries({ queryKey: ["audits"] });
@@ -1042,11 +1043,15 @@ function RemoteWorkLinksTable({
   const shownTotal = remoteWorkLinks.data?.total ?? rows.length;
   const copyDestinationLabel = copyDirection === "to_remote" ? remoteName : localName;
   const canCopy = Boolean(copyDirection && selectedSection);
-  // The Radarr instance that maps this folder supplies the default; each folder has at most one.
+  // The Radarr or Sonarr instance that maps this folder supplies the default; each folder has at most one owner.
   // A response from an older server has no per-instance sections, which simply hides the option.
-  const radarrOwner = (Array.isArray(radarrCopyDefaults.data?.sections) ? radarrCopyDefaults.data.sections : []).find((entry) => typeof entry === "object" && entry.section === selectedSection);
-  const radarrMonitoringAvailable = canCopy && Boolean(radarrOwner);
-  const radarrMonitoring = radarrMonitoringAvailable && (radarrMonitoringChoice?.direction === copyDirection && radarrMonitoringChoice.section === selectedSection ? radarrMonitoringChoice.monitor : radarrOwner?.monitorOnCopy ?? false);
+  const sectionOwner = (defaults: typeof radarrCopyDefaults.data) => (Array.isArray(defaults?.sections) ? defaults.sections : []).find((entry) => typeof entry === "object" && entry.section === selectedSection);
+  const radarrOwner = sectionOwner(radarrCopyDefaults.data);
+  const sonarrOwner = radarrOwner ? undefined : sectionOwner(sonarrCopyDefaults.data);
+  const monitoringOwner = radarrOwner ?? sonarrOwner;
+  const monitoringService = sonarrOwner ? "Sonarr" : "Radarr";
+  const monitoringAvailable = canCopy && Boolean(monitoringOwner);
+  const monitoring = monitoringAvailable && (monitoringChoice?.direction === copyDirection && monitoringChoice.section === selectedSection ? monitoringChoice.monitor : monitoringOwner?.monitorOnCopy ?? false);
   const canChangeRowPolicy = selectedContentType === "movies";
   const policyButtonState = policyButtonsForWorkKind(selection.kind);
   const actionPending = updatePolicy.isPending;
@@ -1061,7 +1066,7 @@ function RemoteWorkLinksTable({
   const activeVisibleLinkCount = rows.length - selectableRows.length;
 
   function queueCopy(title: string, description: string, options: CopyOptions) {
-    const copyOptions = radarrMonitoring ? { ...options, radarrMonitoring: true } : options;
+    const copyOptions = monitoring ? { ...options, ...(sonarrOwner ? { sonarrMonitoring: true } : { radarrMonitoring: true }) } : options;
     onCopyRequest({ key: copyPromptKey(copyOptions), title, description, options: copyOptions, autoStart: true });
   }
 
@@ -1196,10 +1201,12 @@ function RemoteWorkLinksTable({
                   : `Showing all ${formatNumber(rows.length)}`}
               </small>
             ) : null}
-            {radarrMonitoringAvailable ? (
-              <label className="radarr-copy-toggle" title={copyDirection === "to_local" ? `After copying, unmonitor movies in ${radarrOwner?.instanceName ?? "Radarr"} once every file is local` : `After copying, monitor movies in ${radarrOwner?.instanceName ?? "Radarr"} again once every file is remote`}>
-                <input type="checkbox" checked={radarrMonitoring} onChange={(event) => setRadarrMonitoringChoice({ section: selectedSection, direction: copyDirection!, monitor: event.target.checked })} />
-                {copyDirection === "to_local" ? "Unmonitor in Radarr" : "Monitor in Radarr"}
+            {monitoringAvailable ? (
+              <label className="radarr-copy-toggle" title={sonarrOwner
+                ? copyDirection === "to_local" ? `After copying, unmonitor each copied episode in ${sonarrOwner.instanceName} once its file is local; the series stays monitored` : `After copying, monitor each copied episode in ${sonarrOwner.instanceName} again once its file is remote`
+                : copyDirection === "to_local" ? `After copying, unmonitor movies in ${radarrOwner?.instanceName ?? "Radarr"} once every file is local` : `After copying, monitor movies in ${radarrOwner?.instanceName ?? "Radarr"} again once every file is remote`}>
+                <input type="checkbox" checked={monitoring} onChange={(event) => setMonitoringChoice({ section: selectedSection, direction: copyDirection!, monitor: event.target.checked })} />
+                {copyDirection === "to_local" ? `Unmonitor in ${monitoringService}` : `Monitor in ${monitoringService}`}
               </label>
             ) : null}
             {canCopy ? (
