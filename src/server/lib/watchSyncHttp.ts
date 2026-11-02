@@ -14,6 +14,8 @@ export interface WatchSyncResponse {
   status: number;
   headers: IncomingHttpHeaders;
   body: string;
+  // The raw bytes, for binary responses such as artwork.
+  buffer: Buffer;
   // The server's own clock, from its Date header, so cursors never depend on SRTL's clock.
   serverTime: Date | null;
 }
@@ -53,7 +55,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-async function resolveAllowed(hostname: string, service: string): Promise<{ address: string; family: number }> {
+export async function resolveAllowed(hostname: string, service: string): Promise<{ address: string; family: number }> {
   let dnsTimer: NodeJS.Timeout | undefined;
   let addresses: Array<{ address: string; family: number }>;
   try {
@@ -108,7 +110,8 @@ async function attempt(request: WatchSyncRequest): Promise<WatchSyncResponse> {
       response.on("error", () => reject(new WatchSyncError(`${request.service} response was interrupted.`, null, true)));
       response.on("end", () => {
         const date = response.headers.date ? new Date(response.headers.date) : null;
-        resolve({ status: response.statusCode ?? 500, headers: response.headers, body: Buffer.concat(chunks).toString("utf8"), serverTime: date && Number.isFinite(date.getTime()) ? date : null });
+        const buffer = Buffer.concat(chunks);
+        resolve({ status: response.statusCode ?? 500, headers: response.headers, body: buffer.toString("utf8"), buffer, serverTime: date && Number.isFinite(date.getTime()) ? date : null });
       });
     });
     outgoing.on("error", () => {
