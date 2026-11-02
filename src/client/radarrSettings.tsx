@@ -94,6 +94,8 @@ export function RadarrSettingsPanel({ active }: { active: boolean }) {
   const [drafts, setDrafts] = useState<Record<string, RadarrSettingsInput>>({});
   // Held above the configuration because saving remounts it with the new revision.
   const [tab, setTab] = useState<RadarrTab>(readStoredTab);
+  // Also held here: saving the secret is the first webhook step, so the steps and a generated secret must survive that remount.
+  const [webhookSetups, setWebhookSetups] = useState<Record<string, WebhookSetup>>({});
   const instances = overview.data?.instances ?? [];
   const selected = instances.find((instance) => instance.settings.id === requestedInstance) ?? instances[0];
   const selectedId = selected?.settings.id ?? null;
@@ -112,6 +114,7 @@ export function RadarrSettingsPanel({ active }: { active: boolean }) {
   };
   const forgetInstance = (instanceId: string) => {
     setDrafts(({ [instanceId]: _removed, ...rest }) => rest);
+    setWebhookSetups(({ [instanceId]: _removed, ...rest }) => rest);
     queryClient.removeQueries({ queryKey: instanceKey(instanceId) });
   };
   if (overview.isLoading || sections.isLoading) return <p role="status">Loading integrations...</p>;
@@ -134,6 +137,8 @@ export function RadarrSettingsPanel({ active }: { active: boolean }) {
         tab={tab}
         onTabSelect={selectTab}
         onScanJobSelect={setScanPrompt}
+        webhookSetup={webhookSetups[current.settings.id] ?? {}}
+        onWebhookSetupChange={(change) => setWebhookSetups((all) => ({ ...all, [current.settings.id]: { ...all[current.settings.id], ...change } }))}
       />
     </> : selected ? state.error ? <p className="error" role="alert">{state.error.message}</p> : <p role="status">Loading {selected.settings.name}...</p> : null}
     <ScanStatusDialog prompt={scanPrompt} onClose={() => setScanPrompt(null)} />
@@ -200,7 +205,7 @@ function RadarrTabPanel({ tab, active, children }: { tab: RadarrTab; active: Rad
   return <div role="tabpanel" id={`radarr-panel-${tab}`} aria-labelledby={`radarr-tab-${tab}`} data-tab={tab} hidden={tab !== active} className="radarr-tab-panel">{children}</div>;
 }
 
-function RadarrConfiguration({ state, instances, sections, draft: savedDraft, onDraftChange, onSaved, onRemoved, tab, onTabSelect, onScanJobSelect }: { state: RadarrState; instances: RadarrInstanceSummary[]; sections: SectionSettings; draft: RadarrSettingsInput | null; onDraftChange: (draft: RadarrSettingsInput) => void; onSaved: () => void; onRemoved: (overview: RadarrOverview) => void; tab: RadarrTab; onTabSelect: (tab: RadarrTab) => void; onScanJobSelect: (prompt: ScanStatusPrompt) => void }) {
+function RadarrConfiguration({ state, instances, sections, draft: savedDraft, onDraftChange, onSaved, onRemoved, tab, onTabSelect, onScanJobSelect, webhookSetup, onWebhookSetupChange }: { state: RadarrState; instances: RadarrInstanceSummary[]; sections: SectionSettings; draft: RadarrSettingsInput | null; onDraftChange: (draft: RadarrSettingsInput) => void; onSaved: () => void; onRemoved: (overview: RadarrOverview) => void; tab: RadarrTab; onTabSelect: (tab: RadarrTab) => void; onScanJobSelect: (prompt: ScanStatusPrompt) => void; webhookSetup: WebhookSetup; onWebhookSetupChange: (change: WebhookSetup) => void }) {
   const { settings } = state;
   const queryClient = useQueryClient();
   const locations = useStorageLocations();
@@ -215,6 +220,8 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
   const input = { ...draft, mappings: draft.mappingMode === "auto" ? settings.mappings : draft.mappings };
   const testConnection = useMutation({ mutationFn: () => api.testRadarr(settings.id, { ...input, enabled: false }) });
   const save = useMutation({ mutationFn: () => api.saveRadarr(settings.id, input), onSuccess: (state) => {
+    // Saving the secret is step 1 of the webhook setup, so keep the steps as they are rather than collapsing them now that a secret exists.
+    if (input.webhookSecret) onWebhookSetupChange({ open: webhookSetupOpen, ...(input.webhookSecret === webhookSetup.generatedSecret ? { generatedSaved: true } : { generatedSecret: undefined, generatedSaved: false }) });
     onSaved();
     queryClient.setQueryData(instanceKey(settings.id), state);
     void queryClient.invalidateQueries({ queryKey: overviewKey, exact: true });
@@ -228,12 +235,13 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
     setRenaming(null);
   } });
   const [confirmRemove, setConfirmRemove] = useState(false);
-  // Shown until saved: SRTL stores only a hash, so this is the one chance to copy it into Radarr.
-  const [generatedSecret, setGeneratedSecret] = useState<string | null>(null);
-  const showGeneratedSecret = generatedSecret !== null && draft.webhookSecret === generatedSecret;
+  // Shown until this page is left, also after saving: SRTL stores only a hash, so this is the one chance to copy it into Radarr.
+  const { generatedSecret, generatedSaved = false } = webhookSetup;
+  const webhookSetupOpen = webhookSetup.open ?? !settings.hasWebhookSecret;
+  const showGeneratedSecret = generatedSecret !== undefined && (generatedSaved ? !draft.webhookSecret : draft.webhookSecret === generatedSecret);
   const generateSecret = () => {
     const secret = generateRadarrWebhookSecret();
-    setGeneratedSecret(secret);
+    onWebhookSetupChange({ generatedSecret: secret, generatedSaved: false });
     update("webhookSecret", secret);
   };
   const remove = useMutation({ mutationFn: () => api.removeRadarrInstance(settings.id), onSuccess: (overview) => {
@@ -300,7 +308,7 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
           <li><strong>Prepare synchronization:</strong> Automatic mapping detects identical root paths when you test or save, skipping folders another instance already maps. Review the matches, or select Manual if container paths differ. At least one mapping and two distinct policy tags are required before enabling. Tag placeholders are examples, not active settings.</li>
           <li><strong>Enable:</strong> titles without either policy tag are tagged from their SRTL policy right away. Titles that already carry the other policy tag wait in Needs review: change their policy in SRTL, or select them and choose Use SRTL policies or Import existing tags. Every policy you set afterward updates Radarr. Other tags are never removed, and no files are copied.</li>
           <li><strong>Choose copy monitoring:</strong> copying a movie to local can unmonitor it in Radarr, and copying it back to remote monitors it again. Pick the default here; each copy can override it.</li>
-          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, save a webhook secret in the Webhooks tab, then add a Webhook connection in Radarr:<RadarrWebhookSteps urlSource="this instance's URL from the Webhooks tab" /></li>
+          <li><strong>Optional notifications:</strong> to rescan titles after Radarr imports, follow the Webhook setup steps in the <button type="button" className="link-button" onClick={() => onTabSelect("webhooks")}>Webhooks tab</button>.</li>
         </ol>
       </details>
     </header>
@@ -381,8 +389,6 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
           <p className="radarr-lede">Optional. Lets Radarr queue a title rescan after imports, upgrades, and renames.</p>
           <fieldset disabled={fieldsDisabled} className="radarr-fields">
             <div className="radarr-grid">
-              <div className="radarr-field radarr-field-wide"><RadarrFieldLabel id="radarr-webhook-url" label="Webhook URL" help="This instance's own URL. Use it as the POST URL in this Radarr's Settings > Connect > Webhook. If the browser address is not reachable from Radarr, replace its host and port with the reachable SRTL address. Never put the secret in the URL." /><div className="radarr-input-action"><input id="radarr-webhook-url" readOnly value={webhookUrl} onFocus={(event) => event.target.select()} /><CopyButton text={webhookUrl} fallbackInputId="radarr-webhook-url" /></div>{settings.legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}</div>
-              <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-header" label="Header key" help="Radarr sends the secret in a custom header. In the webhook's Headers, add a key/value pair: this is the key. Copy it exactly." /><div className="radarr-input-action"><input id="radarr-webhook-header" readOnly value={webhookHeaderName} spellCheck={false} onFocus={(event) => event.target.select()} /><CopyButton text={webhookHeaderName} fallbackInputId="radarr-webhook-header" /></div></div>
               <div className="radarr-field"><RadarrFieldLabel id="radarr-webhook-secret" label="Header value (secret)" help={`Optional; required only to accept webhooks. Enter your own 24-256 character secret using letters, numbers, hyphens, or underscores, or generate one. Use it as the value of the ${webhookHeaderName} header in Radarr. Save it securely: SRTL cannot display it again. Leave blank to keep a saved secret.`} /><input form={settingsFormId} id="radarr-webhook-secret" type="password" autoComplete="new-password" minLength={24} maxLength={256} pattern={"[A-Za-z0-9_\\-]+"} value={draft.webhookSecret} placeholder={settings.hasWebhookSecret ? "Saved; leave blank to keep" : "Your secret, at least 24 characters"} onChange={(event) => update("webhookSecret", event.target.value)} /><div className="radarr-toolbar"><button type="button" className="secondary" onClick={generateSecret}><KeyRound size={16} />{settings.hasWebhookSecret || showGeneratedSecret ? "Generate new secret" : "Generate secret"}</button></div></div>
             </div>
             {showGeneratedSecret ? <div className="radarr-generated-secret" role="group" aria-label="Generated webhook secret">
@@ -391,10 +397,19 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
                 <input id="radarr-generated-secret" readOnly value={generatedSecret} spellCheck={false} onFocus={(event) => event.target.select()} />
                 <CopyButton text={generatedSecret} fallbackInputId="radarr-generated-secret" />
               </div>
-              <p className="muted">Copy this into Radarr now as the {webhookHeaderName} header value. SRTL only stores a hash and can't show it again.{settings.hasWebhookSecret ? " Saving replaces the current secret, so Radarr must be updated with this new value." : ""} It applies after you save.</p>
+              {generatedSaved ? <p className="muted">Saved. Copy it into Radarr as the {webhookHeaderName} header value: SRTL only stores a hash and can't show it again after you leave this page.</p> : <p className="muted">Copy it, then save: SRTL only stores a hash and can't show it again after you leave this page.{settings.hasWebhookSecret ? " Saving replaces the current secret, so Radarr must be updated with this new value." : ""} Radarr's Test fails until it is saved.</p>}
             </div> : null}
           </fieldset>
-          <details className="radarr-setup radarr-webhook-setup"><summary>Webhook setup</summary><RadarrWebhookSteps /></details>
+          <RadarrWebhookSteps
+            open={webhookSetupOpen}
+            onToggle={(open) => onWebhookSetupChange({ open })}
+            instanceName={settings.name}
+            secretSaved={settings.hasWebhookSecret}
+            webhookUrl={webhookUrl}
+            legacyWebhook={settings.legacyWebhook}
+            secret={showGeneratedSecret ? generatedSecret : undefined}
+            onActivitySelect={() => onTabSelect("activity")}
+          />
         </section>
       </RadarrTabPanel>
       <RadarrTabPanel tab="activity" active={tab}>
@@ -407,14 +422,38 @@ function RadarrConfiguration({ state, instances, sections, draft: savedDraft, on
 
 const webhookTriggers = ["On File Import", "On File Upgrade", "On Rename", "On Movie Added", "On Movie Delete", "On Movie File Delete"];
 
-function RadarrWebhookSteps({ urlSource = "the Webhook URL above" }: { urlSource?: string }) {
-  return <ol className="radarr-webhook-steps">
-    <li>In Radarr Settings &gt; Connect, add a Webhook. Set the method to POST and paste {urlSource}. The URL must be reachable from Radarr.</li>
-    <li>Under Headers, add a key/value pair: key <code>{webhookHeaderName}</code> (copy it from the Header key field), value = your saved secret.</li>
-    <li>Turn on these triggers: {webhookTriggers.join(", ")}.</li>
-    <li>Leave every other trigger off, including On Grab, On Health Issue, On Application Update, On Manual Interaction Required, and On Movie File Delete For Upgrade. SRTL rejects event types it doesn't handle, and a file deleted for an upgrade is already covered by On File Upgrade.</li>
-    <li>Test, then save.</li>
-  </ol>;
+type WebhookSetup = { open?: boolean; generatedSecret?: string; generatedSaved?: boolean };
+
+function RadarrCopyField({ id, label, value }: { id: string; label: string; value: string }) {
+  return <div className="radarr-step-field"><label htmlFor={id}>{label}</label><div className="radarr-input-action"><input id={id} readOnly value={value} spellCheck={false} onFocus={(event) => event.target.select()} /><CopyButton text={value} fallbackInputId={id} /></div></div>;
+}
+
+function RadarrWebhookSteps({ open, onToggle, instanceName, secretSaved, webhookUrl, legacyWebhook, secret, onActivitySelect }: { open: boolean; onToggle: (open: boolean) => void; instanceName: string; secretSaved: boolean; webhookUrl: string; legacyWebhook: boolean; secret: string | undefined; onActivitySelect: () => void }) {
+  return <details className="radarr-setup radarr-webhook-setup" open={open} onToggle={(event) => { if (event.currentTarget.open !== open) onToggle(event.currentTarget.open); }}>
+    <summary>Webhook setup</summary>
+    <ol className="radarr-webhook-steps">
+      <li><strong>In SRTL:</strong> choose Generate secret above (or enter your own), copy it, then choose Save {instanceName} settings. Save first: Radarr's Test is rejected until SRTL has the secret. <span className={secretSaved ? "success" : "muted"}>{secretSaved ? "A secret is saved." : "No secret saved yet."}</span></li>
+      <li><strong>In Radarr:</strong> open Settings &gt; Connect, choose +, then Webhook. Name it SRTL.</li>
+      <li>
+        Turn on exactly these triggers and leave all others off. SRTL rejects event types it doesn't handle.
+        <ul className="radarr-trigger-list">{webhookTriggers.map((trigger) => <li key={trigger}>{trigger}</li>)}</ul>
+      </li>
+      <li>
+        <RadarrCopyField id="radarr-webhook-url" label="Webhook URL" value={webhookUrl} />
+        Method: POST. Leave Username and Password empty. If Radarr can't reach this address, use SRTL's address as Radarr sees it, with the same path.
+        {legacyWebhook ? <p className="muted">The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.</p> : null}
+      </li>
+      <li>
+        Under Headers (choose Show Advanced if they're hidden), add one header:
+        <div className="radarr-step-fields">
+          <RadarrCopyField id="radarr-webhook-header" label="Key" value={webhookHeaderName} />
+          {secret ? <RadarrCopyField id="radarr-webhook-header-value" label="Value" value={secret} /> : <p className="radarr-step-note"><strong>Value:</strong> the secret you saved in step 1. SRTL can't show a saved secret again; if you no longer have it, generate a new one and save it.</p>}
+        </div>
+      </li>
+      <li>Choose Test; it should pass. Then choose Save. If Test fails, check that the secret is saved in SRTL and the URL is reachable from Radarr.</li>
+      <li>To confirm it works: after the next import, the <button type="button" className="link-button" onClick={onActivitySelect}>Activity tab</button> shows the webhook event and a title rescan job.</li>
+    </ol>
+  </details>;
 }
 
 function RadarrWebhookActivity({ events, onScanJobSelect }: { events: RadarrState["events"]; onScanJobSelect: (prompt: ScanStatusPrompt) => void }) {

@@ -3464,7 +3464,6 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-fields label { display: grid; min-width: 0; gap: 7px; font-size: 13px; }
 /* Fields share a grid row; without align-content a shorter field spreads its label and input apart. */
 .radarr-field { display: grid; gap: 7px; min-width: 0; align-content: start; }
-.radarr-field-wide { grid-column: 1 / -1; }
 .radarr-field-label { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .radarr-fields .radarr-field-label label { display: block; color: var(--text-strong); font-weight: 600; }
 .radarr-mapping label { color: var(--text-strong); font-weight: 600; }
@@ -3521,7 +3520,18 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 .radarr-confirmation p { font-size: 14px; line-height: 1.5; }
 .radarr-draft-notice { border-left: 2px solid var(--warn); padding-left: 10px; font-size: 13px; color: var(--muted-strong); }
 .radarr-webhook-setup { margin: 16px 0; }
-.radarr-setup .radarr-webhook-steps { margin: 8px 0 0; }
+.radarr-setup .radarr-webhook-steps { margin: 12px 0 0; }
+.radarr-webhook-steps > li { padding-left: 4px; }
+.radarr-webhook-steps .muted, .radarr-webhook-steps .success { margin: 0; font-size: 13px; }
+.radarr-step-fields { display: grid; gap: 10px; margin-top: 8px; }
+.radarr-step-field { display: grid; gap: 5px; min-width: 0; max-width: 640px; margin: 4px 0 8px; }
+.radarr-step-field label { color: var(--text-strong); font-weight: 600; }
+.radarr-step-field input { height: 38px; font-family: var(--mono, ui-monospace, monospace); font-size: 13px; }
+.radarr-step-note { margin: 0; max-width: 75ch; }
+.radarr-setup .radarr-trigger-list { display: grid; grid-template-columns: repeat(2, max-content); gap: 2px 28px; margin: 6px 0 0; padding-left: 18px; }
+.radarr-setup .radarr-trigger-list li + li { margin-top: 0; }
+.radarr-settings .link-button { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 0; background: transparent; color: var(--selected-accent); font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
+.radarr-settings .link-button:hover { background: transparent; color: var(--text-strong); }
 .radarr-save-area { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; }
 .radarr-save-status { font-size: 13px; color: var(--muted); }
 .radarr-save-status-unsaved { display: inline-flex; align-items: center; gap: 7px; color: var(--warn); font-weight: 600; }
@@ -3529,6 +3539,8 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 
 @media (max-width: 700px) {
   .radarr-grid { grid-template-columns: minmax(0, 1fr); }
+  .radarr-setup .radarr-trigger-list { grid-template-columns: minmax(0, 1fr); }
+  .radarr-step-field input { height: 44px; font-size: 16px; }
   .radarr-mapping { grid-template-columns: minmax(0, 1fr) 40px; }
   .radarr-mapping label:first-child { grid-column: 1 / -1; }
   .radarr-table-scroll table { min-width: 650px; }

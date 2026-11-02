@@ -58,13 +58,19 @@ While a copy with the option runs, SRTL updates each mapped movie as soon as all
 
 ## Configure Radarr Webhooks (Optional)
 
-Webhooks let Radarr trigger title rescans after imports. Tag synchronization and copy monitoring do not need them. In the instance's Webhooks tab, choose **Generate secret** or enter your own secret (at least 24 characters using letters, numbers, hyphens, or underscores), then save it. Generated secrets are 32 random bytes from the browser's cryptographic generator, shown once as 43 URL-safe characters with a **Copy** button: copy the value into Radarr before leaving the page, because SRTL stores only a hash. A generated secret counts as an unsaved change until you save. If the instance already has a secret, saving a new one replaces it, and Radarr must be updated with the new value. Saved secrets are never returned to the browser; blank fields preserve them. Then in Radarr, open **Settings > Connect > Webhook**:
+Webhooks let Radarr trigger title rescans after imports. Tag synchronization and copy monitoring do not need them. Each instance has its own webhook URL, `/api/integrations/radarr/<instance id>/webhook`, and its own secret. The original URL, `/api/integrations/radarr/webhook`, keeps working for an instance migrated from the single-connection settings.
 
-- Set the method to **POST** and use the webhook URL displayed by SRTL for that instance. Each instance has its own URL, `/api/integrations/radarr/<instance id>/webhook`, and its own secret. The original URL, `/api/integrations/radarr/webhook`, keeps working for an instance migrated from the single-connection settings. Replace a localhost/browser-only hostname with an address reachable from Radarr when necessary.
-- Under **Headers**, add a key/value pair: key **`X-SRTL-Webhook-Secret`**, value = the secret you saved in SRTL. The Webhooks tab has a **Copy** button for the URL, the header key, and a generated secret. Do not put secrets in the URL.
-- Turn on these triggers: **On File Import**, **On File Upgrade**, **On Rename**, **On Movie Added**, **On Movie Delete**, and **On Movie File Delete**.
-- Leave every other trigger off: On Grab, On Health Issue, On Health Restored, On Application Update, On Manual Interaction Required, and On Movie File Delete For Upgrade. SRTL rejects event types it doesn't handle, and a file deleted for an upgrade is already covered by On File Upgrade.
-- Test and save the webhook.
+The instance's Webhooks tab walks through these steps, with a **Copy** button next to everything you paste into Radarr. The steps are open until the instance has a saved secret, then collapsed under **Webhook setup**.
+
+1. **In SRTL:** choose **Generate secret** (or enter your own: at least 24 characters using letters, numbers, hyphens, or underscores), copy it, then choose **Save settings**. Save first: Radarr's Test is rejected until SRTL has the secret.
+2. **In Radarr:** open **Settings > Connect**, choose **+**, then **Webhook**. Name it `SRTL`.
+3. Turn on exactly these triggers: **On File Import**, **On File Upgrade**, **On Rename**, **On Movie Added**, **On Movie Delete**, and **On Movie File Delete**. Leave all others off, including On Grab, On Health Issue, On Application Update, On Manual Interaction Required, and On Movie File Delete For Upgrade. SRTL rejects event types it doesn't handle, and On Movie File Delete For Upgrade only repeats On File Upgrade.
+4. **Webhook URL:** paste the instance's URL. **Method:** POST. Leave **Username** and **Password** empty. If Radarr can't reach the address your browser uses, use SRTL's address as Radarr sees it, with the same path. Never put the secret in the URL.
+5. **Headers** (choose **Show Advanced** if they're hidden): add a header with key `X-SRTL-Webhook-Secret` and your secret as the value.
+6. Choose **Test**; it should pass. Then choose **Save**. If Test fails, check that the secret is saved in SRTL and the URL is reachable from Radarr.
+7. To confirm it works: after the next import, the instance's **Activity** tab shows the webhook event and a title rescan job.
+
+Generated secrets are 32 random bytes from the browser's cryptographic generator, shown as 43 URL-safe characters. SRTL stores only a hash, so a generated secret stays on screen, including after you save, only until you leave the page; copy it into Radarr before then. A generated secret counts as an unsaved change until you save. If the instance already has a secret, saving a new one replaces it, and Radarr must be updated with the new value. Saved secrets are never returned to the browser; blank fields preserve them.
 
 Import and upgrade notifications wait until the expected symlink exists, then queue an ordinary title-rescan job. The entire mapped title folder is scanned, not the entire section. Duplicate deliveries are suppressed per instance, each instance's webhook URL has its own rate limit, and overlapping work waits behind existing jobs. Webhook payload paths are never trusted as filesystem instructions: movie identity and paths are re-read from Radarr. New titles discovered through webhooks follow the same policy-tag rules as other titles.
 

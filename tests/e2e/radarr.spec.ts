@@ -114,13 +114,22 @@ test("settings are split into tabs that share one configuration form", async ({ 
   await openTab(page, "Webhooks");
   const webhooks = page.getByRole("tabpanel", { name: "Webhooks" });
   await expect(webhooks.getByLabel("Header value (secret)", { exact: true })).toBeVisible();
-  await expect(webhooks.getByLabel("Header key", { exact: true })).toHaveValue("X-SRTL-Webhook-Secret");
-  // Same order as Radarr's form: URL, then the header key, then its value.
-  expect(await webhooks.locator("input").evaluateAll((inputs) => inputs.map((input) => input.id))).toEqual(["radarr-webhook-url", "radarr-webhook-header", "radarr-webhook-secret"]);
+  // A saved secret means the webhook is set up, so the steps start collapsed but still open on click.
+  const steps = webhooks.locator("details");
+  await expect(steps).not.toHaveAttribute("open");
   await webhooks.getByText("Webhook setup", { exact: true }).click();
-  await expect(webhooks.locator("details")).toContainText("key X-SRTL-Webhook-Secret (copy it from the Header key field), value = your saved secret");
-  await expect(webhooks.locator("details")).toContainText("On File Import, On File Upgrade, On Rename, On Movie Added, On Movie Delete, On Movie File Delete");
-  await expect(webhooks.locator("details")).toContainText("SRTL rejects event types it doesn't handle");
+  await expect(steps).toHaveAttribute("open");
+  await expect(steps.locator(".radarr-webhook-steps > li")).toHaveCount(7);
+  await expect(steps.locator(".radarr-trigger-list li")).toHaveText(["On File Import", "On File Upgrade", "On Rename", "On Movie Added", "On Movie Delete", "On Movie File Delete"]);
+  await expect(steps).toContainText("leave all others off. SRTL rejects event types it doesn't handle");
+  await expect(steps).toContainText("A secret is saved.");
+  // Each step carries the value Radarr needs, in Radarr's own order: URL, then the header key and value.
+  expect(await steps.locator("input").evaluateAll((inputs) => inputs.map((input) => input.id))).toEqual(["radarr-webhook-url", "radarr-webhook-header"]);
+  await expect(steps.getByLabel("Key", { exact: true })).toHaveValue("X-SRTL-Webhook-Secret");
+  await expect(steps).toContainText("Value: the secret you saved in step 1.");
+  await steps.getByRole("button", { name: "Activity tab", exact: true }).click();
+  await expect(radarrTab(page, "Activity")).toHaveAttribute("aria-selected", "true");
+  await openTab(page, "Webhooks");
   await openTab(page, "Activity");
   const activity = page.getByRole("tabpanel", { name: "Activity" });
   await expect(activity.getByRole("heading")).toHaveText(["Webhook events", "Monitoring updates"]);
@@ -423,7 +432,7 @@ test("setup help is readable on hover, keyboard focus, and touch without clippin
     await page.getByText("Setup guide and requirements", { exact: true }).click();
     const setupGuide = page.locator("details").filter({ has: page.getByText("Setup guide and requirements", { exact: true }) });
     await expect(setupGuide).toContainText("These are required to test or save a paused connection.");
-    await expect(setupGuide).toContainText("On File Import, On File Upgrade, On Rename, On Movie Added, On Movie Delete, On Movie File Delete");
+    await expect(setupGuide).toContainText("follow the Webhook setup steps in the Webhooks tab.");
     await page.getByText("Setup guide and requirements", { exact: true }).click();
     const help = page.getByRole("button", { name: "About API key", exact: true });
     if (width === 1440) {
@@ -663,6 +672,7 @@ test("instances are listed with status and folders, and each keeps its own setti
 
   await instanceButton(page, "Radarr").click();
   await expect(page.getByLabel("Webhook URL", { exact: true })).toHaveValue(/\/api\/integrations\/radarr\/a1b2c3d4e5f6\/webhook$/);
+  await page.getByText("Webhook setup", { exact: true }).click();
   await expect(page.getByText("The original URL ending in /api/integrations/radarr/webhook keeps working for this instance.")).toBeVisible();
   await openTab(page, "Policy sync");
   await expect(page.getByLabel("Home NAS policy tag", { exact: true })).toHaveValue("home");
@@ -760,7 +770,7 @@ for (const width of [1440, 390, 320]) {
   });
 }
 
-test("generate secret fills the webhook secret once, marks it unsaved, and clears after saving", async ({ page, context }) => {
+test("generate secret fills the webhook secret, marks it unsaved, and stays copyable after saving until the page is left", async ({ page, context }) => {
   await context.grantPermissions(["clipboard-read", "clipboard-write"]);
   const { state, saves } = await fixture(page);
   state.settings.hasWebhookSecret = false;
@@ -773,16 +783,20 @@ test("generate secret fills the webhook secret once, marks it unsaved, and clear
   expect(first).toMatch(/^[A-Za-z0-9_-]{43}$/);
   await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveValue(first);
   await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
-  await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("SRTL only stores a hash and can't show it again.");
+  await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("SRTL only stores a hash and can't show it again after you leave this page.");
   await expect(page.getByRole("group", { name: "Generated webhook secret" })).not.toContainText("replaces the current secret");
   const generatedGroup = page.getByRole("group", { name: "Generated webhook secret" });
   await generatedGroup.getByRole("button", { name: "Copy", exact: true }).click();
   await expect(generatedGroup.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
   expect(await page.evaluate(() => navigator.clipboard.readText())).toBe(first);
-  const headerKey = page.locator(".radarr-field").filter({ has: page.getByLabel("Header key", { exact: true }) });
-  await headerKey.getByRole("button", { name: "Copy", exact: true }).click();
-  await expect(headerKey.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
-  expect(await page.evaluate(() => navigator.clipboard.readText())).toBe("X-SRTL-Webhook-Secret");
+  const steps = page.locator(".radarr-webhook-setup");
+  await expect(steps).toHaveAttribute("open");
+  for (const [label, value] of [["Webhook URL", /\/api\/integrations\/radarr\/a1b2c3d4e5f6\/webhook$/], ["Key", /^X-SRTL-Webhook-Secret$/], ["Value", new RegExp(`^${first}$`)]] as const) {
+    const field = steps.locator(".radarr-step-field").filter({ has: page.getByLabel(label, { exact: true }) });
+    await field.getByRole("button", { name: "Copy", exact: true }).click();
+    await expect(field.getByRole("button", { name: "Copied", exact: true })).toBeVisible();
+    expect(await page.evaluate(() => navigator.clipboard.readText())).toMatch(value);
+  }
   await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
   const second = await generated.inputValue();
   expect(second).toMatch(/^[A-Za-z0-9_-]{43}$/);
@@ -795,12 +809,21 @@ test("generate secret fills the webhook secret once, marks it unsaved, and clear
   await page.getByRole("button", { name: "Save Radarr settings", exact: true }).click();
   await expect(page.locator(".radarr-save-status")).toHaveText("No unsaved changes");
   expect(saves[0]?.webhookSecret).toBe(third);
-  await expect(generated).toHaveCount(0);
+  // Saving is step 1 of the setup, so the steps stay open and the saved secret stays copyable for steps 4 and 5.
+  await expect(generated).toHaveValue(third);
+  await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("Saved. Copy it into Radarr");
+  await expect(steps).toHaveAttribute("open");
+  await expect(steps.getByLabel("Value", { exact: true })).toHaveValue(third);
+  await expect(steps).toContainText("A secret is saved.");
   await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveValue("");
   await expect(page.getByLabel("Header value (secret)", { exact: true })).toHaveAttribute("placeholder", "Saved; leave blank to keep");
   // With a saved secret, generating warns that Radarr needs the replacement.
   await page.getByRole("button", { name: "Generate new secret", exact: true }).click();
   await expect(page.getByRole("group", { name: "Generated webhook secret" })).toContainText("Saving replaces the current secret, so Radarr must be updated with this new value.");
+  // Leaving the page drops the generated secret: SRTL can't show a saved one again.
+  await page.reload();
+  await expect(page.locator(".radarr-webhook-setup")).not.toHaveAttribute("open");
+  await expect(generated).toHaveCount(0);
 });
 
 test("the Webhooks tab with unsaved changes fits a phone-width page", async ({ page }) => {
@@ -810,10 +833,10 @@ test("the Webhooks tab with unsaved changes fits a phone-width page", async ({ p
   await page.goto(`${baseUrl}/settings/integrations`);
   await openTab(page, "Webhooks");
   await page.getByRole("button", { name: "Generate secret", exact: true }).click();
-  await page.getByText("Webhook setup", { exact: true }).click();
+  await expect(page.locator(".radarr-webhook-setup")).toHaveAttribute("open");
   await expect(radarrTab(page, "Webhooks")).toHaveAccessibleName("Webhooks (unsaved changes)");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  for (const id of ["radarr-webhook-url", "radarr-webhook-header", "radarr-webhook-secret", "radarr-generated-secret"]) {
+  for (const id of ["radarr-webhook-url", "radarr-webhook-header", "radarr-webhook-header-value", "radarr-webhook-secret", "radarr-generated-secret"]) {
     const box = await page.locator(`#${id}`).boundingBox();
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(390);
