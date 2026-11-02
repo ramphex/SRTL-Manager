@@ -7814,3 +7814,30 @@ button.danger-button:hover:not(:disabled) {
   .orphan-categories { grid-template-columns: 1fr; }
   .orphan-table-scroll td:nth-child(5), .orphan-table-scroll th:nth-child(5) { display: none; }
 }
+
+/* Watch sync (Settings > Integrations > Watch sync); layout builds on the Radarr integration styles. */
+.watch-sync-settings h3 { font-size: 15px; margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
+.watch-sync-settings .radarr-section h2 { flex-wrap: wrap; overflow-wrap: anywhere; }
+.watch-sync-card { display: grid; gap: 12px; min-width: 0; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; margin-top: 12px; }
+.watch-sync-card .radarr-heading { margin-bottom: 0; }
+.watch-sync-card .radarr-state, .watch-sync-card p { margin: 0; }
+.watch-sync-pairs { display: grid; gap: 12px; }
+.watch-sync-pill { display: inline-block; margin-left: 8px; padding: 1px 8px; border: 1px solid var(--border); border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--muted); vertical-align: middle; }
+.watch-sync-label { color: var(--text-strong); font-weight: 600; font-size: 13px; }
+.watch-sync-prefixes { display: grid; gap: 8px; }
+.watch-sync-prefix input { flex: 1 1 160px; }
+.watch-sync-signin { display: grid; gap: 8px; margin: 12px 0; justify-items: start; }
+.watch-sync-signin p { margin: 0; }
+.watch-sync-edit form { display: grid; gap: 14px; margin-top: 12px; }
+.watch-sync-users { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 6px 16px; margin: 12px 0 0; padding: 0; list-style: none; font-size: 13px; }
+.watch-sync-users li { overflow-wrap: anywhere; }
+.watch-sync-note { display: block; font-size: 12px; }
+.watch-sync-suggestions { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.watch-sync-suggestions li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); }
+.watch-sync-pair-form select { flex: 1 1 180px; }
+.watch-sync-pair-options label { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted-strong); }
+.watch-sync-preview { border-left: 3px solid var(--warn); padding-left: 12px; font-size: 13px; line-height: 1.5; }
+.watch-sync-preview ul { margin: 6px 0; padding-left: 18px; }
+.watch-sync-samples { max-height: 320px; overflow: auto; }
+.watch-sync-link-button { display: inline-flex; align-items: center; gap: 8px; min-height: 36px; padding: 0 12px; border: 1px solid var(--border); border-radius: 7px; background: var(--secondary-bg); color: var(--secondary-text); text-decoration: none; }
+.watch-sync-link-button:hover { background: var(--secondary-hover); }

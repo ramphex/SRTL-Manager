@@ -1375,6 +1375,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "symlink_cleanup", label: "Symlink cleanups" },
   { value: "orphan_purge", label: "Orphan purges" },
   { value: "path_migration", label: "Path migrations" },
+  { value: "watch_sync", label: "Watch sync" },
 ];
 
 const logLevelFilters: Array<{ value: EventLevelFilter; label: string }> = [
