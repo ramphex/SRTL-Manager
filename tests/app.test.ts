@@ -17,6 +17,7 @@ import { getInventorySummary } from "../src/server/lib/scanner";
 import { bootstrapLocalStoragePolicies, normalizeTitle } from "../src/server/lib/storagePolicies";
 import type { AuditMode, SectionContentType, StoragePolicyKind } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 let tmpDir: string;
 let ctx: AppContext;
@@ -34,7 +35,7 @@ async function createAdminSession(): Promise<string> {
   const setup = await ctx.app.inject({
     method: "POST",
     url: "/api/auth/setup",
-    payload: { username: "admin", password: "password123", confirmPassword: "password123" }
+    payload: { setupToken: readSetupToken(ctx), username: "admin", password: "password-1234", confirmPassword: "password-1234" }
   });
   expect(setup.statusCode).toBe(200);
   await markOnboardingCompleteForExistingInstall(ctx.database.db);
@@ -474,15 +475,15 @@ describe("api app", () => {
     const shortPassword = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: "short", confirmPassword: "short" }
+      payload: { setupToken: readSetupToken(ctx), username: "admin", password: "short", confirmPassword: "short" }
     });
     expect(shortPassword.statusCode).toBe(400);
-    expect(shortPassword.json()).toMatchObject({ error: "Password must be at least 8 characters" });
+    expect(shortPassword.json()).toMatchObject({ error: "Password must be at least 12 characters" });
 
     const mismatch = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: "password123", confirmPassword: "password456" }
+      payload: { setupToken: readSetupToken(ctx), username: "admin", password: "password-1234", confirmPassword: "password-4567" }
     });
     expect(mismatch.statusCode).toBe(400);
     expect(mismatch.json()).toMatchObject({ error: "Passwords do not match" });
@@ -645,7 +646,7 @@ describe("api app", () => {
     const login = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "admin", password: "password123" }
+      payload: { username: "admin", password: "password-1234" }
     });
     expect(login.statusCode).toBe(200);
     const cookie = login.headers["set-cookie"];
@@ -664,14 +665,14 @@ describe("api app", () => {
     const setup = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "MixedCaseAdmin", password: "password123", confirmPassword: "password123" }
+      payload: { setupToken: readSetupToken(ctx), username: "MixedCaseAdmin", password: "password-1234", confirmPassword: "password-1234" }
     });
     expect(setup.statusCode).toBe(200);
 
     const login = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "mixedcaseadmin", password: "password123" }
+      payload: { username: "mixedcaseadmin", password: "password-1234" }
     });
     expect(login.statusCode).toBe(200);
 
@@ -770,7 +771,7 @@ describe("api app", () => {
     const oversizedUsername = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "u".repeat(101), password: "password123", confirmPassword: "password123" }
+      payload: { setupToken: readSetupToken(ctx), username: "u".repeat(101), password: "password-1234", confirmPassword: "password-1234" }
     });
     expect(oversizedUsername.statusCode).toBe(400);
     expect(oversizedUsername.json()).toMatchObject({ error: "Username must be 100 characters or fewer" });
@@ -779,7 +780,7 @@ describe("api app", () => {
     const response = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: oversizedPassword, confirmPassword: oversizedPassword }
+      payload: { setupToken: readSetupToken(ctx), username: "admin", password: oversizedPassword, confirmPassword: oversizedPassword }
     });
     expect(response.statusCode).toBe(400);
     expect(response.json()).toMatchObject({ error: "Password must be 256 characters or fewer" });
@@ -792,7 +793,7 @@ describe("api app", () => {
     const response = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "admin", password: "password123" }
+      payload: { username: "admin", password: "password-1234" }
     });
 
     expect(response.statusCode).toBe(401);
@@ -811,15 +812,16 @@ describe("api app", () => {
   });
 
   it("serializes concurrent first-admin setup attempts", async () => {
+    const setupToken = readSetupToken(ctx);
     const payloads = [
-      { username: "first-admin", password: "password123", confirmPassword: "password123" },
-      { username: "second-admin", password: "password456", confirmPassword: "password456" }
+      { setupToken, username: "first-admin", password: "password-1234", confirmPassword: "password-1234" },
+      { setupToken, username: "second-admin", password: "password-4567", confirmPassword: "password-4567" }
     ];
     const responses = await Promise.all(
       payloads.map((payload) => ctx.app.inject({ method: "POST", url: "/api/auth/setup", payload }))
     );
 
-    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 409]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([200, 403]);
     const users = await ctx.database.db.select().from(schema.adminUsers);
     expect(users).toHaveLength(1);
     expect(["first-admin", "second-admin"]).toContain(users[0]?.username);
@@ -886,10 +888,11 @@ describe("api app", () => {
     const response = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: "password123", confirmPassword: "password123" }
+      payload: { setupToken: readSetupToken(ctx), username: "admin", password: "password-1234", confirmPassword: "password-1234" }
     });
 
     expect(response.statusCode).toBe(200);
+    expect(response.headers["set-cookie"]).toContain("__Host-srtl_session=");
     expect(response.headers["set-cookie"]).toContain("Secure");
     expect(response.headers["set-cookie"]).toContain("SameSite=Strict");
   });
@@ -905,7 +908,7 @@ describe("api app", () => {
     const response = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: "password123", confirmPassword: "password123" }
+      payload: { setupToken: readSetupToken(ctx), username: "admin", password: "password-1234", confirmPassword: "password-1234" }
     });
 
     expect(response.statusCode).toBe(200);
@@ -1419,7 +1422,7 @@ describe("api app", () => {
     const denied = await ctx.app.inject({
       method: "PUT",
       url: "/api/auth/user",
-      payload: { username: "renamed", currentPassword: "password123" }
+      payload: { username: "renamed", currentPassword: "password-1234" }
     });
     expect(denied.statusCode).toBe(401);
 
@@ -1427,7 +1430,7 @@ describe("api app", () => {
     const secondLogin = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "admin", password: "password123" }
+      payload: { username: "admin", password: "password-1234" }
     });
     expect(secondLogin.statusCode).toBe(200);
     const secondCookie = String(secondLogin.headers["set-cookie"]);
@@ -1444,7 +1447,7 @@ describe("api app", () => {
       method: "PUT",
       url: "/api/auth/user",
       headers: { cookie },
-      payload: { username: "renamed", currentPassword: "password123", newPassword: "newpassword123", confirmNewPassword: "different123" }
+      payload: { username: "renamed", currentPassword: "password-1234", newPassword: "newpassword-1234", confirmNewPassword: "different123" }
     });
     expect(mismatch.statusCode).toBe(400);
     expect(mismatch.json()).toMatchObject({ error: "Passwords do not match" });
@@ -1453,16 +1456,16 @@ describe("api app", () => {
       method: "PUT",
       url: "/api/auth/user",
       headers: { cookie },
-      payload: { username: "renamed", currentPassword: "password123", newPassword: "short", confirmNewPassword: "short" }
+      payload: { username: "renamed", currentPassword: "password-1234", newPassword: "short", confirmNewPassword: "short" }
     });
     expect(shortPassword.statusCode).toBe(400);
-    expect(shortPassword.json()).toMatchObject({ error: "Password must be at least 8 characters" });
+    expect(shortPassword.json()).toMatchObject({ error: "Password must be at least 12 characters" });
 
     const update = await ctx.app.inject({
       method: "PUT",
       url: "/api/auth/user",
       headers: { cookie },
-      payload: { username: "renamed", currentPassword: "password123", newPassword: "newpassword123", confirmNewPassword: "newpassword123" }
+      payload: { username: "renamed", currentPassword: "password-1234", newPassword: "newpassword-1234", confirmNewPassword: "newpassword-1234" }
     });
     expect(update.statusCode).toBe(200);
     expect(update.json()).toMatchObject({ user: { username: "renamed" } });
@@ -1479,14 +1482,14 @@ describe("api app", () => {
     const oldLogin = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "admin", password: "password123" }
+      payload: { username: "admin", password: "password-1234" }
     });
     expect(oldLogin.statusCode).toBe(401);
 
     const newLogin = await ctx.app.inject({
       method: "POST",
       url: "/api/auth/login",
-      payload: { username: "renamed", password: "newpassword123" }
+      payload: { username: "renamed", password: "newpassword-1234" }
     });
     expect(newLogin.statusCode).toBe(200);
   });

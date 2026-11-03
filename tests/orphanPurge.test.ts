@@ -12,6 +12,7 @@ import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onbo
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import type { PathsSettings } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 let app: AppContext;
 let database: TestDatabaseHandle;
@@ -232,7 +233,7 @@ describe("orphan purge", () => {
 
   it("purges remote orphans and exposes the review over HTTP", async () => {
     const remote = await storageFile("remote", "Some.Release.2019/Some.Release.mkv");
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     const review = await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } });
     expect(review.json().items).toEqual([expect.objectContaining({ storageFileId: remote.id, category: "unlinked" })]);
@@ -368,7 +369,7 @@ describe("folders with no video", () => {
 
   it("accepts folder ids over HTTP", async () => {
     const folder = await leftoverFolder("remote", "Sample.Only", { "sample.txt": "sample" });
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     const review = await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } });
     expect(review.json().leftoverFolders).toEqual([expect.objectContaining({ folderId: folder.id, fileCount: 1, protectedReason: null })]);

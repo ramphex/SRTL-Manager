@@ -1,5 +1,6 @@
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
+import { findActiveSession, hashToken } from "../src/server/auth";
 import { openDatabase } from "../src/server/db/database";
 import { createTestDatabase } from "./testDb";
 
@@ -50,7 +51,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -255,7 +256,8 @@ describe("database bootstrap", () => {
         { version: 21 },
         { version: 22 },
         { version: 23 },
-        { version: 24 }
+        { version: 24 },
+        { version: 25 }
       ]);
     } finally {
       await database.close();
@@ -454,7 +456,49 @@ describe("database bootstrap", () => {
         { version: 21, name: "sonarr_integration" },
         { version: 22, name: "watch_sync" },
         { version: 23, name: "storage_file_integrity" },
-        { version: 24, name: "shared_media_servers" }
+        { version: 24, name: "shared_media_servers" },
+        { version: 25, name: "auth_sessions_and_security_events" }
+      ]);
+    } finally {
+      await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("adds session activity columns and the security event log without signing anyone out", async () => {
+    const testDatabase = await createTestDatabase();
+    const initial = await openDatabase(testDatabase.databaseUrl);
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
+    try {
+      // Put the schema back to migration 24 with a session issued before the upgrade.
+      await initial.pool.query(`DROP TABLE security_events`);
+      await initial.pool.query(`DROP INDEX sessions_id_idx`);
+      await initial.pool.query(`DROP INDEX sessions_user_idx`);
+      await initial.pool.query(`ALTER TABLE sessions DROP COLUMN id, DROP COLUMN last_seen_at, DROP COLUMN idle_expires_at, DROP COLUMN ip, DROP COLUMN user_agent, DROP COLUMN cookie_reissued_at`);
+      await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 25`);
+      await initial.pool.query(`INSERT INTO admin_users (username, password_hash, created_at) VALUES ('alex_03', 'scrypt$salt$digest', now()::text)`);
+      await initial.pool.query(`INSERT INTO sessions (token_hash, user_id, expires_at, created_at) SELECT $1, id, $2, now()::text FROM admin_users`, [hashToken("legacy-token"), expiresAt]);
+    } finally {
+      await initial.close();
+    }
+
+    await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 25\b/);
+
+    const database = await openDatabase(testDatabase.databaseUrl);
+    try {
+      const sessionColumns = await database.pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'sessions'`);
+      expect(sessionColumns.rows.map((row) => row.column_name)).toEqual(
+        expect.arrayContaining(["id", "last_seen_at", "idle_expires_at", "ip", "user_agent", "cookie_reissued_at"])
+      );
+      const legacy = (await database.pool.query<{ id: number; last_seen_at: string | null; idle_expires_at: string | null }>(`SELECT id, last_seen_at, idle_expires_at FROM sessions`)).rows;
+      expect(legacy).toEqual([{ id: expect.any(Number), last_seen_at: null, idle_expires_at: null }]);
+      // The pre-upgrade session is still valid; its idle clock starts on first use.
+      await expect(findActiveSession(database.db, hashToken("legacy-token"))).resolves.toMatchObject({ username: "alex_03", expiresAt, idleExpiresAt: null });
+
+      const eventColumns = await database.pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'security_events' ORDER BY ordinal_position`);
+      expect(eventColumns.rows.map((row) => row.column_name)).toEqual(["id", "created_at", "event", "user_id", "username", "session_id", "ip", "socket_ip", "user_agent", "details"]);
+      expect((await database.pool.query<{ version: number; name: string }>(`SELECT version, name FROM schema_migrations WHERE version = 25`)).rows).toEqual([
+        { version: 25, name: "auth_sessions_and_security_events" }
       ]);
     } finally {
       await database.close();

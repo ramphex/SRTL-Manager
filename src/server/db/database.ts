@@ -24,7 +24,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 24;
+export const currentSchemaVersion = 25;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -815,6 +815,35 @@ async function initializeDatabase(pool: Pool): Promise<void> {
       try {
         await applyMediaServerMigration(client, nowIso());
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (24, 'shared_media_servers', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(25)) {
+      await client.query("BEGIN");
+      try {
+        // Session activity and device columns for idle timeouts and the session list, and a security event log.
+        // Existing sessions keep working: their idle deadline starts with their first request after the upgrade.
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.sessions') IS NOT NULL THEN
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS id SERIAL;
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS last_seen_at TEXT;
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS idle_expires_at TEXT;
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS ip TEXT;
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_agent TEXT;
+            ALTER TABLE sessions ADD COLUMN IF NOT EXISTS cookie_reissued_at TEXT;
+            CREATE UNIQUE INDEX IF NOT EXISTS sessions_id_idx ON sessions(id);
+            CREATE INDEX IF NOT EXISTS sessions_user_idx ON sessions(user_id);
+          END IF;
+        END $$`);
+        await client.query(`CREATE TABLE IF NOT EXISTS security_events (
+          id SERIAL PRIMARY KEY, created_at TEXT NOT NULL, event TEXT NOT NULL, user_id INTEGER, username TEXT, session_id INTEGER,
+          ip TEXT, socket_ip TEXT, user_agent TEXT, details TEXT NOT NULL DEFAULT '{}'
+        )`);
+        await client.query(`CREATE INDEX IF NOT EXISTS security_events_created_idx ON security_events(created_at, id)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (25, 'auth_sessions_and_security_events', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

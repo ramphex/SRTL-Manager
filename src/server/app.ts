@@ -13,7 +13,11 @@ import { ZodError } from "zod";
 import packageJson from "../../package.json";
 import type { AppConfig } from "./config";
 import { loadConfig } from "./config";
-import { getSessionUser, hasAdmin } from "./auth";
+import { dummyPasswordHash, hasAdmin, type SessionPolicy } from "./auth";
+import { LoginThrottle } from "./loginThrottle";
+import { pruneSecurityEvents } from "./securityEvents";
+import { createSessionAccess, sessionCookieSettings } from "./sessionAccess";
+import { SetupTokenGate } from "./setupToken";
 import { openDatabase, type DatabaseContext } from "./db/database";
 import * as schema from "./db/schema";
 import { desc, eq } from "drizzle-orm";
@@ -75,6 +79,19 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   const jobs = new JobRunner(database.db);
 
   const app = fastify({ logger: true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes });
+  app.decorateRequest("adminSession", null);
+  const sessionPolicy: SessionPolicy = {
+    idleTimeoutMs: config.sessionIdleTimeoutHours * 60 * 60 * 1_000,
+    maxAgeMs: config.sessionMaxAgeDays * 24 * 60 * 60 * 1_000
+  };
+  const sessions = createSessionAccess(database.db, sessionCookieSettings(config.sessionCookieName, config.sessionCookieSecure), sessionPolicy);
+  const setupTokens = new SetupTokenGate({
+    dataDir: config.dataDir,
+    configuredToken: config.setupToken,
+    log: { warn: (message) => app.log.warn(message), info: (message) => app.log.info(message) }
+  });
+  // Computed once up front so the first sign-in with an unknown username takes no longer than later ones.
+  void dummyPasswordHash().catch((error: unknown) => app.log.error({ err: error }, "Could not prepare the password check"));
   // Every route gets its access policy stamped on before anything can register one.
   const routes: Array<{ method: string; url: string }> = [];
   app.addHook("onRoute", (route) => {
@@ -183,7 +200,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
         if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Invalid webhook credentials" });
         return;
       }
-    } else if (!(await getSessionUser(database.db, request.cookies[config.sessionCookieName]))) {
+    } else if (!(await sessions.resolve(request, reply))) {
       if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Authentication required" });
       return;
     }
@@ -248,8 +265,10 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   });
   app.get("/api/health", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async () => ({ ...(await workerHealth()), ok: true }));
   registerAuthRoutes(app, database.db, {
-    cookieName: config.sessionCookieName,
-    cookieSecure: config.sessionCookieSecure
+    sessions,
+    setupTokens,
+    throttle: new LoginThrottle(),
+    securityEventRetentionDays: config.jobHistoryRetentionDays
   });
 
   registerOnboardingRoutes(app, database.db);
@@ -293,13 +312,19 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     app.setNotFoundHandler(async (_request, reply) => reply.code(404).send({ error: "Not found" }));
   }
 
+  const pruneEvents = () =>
+    pruneSecurityEvents(database.db, config.jobHistoryRetentionDays).catch((error: unknown) => app.log.error({ err: error }, "Could not prune security events"));
+  await pruneEvents();
+  const pruneTimer = setInterval(() => void pruneEvents(), 60 * 60 * 1_000);
+  pruneTimer.unref();
+
   app.addHook("onClose", async () => {
+    clearInterval(pruneTimer);
     await database.close();
   });
 
-  if (!(await hasAdmin(database.db))) {
-    app.log.warn("SRTL Manager setup required. Open the web UI to create the first admin user.");
-  }
+  if (await hasAdmin(database.db)) setupTokens.complete();
+  else setupTokens.prepare();
 
   return { app, config, database, jobs, routes };
 }

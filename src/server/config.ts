@@ -3,6 +3,7 @@ import net from "node:net";
 import path from "node:path";
 import type { PathsSettings } from "../shared/types";
 import { mergeEnvSettings, readEnvFile, readProcessEnvSettings } from "./lib/env";
+import { isValidSetupToken } from "./setupToken";
 
 /** Anonymous requests allowed per client address per minute. */
 export const defaultAnonymousRequestsPerMinute = 600;
@@ -13,8 +14,15 @@ export interface AppConfig {
   databaseUrl: string;
   host: string;
   port: number;
+  /** Base session cookie name. With Secure cookies it is sent with the `__Host-` prefix. */
   sessionCookieName: string;
   sessionCookieSecure: boolean;
+  /** A session ends after this many hours without a request. */
+  sessionIdleTimeoutHours: number;
+  /** A session ends this many days after sign-in. */
+  sessionMaxAgeDays: number;
+  /** Fixed first-run setup token from SRTL_SETUP_TOKEN; otherwise one is generated. */
+  setupToken: string | null;
   allowedOrigins: string[];
   publicOrigin: string | null;
   apiDocsEnabled: boolean;
@@ -119,6 +127,21 @@ export function trustProxySetting(value: string | undefined): TrustProxySetting 
   }
   const entries = trimmed.split(/[\s,]+/).filter(Boolean).map(trustProxyEntry);
   return [...new Set(entries)];
+}
+
+function boundedIntegerSetting(value: number | string | undefined, fallback: number, name: string, minimum: number, maximum: number): number {
+  if (value == null || (typeof value === "string" && value.trim() === "")) return fallback;
+  const normalized = typeof value === "string" ? value.trim() : value;
+  const parsed = typeof normalized === "number" ? normalized : /^\d+$/.test(normalized) ? Number(normalized) : Number.NaN;
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) throw new Error(`${name} must be a whole number from ${minimum} to ${maximum}`);
+  return parsed;
+}
+
+function setupTokenSetting(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) return null;
+  if (!isValidSetupToken(trimmed)) throw new Error("SRTL_SETUP_TOKEN must be 24 to 256 letters, digits, '-' or '_'. Remove it to have a token generated.");
+  return trimmed;
 }
 
 function portSetting(value: number | string | undefined, fallback: number): number {
@@ -258,6 +281,21 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     port: portSetting(overrides.port ?? process.env.SRTL_PORT ?? envFile.SRTL_PORT, 3010),
     sessionCookieName: overrides.sessionCookieName ?? (publicWebPort ? `srtl_session_${publicWebPort}` : "srtl_session"),
     sessionCookieSecure,
+    sessionIdleTimeoutHours: boundedIntegerSetting(
+      overrides.sessionIdleTimeoutHours ?? process.env.SRTL_SESSION_IDLE_HOURS ?? envFile.SRTL_SESSION_IDLE_HOURS,
+      12,
+      "SRTL_SESSION_IDLE_HOURS",
+      1,
+      24 * 30
+    ),
+    sessionMaxAgeDays: boundedIntegerSetting(
+      overrides.sessionMaxAgeDays ?? process.env.SRTL_SESSION_MAX_AGE_DAYS ?? envFile.SRTL_SESSION_MAX_AGE_DAYS,
+      14,
+      "SRTL_SESSION_MAX_AGE_DAYS",
+      1,
+      365
+    ),
+    setupToken: overrides.setupToken !== undefined ? setupTokenSetting(overrides.setupToken) : setupTokenSetting(process.env.SRTL_SETUP_TOKEN ?? envFile.SRTL_SETUP_TOKEN),
     allowedOrigins: overrides.allowedOrigins ?? originSettings(process.env.SRTL_ALLOWED_ORIGINS ?? envFile.SRTL_ALLOWED_ORIGINS),
     publicOrigin,
     apiDocsEnabled: overrides.apiDocsEnabled ?? booleanSetting(process.env.SRTL_API_DOCS ?? envFile.SRTL_API_DOCS, false),

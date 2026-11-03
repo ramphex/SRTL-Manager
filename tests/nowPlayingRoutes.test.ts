@@ -9,6 +9,7 @@ import { SourceResolver } from "../src/server/lib/nowPlaying/sourceResolver";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import type { NowPlayingSnapshot } from "../src/shared/nowPlaying";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 describe("Now Playing routes", () => {
   let root = "";
@@ -23,7 +24,7 @@ describe("Now Playing routes", () => {
     app = await createApp({ rootDir: root, databaseUrl: database.databaseUrl, autoMigrate: true, paths: { symlinkDir: path.join(root, "links"), localDir: path.join(root, "local"), remoteDir: path.join(root, "remote") } });
     app.app.log.level = "silent";
     await markOnboardingCompleteForExistingInstall(app.database.db);
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     cookie = String(setup.headers["set-cookie"]).split(";")[0]!;
   });
 

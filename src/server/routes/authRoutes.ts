@@ -1,33 +1,61 @@
 import { z } from "zod";
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eq } from "drizzle-orm";
-import { createAdmin, findAdminByUsername, getSessionUser, hashPassword, hasAdmin, login, logout, verifyPassword } from "../auth";
+import {
+  authenticate,
+  createAdmin,
+  createSession,
+  deleteSession,
+  findAdminByUsername,
+  hasAdmin,
+  passwordHashing,
+  rehashIfNeeded,
+  revokeAllUserSessions,
+  revokeOtherUserSessions,
+  revokeUserSession,
+  listUserSessions,
+  sessionDeadline,
+  type ActiveSession
+} from "../auth";
 import { first, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { markOnboardingAccountCreated } from "../lib/onboarding";
+import { LoginThrottle } from "../loginThrottle";
+import { listSecurityEvents, recordSecurityEvent } from "../securityEvents";
+import { sessionClient, type SessionAccess } from "../sessionAccess";
+import { setupStatusVisibleTo, type SetupTokenGate } from "../setupToken";
+import { describeUserAgent, minimumPasswordLength, type AuthMe, type AuthSessionList, type SecurityEventPage } from "../../shared/auth";
 
-const credentialsSchema = z.object({
-  username: z.string().trim().min(1, "Username is required").max(100, "Username must be 100 characters or fewer").default("admin"),
-  password: z.string().min(8, "Password must be at least 8 characters").max(256, "Password must be 256 characters or fewer")
+const usernameSchema = z.string({ error: "Username is required" }).trim().min(1, "Username is required").max(100, "Username must be 100 characters or fewer");
+const newPasswordSchema = z
+  .string({ error: "Password is required" })
+  .min(minimumPasswordLength, `Password must be at least ${minimumPasswordLength} characters`)
+  .max(256, "Password must be 256 characters or fewer");
+
+// Sign-in accepts any stored password length, so passwords set before the
+// 12-character minimum keep working until they are changed.
+const loginSchema = z.object({
+  username: usernameSchema,
+  password: z.string({ error: "Password is required" }).min(1, "Password is required").max(256, "Password must be 256 characters or fewer")
 });
 
-const setupSchema = credentialsSchema
-  .extend({
-    confirmPassword: z.string().min(8, "Confirm password must be at least 8 characters").max(256, "Confirm password must be 256 characters or fewer")
+const setupSchema = z
+  .object({
+    setupToken: z.string({ error: "Setup token is required" }).trim().min(1, "Setup token is required").max(512, "Setup token is not valid"),
+    username: usernameSchema,
+    password: newPasswordSchema,
+    confirmPassword: z.string({ error: "Confirm the password" }).max(256, "Confirm password must be 256 characters or fewer")
   })
   .refine((body) => body.password === body.confirmPassword, {
     message: "Passwords do not match",
     path: ["confirmPassword"]
   });
 
-const optionalPasswordSchema = z.preprocess(
-  (value) => (value === "" ? undefined : value),
-  z.string().min(8, "Password must be at least 8 characters").max(256, "Password must be 256 characters or fewer").optional()
-);
+const optionalPasswordSchema = z.preprocess((value) => (value === "" ? undefined : value), newPasswordSchema.optional());
 
 const userSettingsSchema = z
   .object({
-    username: z.string().trim().min(1, "Username is required").max(100, "Username must be 100 characters or fewer"),
+    username: usernameSchema,
     currentPassword: z.string().min(1, "Current password is required").max(256, "Current password must be 256 characters or fewer"),
     newPassword: optionalPasswordSchema,
     confirmNewPassword: z.preprocess((value) => (value === "" ? undefined : value), z.string().max(256, "Confirm password must be 256 characters or fewer").optional())
@@ -37,63 +65,118 @@ const userSettingsSchema = z
     path: ["confirmNewPassword"]
   });
 
-interface AuthRouteOptions {
-  cookieName: string;
-  cookieSecure: boolean;
-}
+const sessionIdSchema = z.object({ id: z.coerce.number().int().positive() });
+const securityEventQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+  before: z.coerce.number().int().positive().optional()
+});
 
-function setSessionCookie(reply: FastifyReply, options: AuthRouteOptions, token: string): void {
-  reply.setCookie(options.cookieName, token, {
-    httpOnly: true,
-    sameSite: "strict",
-    path: "/",
-    secure: options.cookieSecure,
-    maxAge: 60 * 60 * 24 * 14
-  });
+/** One answer for every failed setup attempt, so it says nothing about whether setup is still open. */
+const setupUnavailable = "Setup is not available. Check the setup token in the server log.";
+const loginFailed = "Invalid username or password";
+const tooManyAttempts = "Too many sign-in attempts. Try again later.";
+
+export interface AuthRouteOptions {
+  sessions: SessionAccess;
+  setupTokens: SetupTokenGate;
+  throttle: LoginThrottle;
+  securityEventRetentionDays: number;
 }
 
 export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRouteOptions): void {
-  const { cookieName } = options;
-  app.get("/api/auth/me", async (request) => {
-    const user = await getSessionUser(db, request.cookies[cookieName]);
-    return { authenticated: Boolean(user), user, setupRequired: !(await hasAdmin(db)) };
+  const { sessions, setupTokens, throttle } = options;
+
+  const startSession = async (request: FastifyRequest, reply: FastifyReply, userId: number): Promise<ActiveSession> => {
+    const { token, session } = await createSession(db, userId, sessions.policy, sessionClient(request));
+    sessions.issue(reply, token, session.expiresAt);
+    request.adminSession = session;
+    return session;
+  };
+
+  const requireSession = (request: FastifyRequest): ActiveSession => {
+    // The request guard has already resolved the session for admin routes.
+    if (!request.adminSession) throw Object.assign(new Error("Authentication required"), { statusCode: 401 });
+    return request.adminSession;
+  };
+
+  app.get("/api/auth/me", async (request, reply): Promise<AuthMe> => {
+    const session = await sessions.resolve(request, reply);
+    if (session) return { authenticated: true, user: { id: session.userId, username: session.username }, setupRequired: false };
+    let setupRequired = false;
+    if (setupStatusVisibleTo(request) && !(await hasAdmin(db))) {
+      setupTokens.prepare();
+      setupRequired = true;
+    }
+    return { authenticated: false, user: null, setupRequired };
   });
 
-  app.post("/api/auth/setup", { config: { rateLimit: { max: 3, timeWindow: "10 minutes" } } }, async (request, reply) => {
-    if (await hasAdmin(db)) return reply.code(409).send({ error: "Setup has already been completed" });
+  app.post("/api/auth/setup", { config: { rateLimit: { max: 10, timeWindow: "10 minutes" } } }, async (request, reply) => {
     const body = setupSchema.parse(request.body);
-    const created = await createAdmin(db, body.username, body.password);
-    if (!created) return reply.code(409).send({ error: "Setup has already been completed" });
+    if (!(await hasAdmin(db))) setupTokens.prepare();
+    if (!setupTokens.verify(body.setupToken)) {
+      await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "token" } });
+      return reply.code(403).send({ error: setupUnavailable });
+    }
+    const user = await createAdmin(db, body.username, body.password);
+    if (!user) {
+      await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "completed" } });
+      return reply.code(403).send({ error: setupUnavailable });
+    }
+    setupTokens.complete();
+    request.log.info("Initial setup completed; the setup token is no longer valid.");
     await markOnboardingAccountCreated(db);
-    const token = await login(db, body.username, body.password);
-    if (!token) return reply.code(500).send({ error: "Admin was created but automatic login failed" });
-    setSessionCookie(reply, options, token);
+    const session = await startSession(request, reply, user.id);
+    await recordSecurityEvent(db, { event: "setup_completed", request, userId: user.id, username: user.username, sessionId: session.id });
     return { ok: true };
   });
 
   app.post("/api/auth/login", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (request, reply) => {
-    const body = credentialsSchema.parse(request.body);
-    const token = await login(db, body.username, body.password);
-    if (!token) return reply.code(401).send({ error: "Invalid username or password" });
-    setSessionCookie(reply, options, token);
+    const body = loginSchema.parse(request.body);
+    const blocked = throttle.check(body.username, request.ip);
+    if (!blocked.allowed) {
+      reply.header("Retry-After", String(Math.ceil(blocked.retryAfterMs / 1000)));
+      return reply.code(429).send({ error: tooManyAttempts });
+    }
+    const result = await authenticate(db, body.username, body.password);
+    if (!result) {
+      const failure = throttle.failure(body.username, request.ip);
+      await recordSecurityEvent(db, { event: "login_failed", request, username: body.username });
+      if (failure.lockedNow) {
+        await recordSecurityEvent(db, { event: "login_locked", request, username: body.username, details: { retryAfterSeconds: Math.ceil(failure.retryAfterMs / 1000) } });
+      }
+      return reply.code(401).send({ error: loginFailed });
+    }
+    throttle.success(body.username, request.ip);
+    const session = await startSession(request, reply, result.user.id);
+    await recordSecurityEvent(db, {
+      event: "login_succeeded",
+      request,
+      userId: result.user.id,
+      username: result.user.username,
+      sessionId: session.id,
+      details: result.rehashed ? { passwordRehashed: true } : {}
+    });
     return { ok: true };
   });
 
   app.post("/api/auth/logout", async (request, reply) => {
-    await logout(db, request.cookies[cookieName]);
-    reply.clearCookie(cookieName, { path: "/", sameSite: "strict", secure: options.cookieSecure });
+    const session = await sessions.resolve(request, reply);
+    if (session) {
+      await deleteSession(db, session.tokenHash);
+      await recordSecurityEvent(db, { event: "logout", request, userId: session.userId, username: session.username, sessionId: session.id });
+    }
+    sessions.clear(reply);
     return { ok: true };
   });
 
-  app.put("/api/auth/user", async (request, reply) => {
-    const sessionUser = await getSessionUser(db, request.cookies[cookieName]);
-    if (!sessionUser) return reply.code(401).send({ error: "Authentication required" });
-
+  app.put("/api/auth/user", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (request, reply) => {
+    const session = requireSession(request);
     const body = userSettingsSchema.parse(request.body);
-    const user = await first(db.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, sessionUser.id)).limit(1));
+    const user = await first(db.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, session.userId)).limit(1));
     if (!user) return reply.code(401).send({ error: "Authentication required" });
 
-    if (!(await verifyPassword(body.currentPassword, user.passwordHash))) {
+    if (!(await passwordHashing.verify(body.currentPassword, user.passwordHash))) {
+      await recordSecurityEvent(db, { event: "reauthentication_failed", request, userId: user.id, username: user.username, sessionId: session.id });
       return reply.code(401).send({ error: "Current password is incorrect" });
     }
 
@@ -103,17 +186,68 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
       return reply.code(409).send({ error: "Username is already in use" });
     }
 
+    const usernameChanged = username !== user.username;
     const values: { username: string; passwordHash?: string } = { username };
-    if (body.newPassword) values.passwordHash = await hashPassword(body.newPassword);
+    if (body.newPassword) values.passwordHash = await passwordHashing.hash(body.newPassword);
+    else await rehashIfNeeded(db, user, body.currentPassword);
     await db.update(schema.adminUsers).set(values).where(eq(schema.adminUsers.id, user.id));
 
+    if (usernameChanged) {
+      await recordSecurityEvent(db, { event: "username_changed", request, userId: user.id, username, sessionId: session.id, details: { previousUsername: user.username } });
+    }
     if (body.newPassword) {
-      await db.delete(schema.sessions).where(eq(schema.sessions.userId, user.id));
-      const token = await login(db, username, body.newPassword);
-      if (!token) return reply.code(500).send({ error: "Password changed but the replacement session could not be created" });
-      setSessionCookie(reply, options, token);
+      // A new password signs out every session, including other devices.
+      const revoked = await revokeAllUserSessions(db, user.id);
+      const replacement = await startSession(request, reply, user.id);
+      await recordSecurityEvent(db, { event: "password_changed", request, userId: user.id, username, sessionId: replacement.id, details: { sessionsSignedOut: Math.max(0, revoked - 1) } });
+    } else if (usernameChanged) {
+      // Rotate the current session after an account change.
+      await deleteSession(db, session.tokenHash);
+      await startSession(request, reply, user.id);
     }
 
     return { user: { id: user.id, username } };
+  });
+
+  app.get("/api/auth/sessions", async (request): Promise<AuthSessionList> => {
+    const session = requireSession(request);
+    const rows = await listUserSessions(db, session.userId);
+    return {
+      sessions: rows.map((row) => ({
+        id: row.id,
+        current: row.tokenHash === session.tokenHash,
+        createdAt: row.createdAt,
+        lastSeenAt: row.lastSeenAt,
+        expiresAt: sessionDeadline(row),
+        ip: row.ip,
+        device: describeUserAgent(row.userAgent)
+      })),
+      idleTimeoutHours: sessions.policy.idleTimeoutMs / 3_600_000,
+      maxAgeDays: sessions.policy.maxAgeMs / 86_400_000
+    };
+  });
+
+  app.delete("/api/auth/sessions/:id", async (request, reply) => {
+    const session = requireSession(request);
+    const { id } = sessionIdSchema.parse(request.params);
+    const revokedTokenHash = await revokeUserSession(db, session.userId, id);
+    if (!revokedTokenHash) return reply.code(404).send({ error: "Session not found" });
+    const current = revokedTokenHash === session.tokenHash;
+    if (current) sessions.clear(reply);
+    await recordSecurityEvent(db, { event: "session_revoked", request, userId: session.userId, username: session.username, sessionId: session.id, details: { revokedSessionId: id, current } });
+    return { ok: true, current };
+  });
+
+  app.post("/api/auth/sessions/revoke-others", async (request) => {
+    const session = requireSession(request);
+    const revoked = await revokeOtherUserSessions(db, session.userId, session.tokenHash);
+    await recordSecurityEvent(db, { event: "sessions_revoked", request, userId: session.userId, username: session.username, sessionId: session.id, details: { count: revoked } });
+    return { ok: true, revoked };
+  });
+
+  app.get("/api/auth/security-events", async (request): Promise<SecurityEventPage> => {
+    const query = securityEventQuerySchema.parse(request.query);
+    const page = await listSecurityEvents(db, { limit: query.limit, beforeId: query.before });
+    return { ...page, retentionDays: options.securityEventRetentionDays };
   });
 }

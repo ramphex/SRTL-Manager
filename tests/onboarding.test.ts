@@ -8,6 +8,7 @@ import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import type { OnboardingPolicyMode, OnboardingState } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 const silentLogger = { info: () => undefined, warn: () => undefined, error: () => undefined };
 
@@ -63,7 +64,7 @@ describe("first-run onboarding", () => {
     const setup = await app.app.inject({
       method: "POST",
       url: "/api/auth/setup",
-      payload: { username: "admin", password: "password123", confirmPassword: "password123" }
+      payload: { setupToken: readSetupToken(app), username: "admin", password: "password-1234", confirmPassword: "password-1234" }
     });
     expect(setup.statusCode).toBe(200);
     return { cookie: String(setup.headers["set-cookie"]), section };
