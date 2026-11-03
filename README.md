@@ -54,7 +54,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SRTL_LOCATION_1_PATH` and `SRTL_LOCATION_2_PATH`: existing absolute storage paths. Their friendly names are set during onboarding and can be changed later in Settings > Library.
 - `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
-- `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy.
+- `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
 
 The administrator username and password are created in the browser during first-run setup and do not belong in `.env`.
 
@@ -96,6 +96,19 @@ Scale with `SRTL_WORKER_COUNT`; do not simultaneously run `docker compose up --s
 The API checks the public GitHub Releases endpoint for stable and beta version information at startup and when version status is refreshed. This request does not include credentials, paths, or inventory data.
 
 When a configured root changes, restart the stack. The UI enters maintenance mode until it validates and applies a path migration or the prior value is restored. This rebases managed paths; it does not move stored content. Routine Linux remounts are accepted automatically when the canonical path, mount point, filesystem type, and mount source are unchanged; exact device and inode checks still fence active filesystem mutations.
+
+### Reverse proxy and network security
+
+Every API route needs a signed-in admin except sign-in, first-run setup, `/api/health/live`, and the static app files. Radarr and Sonarr webhooks need their per-instance secret. `/api/health` and `/api/health/ready` report worker detail only to direct local requests, such as a container health check, or to a signed-in admin.
+
+Direct LAN access over HTTP needs no extra settings. Behind a reverse proxy that terminates HTTPS, such as Nginx Proxy Manager:
+
+- `SRTL_PUBLIC_ORIGIN`: the address people use, for example `https://srtl.example.com`. Changes from that origin are accepted, and an `https` origin makes session cookies `Secure`. If you also open SRTL by its LAN address, add that origin to `SRTL_ALLOWED_ORIGINS`, for example `http://192.168.1.20:5179`.
+- `SRTL_TRUST_PROXY`: the proxy's address or CIDR range, for example `192.168.1.10`, `172.18.0.0/16` for a shared Docker network, or `loopback` when the proxy runs on the same host. Only these peers may set `X-Forwarded-For` and `X-Forwarded-Proto`, which SRTL uses for client addresses in rate limits and logs and for the request protocol. `true` is refused at startup because it would trust headers any client can send; replace it with the proxy's address when upgrading.
+- Published port: keep it reachable only by the proxy. Set `SRTL_BIND_HOST=127.0.0.1` when the proxy runs on the same host, or remove the `ports` block and use the commented proxy network in `docker-compose.yml` when the proxy is another container.
+- `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to signed-in admins only.
+
+Requests without a session are limited to 600 a minute per client address, and request bodies to 256 KB except on the signed-in routes that need more. Set the proxy's own body limit to at least 70 MB if you restore watch sync backups through it.
 
 ## Backup And Restore
 

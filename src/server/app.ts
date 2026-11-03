@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import fastify, { FastifyInstance } from "fastify";
+import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import cookie from "@fastify/cookie";
 import cors from "@fastify/cors";
 import compress from "@fastify/compress";
@@ -13,7 +13,7 @@ import { ZodError } from "zod";
 import packageJson from "../../package.json";
 import type { AppConfig } from "./config";
 import { loadConfig } from "./config";
-import { hasAdmin, requireAuth } from "./auth";
+import { getSessionUser, hasAdmin } from "./auth";
 import { openDatabase, type DatabaseContext } from "./db/database";
 import * as schema from "./db/schema";
 import { desc, eq } from "drizzle-orm";
@@ -28,7 +28,7 @@ import { registerJobRoutes } from "./routes/jobRoutes";
 import { registerSystemRoutes } from "./routes/systemRoutes";
 import { registerPathConfigurationRoutes } from "./routes/pathConfigurationRoutes";
 import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
-import { radarrInstanceWebhookPath, radarrWebhookPath, registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
+import { registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
 import { registerDamagedRoutes } from "./routes/damagedRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { registerMediaServerRoutes } from "./routes/mediaServerRoutes";
@@ -36,18 +36,23 @@ import { registerWatchSyncRoutes } from "./routes/watchSyncRoutes";
 import { registerNowPlayingRoutes } from "./routes/nowPlayingRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
-import { registerSonarrRoutes, sonarrWebhookInstanceId, sonarrWebhookPath } from "./routes/sonarrRoutes";
+import { registerSonarrRoutes, sonarrWebhookInstanceId } from "./routes/sonarrRoutes";
+import { applyRouteAccessPolicy, defaultBodyLimitBytes, isDirectLoopbackRequest, isReservedPath, type WebhookKind } from "./routeAccess";
 
 export interface AppContext {
   app: FastifyInstance;
   config: AppConfig;
   database: DatabaseContext;
   jobs: JobRunner;
+  /** Every route as registered, for audits of the access policy. */
+  routes: ReadonlyArray<{ method: string; url: string }>;
 }
 
 function formatValidationError(error: ZodError): string {
   return error.issues[0]?.message ?? "Validation failed";
 }
+
+const permissionsPolicy = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()";
 
 function mutationOriginAllowed(requestProtocol: string, requestHost: string | undefined, origin: string, allowedOrigins: string[]): boolean {
   const normalizedOrigin = origin.replace(/\/$/, "");
@@ -69,7 +74,13 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   });
   const jobs = new JobRunner(database.db);
 
-  const app = fastify({ logger: true, trustProxy: config.trustProxy });
+  const app = fastify({ logger: true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes });
+  // Every route gets its access policy stamped on before anything can register one.
+  const routes: Array<{ method: string; url: string }> = [];
+  app.addHook("onRoute", (route) => {
+    for (const method of [route.method].flat()) routes.push({ method: String(method), url: route.url });
+    applyRouteAccessPolicy(route);
+  });
   app.setErrorHandler((error, request, reply) => {
     if (error instanceof ZodError) {
       return reply.code(400).send({ error: formatValidationError(error), issues: error.issues });
@@ -78,6 +89,10 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     if (statusCode >= 500) {
       request.log.error({ err: error }, "Request failed");
       return reply.code(500).send({ error: "Internal server error" });
+    }
+    if (statusCode === 403 && request.routeOptions.url === "/*") {
+      // The static file server refuses non-canonical paths; answer like any other unknown path.
+      return reply.code(404).send({ error: "Not found" });
     }
     return reply.code(statusCode).send({ error: error instanceof Error ? error.message : "Request failed" });
   });
@@ -90,11 +105,18 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
         styleSrc: ["'self'", "'unsafe-inline'"],
         imgSrc: ["'self'", "data:"],
         connectSrc: ["'self'"],
+        frameAncestors: ["'none'"],
         upgradeInsecureRequests: null
       }
-    }
+    },
+    frameguard: { action: "deny" },
+    strictTransportSecurity: { maxAge: 31_536_000, includeSubDomains: false }
+  });
+  app.addHook("onRequest", async (_request, reply) => {
+    reply.header("Permissions-Policy", permissionsPolicy);
   });
   await app.register(rateLimit, { global: false });
+  const anonymousRateLimit = app.createRateLimit({ max: config.anonymousRequestsPerMinute, timeWindow: 60_000 });
   await app.register(compress, {
     encodings: ["br", "gzip"],
     globalDecompression: false,
@@ -104,6 +126,80 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     await app.register(cors, { origin: config.allowedOrigins, credentials: true });
   }
   await app.register(cookie);
+
+  const trustedOrigins = config.publicOrigin && !config.allowedOrigins.includes(config.publicOrigin) ? [...config.allowedOrigins, config.publicOrigin] : config.allowedOrigins;
+  app.addHook("onRequest", async (request, reply) => {
+    if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
+    if (request.headers["sec-fetch-site"] === "cross-site") {
+      await reply.code(403).send({ error: "Cross-site requests are not allowed" });
+      return;
+    }
+    const origin = request.headers.origin;
+    if (origin && !mutationOriginAllowed(request.protocol, request.headers.host, origin, trustedOrigins)) {
+      await reply.code(403).send({ error: "Request origin is not allowed" });
+    }
+  });
+
+  const webhookAuthenticators: Record<WebhookKind, (request: FastifyRequest) => Promise<boolean>> = {
+    radarr: async (request) => {
+      const token = request.headers["x-srtl-webhook-secret"];
+      const instanceId = (() => { try { return webhookInstanceId(request); } catch { return undefined; } })();
+      return instanceId !== undefined && (await authenticateRadarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined));
+    },
+    sonarr: async (request) => {
+      const token = request.headers["x-srtl-webhook-secret"];
+      const instanceId = (() => { try { return sonarrWebhookInstanceId(request); } catch { return undefined; } })();
+      return instanceId !== undefined && (await authenticateSonarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined));
+    }
+  };
+
+  // Counts a request made without an admin session. Returns true once it has answered 429.
+  const rejectOverAnonymousLimit = async (request: FastifyRequest, reply: FastifyReply): Promise<boolean> => {
+    const limit = await anonymousRateLimit(request);
+    if (limit.isAllowed || !limit.isExceeded) return false;
+    reply.header("Retry-After", String(limit.ttlInSeconds));
+    await reply.code(429).send({ error: "Too many requests" });
+    return true;
+  };
+
+  // Default-deny guard. It runs before the body is read and decides only from
+  // the matched route's config, which applyRouteAccessPolicy stamps on every route.
+  app.addHook("onRequest", async (request, reply) => {
+    if (reply.sent) return;
+    if (request.is404) {
+      await rejectOverAnonymousLimit(request, reply);
+      return;
+    }
+    const routeConfig = request.routeOptions.config;
+    const access = routeConfig.auth ?? "admin";
+    if (access === "public") {
+      await rejectOverAnonymousLimit(request, reply);
+      return;
+    }
+    if (access === "internal" && isDirectLoopbackRequest(request)) return;
+    if (access === "webhook") {
+      const authenticate = routeConfig.webhook ? webhookAuthenticators[routeConfig.webhook] : undefined;
+      if (!authenticate || !(await authenticate(request))) {
+        if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Invalid webhook credentials" });
+        return;
+      }
+    } else if (!(await getSessionUser(database.db, request.cookies[config.sessionCookieName]))) {
+      if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Authentication required" });
+      return;
+    }
+    if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
+    const libraryLock = routeConfig.libraryLock ?? "enforced";
+    if (libraryLock === "exempt") return;
+    if (await isPathConfigurationBlocked(database.db)) {
+      await reply.code(423).send({ error: "Managed storage paths changed. Complete the required path migration before modifying the library." });
+      return;
+    }
+    if (libraryLock === "pathMigrationOnly") return;
+    if (!(await isOnboardingComplete(database.db))) {
+      await reply.code(423).send({ error: "Complete initial setup before modifying the library." });
+    }
+  });
+
   if (config.apiDocsEnabled) {
     await app.register(swagger, {
       openapi: {
@@ -115,18 +211,6 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     });
     await app.register(swaggerUi, { routePrefix: "/documentation" });
   }
-
-  app.addHook("onRequest", async (request, reply) => {
-    if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
-    if (request.headers["sec-fetch-site"] === "cross-site") {
-      await reply.code(403).send({ error: "Cross-site requests are not allowed" });
-      return;
-    }
-    const origin = request.headers.origin;
-    if (origin && !mutationOriginAllowed(request.protocol, request.headers.host, origin, config.allowedOrigins)) {
-      await reply.code(403).send({ error: "Request origin is not allowed" });
-    }
-  });
 
   const workerHealth = async () => {
     await database.pool.query("select 1");
@@ -168,41 +252,6 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     cookieSecure: config.sessionCookieSecure
   });
 
-  app.addHook("preHandler", async (request, reply) => {
-    const documentationRequest = config.apiDocsEnabled && request.url.startsWith("/documentation");
-    if (!request.url.startsWith("/api/") && !documentationRequest) return;
-    if (request.url.startsWith("/api/auth/") || request.url === "/api/health" || request.url.startsWith("/api/health/")) return;
-    const radarrWebhook = request.method === "POST" && (request.routeOptions.url === radarrWebhookPath || request.routeOptions.url === radarrInstanceWebhookPath);
-    const sonarrWebhook = request.method === "POST" && request.routeOptions.url === sonarrWebhookPath;
-    if (radarrWebhook) {
-      const token = request.headers["x-srtl-webhook-secret"];
-      const instanceId = (() => { try { return webhookInstanceId(request); } catch { return undefined; } })();
-      if (instanceId === undefined || !(await authenticateRadarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined))) {
-        await reply.code(401).send({ error: "Invalid webhook credentials" });
-      }
-    } else if (sonarrWebhook) {
-      const token = request.headers["x-srtl-webhook-secret"];
-      const instanceId = (() => { try { return sonarrWebhookInstanceId(request); } catch { return undefined; } })();
-      if (instanceId === undefined || !(await authenticateSonarrWebhook(database.db, instanceId, typeof token === "string" ? token : undefined))) {
-        await reply.code(401).send({ error: "Invalid webhook credentials" });
-      }
-    } else {
-      await requireAuth(database.db, config.sessionCookieName)(request, reply);
-    }
-    if (reply.sent) return;
-    if (documentationRequest) return;
-    if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
-    if (request.url.startsWith("/api/system/path-migration") || /^\/api\/jobs\/\d+\/(terminate|cancel)(?:\?|$)/.test(request.url)) return;
-    if (await isPathConfigurationBlocked(database.db)) {
-      await reply.code(423).send({ error: "Managed storage paths changed. Complete the required path migration before modifying the library." });
-      return;
-    }
-    if (request.url.startsWith("/api/onboarding")) return;
-    if (!(await isOnboardingComplete(database.db))) {
-      await reply.code(423).send({ error: "Complete initial setup before modifying the library." });
-    }
-  });
-
   registerOnboardingRoutes(app, database.db);
   registerSettingsRoutes(app, database.db);
   registerRadarrRoutes(app, database.db);
@@ -233,12 +282,15 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
         if (relativePath === "service-worker.js") reply.header("Service-Worker-Allowed", "/");
       }
     });
+    // Unknown paths get the app shell only for page loads outside the API, docs and asset prefixes.
     app.setNotFoundHandler(async (request, reply) => {
-      if (request.url.startsWith("/api/") || request.url.startsWith("/documentation") || request.url.startsWith("/assets/")) {
+      if ((request.method !== "GET" && request.method !== "HEAD") || isReservedPath(request.url)) {
         return reply.code(404).send({ error: "Not found" });
       }
       return reply.type("text/html").sendFile("index.html", { maxAge: 0, immutable: false });
     });
+  } else {
+    app.setNotFoundHandler(async (_request, reply) => reply.code(404).send({ error: "Not found" }));
   }
 
   app.addHook("onClose", async () => {
@@ -249,5 +301,5 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     app.log.warn("SRTL Manager setup required. Open the web UI to create the first admin user.");
   }
 
-  return { app, config, database, jobs };
+  return { app, config, database, jobs, routes };
 }
