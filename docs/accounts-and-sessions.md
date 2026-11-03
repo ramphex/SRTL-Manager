@@ -54,7 +54,8 @@ Each browser you sign in with has its own session.
 - successful and failed sign-ins and lockouts,
 - setup, including rejected setup attempts,
 - password and username changes, and wrong current passwords when changing them,
-- sign-outs and sessions ended from the Sessions list.
+- sign-outs and sessions ended from the Sessions list,
+- removed media servers and stopped Now Playing streams.
 
 Each entry shows the time, the username, the client address, and the browser and system. Entries are removed after `SRTL_JOB_HISTORY_RETENTION_DAYS` days (90 by default), and only the newest 50,000 are kept.
 

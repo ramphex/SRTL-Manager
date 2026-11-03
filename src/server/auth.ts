@@ -3,6 +3,7 @@ import { and, asc, eq, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "./db/database";
 import { first } from "./db/database";
 import * as schema from "./db/schema";
+import { AppError } from "./errors";
 
 const adminSetupLockKey = 1_558_042_911;
 
@@ -216,10 +217,26 @@ export interface ActiveSession {
 /** How often `last_seen_at` and the idle deadline are written for an active session. */
 export const sessionTouchIntervalMs = 60_000;
 
-export class SessionInactiveError extends Error {
+/** The session signed out, expired or went idle after it was first accepted. */
+export class SessionInactiveError extends AppError {
   constructor() {
-    super("Session is no longer active");
-    this.name = "SessionInactiveError";
+    super("Session is no longer active", 401, { code: "session_inactive" });
+  }
+}
+
+/** One answer for every failed setup attempt, so it says nothing about whether setup is still open. */
+export class SetupUnavailableError extends AppError {
+  constructor() {
+    super("Setup is not available. Check the setup token in the server log.", 403, { code: "setup_unavailable" });
+  }
+}
+
+/** Sign-in is locked for this username or address; the caller sends `Retry-After` with it. */
+export class SignInLockedError extends AppError {
+  readonly retryAfterSeconds: number;
+  constructor(retryAfterMs: number) {
+    super("Too many sign-in attempts. Try again later.", 429, { code: "sign_in_locked" });
+    this.retryAfterSeconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
   }
 }
 

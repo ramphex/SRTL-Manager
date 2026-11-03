@@ -15,9 +15,12 @@ import {
   revokeUserSession,
   listUserSessions,
   sessionDeadline,
+  SetupUnavailableError,
+  SignInLockedError,
   type ActiveSession
 } from "../auth";
 import { first, type Db } from "../db/database";
+import { AppError } from "../errors";
 import * as schema from "../db/schema";
 import { markOnboardingAccountCreated } from "../lib/onboarding";
 import { LoginThrottle } from "../loginThrottle";
@@ -71,10 +74,7 @@ const securityEventQuerySchema = z.object({
   before: z.coerce.number().int().positive().optional()
 });
 
-/** One answer for every failed setup attempt, so it says nothing about whether setup is still open. */
-const setupUnavailable = "Setup is not available. Check the setup token in the server log.";
 const loginFailed = "Invalid username or password";
-const tooManyAttempts = "Too many sign-in attempts. Try again later.";
 
 export interface AuthRouteOptions {
   sessions: SessionAccess;
@@ -95,7 +95,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
 
   const requireSession = (request: FastifyRequest): ActiveSession => {
     // The request guard has already resolved the session for admin routes.
-    if (!request.adminSession) throw Object.assign(new Error("Authentication required"), { statusCode: 401 });
+    if (!request.adminSession) throw new AppError("Authentication required", 401);
     return request.adminSession;
   };
 
@@ -115,12 +115,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
     if (!(await hasAdmin(db))) setupTokens.prepare();
     if (!setupTokens.verify(body.setupToken)) {
       await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "token" } });
-      return reply.code(403).send({ error: setupUnavailable });
+      throw new SetupUnavailableError();
     }
     const user = await createAdmin(db, body.username, body.password);
     if (!user) {
       await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "completed" } });
-      return reply.code(403).send({ error: setupUnavailable });
+      throw new SetupUnavailableError();
     }
     setupTokens.complete();
     request.log.info("Initial setup completed; the setup token is no longer valid.");
@@ -134,8 +134,9 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
     const body = loginSchema.parse(request.body);
     const blocked = throttle.check(body.username, request.ip);
     if (!blocked.allowed) {
-      reply.header("Retry-After", String(Math.ceil(blocked.retryAfterMs / 1000)));
-      return reply.code(429).send({ error: tooManyAttempts });
+      const locked = new SignInLockedError(blocked.retryAfterMs);
+      reply.header("Retry-After", String(locked.retryAfterSeconds));
+      throw locked;
     }
     const result = await authenticate(db, body.username, body.password);
     if (!result) {

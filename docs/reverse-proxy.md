@@ -64,7 +64,7 @@ Open **Hosts > Proxy Hosts > Add Proxy Host**.
 - **SSL Certificate:** request a Let's Encrypt certificate for `srtl.example.com`.
 - **Force SSL:** on.
 - **HTTP/2 Support:** on.
-- **HSTS Enabled:** off. SRTL already sends `Strict-Transport-Security` (one year, without `includeSubDomains`), and two copies of the header only confuse browsers. If you turn it on here instead, leave **HSTS Subdomains** off unless every subdomain is HTTPS-only.
+- **HSTS Enabled:** off. SRTL already sends `Strict-Transport-Security` (one year, without `includeSubDomains`), and two copies of the header only confuse browsers. If you turn it on here instead, keep **HSTS Subdomains** off unless all of your subdomains serve HTTPS.
 
 ### 2. Advanced tab
 
@@ -325,14 +325,15 @@ Traefik streams server-sent events without extra settings. Set `SRTL_TRUST_PROXY
 Work through this list in order. Each item is something that has gone wrong on real installs.
 
 **Create the account first**
-- [ ] Open SRTL on your LAN and finish first-run setup, so the administrator account exists before the address is public. An empty instance can be claimed by whoever reaches it first.
-- [ ] Use a long, unique password for the SRTL administrator. Do not reuse your Authentik or media server password.
+- [ ] Open SRTL on your LAN and finish first-run setup, so the administrator account exists before the address is public. Setup needs the one-time setup token from the API log (`docker compose logs api`), but finishing it first leaves nothing to guess.
+- [ ] Use a long, unique password for the SRTL administrator (at least 12 characters). Do not reuse your Authentik or media server password.
 
 **SRTL settings** (in `.env`, then `docker compose up -d`)
 - [ ] `SRTL_PUBLIC_ORIGIN=https://srtl.example.com` (secure cookies follow from it).
 - [ ] `SRTL_TRUST_PROXY` is the proxy's address or range, not `true` and not a wide range such as `0.0.0.0/0`.
 - [ ] `SRTL_ALLOWED_ORIGINS` lists only extra origins you really use, or is empty.
 - [ ] `SRTL_API_DOCS` is off.
+- [ ] `SRTL_SECRET_KEY` is set, and a copy is kept somewhere other than your database backups.
 - [ ] You run the production Docker image, not a development server.
 
 **Network**
@@ -356,9 +357,9 @@ Work through this list in order. Each item is something that has gone wrong on r
 - [ ] After signing in to both, SRTL works, a change such as saving a setting succeeds, and Now Playing stays connected for several minutes.
 
 **Afterwards**
-- [ ] Treat database dumps and the `data` folder as secrets: they hold media server tokens and Radarr and Sonarr API keys. Keep backups off shared storage.
+- [ ] Treat database dumps and the `data` folder as secrets. Media server tokens and Radarr and Sonarr API keys are stored encrypted with `SRTL_SECRET_KEY`, so keep the key apart from the dumps, and keep both off shared storage.
 - [ ] Watch the SRTL [releases](https://github.com/ramphex/SRTL-Manager/releases) and update when a security fix ships.
-- [ ] Review who has acted on your library from time to time. Settings do not show it yet, but `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, and stopped streams, with who, when and the item IDs.
+- [ ] Review account activity from time to time. Settings > User settings lists open sessions and a security activity log of sign-ins, failures, lockouts, account changes, removed media servers and stopped streams. `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, and stopped streams, with who, when and the item IDs.
 - [ ] Decide how long you keep proxy and SRTL logs. They contain client addresses, which are personal data.
 
 ## When something goes wrong

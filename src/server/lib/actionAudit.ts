@@ -3,6 +3,8 @@ import type { FastifyRequest } from "fastify";
 import { eq, sql } from "drizzle-orm";
 import { nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { recordSecurityEvent } from "../securityEvents";
+import type { SecurityEventType } from "../../shared/auth";
 
 /**
  * A record of who did what, and to which items, for actions that change or
@@ -11,8 +13,9 @@ import * as schema from "../db/schema";
  * pruned with job history. Destructive actions that start a job also leave a
  * line in that job's event log.
  *
- * The recorder is the single seam for the audit trail: when a general security
- * event table exists, only `appendActionAudit` needs to change.
+ * The recorder is the single seam for the audit trail. Actions that interrupt
+ * someone or remove a server are also written to the security activity log
+ * (`securityEventFor`), next to sign-ins and account changes.
  */
 
 export type ActionAuditAction =
@@ -82,6 +85,12 @@ export function boundedTargets(targets: Record<string, unknown>): Record<string,
   return bounded;
 }
 
+/** Audit actions that also appear in Settings > User settings > Security activity. */
+const securityEventFor: Partial<Record<ActionAuditAction, SecurityEventType>> = {
+  "media_server.remove": "media_server_removed",
+  "now_playing.stop_stream": "stream_stopped"
+};
+
 async function appendActionAudit(db: Db, entry: ActionAuditEntry): Promise<void> {
   await db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${lockKey})`);
@@ -142,5 +151,17 @@ export async function recordActionAudit(db: Db, request: FastifyRequest, input: 
     }
   } catch (error) {
     request.log.error({ err: error, auditAction: input.action }, "Action audit record could not be written");
+  }
+  const securityEvent = securityEventFor[input.action];
+  if (securityEvent) {
+    // Never throws; a failed write is logged.
+    await recordSecurityEvent(db, {
+      event: securityEvent,
+      request,
+      userId: actor?.userId ?? null,
+      username: actor?.username ?? null,
+      sessionId: request.adminSession?.id ?? null,
+      details: { ...entry.targets, requestId: entry.requestId }
+    });
   }
 }

@@ -6,6 +6,7 @@ import { createApp, type AppContext } from "../src/server/app";
 import { actionAuditLimit, boundedTargets, listActionAudit, type ActionAuditEntry } from "../src/server/lib/actionAudit";
 import { NowPlayingHub } from "../src/server/lib/nowPlaying/hub";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { readSetupToken } from "./authHelpers";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 
 // Copy, purge and discard-partial-copy are checked beside their own flows in app.test.ts and orphanPurge.test.ts.
@@ -22,7 +23,7 @@ describe("action audit trail", () => {
     app = await createApp({ rootDir: root, databaseUrl: database.databaseUrl, autoMigrate: true, anonymousRequestsPerMinute: 100_000, paths: { symlinkDir: path.join(root, "links"), localDir: path.join(root, "local"), remoteDir: path.join(root, "remote") } });
     app.app.log.level = "silent";
     await markOnboardingCompleteForExistingInstall(app.database.db);
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     cookie = String(setup.headers["set-cookie"]).split(";")[0]!;
   });
 
@@ -96,6 +97,22 @@ describe("action audit trail", () => {
       targets: { serverId: "abc123", sessionKey: "session-7", result: "stopped" }
     });
     expect(JSON.stringify(entry)).not.toContain("Please pause");
+  });
+
+  it("also lists media server removals and stopped streams in the security activity log", async () => {
+    vi.spyOn(NowPlayingHub.prototype, "stopStream").mockResolvedValue({ result: "stopped", message: "The stream has stopped." });
+    const created = await call("POST", "/api/media-servers", { kind: "jellyfin", name: "Den", url: "http://192.168.1.22:8096", token: "testJellyfinKey", prefixMappings: [] });
+    const serverId = created.json<{ servers: Array<{ id: string }> }>().servers[0]!.id;
+    const removed = await call("DELETE", `/api/media-servers/${serverId}`);
+    const stopped = await call("POST", "/api/now-playing/stop", { serverId: "abc123", sessionKey: "session-9", message: "Please pause for a moment." });
+    expect(stopped.statusCode).toBe(200);
+    const page = (await call("GET", "/api/auth/security-events?limit=10")).json<{ events: Array<{ event: string; username: string | null; details: Record<string, unknown> }> }>();
+    const mirrored = page.events.filter((event) => event.event === "media_server_removed" || event.event === "stream_stopped");
+    expect(mirrored).toEqual([
+      expect.objectContaining({ event: "stream_stopped", username: "fixture", details: expect.objectContaining({ serverId: "abc123", sessionKey: "session-9", requestId: stopped.headers["x-request-id"] }) }),
+      expect.objectContaining({ event: "media_server_removed", username: "fixture", details: expect.objectContaining({ serverId, name: "Den", requestId: removed.headers["x-request-id"] }) })
+    ]);
+    expect(JSON.stringify(page)).not.toContain("Please pause");
   });
 
   it("does not record a stop that was rejected", async () => {

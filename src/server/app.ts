@@ -94,7 +94,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   // client, so a user can quote it and the matching server log entry can be found.
   const app = fastify({ logger: options.logStream ? { stream: options.logStream } : true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes, genReqId: () => randomBytes(5).toString("hex") });
   if (secretKey.source === "generated") {
-    app.log.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up with the database: without it, saved tokens and API keys cannot be read.`);
+    app.log.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up separately from database backups: without it, saved tokens and API keys cannot be read.`);
   }
   app.decorateRequest("adminSession", null);
   app.decorateRequest("adminUser", null);

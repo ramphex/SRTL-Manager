@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { AdmissionError, AppError, ConflictError, genericServerMessage, publicErrorMessage, toClientError } from "../src/server/errors";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { readSetupToken } from "./authHelpers";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 
 // Text that must never reach a browser: stack frames, SQL, host paths, and upstream response bodies.
@@ -65,7 +66,7 @@ describe("error responses", () => {
     upstreamBase = `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`;
 
     await markOnboardingCompleteForExistingInstall(app.database.db);
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     cookie = String(setup.headers["set-cookie"]).split(";")[0]!;
   });
 

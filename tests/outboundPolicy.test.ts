@@ -33,7 +33,7 @@ afterEach(() => {
 describe("outbound address policy", () => {
   it("allows LAN and internet addresses by default but not loopback, link-local, metadata or multicast", () => {
     configureOutboundPolicy(defaultOutboundPolicy);
-    for (const address of ["192.168.1.20", "10.0.0.5", "172.20.1.1", "100.64.1.1", "fd12::1", "203.0.113.10", "2001:db8::1", "::ffff:192.168.1.20"]) {
+    for (const address of ["192.168.1.20", "10.20.30.5", "172.20.1.1", "100.64.1.1", "fd12::1", "203.0.113.10", "2001:db8::1", "::ffff:192.168.1.20"]) {
       expect(outboundAddressAllowed(address), address).toBe(true);
     }
     for (const address of ["127.0.0.1", "127.1.2.3", "::1", "::ffff:127.0.0.1", "::ffff:7f00:1"]) expect(outboundAddressProblem(address), address).toBe("loopback");
@@ -57,7 +57,7 @@ describe("outbound address policy", () => {
   });
 
   it("rejects malformed entries", () => {
-    for (const value of ["lan", "192.168.1.0/33", "10.0.0.1/8/2", "example.com"]) expect(() => parseOutboundPolicy(value)).toThrow("Invalid SRTL_OUTBOUND_ALLOW_CIDRS entry");
+    for (const value of ["lan", "192.168.1.0/33", "10.20.30.1/8/2", "example.com"]) expect(() => parseOutboundPolicy(value)).toThrow("Invalid SRTL_OUTBOUND_ALLOW_CIDRS entry");
     expect(parseOutboundPolicy("")).toBe(defaultOutboundPolicy);
   });
 

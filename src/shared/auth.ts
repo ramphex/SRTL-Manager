@@ -36,7 +36,9 @@ export type SecurityEventType =
   | "username_changed"
   | "reauthentication_failed"
   | "session_revoked"
-  | "sessions_revoked";
+  | "sessions_revoked"
+  | "media_server_removed"
+  | "stream_stopped";
 
 export interface SecurityEventRecord {
   id: number;
@@ -65,7 +67,9 @@ export const securityEventLabels: Record<SecurityEventType, string> = {
   username_changed: "Username changed",
   reauthentication_failed: "Wrong current password",
   session_revoked: "Session signed out",
-  sessions_revoked: "Other sessions signed out"
+  sessions_revoked: "Other sessions signed out",
+  media_server_removed: "Media server removed",
+  stream_stopped: "Now Playing stream stopped"
 };
 
 export function securityEventLabel(event: string): string {

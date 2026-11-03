@@ -22,7 +22,7 @@ process.umask(0o022);
 
 const config = loadConfig();
 const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
-if (secretKey.source === "generated") console.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up with the database.`);
+if (secretKey.source === "generated") console.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up separately from database backups.`);
 configureOutboundPolicy(config.outboundPolicy);
 const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate, discardUnreadableCredentials: config.discardUnreadableCredentials });
 const workerProcessLock = await database.pool.connect();

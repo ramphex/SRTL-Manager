@@ -145,6 +145,8 @@ function eventDetail(event: SecurityEventRecord): string | null {
       return details.current ? "This browser" : null;
     case "setup_rejected":
       return details.reason === "token" ? "Wrong setup token" : details.reason === "completed" ? "Setup already completed" : null;
+    case "media_server_removed":
+      return typeof details.name === "string" ? details.name : null;
     default:
       return null;
   }

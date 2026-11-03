@@ -127,7 +127,7 @@ describe("authentication and sessions", () => {
         payload: { setupToken: `${token.slice(0, -1)}x`, username: "alex_03", password, confirmPassword: password }
       });
       expect(wrong.statusCode).toBe(403);
-      expect(wrong.json()).toEqual({ error: "Setup is not available. Check the setup token in the server log." });
+      expect(wrong.json()).toMatchObject({ error: "Setup is not available. Check the setup token in the server log.", code: "setup_unavailable" });
       expect(wrong.headers["set-cookie"]).toBeUndefined();
       await expect(app.database.db.select().from(schema.adminUsers)).resolves.toHaveLength(0);
 
@@ -150,7 +150,9 @@ describe("authentication and sessions", () => {
       // The token is single use, and a completed setup answers exactly like a wrong token.
       const reused = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: token, username: "other", password, confirmPassword: password } });
       expect(reused.statusCode).toBe(403);
-      expect(reused.json()).toEqual(wrong.json());
+      // Only the per-request ID differs.
+      const withoutRequestId = (body: Record<string, unknown>) => ({ ...body, requestId: undefined });
+      expect(withoutRequestId(reused.json())).toEqual(withoutRequestId(wrong.json()));
       expect(await events(app)).toEqual(["setup_rejected", "setup_completed", "setup_rejected"]);
     });
 
@@ -251,7 +253,7 @@ describe("authentication and sessions", () => {
         expect(statuses).toEqual([401, 401, 401, 401, 401]);
         const locked = await login(app, { username, remoteAddress: "203.0.113.99" });
         expect(locked.statusCode, username).toBe(429);
-        expect(locked.json()).toEqual({ error: "Too many sign-in attempts. Try again later." });
+        expect(locked.json()).toMatchObject({ error: "Too many sign-in attempts. Try again later.", code: "sign_in_locked" });
         expect(Number(locked.headers["retry-after"])).toBeGreaterThan(0);
       }
       const recorded = await events(app);

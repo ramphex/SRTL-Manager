@@ -27,7 +27,7 @@ services:
       - .env
     environment:
       SRTL_POSTGRES_HOST: postgres
-      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up with the database.
+      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up separately from database dumps.
       SRTL_SECRET_KEY: ${SRTL_SECRET_KEY:?Set SRTL_SECRET_KEY in .env (openssl rand -base64 32)}
     tmpfs:
       - /tmp:size=64m,mode=1777
@@ -49,7 +49,7 @@ services:
       - .env
     environment:
       SRTL_POSTGRES_HOST: postgres
-      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up with the database.
+      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up separately from database dumps.
       SRTL_SECRET_KEY: ${SRTL_SECRET_KEY:?Set SRTL_SECRET_KEY in .env (openssl rand -base64 32)}
     # Publishes the web UI on the host for direct LAN access. Set SRTL_BIND_HOST
     # to 127.0.0.1 when a reverse proxy on this host is the only client. When the
@@ -105,7 +105,7 @@ services:
       - .env
     environment:
       SRTL_POSTGRES_HOST: postgres
-      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up with the database.
+      # Seals saved Plex, Jellyfin, Radarr and Sonarr credentials. Back it up separately from database dumps.
       SRTL_SECRET_KEY: ${SRTL_SECRET_KEY:?Set SRTL_SECRET_KEY in .env (openssl rand -base64 32)}
     volumes:
       - type: bind

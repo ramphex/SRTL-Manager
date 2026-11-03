@@ -7,6 +7,7 @@ import { createCipheriv, createDecipheriv, createHmac, randomBytes } from "node:
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { AppError } from "../errors";
 
 export const secretPrefix = "enc:v1:";
 const keyBytes = 32;
@@ -24,7 +25,15 @@ export const secretPurposes = {
 
 export type SecretPurpose = (typeof secretPurposes)[keyof typeof secretPurposes];
 
-export class SecretKeyError extends Error {}
+/**
+ * The secret key is missing, malformed or does not match the stored credentials. Thrown mostly at startup, where
+ * the message tells the operator what to fix; during a request it is a server-side failure.
+ */
+export class SecretKeyError extends AppError {
+  constructor(message: string, options: { cause?: unknown } = {}) {
+    super(message, 500, { code: "secret_key", cause: options.cause });
+  }
+}
 
 /** A stored value was sealed with a key SRTL does not have. */
 export class SecretKeyMismatchError extends SecretKeyError {
