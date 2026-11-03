@@ -342,7 +342,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     autoMigrate:
       overrides.autoMigrate ?? booleanSetting(process.env.SRTL_AUTO_MIGRATE ?? envFile.SRTL_AUTO_MIGRATE, process.env.NODE_ENV !== "production"),
     trustProxy: overrides.trustProxy ?? trustProxySetting(process.env.SRTL_TRUST_PROXY ?? envFile.SRTL_TRUST_PROXY),
-    anonymousRequestsPerMinute: overrides.anonymousRequestsPerMinute ?? defaultAnonymousRequestsPerMinute,
+    anonymousRequestsPerMinute: boundedIntegerSetting(
+      overrides.anonymousRequestsPerMinute ?? process.env.SRTL_ANONYMOUS_REQUESTS_PER_MINUTE ?? envFile.SRTL_ANONYMOUS_REQUESTS_PER_MINUTE,
+      defaultAnonymousRequestsPerMinute,
+      "SRTL_ANONYMOUS_REQUESTS_PER_MINUTE",
+      1,
+      1_000_000
+    ),
     webRoot: overrides.webRoot ?? process.env.SRTL_WEB_ROOT ?? envFile.SRTL_WEB_ROOT ?? path.join(rootDir, "dist", "client"),
     jobHistoryRetentionDays: integerSetting(
       overrides.jobHistoryRetentionDays ?? process.env.SRTL_JOB_HISTORY_RETENTION_DAYS ?? envFile.SRTL_JOB_HISTORY_RETENTION_DAYS,
