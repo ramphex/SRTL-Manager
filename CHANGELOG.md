@@ -52,6 +52,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Security
 
+- Hardened request authentication and proxy trust. Every API route now requires a signed-in admin unless it is explicitly public (sign-in, first-run setup, the liveness check, and the static app files) or a webhook with its secret, and the check runs before the request body is read.
+- **Upgrade note:** `SRTL_TRUST_PROXY` now takes the addresses or CIDR ranges of your reverse proxies, for example `SRTL_TRUST_PROXY=192.168.1.10` or `SRTL_TRUST_PROXY=172.18.0.0/16`, or `loopback` for a proxy on the same host. `SRTL_TRUST_PROXY=true` is refused at startup, because it trusted forwarding headers from any client. `false` and an empty value are unchanged.
+- Added `SRTL_PUBLIC_ORIGIN` for reverse-proxy installs. Changes from that origin are accepted, and an `https` origin turns on secure session cookies by default; `SRTL_COOKIE_SECURE=false` together with an `https` public origin is refused at startup.
+- `/api/health` and `/api/health/ready` now answer only direct local requests (such as a container health check) or a signed-in admin. `/api/health/live` stays public and returns only that the service is running.
+- The API documentation at `/documentation` is now off unless `SRTL_API_DOCS=true`, whatever `NODE_ENV` is, and needs a signed-in admin when on.
+- Requests without a session are limited to 600 a minute per client address, request bodies are limited to 256 KB except on the signed-in routes that need more (watch sync restore, large copy, audit and purge selections, bulk policy changes), and sign-in bodies to 16 KB.
+- Unknown paths under `/api`, `/documentation` and `/assets` now always return a plain 404.
+- Responses now send `Permissions-Policy`, deny framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), and send `Strict-Transport-Security` without `includeSubDomains`.
 - Cleared the critical and high npm advisories for Fastify, Zod, undici, the router's serializer, Vite, and related packages by updating runtime and development dependencies and refreshing the lockfile.
 - Upgraded Vitest to 5 and jsdom to 30; jsdom 30 requires Node.js 24.15 or newer, which CI and release workflows already use.
 - Pinned GitHub Actions to their newer releases, each checked against its release tag.

@@ -47,8 +47,16 @@ services:
       - .env
     environment:
       SRTL_POSTGRES_HOST: postgres
+    # Publishes the web UI on the host for direct LAN access. Set SRTL_BIND_HOST
+    # to 127.0.0.1 when a reverse proxy on this host is the only client. When the
+    # proxy shares a Docker network with SRTL instead, delete this ports block,
+    # uncomment the networks entries here and at the end of the file, point the
+    # proxy at http://api:3010, and set SRTL_TRUST_PROXY to the proxy's address.
     ports:
       - "${SRTL_BIND_HOST:?Set SRTL_BIND_HOST in .env}:${SRTL_WEB_PORT:?Set SRTL_WEB_PORT in .env}:3010"
+    # networks:
+    #   - default
+    #   - proxy
     volumes:
       - type: bind
         source: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
@@ -114,3 +122,8 @@ services:
         condition: service_healthy
       api:
         condition: service_healthy
+
+# Shared network for a reverse proxy container (see the api service).
+# networks:
+#   proxy:
+#     external: true
