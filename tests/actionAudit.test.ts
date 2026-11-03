@@ -33,7 +33,7 @@ describe("action audit trail", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  const call = (method: "GET" | "POST" | "DELETE", url: string, payload?: unknown) => app.app.inject({ method, url, headers: { cookie }, ...(payload === undefined ? {} : { payload }) });
+  const call = (method: "GET" | "POST" | "DELETE", url: string, payload?: Record<string, unknown>) => app.app.inject({ method, url, headers: { cookie }, payload });
   const trail = async () => (await call("GET", "/api/system/action-audit")).json<ActionAuditEntry[]>();
 
   it("is only readable by a signed-in admin", async () => {

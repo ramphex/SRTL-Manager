@@ -72,8 +72,7 @@ export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunne
   app.post("/api/audits", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = auditOptionsSchema.parse(request.body);
     const configuredSections = (await getSectionSettings(db)).sections;
-    let sections: string[] | undefined;
-    sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
+    const sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
     const options: AuditOptions = {
       mode: body.mode,
       ...(sections ? { sections } : {}),
