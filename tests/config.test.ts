@@ -30,6 +30,20 @@ describe("config", () => {
     expect(config.paths).toEqual({ symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" });
   });
 
+  it("limits requests without a session to 600 a minute unless configured otherwise", async () => {
+    const database = "SRTL_DATABASE_URL=postgres://test:test@db:5432/test";
+    await fs.writeFile(path.join(tmpDir, ".env"), database);
+    expect(loadConfig({ rootDir: tmpDir }).anonymousRequestsPerMinute).toBe(600);
+
+    await fs.writeFile(path.join(tmpDir, ".env"), [database, "SRTL_ANONYMOUS_REQUESTS_PER_MINUTE=1200"].join("\n"));
+    expect(loadConfig({ rootDir: tmpDir }).anonymousRequestsPerMinute).toBe(1200);
+
+    for (const value of ["0", "-1", "1.5", "unlimited", "1000001"]) {
+      await fs.writeFile(path.join(tmpDir, ".env"), [database, `SRTL_ANONYMOUS_REQUESTS_PER_MINUTE=${value}`].join("\n"));
+      expect(() => loadConfig({ rootDir: tmpDir })).toThrow("SRTL_ANONYMOUS_REQUESTS_PER_MINUTE");
+    }
+  });
+
   it("loads an arbitrary worker count and its bounded concurrency safeguards", async () => {
     await fs.writeFile(
       path.join(tmpDir, ".env"),
@@ -233,7 +247,7 @@ describe("config", () => {
 
   it("documents every security setting in the checked-in example environment", async () => {
     const example = await fs.readFile(new URL("../.env.example", import.meta.url), "utf8");
-    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE", "SRTL_SESSION_IDLE_HOURS", "SRTL_SESSION_MAX_AGE_DAYS", "SRTL_SETUP_TOKEN", "SRTL_SECRET_KEY", "SRTL_SECRET_KEY_FILE", "SRTL_OUTBOUND_ALLOW_CIDRS", "SRTL_DISCARD_UNREADABLE_CREDENTIALS"]) {
+    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE", "SRTL_SESSION_IDLE_HOURS", "SRTL_SESSION_MAX_AGE_DAYS", "SRTL_SETUP_TOKEN", "SRTL_SECRET_KEY", "SRTL_SECRET_KEY_FILE", "SRTL_OUTBOUND_ALLOW_CIDRS", "SRTL_DISCARD_UNREADABLE_CREDENTIALS", "SRTL_ANONYMOUS_REQUESTS_PER_MINUTE"]) {
       expect(example, key).toContain(key);
     }
     expect(example).not.toMatch(/^SRTL_TRUST_PROXY=true/m);

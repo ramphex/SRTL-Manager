@@ -66,11 +66,15 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium
-      - name: Generate a throwaway secret key for browser smoke tests
+      - name: Generate throwaway secrets for browser smoke tests
         run: |
           key="$(openssl rand -base64 32)"
           echo "::add-mask::$key"
           echo "SRTL_SECRET_KEY=$key" >> "$GITHUB_ENV"
+          setup_token="$(openssl rand -hex 24)"
+          echo "::add-mask::$setup_token"
+          echo "SRTL_SETUP_TOKEN=$setup_token" >> "$GITHUB_ENV"
+      # The browser suite loads hundreds of pages from one address, well past the default request limit.
       - name: Start production server for browser smoke tests
         env:
           SRTL_DATABASE_URL: postgres://srtl_test:srtl_test@127.0.0.1:5432/postgres
@@ -83,6 +87,7 @@ jobs:
           SRTL_LOCATION_2_PATH=/tmp/srtl-ci/remote \
           SRTL_HOST=127.0.0.1 \
           SRTL_PORT=3010 \
+          SRTL_ANONYMOUS_REQUESTS_PER_MINUTE=100000 \
           npm run start:api > /tmp/srtl-api.log 2>&1 &
           echo $! > /tmp/srtl-api.pid
           for _ in {1..30}; do
@@ -98,7 +103,7 @@ jobs:
           curl -fsS \
             --cookie-jar /tmp/srtl-cookies.txt \
             --header 'Content-Type: application/json' \
-            --data '{"username":"ci-admin","password":"ci-browser-password","confirmPassword":"ci-browser-password"}' \
+            --data "{\"setupToken\":\"$SRTL_SETUP_TOKEN\",\"username\":\"ci-admin\",\"password\":\"ci-browser-password\",\"confirmPassword\":\"ci-browser-password\"}" \
             http://127.0.0.1:3010/api/auth/setup >/dev/null
           SRTL_DATA_DIR=/tmp/srtl-ci/data \
           SYMLINK_DIR=/tmp/srtl-ci/symlinks \
