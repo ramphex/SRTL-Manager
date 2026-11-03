@@ -6,7 +6,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 
 ## Highlights
 
-- Guided first-run account, path, section, policy, and initial-scan setup.
+- Guided first-run account, path, section, policy, and initial-scan setup, protected by a one-time setup token. Session list, sign-out of other devices, and a security activity log in Settings. See [accounts and sessions](docs/accounts-and-sessions.md).
 - Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period.
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles. Each folder can optionally give new titles a [default policy](docs/default-policy.md).
 - Fast and deep audits across local and remote targets.
@@ -56,7 +56,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
 
-The administrator username and password are created in the browser during first-run setup and do not belong in `.env`.
+The administrator username and password are created in the browser during first-run setup and do not belong in `.env`. Setup asks for a one-time setup token from the server log, so nobody else who can reach a new instance can claim it first.
 
 Run `cp .env.example .env`, protect it with `chmod 600 .env`, validate it with `docker compose config --quiet`, then pull and start the stack:
 
@@ -66,6 +66,14 @@ docker compose up -d
 ```
 
 Open `http://<server-ip>:5179` unless a different port was selected. The browser then completes account creation, section setup, initial policy strategy, and the first scan.
+
+Creating the administrator account needs the one-time setup token that the API prints when it starts without an account. Find it with:
+
+```bash
+docker compose logs api | grep "Setup token"
+```
+
+It is also saved in the API container as `/tmp/srtl-data/setup-token` (`docker compose exec api cat /tmp/srtl-data/setup-token`). Without Compose, use `docker logs <api container name>`. The token works once; until setup is done, a new one is printed each time the API container starts. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
 
 The default configuration follows the current stable `latest` image. Pin `SRTL_IMAGE` to a numbered image tag when repeatable deployments are more important than automatically following stable updates.
 
@@ -107,6 +115,9 @@ Direct LAN access over HTTP needs no extra settings. Behind a reverse proxy that
 - `SRTL_TRUST_PROXY`: the proxy's address or CIDR range, for example `192.168.1.10`, `172.18.0.0/16` for a shared Docker network, or `loopback` when the proxy runs on the same host. Only these peers may set `X-Forwarded-For` and `X-Forwarded-Proto`, which SRTL uses for client addresses in rate limits and logs and for the request protocol. `true` is refused at startup because it would trust headers any client can send; replace it with the proxy's address when upgrading.
 - Published port: keep it reachable only by the proxy. Set `SRTL_BIND_HOST=127.0.0.1` when the proxy runs on the same host, or remove the `ports` block and use the commented proxy network in `docker-compose.yml` when the proxy is another container.
 - `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to signed-in admins only.
+- `SRTL_SESSION_IDLE_HOURS` and `SRTL_SESSION_MAX_AGE_DAYS`: a browser is signed out after 12 hours without activity and 14 days after sign-in by default. Settings > User settings lists every session and can sign out one or all others, and shows a log of sign-ins, failures, lockouts and account changes.
+
+Sign-in locks a username for a growing time, up to 15 minutes, after 5 failed attempts from any address, and an address after 20 failed attempts. New passwords need at least 12 characters. With secure cookies the session cookie uses the `__Host-` prefix. Only browsers on the host or the local network are told that a new instance still needs setup; everyone else can still open setup from the sign-in screen, but needs the setup token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
 
 Requests without a session are limited to 600 a minute per client address, and request bodies to 256 KB except on the signed-in routes that need more. Set the proxy's own body limit to at least 70 MB if you restore watch sync backups through it.
 
