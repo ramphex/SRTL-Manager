@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/database";
+import { recordActionAudit } from "../lib/actionAudit";
 import { createSonarrInstance, getSonarrCopyDefaults, getSonarrOverview, getSonarrState, reconcileSonarrSeries, receiveSonarrWebhook, refreshSonarr, removeSonarrInstance, renameSonarrInstance, saveSonarrSettings, sonarrInstanceIdSchema, sonarrInstanceNameSchema, sonarrSettingsSchema, testSonarrConnection } from "../lib/sonarr";
 
 export const sonarrWebhookPath = "/api/integrations/sonarr/:instanceId/webhook";
@@ -28,7 +29,17 @@ export function registerSonarrRoutes(app: FastifyInstance, db: Db): void {
     return getSonarrState(db, instanceId(request));
   });
   app.put("/api/settings/sonarr/instances/:instanceId", async (request) => saveSonarrSettings(db, instanceId(request), sonarrSettingsSchema.parse(request.body)));
-  app.delete("/api/settings/sonarr/instances/:instanceId", async (request) => removeSonarrInstance(db, instanceId(request)));
+  app.delete("/api/settings/sonarr/instances/:instanceId", async (request) => {
+    const id = instanceId(request);
+    const name = (await getSonarrOverview(db)).instances.find((instance) => instance.settings.id === id)?.settings.name;
+    const overview = await removeSonarrInstance(db, id);
+    await recordActionAudit(db, request, {
+      action: "sonarr_instance.remove",
+      summary: `Removed Sonarr instance${name ? ` "${name}"` : ""}`,
+      targets: { instanceId: id, ...(name ? { name } : {}) }
+    });
+    return overview;
+  });
   app.post("/api/settings/sonarr/instances/:instanceId/rename", async (request) => renameSonarrInstance(db, instanceId(request), nameBody.parse(request.body).name));
   app.post("/api/settings/sonarr/instances/:instanceId/test", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request) => testSonarrConnection(db, instanceId(request), sonarrSettingsSchema.parse(request.body)));
   app.post("/api/settings/sonarr/instances/:instanceId/refresh", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request) => refreshSonarr(db, instanceId(request)));

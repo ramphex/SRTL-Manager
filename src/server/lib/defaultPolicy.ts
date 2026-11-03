@@ -2,6 +2,7 @@ import { and, eq, inArray, isNull } from "drizzle-orm";
 import { getSectionSettings, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type { DefaultPolicyApplyResult, DefaultPolicyPreview, DefaultStoragePolicy, SectionSettings, StoragePolicyKind } from "../../shared/types";
+import { AppError } from "../errors";
 import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
 
 export const defaultPolicySource = "default";
@@ -113,9 +114,9 @@ export async function listUnassignedSectionTitles(db: Db, section: string): Prom
   return [...titles.values()].sort((a, b) => a.localeCompare(b));
 }
 
-export class DefaultPolicyRequestError extends Error {
-  constructor(readonly statusCode: number, message: string) {
-    super(message);
+export class DefaultPolicyRequestError extends AppError {
+  constructor(statusCode: number, message: string) {
+    super(message, statusCode);
   }
 }
 

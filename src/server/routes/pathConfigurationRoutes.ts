@@ -11,22 +11,14 @@ const applyInputSchema = migrationInputSchema.extend({ confirmSameStorage: z.lit
 export function registerPathConfigurationRoutes(app: FastifyInstance, db: Db, jobs: JobRunner, environmentPaths: PathsSettings): void {
   app.get("/api/system/path-migration", async () => getPathConfigurationState(db, environmentPaths));
 
-  app.post("/api/system/path-migration/plan", async (request, reply) => {
+  app.post("/api/system/path-migration/plan", async (request) => {
     const body = migrationInputSchema.parse(request.body ?? {});
-    try {
-      await planPathMigration(db, body.migrationId);
-      return getPathConfigurationState(db, environmentPaths);
-    } catch (error: unknown) {
-      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    await planPathMigration(db, body.migrationId);
+    return getPathConfigurationState(db, environmentPaths);
   });
 
-  app.post("/api/system/path-migration/apply", async (request, reply) => {
+  app.post("/api/system/path-migration/apply", async (request) => {
     const body = applyInputSchema.parse(request.body ?? {});
-    try {
-      return { jobId: await jobs.startPathMigration(body.migrationId) };
-    } catch (error: unknown) {
-      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    return { jobId: await jobs.startPathMigration(body.migrationId) };
   });
 }

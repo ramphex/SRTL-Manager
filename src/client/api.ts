@@ -53,6 +53,7 @@ import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSe
 
 type ApiErrorPayload = {
   error?: string;
+  requestId?: string;
   issues?: Array<{ message?: string }>;
 };
 
@@ -68,7 +69,9 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   });
   if (!response.ok) {
     const payload = (await response.json().catch(() => ({}))) as ApiErrorPayload;
-    throw new Error(payload.error ?? payload.issues?.[0]?.message ?? `${response.status} ${response.statusText}`);
+    const message = payload.error ?? payload.issues?.[0]?.message ?? `${response.status} ${response.statusText}`;
+    // Server errors carry a reference the user can quote; the details are in the server log under the same ID.
+    throw new Error(payload.requestId && response.status >= 500 ? `${message} Reference: ${payload.requestId}.` : message);
   }
   return (await response.json()) as T;
 }

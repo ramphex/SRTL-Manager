@@ -1,12 +1,12 @@
 import { lookup } from "node:dns/promises";
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
+import { AppError } from "../errors";
 import { radarrAddressAllowed } from "./radarrClient";
 
-export class WatchSyncError extends Error {
-  readonly statusCode: number = 400;
+export class WatchSyncError extends AppError {
   constructor(message: string, readonly httpStatus: number | null = null, readonly retryable = false) {
-    super(message);
+    super(message, 400);
   }
 }
 

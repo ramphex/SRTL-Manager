@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, sql } from "drizzle-orm";
 import { first, getJsonSetting, nowIso, type Db } from "../db/database";
+import { AppError } from "../errors";
 import * as schema from "../db/schema";
 import { copyFileIdentitiesMatch, parseCopyFileIdentity, readCopyFileIdentity, type CopyFileIdentity } from "../lib/copier";
 import { assertExistingPathInside, withFilesystemTimeout } from "../lib/filesystemSafety";
@@ -11,9 +12,9 @@ import type { PartialCopyDiscardPreview, PartialCopyDiscardRequest, PartialCopyD
 import { linkState, listCopyReconciliation, pathPresence, unresolvedCopyReconciliation, type CopyOperation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 
-export class PartialCopyDiscardError extends Error {
-  constructor(message: string, readonly statusCode: 404 | 409) {
-    super(message);
+export class PartialCopyDiscardError extends AppError {
+  constructor(message: string, statusCode: 404 | 409) {
+    super(message, statusCode);
     this.name = "PartialCopyDiscardError";
   }
 }

@@ -1,8 +1,10 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
+import type { Db } from "../db/database";
 import type { JobRunner } from "../jobs/jobRunner";
+import { recordActionAudit } from "../lib/actionAudit";
 
-export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
+export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db): void {
   app.get("/api/jobs", async (request) => {
     const query = z
       .object({
@@ -27,11 +29,7 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
     const job = await jobs.getJob(params.id);
     if (!job) return reply.code(404).send({ error: "Copy job not found" });
     if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be reviewed for copy jobs" });
-    try {
-      return await jobs.copyFailures(params.id);
-    } catch (error: unknown) {
-      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    return jobs.copyFailures(params.id);
   });
 
   app.post("/api/jobs/:id/copy-failures/remove-symlinks", async (request, reply) => {
@@ -40,11 +38,7 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
     const job = await jobs.getJob(params.id);
     if (!job) return reply.code(404).send({ error: "Copy job not found" });
     if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be removed for copy jobs" });
-    try {
-      return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds) };
-    } catch (error: unknown) {
-      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds) };
   });
 
   app.get("/api/job-reconciliation", async () => jobs.copyReconciliationState());
@@ -59,7 +53,14 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner): void {
   app.post("/api/job-reconciliation/:id/discard-partial-copy", async (request) => {
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
     const body = z.object({ tempPath: z.string().min(1), tempSizeBytes: z.number().int().min(0) }).parse(request.body);
-    return jobs.discardPartialCopy(params.id, body);
+    const result = await jobs.discardPartialCopy(params.id, body);
+    // The temporary file's path is deliberately not recorded; the operation ID identifies it.
+    await recordActionAudit(db, request, {
+      action: "copy.discard_partial",
+      summary: "Discarded a partial copy left by an interrupted job",
+      targets: { operationId: params.id, tempSizeBytes: body.tempSizeBytes }
+    });
+    return result;
   });
 
   app.post("/api/jobs/:id/terminate", async (request, reply) => {

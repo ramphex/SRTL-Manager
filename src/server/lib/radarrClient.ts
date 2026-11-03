@@ -1,9 +1,8 @@
 import { z } from "zod";
+import { AppError } from "../errors";
 import { arrAddressAllowed, normalizeArrUrl, requestArrJson, type ArrService } from "./arrHttp";
 
-export class RadarrError extends Error {
-  readonly statusCode: number = 400;
-}
+export class RadarrError extends AppError {}
 
 export const radarrMovieSchema = z.object({
   id: z.number().int().positive(),

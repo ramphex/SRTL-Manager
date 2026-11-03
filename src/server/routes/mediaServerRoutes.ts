@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/database";
+import { recordActionAudit } from "../lib/actionAudit";
 import {
   addMediaServer,
   checkPlexSignIn,
@@ -39,7 +40,14 @@ export function registerMediaServerRoutes(app: FastifyInstance, db: Db): void {
     return list();
   });
   app.delete(`${base}/:serverId`, async (request) => {
-    await removeMediaServer(db, serverId(request));
+    const id = serverId(request);
+    const removed = (await list()).servers.find((server) => server.id === id);
+    await removeMediaServer(db, id);
+    await recordActionAudit(db, request, {
+      action: "media_server.remove",
+      summary: `Removed media server${removed ? ` "${removed.name}"` : ""}`,
+      targets: { serverId: id, ...(removed ? { name: removed.name, kind: removed.kind } : {}) }
+    });
     return list();
   });
   app.post(`${base}/:serverId/test`, { config: remoteRateLimit }, async (request) => {

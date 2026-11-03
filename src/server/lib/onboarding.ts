@@ -4,6 +4,7 @@ import { and, count, desc, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 import { first, getJsonSetting, getSectionSettings, getSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { AppError } from "../errors";
 import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
 import { getStorageLocationsSettings, storageLocationNamesFromUpdate } from "./storageLocations";
 import type {
@@ -52,9 +53,17 @@ type TitleLocation = {
   hasRemote: boolean;
 };
 
-export class OnboardingInputError extends Error {}
+export class OnboardingInputError extends AppError {
+  constructor(message: string) {
+    super(message, 400);
+  }
+}
 
-export class OnboardingConflictError extends Error {}
+export class OnboardingConflictError extends AppError {
+  constructor(message: string) {
+    super(message, 409);
+  }
+}
 
 function accountRequiredState(): PersistedOnboardingState {
   return {
