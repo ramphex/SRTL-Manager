@@ -4,6 +4,7 @@ import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
 import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
+import { ConflictError, publicErrorMessage } from "../errors";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
@@ -511,21 +512,21 @@ function parseExtras(raw: string): Extra[] {
   }
 }
 
-export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operationIds: number[]): Promise<{ restored: number; errors: string[] }> {
+export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operationIds: number[], onError?: (error: unknown, operationId: number) => void): Promise<{ restored: number; errors: string[] }> {
   let restored = 0;
   const errors: string[] = [];
   for (const operationId of operationIds) {
     try {
       await withResourceMutationGuard(db, async (transaction) => {
         const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).for("update").limit(1))[0];
-        if (!operation || operation.stage !== "held" || !operation.heldPath) throw new Error(`Held file #${operationId} is not available to restore`);
+        if (!operation || operation.stage !== "held" || !operation.heldPath) throw new ConflictError(`Held file #${operationId} is not available to restore`);
         return {
           resources: [{ resourceType: "path", resourceKey: path.resolve(operation.filePath) }],
           mutate: async () => {
             const root = rootPathFor(paths, operation.rootType as StorageRootType);
-            if (!isPathInside(root, operation.heldPath!) || !isPathInside(root, operation.filePath)) throw new Error("Held file is outside its storage root");
+            if (!isPathInside(root, operation.heldPath!) || !isPathInside(root, operation.filePath)) throw new ConflictError(`Held file #${operationId} is outside its storage root.`);
             const occupied = await fs.lstat(operation.filePath).then(() => true, () => false);
-            if (occupied) throw new Error(`A file now exists at ${operation.filePath}; restore it manually`);
+            if (occupied) throw new ConflictError(`A file now exists where held file #${operationId} came from; restore it manually.`, { detail: operation.filePath });
             await fs.mkdir(path.dirname(operation.filePath), { recursive: true });
             await fs.rename(operation.heldPath!, operation.filePath);
             for (const extra of parseExtras(operation.extras)) {
@@ -547,7 +548,8 @@ export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operation
       });
       restored += 1;
     } catch (error) {
-      errors.push(error instanceof Error ? error.message : String(error));
+      onError?.(error, operationId);
+      errors.push(publicErrorMessage(error, `Held file #${operationId} could not be restored.`));
     }
   }
   return { restored, errors };

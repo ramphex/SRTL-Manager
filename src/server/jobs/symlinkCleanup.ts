@@ -4,6 +4,7 @@ import path from "node:path";
 import type { CopyFailureItem, CopyFailureList, MediaLinkRow } from "../../shared/types";
 import type { DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
+import { ConflictError } from "../errors";
 import { assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 
@@ -157,10 +158,10 @@ async function inspectSymlink(
 
 export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promise<ResolvedCopyFailures> {
   const sourceJob = await db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).limit(1).then((rows) => rows[0]);
-  if (!sourceJob) throw new Error("Copy job not found");
-  if (sourceJob.type !== "copy") throw new Error("Failed symlinks can only be reviewed for copy jobs");
+  if (!sourceJob) throw new ConflictError("Copy job not found");
+  if (sourceJob.type !== "copy") throw new ConflictError("Failed symlinks can only be reviewed for copy jobs");
   if (sourceJob.status === "queued" || sourceJob.status === "running") {
-    throw new Error("Wait for the copy job to finish before reviewing failed symlinks");
+    throw new ConflictError("Wait for the copy job to finish before reviewing failed symlinks");
   }
 
   const eventRows = await db
@@ -317,17 +318,17 @@ export async function removeExpectedSymlink(symlinkRoot: string, linkPath: strin
     if (errorCode(error) === "ENOENT") return "already_missing";
     throw error;
   }
-  if (!firstStat.isSymbolicLink()) throw new Error("Managed library path is no longer a symlink; nothing was removed");
+  if (!firstStat.isSymbolicLink()) throw new ConflictError("Managed library path is no longer a symlink; nothing was removed");
   const rawTarget = await withFilesystemTimeout(fs.readlink(linkPath), `Target read for failed-copy symlink ${linkPath}`);
   const actualTarget = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(path.dirname(linkPath), rawTarget);
   if (path.resolve(actualTarget) !== path.resolve(expectedTargetPath)) {
-    throw new Error("Symlink target changed after cleanup was queued; rescan before taking action");
+    throw new ConflictError("Symlink target changed after cleanup was queued; rescan before taking action");
   }
 
   await assertPathParentInside(symlinkRoot, linkPath, "Failed-copy symlink");
   const finalStat = await withFilesystemTimeout(fs.lstat(linkPath), `Final inspection of failed-copy symlink ${linkPath}`);
   if (!finalStat.isSymbolicLink() || finalStat.dev !== firstStat.dev || finalStat.ino !== firstStat.ino) {
-    throw new Error("Symlink changed while cleanup was being prepared; nothing was removed");
+    throw new ConflictError("Symlink changed while cleanup was being prepared; nothing was removed");
   }
   await withFilesystemTimeout(fs.unlink(linkPath), `Removal of failed-copy symlink ${linkPath}`);
   return "removed";

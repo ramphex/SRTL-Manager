@@ -1,10 +1,10 @@
 import { z } from "zod";
+import { AppError } from "../errors";
 import { arrAddressAllowed, normalizeArrUrl, requestArrJson, type ArrService } from "./arrHttp";
 
-export class SonarrError extends Error {
-  readonly statusCode: number = 400;
+export class SonarrError extends AppError {
   // Sonarr's own HTTP status when the error came from a Sonarr response.
-  constructor(message: string, readonly httpStatus?: number) { super(message); }
+  constructor(message: string, readonly httpStatus?: number) { super(message, 400); }
 }
 
 export const sonarrSeriesSchema = z.object({

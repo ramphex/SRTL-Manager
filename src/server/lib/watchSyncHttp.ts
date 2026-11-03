@@ -1,11 +1,11 @@
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
 import { outboundProblemMessage, pinnedLookup, resolveOutbound, type ResolvedAddress } from "./outboundPolicy";
+import { AppError } from "../errors";
 
-export class WatchSyncError extends Error {
-  readonly statusCode: number = 400;
+export class WatchSyncError extends AppError {
   constructor(message: string, readonly httpStatus: number | null = null, readonly retryable = false) {
-    super(message);
+    super(message, 400);
   }
 }
 

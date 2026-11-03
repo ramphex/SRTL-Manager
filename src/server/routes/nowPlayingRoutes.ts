@@ -4,6 +4,7 @@ import type { NowPlayingSettings } from "../../shared/nowPlaying";
 import { assertSessionActive } from "../auth";
 import { defaultNowPlayingStreamLimits, type NowPlayingStreamLimits } from "../config";
 import { getJsonSetting, setSetting, type Db } from "../db/database";
+import { recordActionAudit } from "../lib/actionAudit";
 import { loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema } from "../lib/mediaServers";
 import { NowPlayingHub, type NowPlayingEvent } from "../lib/nowPlaying/hub";
 import { SourceResolver } from "../lib/nowPlaying/sourceResolver";
@@ -126,7 +127,14 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
 
   app.post("/api/now-playing/stop", { config: { rateLimit: { max: 20, timeWindow: "1 minute" } } }, async (request) => {
     const body = stopSchema.parse(request.body);
-    return hub.stopStream(body.serverId, body.sessionKey, body.message);
+    const result = await hub.stopStream(body.serverId, body.sessionKey, body.message);
+    // The viewer's name and the message text are not recorded; the server and session identify the stream.
+    await recordActionAudit(db, request, {
+      action: "now_playing.stop_stream",
+      summary: "Stopped a Now Playing stream",
+      targets: { serverId: body.serverId, sessionKey: body.sessionKey, result: result.result }
+    });
+    return result;
   });
 
   app.get("/api/now-playing/settings", async () => loadNowPlayingSettings(db));

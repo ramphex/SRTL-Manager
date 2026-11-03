@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/database";
+import { recordActionAudit } from "../lib/actionAudit";
 import { createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, radarrInstanceIdSchema, radarrInstanceNameSchema, radarrSettingsSchema, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, renameRadarrInstance, saveRadarrSettings, testRadarrConnection } from "../lib/radarr";
 
 // The original single-instance URL keeps serving the instance migrated from it.
@@ -30,7 +31,17 @@ export function registerRadarrRoutes(app: FastifyInstance, db: Db): void {
     return getRadarrState(db, instanceId(request));
   });
   app.put("/api/settings/radarr/instances/:instanceId", async (request) => saveRadarrSettings(db, instanceId(request), radarrSettingsSchema.parse(request.body)));
-  app.delete("/api/settings/radarr/instances/:instanceId", async (request) => removeRadarrInstance(db, instanceId(request)));
+  app.delete("/api/settings/radarr/instances/:instanceId", async (request) => {
+    const id = instanceId(request);
+    const name = (await getRadarrOverview(db)).instances.find((instance) => instance.settings.id === id)?.settings.name;
+    const overview = await removeRadarrInstance(db, id);
+    await recordActionAudit(db, request, {
+      action: "radarr_instance.remove",
+      summary: `Removed Radarr instance${name ? ` "${name}"` : ""}`,
+      targets: { instanceId: id, ...(name ? { name } : {}) }
+    });
+    return overview;
+  });
   app.post("/api/settings/radarr/instances/:instanceId/rename", async (request) => renameRadarrInstance(db, instanceId(request), nameBody.parse(request.body).name));
   app.post("/api/settings/radarr/instances/:instanceId/test", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request) => testRadarrConnection(db, instanceId(request), radarrSettingsSchema.parse(request.body)));
   app.post("/api/settings/radarr/instances/:instanceId/refresh", { config: { rateLimit: { max: 10, timeWindow: "1 minute" } } }, async (request) => refreshRadarr(db, instanceId(request)));

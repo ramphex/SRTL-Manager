@@ -2,6 +2,8 @@ import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { desc, eq, inArray } from "drizzle-orm";
 import { first, getJsonSetting, type Db } from "../db/database";
+import { AppError } from "../errors";
+import { recordActionAudit } from "../lib/actionAudit";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
@@ -61,12 +63,9 @@ const mediaLinkLookupInputSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).max(1000)
 });
 
-class StoragePolicyRequestError extends Error {
-  constructor(
-    readonly statusCode: number,
-    message: string
-  ) {
-    super(message);
+class StoragePolicyRequestError extends AppError {
+  constructor(statusCode: number, message: string) {
+    super(message, statusCode);
     this.name = "StoragePolicyRequestError";
   }
 }
@@ -168,17 +167,13 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
 }
 
 export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
-  app.post("/api/scans", async (request, reply) => {
+  app.post("/api/scans", async (request) => {
     const options = scanOptionsSchema.parse(request.body ?? undefined);
-    try {
-      const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(db, "advancedSettings", {}));
-      const jobIds = await jobs.startScanJobs(options, advancedSettings.scan.symlinkFolderScheduling);
-      const jobId = jobIds[0];
-      if (!jobId) throw new Error("No scan jobs were queued");
-      return { jobId, jobIds };
-    } catch (error: unknown) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(db, "advancedSettings", {}));
+    const jobIds = await jobs.startScanJobs(options, advancedSettings.scan.symlinkFolderScheduling);
+    const jobId = jobIds[0];
+    if (!jobId) throw new Error("No scan jobs were queued");
+    return { jobId, jobIds };
   });
 
   app.get("/api/scans", async () => listScanHistory(db));
@@ -289,14 +284,23 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
 
   app.get("/api/inventory/scan-timestamps", async () => getInventoryScanTimestamps(db));
 
-  app.post("/api/copies", { bodyLimit: largeSelectionBodyLimitBytes }, async (request, reply) => {
+  app.post("/api/copies", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = copyInputSchema.parse(request.body);
-    try {
-      return { jobId: await jobs.startCopy(body) };
-    } catch (error: unknown) {
-      request.log.warn({ err: error }, "Copy admission rejected");
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    const jobId = await jobs.startCopy(body);
+    await recordActionAudit(db, request, {
+      action: "copy.start",
+      summary: `Started a copy ${body.direction === "to_local" ? "to local" : "to remote"} storage`,
+      jobId,
+      targets: {
+        jobId,
+        direction: body.direction,
+        ...(body.linkIds ? { linkIds: body.linkIds, linkCount: body.linkIds.length } : {}),
+        ...(body.section ? { section: body.section } : {}),
+        ...(body.itemName ? { itemName: body.itemName } : {}),
+        ...(body.localConflictStrategy ? { localConflictStrategy: body.localConflictStrategy } : {})
+      }
+    });
+    return { jobId };
   });
 
   app.post("/api/copies/conflicts", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {

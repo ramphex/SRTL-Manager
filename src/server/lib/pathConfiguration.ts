@@ -3,6 +3,7 @@ import path from "node:path";
 import { and, asc, count, desc, eq, inArray, isNull, ne, notInArray, sql } from "drizzle-orm";
 import { first, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
+import { ConflictError } from "../errors";
 import { unresolvedCopyReconciliation } from "../jobs/copyReconciliation";
 import { schedulerLockKey } from "../jobs/scheduling";
 import { assertPathParentInside } from "./filesystemSafety";
@@ -995,13 +996,13 @@ async function mapWithConcurrency<T, R>(values: T[], concurrency: number, mapper
 
 async function migrationContext(db: Db, migrationId: number): Promise<{ migration: PathMigrationRow; source: PathConfigurationRow; target: PathConfigurationRow }> {
   const migration = await first(db.select().from(schema.pathMigrations).where(eq(schema.pathMigrations.id, migrationId)).limit(1));
-  if (!migration) throw new Error("Path migration was not found");
-  if (!migration.sourceConfigId) throw new Error("Initial path configuration is incomplete; correct .env and restart the app");
+  if (!migration) throw new ConflictError("Path migration was not found");
+  if (!migration.sourceConfigId) throw new ConflictError("Initial path configuration is incomplete; correct .env and restart the app");
   const [source, target] = await Promise.all([
     first(db.select().from(schema.pathConfigurations).where(eq(schema.pathConfigurations.id, migration.sourceConfigId)).limit(1)),
     first(db.select().from(schema.pathConfigurations).where(eq(schema.pathConfigurations.id, migration.targetConfigId)).limit(1))
   ]);
-  if (!source || !target) throw new Error("Path migration configuration is incomplete");
+  if (!source || !target) throw new ConflictError("Path migration configuration is incomplete");
   return { migration, source, target };
 }
 
@@ -1014,7 +1015,7 @@ async function assertCopyOperationsReconciledForPathMigration(db: DbExecutor): P
       .limit(1)
   );
   if (reconciliationOperation) {
-    throw new Error(
+    throw new ConflictError(
       `Copy operation #${reconciliationOperation.id} requires manual reconciliation before managed paths can be migrated`
     );
   }
@@ -1027,7 +1028,7 @@ async function assertCopyOperationsReconciledForPathMigration(db: DbExecutor): P
       .limit(1)
   );
   if (incompleteOperation) {
-    throw new Error(
+    throw new ConflictError(
       `Copy operation #${incompleteOperation.id} from job #${incompleteOperation.jobId} has unresolved filesystem changes; recover or manually reconcile it before managed paths can be migrated`
     );
   }
@@ -1047,7 +1048,7 @@ async function assertCopyOperationsReconciledForPathMigration(db: DbExecutor): P
       .limit(1)
   );
   if (activeCopyOperation) {
-    throw new Error(
+    throw new ConflictError(
       `Copy job #${activeCopyOperation.jobId} is still reconciling filesystem changes; wait for recovery before analyzing or applying the path migration`
     );
   }
@@ -1055,10 +1056,10 @@ async function assertCopyOperationsReconciledForPathMigration(db: DbExecutor): P
 
 export async function planPathMigration(db: Db, migrationId: number): Promise<void> {
   const { migration, source, target } = await migrationContext(db, migrationId);
-  if (!["pending", "planned", "failed"].includes(migration.status)) throw new Error("Path migration cannot be analyzed in its current state");
+  if (!["pending", "planned", "failed"].includes(migration.status)) throw new ConflictError("Path migration cannot be analyzed in its current state");
   const targetPaths = pathsFromConfiguration(target);
   const environmentErrors = validateManagedPaths(targetPaths);
-  if (environmentErrors.length > 0) throw new Error(environmentErrors.join(" "));
+  if (environmentErrors.length > 0) throw new ConflictError(environmentErrors.join(" "));
 
   await db.transaction(async (transaction) => {
     await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
@@ -1066,7 +1067,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
       transaction.select().from(schema.pathMigrations).where(eq(schema.pathMigrations.id, migrationId)).for("update").limit(1)
     );
     if (!currentMigration || !["pending", "planned", "failed"].includes(currentMigration.status)) {
-      throw new Error("Path migration analysis is already running or the detected path change was replaced");
+      throw new ConflictError("Path migration analysis is already running or the detected path change was replaced");
     }
     const otherBlockingMigration = await first(
       transaction
@@ -1076,7 +1077,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
         .limit(1)
     );
     if (otherBlockingMigration) {
-      throw new Error(
+      throw new ConflictError(
         `Path migration #${otherBlockingMigration.id} is still being reconciled; wait for it to finish before analyzing this path change`
       );
     }
@@ -1088,13 +1089,13 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
         .limit(1)
     );
     if (activePathJob) {
-      throw new Error(
+      throw new ConflictError(
         `Path migration job #${activePathJob.id} is still active; wait for it to finish before analyzing this path change`
       );
     }
     await assertCopyOperationsReconciledForPathMigration(transaction);
     const runningJob = await first(transaction.select({ id: schema.jobs.id }).from(schema.jobs).where(eq(schema.jobs.status, "running")).limit(1));
-    if (runningJob) throw new Error("Another job is still stopping for the path change; wait for it to pause before analyzing migration");
+    if (runningJob) throw new ConflictError("Another job is still stopping for the path change; wait for it to pause before analyzing migration");
     if (currentMigration.status === "failed" && currentMigration.startedAt != null) {
       const unresolvedItem = await first(
         transaction
@@ -1109,7 +1110,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
           .limit(1)
       );
       if (unresolvedItem) {
-        throw new Error(
+        throw new ConflictError(
           "Path migration cannot be analyzed again until every previously applied symlink is rolled back or manually reconciled"
         );
       }
@@ -1121,7 +1122,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
         .where(and(eq(schema.pathMigrations.id, migrationId), inArray(schema.pathMigrations.status, ["pending", "planned", "failed"])))
         .returning({ id: schema.pathMigrations.id })
     );
-    if (!claimed) throw new Error("Path migration analysis is already running or the detected path change was replaced");
+    if (!claimed) throw new ConflictError("Path migration analysis is already running or the detected path change was replaced");
     await transaction.delete(schema.pathMigrationItems).where(eq(schema.pathMigrationItems.migrationId, migrationId));
   });
   try {
@@ -1131,7 +1132,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
       .set({ symlinkIdentity: JSON.stringify(identities.symlink), localIdentity: JSON.stringify(identities.local), remoteIdentity: JSON.stringify(identities.remote) })
       .where(eq(schema.pathConfigurations.id, target.id));
     const rootErrors = inspectedPathErrors(identities);
-    if (rootErrors.length > 0) throw new Error(rootErrors.join(" "));
+    if (rootErrors.length > 0) throw new ConflictError(rootErrors.join(" "));
     const links = await db.select().from(schema.mediaLinks).where(isNull(schema.mediaLinks.missingSince)).orderBy(asc(schema.mediaLinks.id));
     const planned = (await mapWithConcurrency(links, 8, (link) => validateMigrationItem(link, pathsFromConfiguration(source), targetPaths))).filter(
       (item): item is NonNullable<typeof item> => item !== null
@@ -1146,7 +1147,7 @@ export async function planPathMigration(db: Db, migrationId: number): Promise<vo
         .where(and(eq(schema.pathMigrations.id, migrationId), eq(schema.pathMigrations.status, "planning")))
         .returning({ id: schema.pathMigrations.id })
     );
-    if (!plannedMigration) throw new Error("Detected paths changed again while migration analysis was running");
+    if (!plannedMigration) throw new ConflictError("Detected paths changed again while migration analysis was running");
   } catch (error: unknown) {
     await db
       .update(schema.pathMigrations)

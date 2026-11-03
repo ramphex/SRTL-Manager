@@ -3,6 +3,7 @@ import { z } from "zod";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import type { PathsSettings } from "../../shared/types";
 import { getJsonSetting, type Db } from "../db/database";
+import { recordActionAudit } from "../lib/actionAudit";
 import type { JobRunner } from "../jobs/jobRunner";
 import { listHeldOrphans, listOrphanReview, restoreHeldOrphans } from "../jobs/orphanPurge";
 
@@ -15,7 +16,7 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
     return listOrphanReview(db, query.rootType, settings.cleanup.holdDays);
   });
 
-  app.post("/api/orphans/purge", { bodyLimit: 4 * 1024 * 1024 }, async (request, reply) => {
+  app.post("/api/orphans/purge", { bodyLimit: 4 * 1024 * 1024 }, async (request) => {
     const body = z
       .object({
         rootType: rootTypeSchema,
@@ -25,12 +26,14 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
       })
       .refine((value) => value.storageFileIds.length + value.folderIds.length > 0, { message: "Choose at least one orphan file or folder to purge" })
       .parse(request.body);
-    try {
-      return { jobId: await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode, body.folderIds) };
-    } catch (error: unknown) {
-      request.log.warn({ err: error }, "Orphan purge admission rejected");
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    const jobId = await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode, body.folderIds);
+    await recordActionAudit(db, request, {
+      action: body.mode === "delete" ? "orphan.purge_delete" : "orphan.purge_hold",
+      summary: `${body.mode === "delete" ? "Deleted" : "Held"} ${body.storageFileIds.length} orphan file(s) and ${body.folderIds.length} folder(s) on ${body.rootType} storage`,
+      jobId,
+      targets: { jobId, rootType: body.rootType, mode: body.mode, storageFileIds: body.storageFileIds, folderIds: body.folderIds }
+    });
+    return { jobId };
   });
 
   app.get("/api/orphans/held", async () => listHeldOrphans(db));
@@ -38,6 +41,6 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
   app.post("/api/orphans/held/restore", async (request) => {
     const body = z.object({ operationIds: z.array(z.number().int().positive()).min(1).max(5_000) }).parse(request.body);
     const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-    return restoreHeldOrphans(db, paths, [...new Set(body.operationIds)]);
+    return restoreHeldOrphans(db, paths, [...new Set(body.operationIds)], (error, operationId) => request.log.warn({ err: error, operationId }, "Held file restore failed"));
   });
 }

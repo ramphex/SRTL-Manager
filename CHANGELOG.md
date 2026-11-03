@@ -52,6 +52,9 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Security
 
+- Error responses no longer include stack traces, file paths, database text, or upstream response bodies. Expected failures keep their plain-language messages (for example "Radarr rejected the API key."); anything unexpected returns a generic message with a request ID, also sent as `X-Request-Id`, that matches the full error in the server log.
+- SRTL now records who started a copy or an orphan purge, discarded a partial copy, removed a media server or a Radarr or Sonarr instance, or stopped a Now Playing stream, with the time and the item IDs. Signed-in admins can read the record at `/api/system/action-audit`; copies and purges also note the requester in the job's event log. It needs no database migration.
+- Added a [reverse proxy guide](docs/reverse-proxy.md) with Nginx Proxy Manager settings, Authentik forward-auth, brief Caddy and Traefik examples, and a checklist for exposing SRTL to the internet.
 - Hardened request authentication and proxy trust. Every API route now requires a signed-in admin unless it is explicitly public (sign-in, first-run setup, the liveness check, and the static app files) or a webhook with its secret, and the check runs before the request body is read.
 - **Upgrade note:** `SRTL_TRUST_PROXY` now takes the addresses or CIDR ranges of your reverse proxies, for example `SRTL_TRUST_PROXY=192.168.1.10` or `SRTL_TRUST_PROXY=172.18.0.0/16`, or `loopback` for a proxy on the same host. `SRTL_TRUST_PROXY=true` is refused at startup, because it trusted forwarding headers from any client. `false` and an empty value are unchanged.
 - Added `SRTL_PUBLIC_ORIGIN` for reverse-proxy installs. Changes from that origin are accepted, and an `https` origin turns on secure session cookies by default; `SRTL_COOKIE_SECURE=false` together with an `https` public origin is refused at startup.

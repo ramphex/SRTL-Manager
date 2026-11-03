@@ -125,6 +125,10 @@ A saved token or API key is only sent to the address it was entered for. Changin
 
 Requests without a session are limited to 600 a minute per client address, and request bodies to 256 KB except on the signed-in routes that need more. Set the proxy's own body limit to at least 70 MB if you restore watch sync backups through it.
 
+The [reverse proxy guide](docs/reverse-proxy.md) has step-by-step Nginx Proxy Manager settings (HTTPS, upload size, the Now Playing stream, blocking health detail, keeping Radarr and Sonarr webhooks on the LAN), an Authentik forward-auth setup, short Caddy and Traefik examples, and a checklist to finish before exposing SRTL to the internet.
+
+Error responses from the API never include stack traces, file paths, database text, or what Plex, Jellyfin, Radarr or Sonarr sent back. A failure that SRTL did not expect ends with `Reference: <id>`; the same ID is in the `X-Request-Id` response header and on the matching `docker compose logs api` lines, which hold the full detail. SRTL also keeps a short record of who started copies and purges, discarded partial copies, removed media servers and Radarr or Sonarr instances, and stopped streams, with the time and the item IDs. A signed-in admin can read it at `/api/system/action-audit`.
+
 ## Backup And Restore
 
 Create a database backup before upgrades or path changes:

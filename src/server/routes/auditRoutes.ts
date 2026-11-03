@@ -3,6 +3,7 @@ import type { FastifyInstance } from "fastify";
 import { and, count, desc, eq, inArray, ne } from "drizzle-orm";
 import { first, getSectionSettings, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { AdmissionError } from "../errors";
 import type { JobRunner } from "../jobs/jobRunner";
 import type { AuditOptions, AuditResultPage, AuditRunRecord, JobStatus } from "../../shared/types";
 
@@ -26,7 +27,7 @@ function normalizeAuditSections(selectedSections: string[] | undefined, configur
   const normalized = [...new Set(requested.map((section) => section.trim()).filter(Boolean))];
   const invalid = normalized.filter((section) => !configured.has(section));
   if (invalid.length > 0) {
-    throw new Error(`Unknown audit folder: ${invalid.join(", ")}`);
+    throw new AdmissionError(`Unknown audit folder: ${invalid.join(", ")}`);
   }
   return normalized;
 }
@@ -68,15 +69,10 @@ async function findAuditRunByJobId(db: Db, jobId: number): Promise<AuditRunRecor
 }
 
 export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
-  app.post("/api/audits", { bodyLimit: largeSelectionBodyLimitBytes }, async (request, reply) => {
+  app.post("/api/audits", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = auditOptionsSchema.parse(request.body);
     const configuredSections = (await getSectionSettings(db)).sections;
-    let sections: string[] | undefined;
-    try {
-      sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
-    } catch (error: unknown) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    const sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
     const options: AuditOptions = {
       mode: body.mode,
       ...(sections ? { sections } : {}),
@@ -87,11 +83,7 @@ export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunne
       ...(body.relativePathPrefix ? { relativePathPrefix: body.relativePathPrefix } : {}),
       ...(body.byteCompare !== undefined ? { byteCompare: body.byteCompare } : {})
     };
-    try {
-      return { jobId: await jobs.startAudit(options) };
-    } catch (error: unknown) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
-    }
+    return { jobId: await jobs.startAudit(options) };
   });
 
   app.get("/api/audits", async () => listAuditHistory(db));

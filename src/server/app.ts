@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -10,6 +11,7 @@ import fastifyStatic from "@fastify/static";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import { ZodError } from "zod";
+import { AppError, toClientError } from "./errors";
 import packageJson from "../../package.json";
 import type { AppConfig } from "./config";
 import { loadConfig, secretKeyOptions } from "./config";
@@ -29,6 +31,7 @@ import { registerSettingsRoutes } from "./routes/settingsRoutes";
 import { registerLibraryRoutes } from "./routes/libraryRoutes";
 import { registerAuditRoutes } from "./routes/auditRoutes";
 import { registerJobRoutes } from "./routes/jobRoutes";
+import { registerActionAuditRoutes } from "./routes/actionAuditRoutes";
 import { registerSystemRoutes } from "./routes/systemRoutes";
 import { registerPathConfigurationRoutes } from "./routes/pathConfigurationRoutes";
 import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
@@ -71,7 +74,12 @@ function mutationOriginAllowed(requestProtocol: string, requestHost: string | un
   }
 }
 
-export async function createApp(overrides: Partial<AppConfig> = {}): Promise<AppContext> {
+export interface CreateAppOptions {
+  /** Where request and error logs are written. Defaults to standard output; tests pass a stream to read them. */
+  logStream?: NodeJS.WritableStream;
+}
+
+export async function createApp(overrides: Partial<AppConfig> = {}, options: CreateAppOptions = {}): Promise<AppContext> {
   const config = loadConfig(overrides);
   const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
   configureOutboundPolicy(config.outboundPolicy);
@@ -82,11 +90,14 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   });
   const jobs = new JobRunner(database.db);
 
-  const app = fastify({ logger: true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes });
+  // Each request gets a short random ID. It is logged with every line for the request and sent back to the
+  // client, so a user can quote it and the matching server log entry can be found.
+  const app = fastify({ logger: options.logStream ? { stream: options.logStream } : true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes, genReqId: () => randomBytes(5).toString("hex") });
   if (secretKey.source === "generated") {
     app.log.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up with the database: without it, saved tokens and API keys cannot be read.`);
   }
   app.decorateRequest("adminSession", null);
+  app.decorateRequest("adminUser", null);
   const sessionPolicy: SessionPolicy = {
     idleTimeoutMs: config.sessionIdleTimeoutHours * 60 * 60 * 1_000,
     maxAgeMs: config.sessionMaxAgeDays * 24 * 60 * 60 * 1_000
@@ -105,20 +116,22 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     for (const method of [route.method].flat()) routes.push({ method: String(method), url: route.url });
     applyRouteAccessPolicy(route);
   });
+  // The only place an error becomes a response. Clients get a safe message, a code and the request ID;
+  // the full error (stack, SQL, paths, upstream detail) goes to the server log only.
   app.setErrorHandler((error, request, reply) => {
+    const requestId = String(request.id);
     if (error instanceof ZodError) {
-      return reply.code(400).send({ error: formatValidationError(error), issues: error.issues });
+      return reply.code(400).send({ error: formatValidationError(error), code: "validation_failed", requestId, issues: error.issues.map((issue) => ({ path: issue.path, message: issue.message })) });
     }
-    const statusCode = error && typeof error === "object" && "statusCode" in error && typeof error.statusCode === "number" ? error.statusCode : 500;
-    if (statusCode >= 500) {
-      request.log.error({ err: error }, "Request failed");
-      return reply.code(500).send({ error: "Internal server error" });
-    }
-    if (statusCode === 403 && request.routeOptions.url === "/*") {
+    if (error instanceof Error && (error as { statusCode?: unknown }).statusCode === 403 && request.routeOptions.url === "/*") {
       // The static file server refuses non-canonical paths; answer like any other unknown path.
       return reply.code(404).send({ error: "Not found" });
     }
-    return reply.code(statusCode).send({ error: error instanceof Error ? error.message : "Request failed" });
+    const clientError = toClientError(error);
+    const detail = error instanceof AppError ? error.detail : undefined;
+    if (clientError.expected) request.log.warn({ err: error, ...(detail ? { detail } : {}) }, "Request rejected");
+    else request.log.error({ err: error }, "Request failed");
+    return reply.code(clientError.statusCode).send({ error: clientError.message, code: clientError.code, requestId });
   });
 
   await app.register(helmet, {
@@ -136,8 +149,9 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
     frameguard: { action: "deny" },
     strictTransportSecurity: { maxAge: 31_536_000, includeSubDomains: false }
   });
-  app.addHook("onRequest", async (_request, reply) => {
+  app.addHook("onRequest", async (request, reply) => {
     reply.header("Permissions-Policy", permissionsPolicy);
+    reply.header("X-Request-Id", request.id);
   });
   await app.register(rateLimit, { global: false });
   const anonymousRateLimit = app.createRateLimit({ max: config.anonymousRequestsPerMinute, timeWindow: 60_000 });
@@ -207,9 +221,13 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
         if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Invalid webhook credentials" });
         return;
       }
-    } else if (!(await sessions.resolve(request, reply))) {
-      if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Authentication required" });
-      return;
+    } else {
+      const session = await sessions.resolve(request, reply);
+      if (!session) {
+        if (!(await rejectOverAnonymousLimit(request, reply))) await reply.code(401).send({ error: "Authentication required" });
+        return;
+      }
+      request.adminUser = { userId: session.userId, username: session.username };
     }
     if (request.method === "GET" || request.method === "HEAD" || request.method === "OPTIONS") return;
     const libraryLock = routeConfig.libraryLock ?? "enforced";
@@ -289,7 +307,8 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerAuditRoutes(app, database.db, jobs);
   registerOrphanRoutes(app, database.db, jobs);
   registerDamagedRoutes(app, database.db);
-  registerJobRoutes(app, jobs);
+  registerJobRoutes(app, jobs, database.db);
+  registerActionAuditRoutes(app, database.db);
   registerSystemRoutes(app);
   registerPathConfigurationRoutes(app, database.db, jobs, config.paths);
 

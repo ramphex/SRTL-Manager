@@ -18,6 +18,7 @@ import {
 } from "../../shared/watchSync";
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { publicErrorMessage } from "../errors";
 import { JellyfinClient } from "./jellyfinClient";
 import { findMediaServer, getMediaServer, loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
@@ -230,7 +231,7 @@ export async function discoverWatchSyncUsers(db: Db, serverId: string): Promise<
     const details = server.kind === "plex" ? await discoverPlex(db, server, identifier) : await discoverJellyfin(db, server, identifier);
     await recordMediaServerStatus(db, server.id, null, details, server.token);
   } catch (error) {
-    await recordServerStatus(db, server.id, error instanceof Error ? error.message : "Connection failed.");
+    await recordServerStatus(db, server.id, publicErrorMessage(error, "Connection failed."));
     throw error;
   }
   return getWatchSyncState(db);

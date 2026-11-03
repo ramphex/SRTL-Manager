@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import type { Db } from "../db/database";
+import { AppError } from "../errors";
 import * as schema from "../db/schema";
 import { canonicalTitleKey } from "../lib/storagePolicies";
 import { reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
@@ -21,28 +22,27 @@ interface PreparedResourceMutation<T> {
   mutate(): Promise<T>;
 }
 
-export class ActiveJobResourceConflictError extends Error {
-  readonly statusCode = 409;
+export class ActiveJobResourceConflictError extends AppError {
 
   constructor(conflict: ActiveJobConflict, global: boolean) {
     const scope = global ? "the library" : "the same media";
     if (conflict.status === "reconciliation_required") {
-      super(`Storage policy cannot be changed because copy data from job #${conflict.jobId} requires manual reconciliation for ${scope}.`);
+      super(`Storage policy cannot be changed because copy data from job #${conflict.jobId} requires manual reconciliation for ${scope}.`, 409);
       this.name = "ActiveJobResourceConflictError";
       return;
     }
     super(
-      `Storage policy cannot be changed while ${conflict.type} job #${conflict.jobId} is ${conflict.status} for ${scope}. Wait for it to finish or terminate it before changing this policy.`
+      `Storage policy cannot be changed while ${conflict.type} job #${conflict.jobId} is ${conflict.status} for ${scope}. Wait for it to finish or terminate it before changing this policy.`,
+      409
     );
     this.name = "ActiveJobResourceConflictError";
   }
 }
 
-export class ActiveJobConfigurationConflictError extends Error {
-  readonly statusCode = 409;
+export class ActiveJobConfigurationConflictError extends AppError {
 
   constructor(job: ActiveJobConflict) {
-    super(`Library folders cannot be changed while ${job.type} job #${job.jobId} is ${job.status}. Wait for it to finish or terminate it first.`);
+    super(`Library folders cannot be changed while ${job.type} job #${job.jobId} is ${job.status}. Wait for it to finish or terminate it first.`, 409);
     this.name = "ActiveJobConfigurationConflictError";
   }
 }

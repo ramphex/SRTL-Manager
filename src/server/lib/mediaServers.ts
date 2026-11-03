@@ -15,6 +15,7 @@ import {
 } from "../../shared/mediaServers";
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
+import { publicErrorMessage } from "../errors";
 import { JellyfinClient } from "./jellyfinClient";
 import { openSecret, sealSecret, secretPurposes } from "./secretBox";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
@@ -257,7 +258,7 @@ export async function testMediaServer(db: Db, serverId: string): Promise<MediaSe
       details = { version: info.version };
     }
   } catch (error) {
-    await recordMediaServerStatus(db, server.id, error instanceof Error ? error.message : "Connection failed.");
+    await recordMediaServerStatus(db, server.id, publicErrorMessage(error, "Connection failed."));
     throw error;
   }
   await recordMediaServerStatus(db, server.id, null, details, server.token);

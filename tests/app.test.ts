@@ -1961,6 +1961,18 @@ describe("api app", () => {
 
     expect(copy.statusCode).toBe(200);
     const { jobId } = copy.json<{ jobId: number }>();
+    const trail = await ctx.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } });
+    expect(trail.json()).toEqual([
+      expect.objectContaining({
+        action: "copy.start",
+        actor: { userId: expect.any(Number), username: "admin" },
+        requestId: copy.headers["x-request-id"],
+        at: expect.any(String),
+        targets: { jobId, direction: "to_local", linkIds: [fixture.id], linkCount: 1 }
+      })
+    ]);
+    const queuedEvents = await ctx.jobs.listEvents(jobId);
+    expect(queuedEvents.map((event) => event.message)).toContain("Started a copy to local storage (requested by admin from 127.0.0.1)");
     const job = await runQueuedJob(jobId, { copyRunner: testCopyRunner });
     expect(job).toMatchObject({
       status: "completed",
@@ -2276,6 +2288,12 @@ describe("api app", () => {
     });
     expect(discard.statusCode).toBe(200);
     expect(discard.json()).toMatchObject({ operationId, jobId, removedTempPath: tempPath, removedBytes: tempSizeBytes, state: { unresolvedCount: 0 } });
+    const discardTrail = (await ctx.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; actor: { username: string }; targets: Record<string, unknown> }>>();
+    expect(discardTrail).toEqual([
+      expect.objectContaining({ action: "copy.discard_partial", actor: { userId: expect.any(Number), username: "admin" }, targets: { operationId, jobId, tempSizeBytes } })
+    ]);
+    // The temporary file's path is not copied into the trail.
+    expect(JSON.stringify(discardTrail)).not.toContain(tempPath);
     await expect(fs.lstat(tempPath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.readFile(fixture.destinationPath, "utf8")).resolves.toBe("old placeholder");
     await expect(fs.readFile(fixture.sourcePath, "utf8")).resolves.toBe("remote source payload");

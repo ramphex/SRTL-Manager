@@ -5,6 +5,7 @@ import path from "node:path";
 import type { JobConcurrencySettings } from "../config";
 import { dbAll, dbGet, first, getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
+import { AdmissionError, ConflictError } from "../errors";
 import { auditMediaLink, defaultAuditRunner, type AuditCommandRunner } from "../lib/auditor";
 import {
   copyFileIdentitiesMatch,
@@ -89,7 +90,7 @@ export class LeaseLostError extends Error {
 }
 
 // A scan for the same scope is already queued or running.
-export class ScanAdmissionConflictError extends Error {
+export class ScanAdmissionConflictError extends AdmissionError {
   constructor(message: string) {
     super(message);
     this.name = "ScanAdmissionConflictError";
@@ -197,7 +198,7 @@ function normalizeSelectedSections(selectedSections: string[] | undefined, confi
   const normalized = [...new Set(requested.map((section) => section.trim()).filter(Boolean))];
   const invalid = normalized.filter((section) => !configured.has(section));
   if (invalid.length > 0) {
-    throw new Error(`Unknown ${label}: ${invalid.join(", ")}`);
+    throw new AdmissionError(`Unknown ${label}: ${invalid.join(", ")}`);
   }
   return normalized;
 }
@@ -214,9 +215,9 @@ function normalizeScanTitleScopes(scopes: ScanTitleScope[] | undefined, configur
   for (const scope of scopes) {
     const section = scope.section.trim();
     const itemName = scope.itemName.trim();
-    if (!configured.has(section)) throw new Error(`Unknown title scan folder: ${section}`);
+    if (!configured.has(section)) throw new AdmissionError(`Unknown title scan folder: ${section}`);
     if (!itemName || itemName === "." || itemName === ".." || itemName.includes("/") || itemName.includes("\\") || itemName.includes("\0")) {
-      throw new Error("Title scan names must identify one title folder");
+      throw new AdmissionError("Title scan names must identify one title folder");
     }
     normalized.set(`${section}\0${itemName}`, { section, itemName });
   }
@@ -328,7 +329,7 @@ async function normalizeScanOptions(db: Db, options: ScanOptions = defaultScanOp
   const configuredSections = await getSectionSettings(db);
   const titleScopes = normalizeScanTitleScopes(options.titleScopes, configuredSections.sections);
   if (titleScopes?.length && (!options.scanSymlinks || options.scanLocal || options.scanRemote)) {
-    throw new Error("Title rescans can only scan symlinks");
+    throw new AdmissionError("Title rescans can only scan symlinks");
   }
   const legacySections = normalizeOptionalSections(options.sections, configuredSections.sections, "scan folder");
   const symlinkSections = titleScopes?.length
@@ -349,11 +350,11 @@ async function normalizeScanOptions(db: Db, options: ScanOptions = defaultScanOp
 async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): Promise<AuditOptions> {
   const requestedOptions: { mode: AuditMode; sections?: string[]; targets?: StorageRootType[]; byteCompare?: boolean } = typeof input === "string" ? { mode: input } : input;
   const configuredSections = await getSectionSettings(db);
-  if (requestedOptions.mode !== "fast" && requestedOptions.mode !== "deep") throw new Error("Audit mode must be fast or deep");
+  if (requestedOptions.mode !== "fast" && requestedOptions.mode !== "deep") throw new AdmissionError("Audit mode must be fast or deep");
   const section = typeof input === "string" ? undefined : input.section?.trim();
-  if (section && !configuredSections.sections.includes(section)) throw new Error(`Unknown audit folder: ${section}`);
+  if (section && !configuredSections.sections.includes(section)) throw new AdmissionError(`Unknown audit folder: ${section}`);
   const linkIds = typeof input === "string" || !input.linkIds ? undefined : [...new Set(input.linkIds)].filter((id) => Number.isInteger(id) && id > 0);
-  if (typeof input !== "string" && input.linkIds && linkIds?.length !== input.linkIds.length) throw new Error("Audit link IDs must be positive integers");
+  if (typeof input !== "string" && input.linkIds && linkIds?.length !== input.linkIds.length) throw new AdmissionError("Audit link IDs must be positive integers");
   const itemName = typeof input === "string" ? undefined : input.itemName?.trim();
   const relativePathPrefix = typeof input === "string" ? undefined : normalizeRelativePrefix(input.relativePathPrefix);
   const hasScopedAudit = Boolean(linkIds !== undefined || section || itemName || relativePathPrefix);
@@ -364,8 +365,8 @@ async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): P
     : hasScopedAudit || !targets.includes("local")
       ? undefined
       : normalizeSelectedSections(undefined, configuredSections.sections, "audit folder");
-  if ((!hasScopedAudit || hasRequestedTargets) && targets.length === 0) throw new Error("Select at least one audit target");
-  if (!hasScopedAudit && targets.includes("local") && (!selectedSections || selectedSections.length === 0)) throw new Error("Select at least one local audit folder");
+  if ((!hasScopedAudit || hasRequestedTargets) && targets.length === 0) throw new AdmissionError("Select at least one audit target");
+  if (!hasScopedAudit && targets.includes("local") && (!selectedSections || selectedSections.length === 0)) throw new AdmissionError("Select at least one local audit folder");
   return {
     mode: requestedOptions.mode,
     ...(selectedSections ? { sections: selectedSections } : {}),
@@ -408,18 +409,18 @@ function normalizeRelativePrefix(prefix: string | undefined): string | undefined
   if (!prefix) return undefined;
   const normalized = prefix.replace(/\\/g, "/").split("/").filter(Boolean).join("/");
   if (!normalized || normalized === "." || normalized.startsWith("../") || normalized.includes("/../")) {
-    throw new Error("Copy prefix must stay inside the selected folder");
+    throw new AdmissionError("Copy prefix must stay inside the selected folder");
   }
   return normalized;
 }
 
 async function normalizeCopyOptions(db: Db, options: CopyOptions): Promise<CopyOptions> {
-  if (options.direction !== "to_local" && options.direction !== "to_remote") throw new Error("Copy direction must be to_local or to_remote");
+  if (options.direction !== "to_local" && options.direction !== "to_remote") throw new AdmissionError("Copy direction must be to_local or to_remote");
   const configuredSections = await getSectionSettings(db);
   const section = options.section?.trim();
-  if (section && !configuredSections.sections.includes(section)) throw new Error(`Unknown copy folder: ${section}`);
+  if (section && !configuredSections.sections.includes(section)) throw new AdmissionError(`Unknown copy folder: ${section}`);
   const linkIds = options.linkIds ? [...new Set(options.linkIds)].filter((id) => Number.isInteger(id) && id > 0) : undefined;
-  if (options.linkIds && linkIds?.length !== options.linkIds.length) throw new Error("Copy link IDs must be positive integers");
+  if (options.linkIds && linkIds?.length !== options.linkIds.length) throw new AdmissionError("Copy link IDs must be positive integers");
   const normalized: CopyOptions = {
     direction: options.direction,
     ...(linkIds && linkIds.length > 0 ? { linkIds } : {}),
@@ -431,7 +432,7 @@ async function normalizeCopyOptions(db: Db, options: CopyOptions): Promise<CopyO
     ...(options.radarrMonitoring === true ? { radarrMonitoring: true } : {}),
     ...(options.sonarrMonitoring === true ? { sonarrMonitoring: true } : {})
   };
-  if (!normalized.linkIds?.length && !normalized.section && !normalized.itemName) throw new Error("Copy requires link IDs, a folder scope, or a title");
+  if (!normalized.linkIds?.length && !normalized.section && !normalized.itemName) throw new AdmissionError("Copy requires link IDs, a folder scope, or a title");
   return normalized;
 }
 
@@ -954,7 +955,7 @@ async function copyReplacementResourceClaims(
   for (const destination of selectedDestinations.entries) {
     const existingLinkId = destinations.get(destination.canonicalPath);
     if (existingLinkId != null && existingLinkId !== destination.linkId) {
-      throw new Error(`Selected media #${existingLinkId} and #${destination.linkId} resolve to the same copy destination: ${destination.lexicalPath}`);
+      throw new AdmissionError(`Selected media #${existingLinkId} and #${destination.linkId} resolve to the same copy destination.`, { detail: destination.lexicalPath });
     }
     destinations.set(destination.canonicalPath, destination.linkId);
   }
@@ -962,7 +963,7 @@ async function copyReplacementResourceClaims(
     const canonicalLinkPath = await canonicalPathForClaim(paths.symlinkDir, link.linkPath, "Library symlink claim", true);
     const existingLibraryLinkId = libraryLinks.get(canonicalLinkPath);
     if (existingLibraryLinkId != null && existingLibraryLinkId !== link.id) {
-      throw new Error(`Selected media #${existingLibraryLinkId} and #${link.id} resolve to the same library symlink: ${link.linkPath}`);
+      throw new AdmissionError(`Selected media #${existingLibraryLinkId} and #${link.id} resolve to the same library symlink.`, { detail: link.linkPath });
     }
     libraryLinks.set(canonicalLinkPath, link.id);
   }
@@ -978,11 +979,11 @@ async function copyReplacementResourceClaims(
       const canonicalCandidatePath = await canonicalPathForClaim(paths.localDir, candidatePath, "Local replacement claim");
       const destinationOwner = destinations.get(canonicalCandidatePath);
       if (destinationOwner != null && destinationOwner !== link.id) {
-        throw new Error(`Replacement cleanup for media #${link.id} overlaps selected destination for media #${destinationOwner}: ${candidatePath}`);
+        throw new AdmissionError(`Replacement cleanup for media #${link.id} overlaps the selected destination for media #${destinationOwner}.`, { detail: candidatePath });
       }
       const cleanupOwner = cleanupOwners.get(canonicalCandidatePath);
       if (cleanupOwner != null && cleanupOwner !== link.id) {
-        throw new Error(`Replacement cleanup for media #${link.id} overlaps cleanup for media #${cleanupOwner}: ${candidatePath}`);
+        throw new AdmissionError(`Replacement cleanup for media #${link.id} overlaps cleanup for media #${cleanupOwner}.`, { detail: candidatePath });
       }
       cleanupOwners.set(canonicalCandidatePath, link.id);
       const identity = await copyCleanupIdentity(candidatePath);
@@ -2227,13 +2228,13 @@ async function prepareScanJob(db: DbExecutor, normalizedOptions: ScanOptions, al
 
   const scanLinks = filterScanLinks(await listMediaLinks(db, undefined, "current"), normalizedOptions);
   const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-  if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+  if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new AdmissionError("Path settings are incomplete");
   const availableScopes = new Set(scanLinks.map((link) => `${link.section}\0${link.itemName}`));
   const unavailableScopes = (normalizedOptions.titleScopes ?? []).filter(
     (scope) => !availableScopes.has(`${scope.section}\0${scope.itemName}`)
   );
   if (!allowNewTitles && unavailableScopes.length > 0) {
-    throw new Error(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
+    throw new AdmissionError(`Title is not available in the current symlink inventory: ${unavailableScopes.map((scope) => scope.itemName).join(", ")}`);
   }
   return {
     progress: { options: normalizedOptions },
@@ -2291,7 +2292,7 @@ export class JobRunner {
   constructor(private readonly db: Db) {}
 
   async startExternalTitleScan(titleScopes: ScanTitleScope[]): Promise<number> {
-    if (!titleScopes.length) throw new Error("An external refresh requires a title scope");
+    if (!titleScopes.length) throw new AdmissionError("An external refresh requires a title scope");
     const options = await normalizeScanOptions(this.db, { scanSymlinks: true, scanLocal: false, scanRemote: false, titleScopes });
     return this.enqueuePreparedJob("scan", async (transaction) => ({
       ...await prepareScanJob(transaction, options, true),
@@ -2317,12 +2318,12 @@ export class JobRunner {
   private async enqueuePreparedJobs(type: JobRecord["type"], prepare: (db: DbExecutor) => Promise<PreparedJob[]>): Promise<number[]> {
     await reconcileProvablySettledCopyOperations(this.db);
     if (type !== "path_migration" && (await isPathConfigurationBlocked(this.db))) {
-      throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
+      throw new AdmissionError("Managed storage paths changed. Resolve the required path migration before starting another job.");
     }
     return this.db.transaction(async (transaction) => {
       await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
       if (type !== "path_migration" && (await isPathConfigurationBlocked(transaction))) {
-        throw new Error("Managed storage paths changed. Resolve the required path migration before starting another job.");
+        throw new AdmissionError("Managed storage paths changed. Resolve the required path migration before starting another job.");
       }
       const preparedJobs = await prepare(transaction);
       if (preparedJobs.length === 0) throw new Error("No jobs were prepared");
@@ -2383,11 +2384,11 @@ export class JobRunner {
         `);
           if (conflict) {
             if (conflict.status === "reconciliation_required") {
-              throw new Error(
+              throw new AdmissionError(
                 `Copy data from job #${conflict.jobId} requires manual reconciliation before another action can touch the same media item or managed path.`
               );
             }
-            throw new Error(
+            throw new AdmissionError(
               `Job #${conflict.jobId} is already ${conflict.status} for ${conflict.overlapCount} matching media item${conflict.overlapCount === 1 ? "" : "s"}. Wait for it to finish or terminate it before queuing another action.`
             );
           }
@@ -2717,7 +2718,7 @@ export class JobRunner {
       ...(normalizedOptions.direction === "to_local" && advancedSettings.cleanup.deleteRemoteSourceAfterCopy ? { deleteRemoteSource: true } : {})
     };
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-    if (!paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+    if (!paths.localDir || !paths.remoteDir) throw new AdmissionError("Path settings are incomplete");
     const replacementClaims = await copyReplacementResourceClaims(this.db, orderedSelectedLinks, paths, optionsWithResolvedLinks);
     const expectedSelection = copyAdmissionSelectionFingerprint(orderedSelectedLinks);
     const expectedClaimedSelection = copyAdmissionSelectionFingerprint(claimedLinks);
@@ -2733,7 +2734,7 @@ export class JobRunner {
         currentPaths.localDir !== paths.localDir ||
         currentPaths.remoteDir !== paths.remoteDir
       ) {
-        throw new Error("Copy selection changed while the job was being prepared. Review the current inventory and queue it again.");
+        throw new AdmissionError("Copy selection changed while the job was being prepared. Review the current inventory and queue it again.");
       }
       return {
         progress: { options: storedOptions },
@@ -2763,19 +2764,19 @@ export class JobRunner {
     const requested = [...new Set(storageFileIds)];
     const requestedFolders = [...new Set(folderIds)];
     if (requested.length + requestedFolders.length === 0 || [...requested, ...requestedFolders].some((id) => !Number.isInteger(id) || id < 1)) {
-      throw new Error("Choose at least one orphan file or folder to purge");
+      throw new AdmissionError("Choose at least one orphan file or folder to purge");
     }
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     const root = rootPathFor(paths, rootType);
-    if (!root) throw new Error("Storage path settings are incomplete");
+    if (!root) throw new AdmissionError("Storage path settings are incomplete");
     return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
       const staleness = await symlinkInventoryStaleness(transaction);
-      if (staleness.warning) throw new Error(staleness.warning);
+      if (staleness.warning) throw new AdmissionError(staleness.warning);
       const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested) : { eligible: [], rejected: [] };
       const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders);
       const allRejected = [...rejected, ...folders.rejected];
       if (allRejected.length > 0) {
-        throw new Error(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
+        throw new AdmissionError(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
       }
       const folderSections = folders.eligible.map((folder) => folder.relativePath.split("/")[0] ?? "");
       const claims: ResourceClaim[] = inventoryScopeResourceClaims(rootType, [...eligible.map((row) => row.section), ...folderSections], "shared");
@@ -2819,7 +2820,7 @@ export class JobRunner {
   async startSymlinkCleanup(sourceJobId: number, linkIds: number[]): Promise<number> {
     const requestedLinkIds = [...new Set(linkIds)];
     if (requestedLinkIds.length === 0 || requestedLinkIds.some((id) => !Number.isInteger(id) || id < 1)) {
-      throw new Error("Choose at least one identifiable failed symlink to remove");
+      throw new ConflictError("Choose at least one identifiable failed symlink to remove");
     }
     return this.enqueuePreparedJob("symlink_cleanup", async (transaction) => {
       const resolved = await resolveCopyFailures(transaction, sourceJobId);
@@ -2836,14 +2837,14 @@ export class JobRunner {
         const details = invalid
           .map(({ failure, linkId }) => `media #${linkId}: ${failure?.item.symlinkStatusDetail ?? "not identified as a failed item"}`)
           .join("; ");
-        throw new Error(`Failed symlink selection is no longer eligible. ${details}`);
+        throw new ConflictError(`Failed symlink selection is no longer eligible. ${details}`);
       }
       const eligibleFailures = selectedFailures.filter(
         (failure): failure is NonNullable<typeof failure> =>
           Boolean(failure?.link && failure.linkPath && failure.expectedTargetPath && failure.item.mediaLinkId)
       );
       if (eligibleFailures.length !== requestedLinkIds.length) {
-        throw new Error("Failed symlink selection could not be resolved to current managed links");
+        throw new ConflictError("Failed symlink selection could not be resolved to current managed links");
       }
       const links = eligibleFailures.map((failure) => failure.link!);
       const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
@@ -2889,14 +2890,14 @@ export class JobRunner {
     const jobId = await this.db.transaction(async (transaction) => {
       await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
       const readyMigration = await first(transaction.select().from(schema.pathMigrations).where(eq(schema.pathMigrations.id, migrationId)).for("update").limit(1));
-      if (!readyMigration || readyMigration.status !== "planned") throw new Error("Analyze the path change before starting migration");
+      if (!readyMigration || readyMigration.status !== "planned") throw new ConflictError("Analyze the path change before starting migration");
       const blocked = await first(
         transaction
           .select({ value: count() })
           .from(schema.pathMigrationItems)
           .where(and(eq(schema.pathMigrationItems.migrationId, migrationId), eq(schema.pathMigrationItems.validationStatus, "blocked")))
       );
-      if (Number(blocked?.value ?? 0) > 0) throw new Error("Resolve every blocked symlink before starting migration");
+      if (Number(blocked?.value ?? 0) > 0) throw new ConflictError("Resolve every blocked symlink before starting migration");
       const timestamp = nowIso();
       const row = await first(
         transaction
@@ -2925,7 +2926,7 @@ export class JobRunner {
           .where(and(eq(schema.pathMigrations.id, migrationId), eq(schema.pathMigrations.status, "planned")))
           .returning({ id: schema.pathMigrations.id })
       );
-      if (!migration) throw new Error("Path migration is no longer ready to start");
+      if (!migration) throw new ConflictError("Path migration is no longer ready to start");
       await transaction.insert(schema.jobEvents).values({ jobId: row.id, timestamp, level: "info", message: "Job queued", data: JSON.stringify({ type: "path_migration", migrationId }) });
       return row.id;
     });
