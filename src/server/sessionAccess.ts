@@ -15,6 +15,8 @@ export interface SessionCookieSettings {
   /** Older names still accepted once, then exchanged for `name`. */
   legacyNames: string[];
   secure: boolean;
+  /** Plain-HTTP origins the admin listed. Browsers refuse Secure cookies there, so requests to them use the plain name. */
+  plainHttpOrigins: string[];
 }
 
 /**
@@ -22,9 +24,18 @@ export interface SessionCookieSettings {
  * browsers accept only with Secure, `Path=/` and no Domain, so neither a
  * sibling subdomain nor a plain-HTTP response can plant or overwrite it.
  */
-export function sessionCookieSettings(baseName: string, secure: boolean): SessionCookieSettings {
+export function sessionCookieSettings(baseName: string, secure: boolean, trustedOrigins: string[] = []): SessionCookieSettings {
   const plainName = baseName.replace(/^__Host-/, "");
-  return secure ? { name: `__Host-${plainName}`, legacyNames: [plainName], secure } : { name: plainName, legacyNames: [], secure };
+  if (!secure) return { name: plainName, legacyNames: [], secure, plainHttpOrigins: [] };
+  return { name: `__Host-${plainName}`, legacyNames: [plainName], secure, plainHttpOrigins: trustedOrigins.filter((origin) => origin.startsWith("http:")) };
+}
+
+function originOf(value: string): string | null {
+  try {
+    return new URL(value).origin;
+  } catch {
+    return null;
+  }
 }
 
 /** Parallel requests from one page load may all carry the old cookie name; they share this window. */
@@ -48,9 +59,20 @@ export function createSessionAccess(db: Db, cookie: SessionCookieSettings, polic
   const resolved = new WeakMap<FastifyRequest, Promise<ActiveSession | null>>();
   const cookieOptions = { httpOnly: true, sameSite: "strict" as const, path: "/", secure: cookie.secure };
 
+  const plainName = cookie.legacyNames[0];
+  // A browser talking to SRTL directly over plain HTTP, at an address the admin listed. HTTPS requests never qualify.
+  const usesPlainCookie = (request: FastifyRequest): boolean => {
+    if (!plainName || cookie.plainHttpOrigins.length === 0 || request.protocol !== "http" || request.headers["x-forwarded-proto"] !== undefined) return false;
+    const own = originOf(`http://${request.headers.host ?? ""}`);
+    if (!own || !cookie.plainHttpOrigins.includes(own)) return false;
+    const origin = request.headers.origin;
+    return origin === undefined || originOf(origin) === own;
+  };
+
   const issue = (reply: FastifyReply, token: string, expiresAt: string) => {
     const maxAge = Math.max(1, Math.floor((Date.parse(expiresAt) - clock()) / 1000));
-    reply.setCookie(cookie.name, token, { ...cookieOptions, maxAge });
+    if (plainName && usesPlainCookie(reply.request)) reply.setCookie(plainName, token, { ...cookieOptions, secure: false, maxAge });
+    else reply.setCookie(cookie.name, token, { ...cookieOptions, maxAge });
   };
   const clearLegacy = (reply: FastifyReply, name: string) => {
     reply.clearCookie(name, { httpOnly: true, sameSite: "strict", path: "/" });
@@ -62,8 +84,9 @@ export function createSessionAccess(db: Db, cookie: SessionCookieSettings, polic
 
   async function lookup(request: FastifyRequest, reply: FastifyReply): Promise<ActiveSession | null> {
     const now = clock();
-    const current = request.cookies[cookie.name];
-    const legacy = cookie.legacyNames.map((name) => ({ name, token: request.cookies[name] })).filter((entry): entry is { name: string; token: string } => Boolean(entry.token));
+    const plain = usesPlainCookie(request);
+    const current = request.cookies[cookie.name] ?? (plain && plainName ? request.cookies[plainName] : undefined);
+    const legacy = (plain ? [] : cookie.legacyNames).map((name) => ({ name, token: request.cookies[name] })).filter((entry): entry is { name: string; token: string } => Boolean(entry.token));
     for (const entry of legacy) clearLegacy(reply, entry.name);
 
     if (current) {

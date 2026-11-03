@@ -376,11 +376,82 @@ describe("authentication and sessions", () => {
     });
 
     it("keeps the plain cookie name without Secure", async () => {
-      expect(sessionCookieSettings("srtl_session_5178", false)).toEqual({ name: "srtl_session_5178", legacyNames: [], secure: false });
-      expect(sessionCookieSettings("srtl_session_5178", true)).toEqual({ name: "__Host-srtl_session_5178", legacyNames: ["srtl_session_5178"], secure: true });
+      expect(sessionCookieSettings("srtl_session_5178", false)).toEqual({ name: "srtl_session_5178", legacyNames: [], secure: false, plainHttpOrigins: [] });
+      expect(sessionCookieSettings("srtl_session_5178", true)).toEqual({ name: "__Host-srtl_session_5178", legacyNames: ["srtl_session_5178"], secure: true, plainHttpOrigins: [] });
       const app = await startApp();
       const cookie = await setupAdmin(app);
       expect(cookie.startsWith("srtl_session=")).toBe(true);
+    });
+
+    describe("with an https public origin and a listed LAN address", () => {
+      const lanHost = "192.168.1.20:5179";
+      const lan = { host: lanHost, origin: `http://${lanHost}` };
+      const publicSite = { host: "srtl.example.com", origin: "https://srtl.example.com" };
+      const signIn = (app: AppContext, headers: Record<string, string>) =>
+        app.app.inject({ method: "POST", url: "/api/auth/login", headers, payload: { username: "alex_03", password } });
+
+      async function startWithLanAddress(overrides: Partial<AppConfig> = {}): Promise<AppContext> {
+        const app = await startApp({ publicOrigin: publicSite.origin, allowedOrigins: [lan.origin], ...overrides });
+        await setupAdmin(app);
+        return app;
+      }
+
+      it("issues a cookie browsers keep over plain HTTP, and keeps it across requests", async () => {
+        const app = await startWithLanAddress();
+        const response = await signIn(app, lan);
+        expect(response.statusCode).toBe(200);
+        const [issued, ...others] = setCookies(response.headers["set-cookie"]);
+        expect(others).toEqual([]);
+        expect(issued).toMatch(/^srtl_session=/);
+        expect(issued).not.toContain("Secure");
+        expect(issued).toContain("HttpOnly");
+        expect(issued).toContain("SameSite=Strict");
+
+        const token = cookieValue(response.headers["set-cookie"], "srtl_session")!;
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const next = await app.app.inject({ method: "GET", url: "/api/settings/paths", headers: { host: lanHost, cookie: `srtl_session=${token}` } });
+          expect(next.statusCode).toBe(200);
+          expect(next.headers["set-cookie"]).toBeUndefined();
+        }
+        await app.database.db.update(schema.sessions).set({ cookieReissuedAt: new Date(Date.now() - legacyCookieGraceMs - 1_000).toISOString() });
+        expect((await app.app.inject({ method: "GET", url: "/api/settings/paths", headers: { host: lanHost, cookie: `srtl_session=${token}` } })).statusCode).toBe(200);
+      });
+
+      it("keeps Secure __Host- cookies for every other request", async () => {
+        const app = await startWithLanAddress();
+        const fromSite = await signIn(app, publicSite);
+        expect(fromSite.statusCode).toBe(200);
+        const issued = setCookies(fromSite.headers["set-cookie"])[0];
+        expect(issued).toMatch(/^__Host-srtl_session=/);
+        expect(issued).toContain("Secure");
+
+        // A proxy that rewrites Host to the LAN address must not downgrade the site's cookie.
+        const rewrittenHost = await signIn(app, { host: lanHost, origin: publicSite.origin });
+        expect(setCookies(rewrittenHost.headers["set-cookie"])[0]).toMatch(/^__Host-srtl_session=.*Secure/);
+        const forwarded = await signIn(app, { ...lan, "x-forwarded-proto": "https" });
+        expect(setCookies(forwarded.headers["set-cookie"])[0]).toMatch(/^__Host-srtl_session=.*Secure/);
+
+        // An address that is not listed gets the Secure cookie too, and cannot keep using the plain name.
+        const token = cookieValue(fromSite.headers["set-cookie"], "__Host-srtl_session")!;
+        const elsewhere = await app.app.inject({ method: "GET", url: "/api/settings/paths", headers: { host: "192.168.1.99:5179", cookie: `srtl_session=${token}` } });
+        expect(cookieValue(elsewhere.headers["set-cookie"], "__Host-srtl_session")).toBe(token);
+      });
+
+      it("trusts forwarded HTTPS from a listed proxy on the LAN address", async () => {
+        const app = await startWithLanAddress({ trustProxy: ["127.0.0.1"] });
+        const response = await signIn(app, { host: lanHost, "x-forwarded-proto": "https" });
+        expect(setCookies(response.headers["set-cookie"])[0]).toMatch(/^__Host-srtl_session=.*Secure/);
+      });
+
+      it("signs out of the LAN address", async () => {
+        const app = await startWithLanAddress();
+        const response = await signIn(app, lan);
+        const token = cookieValue(response.headers["set-cookie"], "srtl_session")!;
+        const logout = await app.app.inject({ method: "POST", url: "/api/auth/logout", headers: { ...lan, cookie: `srtl_session=${token}` } });
+        expect(logout.statusCode).toBe(200);
+        expect(setCookies(logout.headers["set-cookie"]).find((header) => header.startsWith("srtl_session="))).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+        expect((await app.app.inject({ method: "GET", url: "/api/settings/paths", headers: { host: lanHost, cookie: `srtl_session=${token}` } })).statusCode).toBe(401);
+      });
     });
   });
 

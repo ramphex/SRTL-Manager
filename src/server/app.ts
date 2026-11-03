@@ -102,7 +102,8 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
     idleTimeoutMs: config.sessionIdleTimeoutHours * 60 * 60 * 1_000,
     maxAgeMs: config.sessionMaxAgeDays * 24 * 60 * 60 * 1_000
   };
-  const sessions = createSessionAccess(database.db, sessionCookieSettings(config.sessionCookieName, config.sessionCookieSecure), sessionPolicy);
+  const trustedOrigins = config.publicOrigin && !config.allowedOrigins.includes(config.publicOrigin) ? [...config.allowedOrigins, config.publicOrigin] : config.allowedOrigins;
+  const sessions = createSessionAccess(database.db, sessionCookieSettings(config.sessionCookieName, config.sessionCookieSecure, trustedOrigins), sessionPolicy);
   const setupTokens = new SetupTokenGate({
     dataDir: config.dataDir,
     configuredToken: config.setupToken,
@@ -165,7 +166,6 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   }
   await app.register(cookie);
 
-  const trustedOrigins = config.publicOrigin && !config.allowedOrigins.includes(config.publicOrigin) ? [...config.allowedOrigins, config.publicOrigin] : config.allowedOrigins;
   app.addHook("onRequest", async (request, reply) => {
     if (["GET", "HEAD", "OPTIONS"].includes(request.method)) return;
     if (request.headers["sec-fetch-site"] === "cross-site") {
