@@ -1,7 +1,11 @@
 import fs from "node:fs";
+import net from "node:net";
 import path from "node:path";
 import type { PathsSettings } from "../shared/types";
 import { mergeEnvSettings, readEnvFile, readProcessEnvSettings } from "./lib/env";
+
+/** Anonymous requests allowed per client address per minute. */
+export const defaultAnonymousRequestsPerMinute = 600;
 
 export interface AppConfig {
   rootDir: string;
@@ -12,14 +16,23 @@ export interface AppConfig {
   sessionCookieName: string;
   sessionCookieSecure: boolean;
   allowedOrigins: string[];
+  publicOrigin: string | null;
   apiDocsEnabled: boolean;
   autoMigrate: boolean;
-  trustProxy: boolean;
+  trustProxy: TrustProxySetting;
+  anonymousRequestsPerMinute: number;
   webRoot: string;
   jobHistoryRetentionDays: number;
   jobConcurrency: JobConcurrencySettings;
   paths: PathsSettings;
 }
+
+/**
+ * Reverse proxies whose forwarding headers are trusted: `false`, or a list of
+ * addresses, CIDR ranges and the proxy-addr names `loopback`, `linklocal` and
+ * `uniquelocal`. There is no "trust everyone" setting.
+ */
+export type TrustProxySetting = false | string[];
 
 export interface JobConcurrencySettings {
   workerCount: number;
@@ -41,6 +54,19 @@ function booleanSetting(value: string | undefined, fallback: boolean): boolean {
   throw new Error(`Invalid boolean setting: ${value}`);
 }
 
+function parseOrigin(origin: string, label: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(origin);
+  } catch {
+    throw new Error(`Invalid ${label}: ${origin}`);
+  }
+  if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error(`Invalid ${label}: ${origin}`);
+  }
+  return parsed.origin;
+}
+
 function originSettings(value: string | undefined): string[] {
   if (!value) return [];
   return [
@@ -49,15 +75,50 @@ function originSettings(value: string | undefined): string[] {
         .split(",")
         .map((origin) => origin.trim().replace(/\/$/, ""))
         .filter(Boolean)
-        .map((origin) => {
-          const parsed = new URL(origin);
-          if (!["http:", "https:"].includes(parsed.protocol) || parsed.username || parsed.password || parsed.pathname !== "/" || parsed.search || parsed.hash) {
-            throw new Error(`Invalid allowed origin: ${origin}`);
-          }
-          return parsed.origin;
-        })
+        .map((origin) => parseOrigin(origin, "allowed origin"))
     )
   ];
+}
+
+function publicOriginSetting(value: string | undefined): string | null {
+  const trimmed = value?.trim().replace(/\/$/, "");
+  return trimmed ? parseOrigin(trimmed, "SRTL_PUBLIC_ORIGIN") : null;
+}
+
+const trustProxyKeywords = new Set(["loopback", "linklocal", "uniquelocal"]);
+
+function trustProxyEntry(entry: string): string {
+  const normalized = entry.toLowerCase();
+  if (trustProxyKeywords.has(normalized)) return normalized;
+  const [address, prefix, ...rest] = normalized.split("/");
+  const family = net.isIP(address ?? "");
+  if (family === 0 || rest.length > 0) throw new Error(`Invalid SRTL_TRUST_PROXY entry: ${entry}. Use an IP address, a CIDR range or loopback.`);
+  if (prefix === undefined) return normalized;
+  const bits = /^\d{1,3}$/.test(prefix) ? Number(prefix) : Number.NaN;
+  const maxBits = family === 4 ? 32 : 128;
+  if (!Number.isInteger(bits) || bits < 1 || bits > maxBits) {
+    throw new Error(`Invalid SRTL_TRUST_PROXY entry: ${entry}. The prefix length must be between 1 and ${maxBits}.`);
+  }
+  return normalized;
+}
+
+/**
+ * Parses SRTL_TRUST_PROXY. `true` used to trust forwarding headers from any
+ * client, which let anyone choose their own address for rate limits and logs,
+ * so it is refused with a message naming the replacement.
+ */
+export function trustProxySetting(value: string | undefined): TrustProxySetting {
+  const trimmed = value?.trim() ?? "";
+  if (trimmed === "") return false;
+  const lowered = trimmed.toLowerCase();
+  if (["0", "false", "no", "off"].includes(lowered)) return false;
+  if (["1", "true", "yes", "on", "*", "all"].includes(lowered)) {
+    throw new Error(
+      "SRTL_TRUST_PROXY no longer accepts true. List the reverse proxy addresses or CIDR ranges instead, for example SRTL_TRUST_PROXY=192.168.1.10 or SRTL_TRUST_PROXY=172.18.0.0/16, or use loopback when the proxy runs on the same host."
+    );
+  }
+  const entries = trimmed.split(/[\s,]+/).filter(Boolean).map(trustProxyEntry);
+  return [...new Set(entries)];
 }
 
 function portSetting(value: number | string | undefined, fallback: number): number {
@@ -180,6 +241,13 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const publicWebPortValue = process.env.SRTL_WEB_PORT ?? envFile.SRTL_WEB_PORT;
   const publicWebPort = publicWebPortValue ? portSetting(publicWebPortValue, 5179) : null;
   if (!path.isAbsolute(dataDir)) throw new Error(`SRTL_DATA_DIR must be an absolute path: ${dataDir}`);
+  const publicOrigin = overrides.publicOrigin !== undefined ? overrides.publicOrigin : publicOriginSetting(process.env.SRTL_PUBLIC_ORIGIN ?? envFile.SRTL_PUBLIC_ORIGIN);
+  const httpsPublicOrigin = publicOrigin?.startsWith("https:") ?? false;
+  const cookieSecureValue = process.env.SRTL_COOKIE_SECURE ?? envFile.SRTL_COOKIE_SECURE;
+  const sessionCookieSecure = overrides.sessionCookieSecure ?? booleanSetting(cookieSecureValue, httpsPublicOrigin);
+  if (overrides.sessionCookieSecure === undefined && httpsPublicOrigin && !sessionCookieSecure) {
+    throw new Error("SRTL_COOKIE_SECURE=false conflicts with an https SRTL_PUBLIC_ORIGIN. Remove SRTL_COOKIE_SECURE or set it to true.");
+  }
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
   return {
@@ -189,14 +257,14 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
     host: overrides.host ?? process.env.SRTL_HOST ?? envFile.SRTL_HOST ?? "127.0.0.1",
     port: portSetting(overrides.port ?? process.env.SRTL_PORT ?? envFile.SRTL_PORT, 3010),
     sessionCookieName: overrides.sessionCookieName ?? (publicWebPort ? `srtl_session_${publicWebPort}` : "srtl_session"),
-    sessionCookieSecure:
-      overrides.sessionCookieSecure ?? booleanSetting(process.env.SRTL_COOKIE_SECURE ?? envFile.SRTL_COOKIE_SECURE, false),
+    sessionCookieSecure,
     allowedOrigins: overrides.allowedOrigins ?? originSettings(process.env.SRTL_ALLOWED_ORIGINS ?? envFile.SRTL_ALLOWED_ORIGINS),
-    apiDocsEnabled:
-      overrides.apiDocsEnabled ?? booleanSetting(process.env.SRTL_API_DOCS ?? envFile.SRTL_API_DOCS, process.env.NODE_ENV !== "production"),
+    publicOrigin,
+    apiDocsEnabled: overrides.apiDocsEnabled ?? booleanSetting(process.env.SRTL_API_DOCS ?? envFile.SRTL_API_DOCS, false),
     autoMigrate:
       overrides.autoMigrate ?? booleanSetting(process.env.SRTL_AUTO_MIGRATE ?? envFile.SRTL_AUTO_MIGRATE, process.env.NODE_ENV !== "production"),
-    trustProxy: overrides.trustProxy ?? booleanSetting(process.env.SRTL_TRUST_PROXY ?? envFile.SRTL_TRUST_PROXY, false),
+    trustProxy: overrides.trustProxy ?? trustProxySetting(process.env.SRTL_TRUST_PROXY ?? envFile.SRTL_TRUST_PROXY),
+    anonymousRequestsPerMinute: overrides.anonymousRequestsPerMinute ?? defaultAnonymousRequestsPerMinute,
     webRoot: overrides.webRoot ?? process.env.SRTL_WEB_ROOT ?? envFile.SRTL_WEB_ROOT ?? path.join(rootDir, "dist", "client"),
     jobHistoryRetentionDays: integerSetting(
       overrides.jobHistoryRetentionDays ?? process.env.SRTL_JOB_HISTORY_RETENTION_DAYS ?? envFile.SRTL_JOB_HISTORY_RETENTION_DAYS,

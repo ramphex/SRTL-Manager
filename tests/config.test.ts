@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { loadConfig } from "../src/server/config";
+import { loadConfig, trustProxySetting } from "../src/server/config";
 
 let tmpDir: string;
 
@@ -174,5 +174,70 @@ describe("config", () => {
 
     await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_ALLOWED_ORIGINS=https://example.invalid/path\n");
     expect(() => loadConfig({ rootDir: tmpDir })).toThrow("Invalid allowed origin");
+  });
+
+  it("trusts forwarding headers only from listed proxy addresses", async () => {
+    expect(trustProxySetting(undefined)).toBe(false);
+    expect(trustProxySetting("")).toBe(false);
+    expect(trustProxySetting("false")).toBe(false);
+    expect(trustProxySetting("192.168.1.10")).toEqual(["192.168.1.10"]);
+    expect(trustProxySetting("192.168.1.10, 172.18.0.0/16 loopback")).toEqual(["192.168.1.10", "172.18.0.0/16", "loopback"]);
+    expect(trustProxySetting("fd00::/8,::1")).toEqual(["fd00::/8", "::1"]);
+
+    for (const value of ["true", "TRUE", "1", "yes", "on", "*"]) {
+      expect(() => trustProxySetting(value)).toThrow("SRTL_TRUST_PROXY no longer accepts true");
+    }
+    for (const value of ["0.0.0.0/0", "::/0", "192.168.1.0/33", "192.168.1.300", "proxy.example.com", "192.168.1.0/24/1", "2"]) {
+      expect(() => trustProxySetting(value), value).toThrow("Invalid SRTL_TRUST_PROXY entry");
+    }
+
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_TRUST_PROXY=192.168.1.10/32\n");
+    expect(loadConfig({ rootDir: tmpDir }).trustProxy).toEqual(["192.168.1.10/32"]);
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_TRUST_PROXY=true\n");
+    expect(() => loadConfig({ rootDir: tmpDir })).toThrow("SRTL_TRUST_PROXY no longer accepts true");
+  });
+
+  it("derives secure cookies and a trusted origin from an https public origin", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_PUBLIC_ORIGIN=https://srtl.example.com/\n");
+    const config = loadConfig({ rootDir: tmpDir });
+    expect(config.publicOrigin).toBe("https://srtl.example.com");
+    expect(config.sessionCookieSecure).toBe(true);
+    expect(config.allowedOrigins).toEqual([]);
+
+    await fs.writeFile(path.join(tmpDir, ".env"), ["SRTL_PUBLIC_ORIGIN=https://srtl.example.com", "SRTL_COOKIE_SECURE=false"].join("\n"));
+    expect(() => loadConfig({ rootDir: tmpDir })).toThrow("SRTL_COOKIE_SECURE=false conflicts with an https SRTL_PUBLIC_ORIGIN");
+
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_PUBLIC_ORIGIN=http://192.168.1.20:5179\n");
+    expect(loadConfig({ rootDir: tmpDir }).sessionCookieSecure).toBe(false);
+
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_PUBLIC_ORIGIN=https://srtl.example.com/admin\n");
+    expect(() => loadConfig({ rootDir: tmpDir })).toThrow("Invalid SRTL_PUBLIC_ORIGIN");
+
+    await fs.writeFile(path.join(tmpDir, ".env"), "");
+    expect(loadConfig({ rootDir: tmpDir })).toMatchObject({ publicOrigin: null, sessionCookieSecure: false });
+  });
+
+  it("keeps API documentation off unless it is enabled explicitly", async () => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    try {
+      process.env.NODE_ENV = "development";
+      await fs.writeFile(path.join(tmpDir, ".env"), "");
+      expect(loadConfig({ rootDir: tmpDir }).apiDocsEnabled).toBe(false);
+      await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_API_DOCS=true\n");
+      expect(loadConfig({ rootDir: tmpDir }).apiDocsEnabled).toBe(true);
+    } finally {
+      if (previousNodeEnv == null) delete process.env.NODE_ENV;
+      else process.env.NODE_ENV = previousNodeEnv;
+    }
+  });
+
+  it("documents every security setting in the checked-in example environment", async () => {
+    const example = await fs.readFile(new URL("../.env.example", import.meta.url), "utf8");
+    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE"]) {
+      expect(example, key).toContain(key);
+    }
+    expect(example).not.toMatch(/^SRTL_TRUST_PROXY=true/m);
+    await fs.writeFile(path.join(tmpDir, ".env"), example.replace(/^SRTL_POSTGRES_PASSWORD=$/m, "SRTL_POSTGRES_PASSWORD=example"));
+    expect(() => loadConfig({ rootDir: tmpDir })).not.toThrow();
   });
 });
