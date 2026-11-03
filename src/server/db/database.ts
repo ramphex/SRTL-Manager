@@ -7,6 +7,8 @@ import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
+import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
+import { activeSecretBox } from "../lib/secretBox";
 
 export type Db = NodePgDatabase<typeof schema>;
 export type DbExecutor = Db;
@@ -22,9 +24,11 @@ export interface DatabaseOpenOptions {
   databaseUrl: string;
   migrate?: boolean;
   pool?: Pool;
+  /** Removes stored credentials that the configured secret key cannot open, instead of refusing to start. */
+  discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 25;
+export const currentSchemaVersion = 26;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -825,6 +829,18 @@ async function initializeDatabase(pool: Pool): Promise<void> {
       // Placeholder for migration 25, which another change supplies. It changes nothing.
       await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (25, 'placeholder_25', $1)`, [nowIso()]);
     }
+    if (!applied.has(26)) {
+      await client.query("BEGIN");
+      try {
+        // Stored Plex tokens and Jellyfin, Radarr and Sonarr API keys are sealed with the secret key.
+        await encryptStoredSecrets(client, activeSecretBox(), nowIso());
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (26, 'encrypt_stored_credentials', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
   } finally {
     await client.query("select pg_advisory_unlock($1)", [bootstrapLockKey]).catch(() => undefined);
     client.release();
@@ -849,6 +865,12 @@ export async function openDatabase(options: DatabaseOpenOptions | string): Promi
         throw new Error(`Database schema is out of date. Missing migration${missingVersions.length === 1 ? "" : "s"} ${missingVersions.join(", ")}; run the migration service.`);
       }
     }
+    await verifySecretKey(pool, activeSecretBox(), {
+      discardUnreadable: typeof options === "string" ? false : options.discardUnreadableCredentials === true,
+      lockKey: bootstrapLockKey,
+      timestamp: nowIso(),
+      warn: (message) => console.warn(message)
+    });
   } catch (error) {
     if (!suppliedPool) await pool.end().catch(() => undefined);
     throw error;

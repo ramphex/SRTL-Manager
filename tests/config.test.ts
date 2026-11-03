@@ -233,7 +233,7 @@ describe("config", () => {
 
   it("documents every security setting in the checked-in example environment", async () => {
     const example = await fs.readFile(new URL("../.env.example", import.meta.url), "utf8");
-    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE"]) {
+    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE", "SRTL_SECRET_KEY", "SRTL_SECRET_KEY_FILE", "SRTL_OUTBOUND_ALLOW_CIDRS", "SRTL_DISCARD_UNREADABLE_CREDENTIALS"]) {
       expect(example, key).toContain(key);
     }
     expect(example).not.toMatch(/^SRTL_TRUST_PROXY=true/m);

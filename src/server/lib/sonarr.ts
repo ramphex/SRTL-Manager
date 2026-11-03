@@ -15,6 +15,7 @@ import { isOnboardingComplete } from "./onboarding";
 import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { SonarrClient, SonarrError, normalizeSonarrUrl, type SonarrEpisode, type SonarrEpisodeFile, type SonarrSeries } from "./sonarrClient";
 import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
+import { secretPurposes } from "./secretBox";
 
 const tagSyncBatchSize = 50;
 // Episodes changed per pass, and per Sonarr request.
@@ -43,7 +44,7 @@ class SonarrInstanceNotFound extends SonarrError {
   constructor() { super("This Sonarr instance no longer exists. Reload the integration settings."); }
 }
 
-const store = createArrInstanceStore({ name: "Sonarr", settingKey: "sonarrInstances", lock: 781_889_452, sectionType: "shows", sectionTypeLabel: "Shows", error: (message) => new SonarrError(message), notFound: () => new SonarrInstanceNotFound(), normalizeUrl: normalizeSonarrUrl });
+const store = createArrInstanceStore({ name: "Sonarr", settingKey: "sonarrInstances", lock: 781_889_452, sectionType: "shows", sectionTypeLabel: "Shows", error: (message) => new SonarrError(message), notFound: () => new SonarrInstanceNotFound(), normalizeUrl: normalizeSonarrUrl, apiKeyPurpose: secretPurposes.sonarrApiKey });
 const { storedInstances, settings, writeSettings, locked, commitCurrent, candidateSettings, automaticMappings, assertSectionsAvailable, publicSettings, sectionOwner, webhookInstance } = store;
 export const sonarrInstanceIdSchema = store.instanceIdSchema;
 export const sonarrInstanceNameSchema = store.instanceNameSchema;

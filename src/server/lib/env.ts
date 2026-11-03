@@ -29,6 +29,10 @@ export interface EnvSettings {
   SRTL_AUTO_MIGRATE?: string;
   SRTL_TRUST_PROXY?: string;
   SRTL_WEB_ROOT?: string;
+  SRTL_SECRET_KEY?: string;
+  SRTL_SECRET_KEY_FILE?: string;
+  SRTL_DISCARD_UNREADABLE_CREDENTIALS?: string;
+  SRTL_OUTBOUND_ALLOW_CIDRS?: string;
 }
 
 const supportedKeys = [
@@ -59,7 +63,11 @@ const supportedKeys = [
   "SRTL_API_DOCS",
   "SRTL_AUTO_MIGRATE",
   "SRTL_TRUST_PROXY",
-  "SRTL_WEB_ROOT"
+  "SRTL_WEB_ROOT",
+  "SRTL_SECRET_KEY",
+  "SRTL_SECRET_KEY_FILE",
+  "SRTL_DISCARD_UNREADABLE_CREDENTIALS",
+  "SRTL_OUTBOUND_ALLOW_CIDRS"
 ] as const;
 
 export function parseEnvFile(content: string): EnvSettings {

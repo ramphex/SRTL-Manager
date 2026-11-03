@@ -19,6 +19,7 @@ import { JellyfinClient, type JellyfinItem } from "./jellyfinClient";
 import { PlexServerClient, type PlexItem } from "./plexClient";
 import { WatchSyncError } from "./watchSyncHttp";
 import { findServer, loadWatchSyncContext, loadWatchSyncSettings, readCursor, recordServerStatus, writeCursor, type PairRow, type StoredServer, type UserRow, type WatchSyncContext } from "./watchSync";
+import { openSecret, secretPurposes } from "./secretBox";
 
 type Side = "plex" | "jellyfin";
 export interface WatchSyncFeatures { watched: boolean; position: boolean }
@@ -206,7 +207,10 @@ async function onServer<T>(server: StoredServer, action: () => Promise<T>): Prom
 async function loadRuntime(db: Db, settings: WatchSyncContext, pair: PairRow, signal?: AbortSignal): Promise<PairRuntime> {
   const plexServer = findServer(settings, pair.plexServerId, "plex");
   const jellyfinServer = findServer(settings, pair.jellyfinServerId, "jellyfin");
-  const user = async (serverId: string, externalId: string) => (await db.select().from(schema.watchSyncUsers).where(and(eq(schema.watchSyncUsers.serverId, serverId), eq(schema.watchSyncUsers.externalId, externalId))).limit(1))[0];
+  const user = async (serverId: string, externalId: string) => {
+    const row = (await db.select().from(schema.watchSyncUsers).where(and(eq(schema.watchSyncUsers.serverId, serverId), eq(schema.watchSyncUsers.externalId, externalId))).limit(1))[0];
+    return row ? { ...row, accessToken: openSecret(row.accessToken, secretPurposes.watchSyncUserToken) } : row;
+  };
   const plexUser = await user(pair.plexServerId, pair.plexUserId);
   const jellyfinUser = await user(pair.jellyfinServerId, pair.jellyfinUserId);
   if (!plexUser || !jellyfinUser) throw new WatchSyncError("A user in this pair is no longer known. Discover users again.");

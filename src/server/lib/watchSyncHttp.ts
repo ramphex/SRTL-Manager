@@ -1,7 +1,6 @@
-import { lookup } from "node:dns/promises";
 import http, { type IncomingHttpHeaders } from "node:http";
 import https from "node:https";
-import { radarrAddressAllowed } from "./radarrClient";
+import { outboundProblemMessage, pinnedLookup, resolveOutbound, type ResolvedAddress } from "./outboundPolicy";
 
 export class WatchSyncError extends Error {
   readonly statusCode: number = 400;
@@ -31,6 +30,8 @@ export interface WatchSyncRequest {
   maxBytes?: number;
   retries?: number;
   signal?: AbortSignal;
+  // A built-in endpoint such as plex.tv rather than an address an admin entered: it skips the outbound allow list.
+  trusted?: boolean;
 }
 
 // Tests shorten the backoff; production waits 0.5 s, 1.5 s, 4.5 s.
@@ -55,30 +56,19 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export async function resolveAllowed(hostname: string, service: string): Promise<{ address: string; family: number }> {
-  let dnsTimer: NodeJS.Timeout | undefined;
-  let addresses: Array<{ address: string; family: number }>;
-  try {
-    addresses = await Promise.race([
-      lookup(hostname, { all: true }),
-      new Promise<never>((_resolve, reject) => { dnsTimer = setTimeout(() => reject(new Error("DNS timeout")), 5000); })
-    ]);
-  } catch {
-    throw new WatchSyncError(`${service} hostname could not be resolved.`, null, true);
-  } finally {
-    if (dnsTimer) clearTimeout(dnsTimer);
-  }
-  if (!addresses.length || addresses.some((entry) => !radarrAddressAllowed(entry.address))) {
-    throw new WatchSyncError(`${service} URL resolves to an unsupported network address.`);
-  }
-  return addresses[0]!;
+// Resolves the host once and checks every answer against the outbound policy; requests connect to the result only.
+export async function resolveAllowed(hostname: string, service: string, options: { trusted?: boolean } = {}): Promise<ResolvedAddress> {
+  const resolved = await resolveOutbound(hostname, options);
+  if (resolved.ok) return resolved.address;
+  if (resolved.problem === "dns") throw new WatchSyncError(`${service} hostname could not be resolved.`, null, true);
+  throw new WatchSyncError(outboundProblemMessage(service, resolved.problem));
 }
 
 // One attempt. Every request opens its own connection and closes it afterwards: Jellyfin stalls kept-alive
 // connections after a few hundred requests, so connection reuse is never worth it here.
 async function attempt(request: WatchSyncRequest): Promise<WatchSyncResponse> {
   const url = new URL(request.url);
-  const address = await resolveAllowed(url.hostname.replace(/^\[|\]$/g, ""), request.service);
+  const address = await resolveAllowed(url.hostname, request.service, { trusted: request.trusted });
   const maxBytes = request.maxBytes ?? 32 * 1024 * 1024;
   const timeout = AbortSignal.timeout(request.timeoutMs ?? 20_000);
   const signal = request.signal ? AbortSignal.any([timeout, request.signal]) : timeout;
@@ -87,10 +77,7 @@ async function attempt(request: WatchSyncRequest): Promise<WatchSyncResponse> {
       method: request.method ?? "GET",
       agent: false,
       signal,
-      lookup: (_hostname, options, callback) => {
-        if (options.all) callback(null, [address]);
-        else callback(null, address.address, address.family);
-      },
+      lookup: pinnedLookup(address),
       headers: {
         Accept: "application/json",
         Connection: "close",

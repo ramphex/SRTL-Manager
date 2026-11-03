@@ -5,7 +5,7 @@ import fastify, { type FastifyInstance } from "fastify";
 import { eq } from "drizzle-orm";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
-import { setSetting } from "../src/server/db/database";
+import { getSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { defaultCopyRunner, type CopyCommandRunner } from "../src/server/lib/copier";
@@ -205,6 +205,25 @@ describe("Sonarr instances and folder ownership", () => {
     expect(await app.database.db.select().from(schema.sonarrSeries)).toEqual([]);
     expect(hd.requests).toBe(requests);
     expect(hd.edits).toEqual([]);
+  });
+
+  it("stores the API key encrypted and never sends it to a new address without entering it again", async () => {
+    const hd = await fakeSonarr([show(1, "Alpha", "/tv")], ["/tv"]);
+    const id = await instance("Sonarr", hd, [{ rootPath: "/tv", section: "shows" }], { webhookSecret });
+    const stored = await getSetting(app.database.db, "sonarrInstances");
+    expect(stored).toMatch(/"apiKey":"enc:v1:/);
+    expect(stored).not.toContain(apiKey);
+    expect(stored).not.toContain(webhookSecret);
+    const elsewhere = await fakeSonarr([], []);
+    const current = (await getSonarrState(app.database.db, id)).settings;
+    const moved = { ...current, baseUrl: elsewhere.url, apiKey: "" };
+    await expect(testSonarrConnection(app.database.db, id, moved)).rejects.toThrow("Enter the API key");
+    await expect(saveSonarrSettings(app.database.db, id, moved)).rejects.toThrow("Enter the API key");
+    expect(elsewhere.requests).toBe(0);
+    expect(JSON.stringify(await getSonarrState(app.database.db, id))).not.toContain(apiKey);
+    // Entering the key again moves the connection.
+    const saved = await saveSonarrSettings(app.database.db, id, { ...moved, apiKey, mappings: [], enabled: false });
+    expect(saved.settings).toMatchObject({ baseUrl: elsewhere.url, hasApiKey: true });
   });
 });
 

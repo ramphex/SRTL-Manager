@@ -11,6 +11,7 @@ import { first, getJsonSetting, getSectionSettings, setSetting, type Db } from "
 import * as schema from "../db/schema";
 import { withFilesystemTimeout } from "./filesystemSafety";
 import { isMediaFile } from "./media";
+import { openSecret, sealSecret, type SecretPurpose } from "./secretBox";
 import { canonicalTitleKey } from "./storagePolicies";
 
 export const arrWebhookSecretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
@@ -42,6 +43,8 @@ export interface ArrStoreDefinition {
   error: (message: string) => Error;
   notFound: () => Error;
   normalizeUrl: (input: string) => string;
+  // The API key is stored sealed with the secret key under this purpose.
+  apiKeyPurpose: SecretPurpose;
 }
 
 const defaultSettings: Omit<ArrStoredSettings, "id" | "name" | "copyJobFloor"> = { revision: 0, baseUrl: "", apiKey: "", webhookSecretHash: "", enabled: false, localTag: "", remoteTag: "", monitorOnCopy: false, mappingMode: "auto", mappings: [], lastRefreshAt: null, lastError: null };
@@ -156,9 +159,17 @@ export function createArrInstanceStore(definition: ArrStoreDefinition) {
   async function storedInstances(db: Db): Promise<ArrStoredInstances> {
     const saved = await getJsonSetting<Partial<ArrStoredInstances>>(db, settingKey, {});
     return {
-      instances: (saved.instances ?? []).map((instance) => ({ ...instance, mappingMode: instance.mappingMode ?? "manual", monitorOnCopy: instance.monitorOnCopy ?? false, copyJobFloor: instance.copyJobFloor ?? 0 })),
+      instances: (saved.instances ?? []).map((instance) => ({
+        ...instance, apiKey: openSecret(instance.apiKey ?? "", definition.apiKeyPurpose),
+        mappingMode: instance.mappingMode ?? "manual", monitorOnCopy: instance.monitorOnCopy ?? false, copyJobFloor: instance.copyJobFloor ?? 0
+      })),
       legacyWebhookInstanceId: saved.legacyWebhookInstanceId ?? null
     };
+  }
+
+  // Every write of the instance list goes through here, so API keys are never stored in plaintext.
+  async function saveInstances(db: Db, stored: ArrStoredInstances): Promise<void> {
+    await setSetting(db, settingKey, { ...stored, instances: stored.instances.map((instance) => ({ ...instance, apiKey: sealSecret(instance.apiKey, definition.apiKeyPurpose) })) });
   }
 
   async function settings(db: Db, instanceId: string): Promise<ArrStoredSettings> {
@@ -170,7 +181,7 @@ export function createArrInstanceStore(definition: ArrStoreDefinition) {
   // Callers hold the integration lock, so the list cannot change between this read and write.
   async function writeSettings(db: Db, config: ArrStoredSettings): Promise<void> {
     const stored = await storedInstances(db);
-    await setSetting(db, settingKey, { ...stored, instances: stored.instances.map((instance) => instance.id === config.id ? config : instance) });
+    await saveInstances(db, { ...stored, instances: stored.instances.map((instance) => instance.id === config.id ? config : instance) });
   }
 
   async function locked<T>(db: Db, action: (transaction: Db) => Promise<T>): Promise<T> {
@@ -281,7 +292,7 @@ export function createArrInstanceStore(definition: ArrStoreDefinition) {
       // Copies finished before the instance existed were never requested from it.
       const floor = await first(transaction.select({ id: sql<number>`coalesce(max(${schema.jobs.id}), 0)::int` }).from(schema.jobs));
       const instance: ArrStoredSettings = { ...defaultSettings, id, name, copyJobFloor: floor?.id ?? 0 };
-      await setSetting(transaction, settingKey, { ...stored, instances: [...stored.instances, instance] });
+      await saveInstances(transaction, { ...stored, instances: [...stored.instances, instance] });
       return instance;
     });
     return created.id;
@@ -303,7 +314,7 @@ export function createArrInstanceStore(definition: ArrStoreDefinition) {
       const stored = await storedInstances(transaction);
       if (!stored.instances.some((instance) => instance.id === instanceId)) throw definition.notFound();
       await removeRows(transaction);
-      await setSetting(transaction, settingKey, {
+      await saveInstances(transaction, {
         instances: stored.instances.filter((instance) => instance.id !== instanceId),
         legacyWebhookInstanceId: stored.legacyWebhookInstanceId === instanceId ? null : stored.legacyWebhookInstanceId
       });
