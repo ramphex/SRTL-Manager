@@ -14,7 +14,7 @@ If you cannot use the Plex PIN sign-in, paste your Plex account token into **Edi
 ## Test, edit, and remove
 
 - **Test connection** reaches the server with its token or key, records the version and status, and, for Plex, the machine identifier and owner account. Features that use the server record their own failures on it too, so the status reflects the last request any of them made.
-- **Edit** changes the name, URL, token or key, and path prefix mappings. Saved tokens and keys are never shown again; leave the field empty to keep the saved one. Changing a Jellyfin URL requires entering the API key again, so a saved key is never sent to an address you have not confirmed.
+- **Edit** changes the name, URL, token or key, and path prefix mappings. Saved tokens and keys are never shown again; leave the field empty to keep the saved one. Changing a Jellyfin URL requires entering the API key again, so a saved key is never sent to an address you have not confirmed. Changing a Plex URL signs the server out for the same reason: its token and its users' tokens are cleared, so use **Sign in with Plex** again (then watch sync finds the users again), or paste a token with the change. Tokens and keys are stored encrypted with `SRTL_SECRET_KEY`.
 - **Remove** forgets the connection and the per-server records SRTL kept for it (such as discovered users and the item index). Nothing changes on the server. A server that watch sync pairs still use cannot be removed; the message names the pairs to remove first.
 
 ## Path prefix mappings

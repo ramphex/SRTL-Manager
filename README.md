@@ -53,6 +53,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SYMLINK_DIR`: the existing absolute path containing the managed symlinks.
 - `SRTL_LOCATION_1_PATH` and `SRTL_LOCATION_2_PATH`: existing absolute storage paths. Their friendly names are set during onboarding and can be changed later in Settings > Library.
 - `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
+- `SRTL_SECRET_KEY`: the key that encrypts saved Plex tokens and Jellyfin, Radarr and Sonarr API keys. Generate it once with `openssl rand -base64 32` and keep a copy with your backups. Compose will not start without it. See [Backup And Restore](#backup-and-restore).
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
 
@@ -107,6 +108,9 @@ Direct LAN access over HTTP needs no extra settings. Behind a reverse proxy that
 - `SRTL_TRUST_PROXY`: the proxy's address or CIDR range, for example `192.168.1.10`, `172.18.0.0/16` for a shared Docker network, or `loopback` when the proxy runs on the same host. Only these peers may set `X-Forwarded-For` and `X-Forwarded-Proto`, which SRTL uses for client addresses in rate limits and logs and for the request protocol. `true` is refused at startup because it would trust headers any client can send; replace it with the proxy's address when upgrading.
 - Published port: keep it reachable only by the proxy. Set `SRTL_BIND_HOST=127.0.0.1` when the proxy runs on the same host, or remove the `ports` block and use the commented proxy network in `docker-compose.yml` when the proxy is another container.
 - `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to signed-in admins only.
+- `SRTL_OUTBOUND_ALLOW_CIDRS`: the addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr. The default, `private,public`, allows LAN and internet addresses but not loopback; add `loopback` for a server on the same host outside Docker, or list CIDR ranges such as `192.168.1.0/24` to allow only those. Link-local and cloud metadata addresses are always refused, every request connects to the address it checked, and plex.tv sign-in is not affected.
+
+A saved token or API key is only sent to the address it was entered for. Changing a Jellyfin, Radarr or Sonarr address needs its API key again, and changing a Plex address signs that server out until you use **Sign in with Plex** again or paste a token.
 
 Requests without a session are limited to 600 a minute per client address, and request bodies to 256 KB except on the signed-in routes that need more. Set the proxy's own body limit to at least 70 MB if you restore watch sync backups through it.
 
@@ -127,7 +131,16 @@ docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" "$POSTGRES_DB"' 
 docker compose start api worker
 ```
 
-Keep `.env`, `.env.backup.*`, and database dump files private. Dumps contain account hashes, paths, inventory records, job history, and saved integration API credentials.
+Keep `.env`, `.env.backup.*`, and database dump files private. Dumps contain account hashes, paths, inventory records, job history, and saved integration credentials.
+
+### Secret key
+
+Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are encrypted with AES-256-GCM using `SRTL_SECRET_KEY`, so a database dump alone does not reveal them. Back up the key with every database backup, but store it separately from the dumps, for example in a password manager. Restoring a dump needs the same key.
+
+- **Without the key, the saved credentials cannot be recovered.** SRTL refuses to start with a different key and names the key the credentials need. If the original key is lost, start once with `SRTL_DISCARD_UNREADABLE_CREDENTIALS=true`: SRTL removes only the credentials it cannot read, then you sign in with Plex and enter the API keys again in Settings, and remove the setting.
+- `SRTL_SECRET_KEY_FILE` can name a file holding the key instead, such as a Docker secret.
+- Outside Docker, when neither setting is given, SRTL creates `secret.key` in its data directory (`SRTL_DATA_DIR`, by default `data/` in the working directory) with mode 0600 on first start and logs where it is. Back that file up. SRTL never creates a key in a temporary directory, where it would be lost on restart.
+- **Upgrading:** the first start after the upgrade encrypts the existing saved credentials in place (database migration 26). Set `SRTL_SECRET_KEY` in `.env` before upgrading Docker installs, and take a database backup first as usual.
 
 ## Development
 
