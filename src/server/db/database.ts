@@ -24,7 +24,7 @@ export interface DatabaseOpenOptions {
   pool?: Pool;
 }
 
-export const currentSchemaVersion = 24;
+export const currentSchemaVersion = 25;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -820,6 +820,10 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query("ROLLBACK");
         throw error;
       }
+    }
+    if (!applied.has(25)) {
+      // Placeholder for migration 25, which another change supplies. It changes nothing.
+      await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (25, 'placeholder_25', $1)`, [nowIso()]);
     }
   } finally {
     await client.query("select pg_advisory_unlock($1)", [bootstrapLockKey]).catch(() => undefined);
