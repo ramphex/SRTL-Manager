@@ -58,7 +58,8 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     await recordActionAudit(db, request, {
       action: "copy.discard_partial",
       summary: "Discarded a partial copy left by an interrupted job",
-      targets: { operationId: params.id, tempSizeBytes: body.tempSizeBytes }
+      jobId: result.jobId,
+      targets: { operationId: params.id, jobId: result.jobId, tempSizeBytes: body.tempSizeBytes }
     });
     return result;
   });

@@ -238,6 +238,21 @@ describe("orphan purge", () => {
     expect(review.json().items).toEqual([expect.objectContaining({ storageFileId: remote.id, category: "unlinked" })]);
     const queued = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", storageFileIds: [remote.id], mode: "delete" } });
     expect(queued.statusCode).toBe(200);
+    // The purge is recorded with who asked, when, and which items, and the job's own log says so too.
+    const { jobId: purgeJobId } = queued.json<{ jobId: number }>();
+    const trail = await app.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } });
+    expect(trail.statusCode).toBe(200);
+    expect(trail.json()).toEqual([
+      expect.objectContaining({
+        action: "orphan.purge_delete",
+        at: expect.any(String),
+        actor: { userId: expect.any(Number), username: "fixture" },
+        ip: expect.any(String),
+        requestId: queued.headers["x-request-id"],
+        targets: { jobId: purgeJobId, rootType: "remote", mode: "delete", storageFileIds: [remote.id], folderIds: [] }
+      })
+    ]);
+    expect((await app.jobs.listEvents(purgeJobId)).map((event) => event.message)).toContain("Deleted 1 orphan file(s) and 0 folder(s) on remote storage (requested by fixture from 127.0.0.1)");
     await runJobs();
     await expect(fs.stat(remote.filePath)).rejects.toMatchObject({ code: "ENOENT" });
     const [row] = await app.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, remote.id));
@@ -376,6 +391,8 @@ describe("folders with no video", () => {
     expect(empty.statusCode).toBe(400);
     const queued = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", folderIds: [folder.id], mode: "delete" } });
     expect(queued.statusCode).toBe(200);
+    const audit = (await app.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; targets: Record<string, unknown> }>>();
+    expect(audit).toEqual([expect.objectContaining({ action: "orphan.purge_delete", targets: expect.objectContaining({ folderIds: [folder.id], storageFileIds: [] }) })]);
     await runJobs();
     await expect(fs.stat(folder.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
   });
