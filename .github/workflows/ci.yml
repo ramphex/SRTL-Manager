@@ -66,6 +66,11 @@ jobs:
       - run: npm run check
       - run: npm run build
       - run: npx playwright install --with-deps chromium
+      - name: Generate a throwaway secret key for browser smoke tests
+        run: |
+          key="$(openssl rand -base64 32)"
+          echo "::add-mask::$key"
+          echo "SRTL_SECRET_KEY=$key" >> "$GITHUB_ENV"
       - name: Start production server for browser smoke tests
         env:
           SRTL_DATABASE_URL: postgres://srtl_test:srtl_test@127.0.0.1:5432/postgres

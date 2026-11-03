@@ -15,6 +15,7 @@ import { RadarrClient, RadarrError, normalizeRadarrUrl, type RadarrMovie } from 
 import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
 import { assertPathParentInside, withFilesystemTimeout } from "./filesystemSafety";
 import type { MediaExpectation } from "./mediaIntegrity";
+import { secretPurposes } from "./secretBox";
 
 const tagSyncBatchSize = 50;
 const monitorBatchSize = 50;
@@ -37,7 +38,7 @@ class RadarrInstanceNotFound extends RadarrError {
   constructor() { super("This Radarr instance no longer exists. Reload the integration settings."); }
 }
 
-const store = createArrInstanceStore({ name: "Radarr", settingKey: "radarrInstances", lock: 781_889_451, sectionType: "movies", sectionTypeLabel: "Movies", error: (message) => new RadarrError(message), notFound: () => new RadarrInstanceNotFound(), normalizeUrl: normalizeRadarrUrl });
+const store = createArrInstanceStore({ name: "Radarr", settingKey: "radarrInstances", lock: 781_889_451, sectionType: "movies", sectionTypeLabel: "Movies", error: (message) => new RadarrError(message), notFound: () => new RadarrInstanceNotFound(), normalizeUrl: normalizeRadarrUrl, apiKeyPurpose: secretPurposes.radarrApiKey });
 const { storedInstances, settings, writeSettings, locked, commitCurrent, candidateSettings, automaticMappings, assertSectionsAvailable, publicSettings, sectionOwner, webhookInstance } = store;
 export const radarrWebhookSecretSchema = arrWebhookSecretSchema;
 export const radarrInstanceIdSchema = store.instanceIdSchema;

@@ -64,6 +64,7 @@ export async function plexTvGeoLookup(ip: string, token: string, clientIdentifie
   const { data } = await watchSyncJson({
     url: `${plexEndpoints.plexTv}/api/v2/geoip?ip_address=${encodeURIComponent(ip)}`,
     service: "plex.tv",
+    trusted: true,
     headers: plexHeaders(clientIdentifier, token),
     timeoutMs,
     retries: 0,

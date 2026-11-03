@@ -26,6 +26,7 @@ import {
 } from "../src/server/lib/watchSync";
 import { decideWatchSync, runWatchSyncJob, runWatchSyncTick, scheduleWatchSyncReconcile, toSrtlPath, watchSyncPacing, type WatchSyncJobOptions } from "../src/server/lib/watchSyncEngine";
 import { watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
+import { openSecret, secretPurposes } from "../src/server/lib/secretBox";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import type { WatchSyncDirection, WatchSyncSideState, WatchSyncState } from "../src/shared/watchSync";
 import { MockMediaServers, type MockItem } from "./watchSyncMocks";
@@ -228,7 +229,10 @@ describe("watch sync user pairing", () => {
     expect(JSON.stringify(current)).not.toContain("tok-bob");
     expect(JSON.stringify(current)).not.toContain(mock.ownerToken);
     const stored = await app.database.db.select().from(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.externalId, "300"));
-    expect(stored[0]?.accessToken).toBe("tok-kids");
+    // Stored sealed with the secret key, never as the token itself.
+    expect(stored[0]?.accessToken).toMatch(/^enc:v1:/);
+    expect(stored[0]?.accessToken).not.toContain("tok-kids");
+    expect(openSecret(stored[0]!.accessToken, secretPurposes.watchSyncUserToken)).toBe("tok-kids");
     expect(mock.pinPolls).toBe(2);
   });
 

@@ -144,7 +144,12 @@ describe("media servers API", () => {
 
     const renamed = await call("PUT", `/api/media-servers/${id}`, { name: "Living room", url: `${mock.base}/jf1`, token: "", prefixMappings: [{ serverPrefix: "/media", srtlPrefix: "/mnt/plex" }] });
     expect(renamed.statusCode).toBe(200);
-    expect((await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]).toMatchObject({ name: "Living room", token: apiKey });
+    const row = (await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]!;
+    expect(row.name).toBe("Living room");
+    // The key is stored sealed with the secret key and still opens to the saved key.
+    expect(row.token).toMatch(/^enc:v1:/);
+    expect(row.token).not.toContain(apiKey);
+    expect((await loadMediaServers(app.database.db)).find((server) => server.id === id)?.token).toBe(apiKey);
     // A saved key is never sent to a new address unless it is entered again.
     const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Living room", url: "http://elsewhere:8096", prefixMappings: [] });
     expect(moved.statusCode).toBe(400);
@@ -170,6 +175,37 @@ describe("media servers API", () => {
     expect(authorized.body).not.toContain(mock.ownerToken);
     const state = await getWatchSyncState(app.database.db);
     expect(state.users.filter((user) => user.serverId === id).map((user) => user.name)).toContain("alex_03");
+  });
+
+  it("signs a Plex server out when its address changes, so no stored token reaches the new address", async () => {
+    const created = await call("POST", "/api/media-servers", { kind: "plex", name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [] });
+    const id = (created.json() as MediaServerList).servers[0]!.id;
+    const pin = (await call("POST", `/api/media-servers/${id}/plex-pin`)).json() as { pinId: number };
+    await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`);
+    expect((await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`)).json()).toMatchObject({ status: "authorized" });
+    const users = () => app.database.db.select().from(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.serverId, id));
+    expect((await users()).filter((user) => user.accessToken)).not.toHaveLength(0);
+
+    // The new address is another path on the mock, so any request carrying a token would be recorded.
+    const newUrl = `${mock.base}/moved`;
+    mock.requests = [];
+    const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Home Plex", url: newUrl, prefixMappings: [] });
+    expect(moved.statusCode).toBe(200);
+    expect((moved.json() as MediaServerList).servers[0]).toMatchObject({ url: newUrl, hasToken: false, machineIdentifier: null, accountName: null });
+    expect((await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]).toMatchObject({ token: "", pendingPin: null });
+    expect((await users()).every((user) => user.accessToken === null && !user.available)).toBe(true);
+    const tested = await call("POST", `/api/media-servers/${id}/test`);
+    expect(tested.statusCode).toBe(400);
+    expect(tested.json().error).toContain("Sign in with Plex");
+    expect(mock.requests.filter((request) => request.includes("/moved"))).toEqual([]);
+
+    // A token pasted with the change is saved for the new address, sealed.
+    const pasted = await call("PUT", `/api/media-servers/${id}`, { name: "Home Plex", url: `${mock.base}/pms`, token: mock.ownerToken, prefixMappings: [] });
+    expect((pasted.json() as MediaServerList).servers[0]).toMatchObject({ hasToken: true });
+    expect(pasted.body).not.toContain(mock.ownerToken);
+    const row = (await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]!;
+    expect(row.token).toMatch(/^enc:v1:/);
+    expect(row.token).not.toContain(mock.ownerToken);
   });
 
   it("blocks removing a server while watch sync pairs use it, naming the pairs", async () => {

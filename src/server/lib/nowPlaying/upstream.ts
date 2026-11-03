@@ -1,8 +1,10 @@
+import { Agent, WebSocket } from "undici";
 import { z } from "zod";
 import type { MediaServerKind } from "../../../shared/mediaServers";
 import type { NowPlayingServerState, NowPlayingState } from "../../../shared/nowPlaying";
 import { jellyfinHeaders } from "../jellyfinClient";
 import { plexEndpoints, plexHeaders } from "../plexClient";
+import { pinnedLookup } from "../outboundPolicy";
 import { WatchSyncError, resolveAllowed, watchSyncJson, watchSyncRequest } from "../watchSyncHttp";
 import { parseJellyfinSession, parsePlexSession, type ParsedSession } from "./classify";
 
@@ -61,13 +63,11 @@ export function socketUrl(baseUrl: string, path: string, query: Record<string, s
   return url.toString();
 }
 
-// Node's WebSocket accepts request headers, so credentials need not appear in the URL.
-const NodeWebSocket = WebSocket as unknown as new (url: string, init?: { headers?: Record<string, string> }) => WebSocket;
-
 export interface SocketAttempt { url: string; headers?: Record<string, string> }
 
 // Tries each way of authenticating in turn: headers first, then the token in the query string that some servers
-// expect. The socket host is checked against the same address rules as every other media server request.
+// expect. The socket host is checked against the same address rules as every other media server request, and the
+// socket connects to the checked address: the host is never looked up a second time.
 async function openWebSocket(attempts: SocketAttempt[], service: string, handlers: SocketHandlers, onOpen: (socket: WebSocket) => void, onMessage: (data: string, socket: WebSocket) => void): Promise<() => void> {
   let lastError: unknown = new NowPlayingError(`${service} socket could not be opened.`);
   for (const attempt of attempts) {
@@ -81,11 +81,21 @@ async function openWebSocket(attempts: SocketAttempt[], service: string, handler
 }
 
 async function openWebSocketOnce(attempt: SocketAttempt, service: string, handlers: SocketHandlers, onOpen: (socket: WebSocket) => void, onMessage: (data: string, socket: WebSocket) => void): Promise<() => void> {
-  await resolveAllowed(new URL(attempt.url).hostname.replace(/^\[|\]$/g, ""), service);
+  const address = await resolveAllowed(new URL(attempt.url).hostname, service);
+  // TLS still verifies the certificate against the host name; only the address lookup is fixed.
+  const dispatcher = new Agent({ connect: { lookup: pinnedLookup(address) } });
+  const release = () => { void dispatcher.destroy().catch(() => undefined); };
   return new Promise((resolve, reject) => {
     let opened = false;
     let closed = false;
-    const socket = new NodeWebSocket(attempt.url, attempt.headers ? { headers: attempt.headers } : undefined);
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket(attempt.url, { dispatcher, ...(attempt.headers ? { headers: attempt.headers } : {}) });
+    } catch {
+      release();
+      reject(new NowPlayingError(`${service} socket could not be opened.`));
+      return;
+    }
     const timer = setTimeout(() => {
       if (opened) return;
       closed = true;
@@ -116,6 +126,7 @@ async function openWebSocketOnce(attempt: SocketAttempt, service: string, handle
     });
     socket.addEventListener("close", () => {
       clearTimeout(timer);
+      release();
       if (!opened) {
         if (!closed) reject(new NowPlayingError(`${service} socket closed before it opened.`));
         closed = true;
@@ -403,7 +414,7 @@ export function createLiveAdapter(config: LiveServerConfig): LiveAdapter {
 
 // plex.tv reports the account's subscription; an active one is Plex Pass.
 export async function plexPassActive(token: string, clientIdentifier: string): Promise<boolean> {
-  const { data } = await watchSyncJson({ url: `${plexEndpoints.plexTv}/api/v2/user`, service: "plex.tv", headers: plexHeaders(clientIdentifier, token), timeoutMs: 8000, retries: 1, maxBytes: 1024 * 1024 });
+  const { data } = await watchSyncJson({ url: `${plexEndpoints.plexTv}/api/v2/user`, service: "plex.tv", trusted: true, headers: plexHeaders(clientIdentifier, token), timeoutMs: 8000, retries: 1, maxBytes: 1024 * 1024 });
   const parsed = z.object({
     subscription: z.object({ active: z.boolean().optional(), status: z.string().optional() }).loose().nullish()
   }).loose().safeParse(data);

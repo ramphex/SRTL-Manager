@@ -60,7 +60,7 @@ export function MediaServerSettingsPanel() {
       {full ? <p className="muted">SRTL supports up to {limit} media servers.</p> : null}
     </Section>
     {servers.length ? <div className="media-server-list">{servers.map((server) => <ServerCard key={server.id} server={server} />)}</div> : null}
-    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored only on the SRTL server and are never shown again.</p>
+    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored encrypted on the SRTL server and are never shown again.</p>
   </div>;
 }
 
@@ -82,7 +82,7 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
   const tokenLabel = kind === "plex" ? "Plex token (optional)" : "API key";
   const tokenHelp = kind === "plex"
     ? "Use Sign in with Plex instead when you can. If you paste a token, use your account's token, never the PlexOnlineToken from the server's Preferences.xml."
-    : "Create one in Jellyfin under Dashboard > API Keys. It is stored on the SRTL server and never shown again. Changing the URL requires entering it again.";
+    : "Create one in Jellyfin under Dashboard > API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.";
   return <fieldset className="radarr-fields" disabled={disabled}>
     <div className="radarr-grid">
       <label>Name<input required maxLength={60} value={draft.name} placeholder={kind === "plex" ? "Home Plex" : "Jellyfin"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
@@ -172,6 +172,7 @@ function ServerCard({ server }: { server: MediaServer }) {
   const remove = useMutation({ mutationFn: () => mediaServerApi.remove(server.id), onSuccess: setList });
   const busy = save.isPending || test.isPending || remove.isPending;
   const changed = draft.name !== server.name || draft.url !== server.url || Boolean(draft.token) || JSON.stringify(draft.prefixMappings) !== JSON.stringify(server.prefixMappings);
+  const addressChanged = draft.url.trim().replace(/\/+$/, "") !== server.url;
   const status = mediaServerStatus(server);
   const kind = mediaServerKindLabels[server.kind];
   return <section className="watch-sync-card media-server-card" aria-label={`${kind} server ${server.name}`}>
@@ -195,6 +196,7 @@ function ServerCard({ server }: { server: MediaServer }) {
     {server.kind === "plex" ? <PlexSignIn server={server} /> : null}
     {editing ? <form className="media-server-edit" aria-label={`Edit ${server.name}`} onSubmit={(event) => { event.preventDefault(); if (!busy) save.mutate(); }}>
       <ServerFields kind={server.kind} draft={draft} setDraft={setDraft} hasToken={server.hasToken} disabled={busy} />
+      {server.kind === "plex" && server.hasToken && addressChanged && !draft.token?.trim() ? <p className="muted" role="note">Saving a new address signs this server out of Plex, so its token is never sent to the new address. Use <strong>Sign in with Plex</strong> again afterwards, or paste a token above.</p> : null}
       <div className="radarr-toolbar">
         <button type="submit" disabled={busy || !changed}>{save.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Save size={16} />}Save</button>
         <button type="button" className="secondary" disabled={save.isPending} onClick={() => setEditing(false)}><X size={16} />Cancel</button>

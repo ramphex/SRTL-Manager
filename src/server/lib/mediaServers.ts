@@ -16,6 +16,7 @@ import {
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JellyfinClient } from "./jellyfinClient";
+import { openSecret, sealSecret, secretPurposes } from "./secretBox";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
 import { WatchSyncError, normalizeServerUrl } from "./watchSyncHttp";
 
@@ -68,9 +69,13 @@ function parseMappings(raw: string): MediaServerPrefixMapping[] {
   }
 }
 
+// Tokens are stored sealed with the secret key and opened only here.
+const sealToken = (token: string) => sealSecret(token, secretPurposes.mediaServerToken);
+const openToken = (stored: string) => openSecret(stored, secretPurposes.mediaServerToken);
+
 function toRecord(row: Row): MediaServerRecord {
   return {
-    id: row.id, kind: row.kind as MediaServerKind, name: row.name, url: row.url, token: row.token, prefixMappings: parseMappings(row.prefixMappings),
+    id: row.id, kind: row.kind as MediaServerKind, name: row.name, url: row.url, token: openToken(row.token), prefixMappings: parseMappings(row.prefixMappings),
     machineIdentifier: row.machineIdentifier, accountName: row.accountName, accountId: row.accountId, version: row.version,
     lastCheckedAt: row.lastCheckedAt, lastError: row.lastError
   };
@@ -147,25 +152,40 @@ export async function addMediaServer(db: Db, kind: MediaServerKind, input: Media
     if (existing.some((server) => server.name.toLowerCase() === draft.name.toLowerCase())) throw new WatchSyncError("Another media server already uses this name.");
     const timestamp = nowIso();
     await transaction.insert(schema.mediaServers).values({
-      id, kind, name: draft.name, url: draft.url, token: draft.token ?? "", prefixMappings: JSON.stringify(draft.prefixMappings),
+      id, kind, name: draft.name, url: draft.url, token: sealToken(draft.token ?? ""), prefixMappings: JSON.stringify(draft.prefixMappings),
       position: Math.max(-1, ...existing.map((server) => server.position)) + 1, createdAt: timestamp, updatedAt: timestamp
     });
   }));
   return getMediaServer(db, id);
 }
 
+// A saved token or API key is only ever sent to the address it was entered for. A new Jellyfin address needs the
+// API key again. A new Plex address signs the server out: the owner token, the per-user tokens found with it, and
+// any pending sign-in are cleared, unless a token is pasted with the change, and Sign in with Plex connects it again.
 export async function updateMediaServer(db: Db, serverId: string, input: MediaServerInput): Promise<MediaServerRecord> {
   const current = await getMediaServer(db, serverId);
   const draft = validateInput(current.kind, input);
-  // A saved key is never sent to a new address the admin has not confirmed by entering it again.
-  if (draft.url !== current.url && !draft.token && current.kind === "jellyfin") throw new WatchSyncError("Enter the API key again when changing the Jellyfin address.");
-  const tokenChanged = Boolean(draft.token) && draft.token !== current.token;
-  await withNameCheck(() => db.update(schema.mediaServers).set({
-    name: draft.name, url: draft.url, token: draft.token || current.token, prefixMappings: JSON.stringify(draft.prefixMappings),
-    ...(tokenChanged ? { machineIdentifier: null, accountName: null, accountId: null, pendingPin: null } : {}),
-    ...(tokenChanged || draft.url !== current.url ? { lastCheckedAt: null, lastError: null, version: null } : {}),
-    updatedAt: nowIso()
-  }).where(eq(schema.mediaServers.id, serverId)));
+  const urlChanged = draft.url !== current.url;
+  if (urlChanged && !draft.token && current.kind === "jellyfin") throw new WatchSyncError("Enter the API key again when changing the Jellyfin address.");
+  const signOut = urlChanged && !draft.token;
+  const tokenChanged = signOut ? Boolean(current.token) : Boolean(draft.token) && draft.token !== current.token;
+  await withNameCheck(() => db.transaction(async (transaction) => {
+    const stored = (await transaction.select({ token: schema.mediaServers.token }).from(schema.mediaServers).where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
+    if (!stored) throw new MediaServerNotFound("This media server no longer exists. Reload Settings > Media servers.");
+    // An unchanged token keeps its stored form, so status updates made with it still match.
+    const token = signOut ? "" : draft.token && draft.token !== current.token ? sealToken(draft.token) : stored.token;
+    await transaction.update(schema.mediaServers).set({
+      name: draft.name, url: draft.url, token, prefixMappings: JSON.stringify(draft.prefixMappings),
+      ...(tokenChanged || urlChanged ? { machineIdentifier: null, accountName: null, accountId: null, pendingPin: null } : {}),
+      ...(tokenChanged || urlChanged ? { lastCheckedAt: null, lastError: null, version: null } : {}),
+      updatedAt: nowIso()
+    }).where(eq(schema.mediaServers.id, serverId));
+    if (urlChanged && current.kind === "plex") {
+      // Shared users' tokens were issued for this server and would otherwise follow it to the new address.
+      await transaction.update(schema.watchSyncUsers).set({ accessToken: null, available: false, note: "The server address changed. Sign in with Plex again, then discover users again.", updatedAt: nowIso() })
+        .where(eq(schema.watchSyncUsers.serverId, serverId));
+    }
+  }));
   return getMediaServer(db, serverId);
 }
 
@@ -208,8 +228,13 @@ export interface MediaServerDetails {
 
 // Records the outcome of any request to the server: a successful check clears the error.
 export async function recordMediaServerStatus(db: Db, serverId: string, error: string | null, details: MediaServerDetails = {}, token?: string): Promise<void> {
-  const where = token === undefined ? eq(schema.mediaServers.id, serverId) : and(eq(schema.mediaServers.id, serverId), eq(schema.mediaServers.token, token));
-  // Details describe the token they were read with, so they are dropped if the token changed meanwhile.
+  let where = eq(schema.mediaServers.id, serverId);
+  if (token !== undefined) {
+    // Details describe the token they were read with, so they are dropped if the token changed meanwhile.
+    const stored = (await db.select({ token: schema.mediaServers.token }).from(schema.mediaServers).where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
+    if (!stored || openToken(stored.token) !== token) return;
+    where = and(eq(schema.mediaServers.id, serverId), eq(schema.mediaServers.token, stored.token))!;
+  }
   await db.update(schema.mediaServers).set({ lastCheckedAt: nowIso(), lastError: error, ...(error ? {} : details) }).where(where);
 }
 
@@ -266,7 +291,7 @@ export async function checkPlexSignIn(db: Db, serverId: string, pinId: number, a
     return { status: "waiting" };
   }
   await db.update(schema.mediaServers).set({
-    token: pin.authToken, pendingPin: null, machineIdentifier: null, accountName: null, accountId: null, lastError: null, updatedAt: nowIso()
+    token: sealToken(pin.authToken), pendingPin: null, machineIdentifier: null, accountName: null, accountId: null, lastError: null, updatedAt: nowIso()
   }).where(eq(schema.mediaServers.id, serverId));
   await testMediaServer(db, serverId).catch(() => undefined);
   if (afterSignIn) await afterSignIn(serverId).catch(() => undefined);

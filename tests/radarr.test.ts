@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
-import { getJsonSetting, setSetting } from "../src/server/db/database";
+import { getJsonSetting, getSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall, onboardingSettingKey } from "../src/server/lib/onboarding";
@@ -279,6 +279,32 @@ describe("Radarr policy and webhook integration", () => {
     expect(result.settings.enabled).toBe(false);
     expect(result.settings.hasApiKey).toBe(true);
     await expect(saveRadarrSettings(app.database.db, instanceId, { ...result.settings, baseUrl: "http://127.0.0.1:1" })).rejects.toThrow("Enter the API key");
+  });
+
+  it("stores the API key encrypted and never sends it to a new address without entering it again", async () => {
+    await connected();
+    const stored = await getSetting(app.database.db, "radarrInstances");
+    expect(stored).toMatch(/"apiKey":"enc:v1:/);
+    expect(stored).not.toContain(apiKey);
+    expect(stored).not.toContain(webhookSecret);
+    const seen: Array<string | undefined> = [];
+    const other = fastify();
+    other.all("/*", async (request) => {
+      seen.push(request.headers["x-api-key"] as string | undefined);
+      return {};
+    });
+    const otherAddress = await other.listen({ host: "127.0.0.1", port: 0 });
+    try {
+      const current = (await getRadarrState(app.database.db, instanceId)).settings;
+      const moved = { ...current, baseUrl: `${otherAddress}/radarr`, apiKey: "" };
+      await expect(testRadarrConnection(app.database.db, instanceId, moved)).rejects.toThrow("Enter the API key");
+      await expect(saveRadarrSettings(app.database.db, instanceId, moved)).rejects.toThrow("Enter the API key");
+      expect(seen).toEqual([]);
+      expect(JSON.stringify(await getRadarrState(app.database.db, instanceId))).not.toContain(apiKey);
+    } finally {
+      await other.close();
+    }
+    expect((await getRadarrState(app.database.db, instanceId)).settings).toMatchObject({ baseUrl: input.baseUrl, hasApiKey: true });
   });
 
   it("rejects stale settings, invalid mappings, and changed movie identities", async () => {

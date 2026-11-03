@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import os from "node:os";
-import { loadConfig } from "./config";
+import { loadConfig, secretKeyOptions } from "./config";
 import { getJsonSetting, nowIso, openDatabase } from "./db/database";
 import type { PathsSettings } from "../shared/types";
 import { CopyTransferLimiter } from "./jobs/copyLimiter";
@@ -14,12 +14,17 @@ import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork
 import { queueCopiedSonarrEpisodes, sonarrMediaExpectation, startSonarrWork } from "./lib/sonarr";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 import { runWatchSyncWork } from "./lib/watchSyncEngine";
+import { configureOutboundPolicy } from "./lib/outboundPolicy";
+import { loadAndInstallSecretKey } from "./lib/secretBox";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
 
 const config = loadConfig();
-const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate });
+const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
+if (secretKey.source === "generated") console.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up with the database.`);
+configureOutboundPolicy(config.outboundPolicy);
+const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate, discardUnreadableCredentials: config.discardUnreadableCredentials });
 const workerProcessLock = await database.pool.connect();
 let workerProcessLockAcquired = false;
 async function runDataMaintenance(): Promise<void> {

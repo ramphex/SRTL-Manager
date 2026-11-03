@@ -22,6 +22,7 @@ import { JellyfinClient } from "./jellyfinClient";
 import { findMediaServer, getMediaServer, loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
 import { WatchSyncError } from "./watchSyncHttp";
+import { sealSecret, secretPurposes } from "./secretBox";
 
 const settingKey = "watchSync";
 const settingsLock = 781_889_470;
@@ -156,7 +157,8 @@ async function saveUsers(db: Db, serverId: string, users: Array<Omit<UserRow, "s
   const timestamp = nowIso();
   await db.transaction(async (transaction) => {
     for (const user of users) {
-      const values = { ...user, serverId, updatedAt: timestamp };
+      // Plex access tokens are stored sealed with the secret key.
+      const values = { ...user, accessToken: user.accessToken ? sealSecret(user.accessToken, secretPurposes.watchSyncUserToken) : null, serverId, updatedAt: timestamp };
       await transaction.insert(schema.watchSyncUsers).values(values).onConflictDoUpdate({
         target: [schema.watchSyncUsers.serverId, schema.watchSyncUsers.externalId],
         set: { name: values.name, username: values.username, kind: values.kind, accountId: values.accountId, accessToken: values.accessToken, available: values.available, note: values.note, updatedAt: timestamp }

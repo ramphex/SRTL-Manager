@@ -12,7 +12,7 @@ import swaggerUi from "@fastify/swagger-ui";
 import { ZodError } from "zod";
 import packageJson from "../../package.json";
 import type { AppConfig } from "./config";
-import { loadConfig } from "./config";
+import { loadConfig, secretKeyOptions } from "./config";
 import { dummyPasswordHash, hasAdmin, type SessionPolicy } from "./auth";
 import { LoginThrottle } from "./loginThrottle";
 import { pruneSecurityEvents } from "./securityEvents";
@@ -41,6 +41,8 @@ import { registerNowPlayingRoutes } from "./routes/nowPlayingRoutes";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
 import { registerSonarrRoutes, sonarrWebhookInstanceId } from "./routes/sonarrRoutes";
+import { configureOutboundPolicy } from "./lib/outboundPolicy";
+import { loadAndInstallSecretKey } from "./lib/secretBox";
 import { applyRouteAccessPolicy, defaultBodyLimitBytes, isDirectLoopbackRequest, isReservedPath, type WebhookKind } from "./routeAccess";
 
 export interface AppContext {
@@ -71,7 +73,9 @@ function mutationOriginAllowed(requestProtocol: string, requestHost: string | un
 
 export async function createApp(overrides: Partial<AppConfig> = {}): Promise<AppContext> {
   const config = loadConfig(overrides);
-  const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate });
+  const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
+  configureOutboundPolicy(config.outboundPolicy);
+  const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate, discardUnreadableCredentials: config.discardUnreadableCredentials });
   await reconcileOnboardingState(database.db);
   await reconcileEnvironmentPaths(database.db, config.paths, {
     allowDirectAdoptionBeforeInventory: await canAdoptEnvironmentPathsBeforeInitialScan(database.db)
@@ -79,6 +83,9 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   const jobs = new JobRunner(database.db);
 
   const app = fastify({ logger: true, trustProxy: config.trustProxy, bodyLimit: defaultBodyLimitBytes });
+  if (secretKey.source === "generated") {
+    app.log.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up with the database: without it, saved tokens and API keys cannot be read.`);
+  }
   app.decorateRequest("adminSession", null);
   const sessionPolicy: SessionPolicy = {
     idleTimeoutMs: config.sessionIdleTimeoutHours * 60 * 60 * 1_000,
@@ -277,7 +284,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}): Promise<App
   registerSonarrRoutes(app, database.db);
   registerMediaServerRoutes(app, database.db);
   registerWatchSyncRoutes(app, database.db, jobs);
-  registerNowPlayingRoutes(app, database.db);
+  registerNowPlayingRoutes(app, database.db, { limits: config.nowPlayingStreams });
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
   registerOrphanRoutes(app, database.db, jobs);

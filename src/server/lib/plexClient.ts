@@ -61,11 +61,11 @@ export class PlexTvClient {
   constructor(private readonly clientIdentifier: string) {}
 
   private async json(path: string, method = "GET", token?: string, signal?: AbortSignal): Promise<unknown> {
-    return (await watchSyncJson({ url: `${plexEndpoints.plexTv}${path}`, service: "plex.tv", method, headers: plexHeaders(this.clientIdentifier, token), signal })).data;
+    return (await watchSyncJson({ url: `${plexEndpoints.plexTv}${path}`, service: "plex.tv", trusted: true, method, headers: plexHeaders(this.clientIdentifier, token), signal })).data;
   }
 
   private async xml(path: string, token: string, signal?: AbortSignal): Promise<string> {
-    return (await watchSyncRequest({ url: `${plexEndpoints.plexTv}${path}`, service: "plex.tv", headers: { ...plexHeaders(this.clientIdentifier, token), Accept: "application/xml" }, signal })).body;
+    return (await watchSyncRequest({ url: `${plexEndpoints.plexTv}${path}`, service: "plex.tv", trusted: true, headers: { ...plexHeaders(this.clientIdentifier, token), Accept: "application/xml" }, signal })).body;
   }
 
   async createPin(): Promise<PlexPin> {

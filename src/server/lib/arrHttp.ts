@@ -1,7 +1,6 @@
-import { lookup } from "node:dns/promises";
 import http from "node:http";
 import https from "node:https";
-import { isIP } from "node:net";
+import { outboundAddressAllowed, outboundProblemMessage, pinnedLookup, resolveOutbound } from "./outboundPolicy";
 
 // How a Radarr or Sonarr client names itself in errors, and the error type its callers expect.
 export interface ArrService {
@@ -19,46 +18,25 @@ export function normalizeArrUrl(input: string, service: ArrService): string {
   return url.toString().replace(/\/+$/, "");
 }
 
+// Whether SRTL may connect to this address under the outbound policy (SRTL_OUTBOUND_ALLOW_CIDRS).
 export function arrAddressAllowed(address: string): boolean {
-  const ip = address.toLowerCase();
-  if (ip.startsWith("::ffff:")) {
-    const suffix = ip.slice(7);
-    if (isIP(suffix) === 4) return arrAddressAllowed(suffix);
-    return false;
-  }
-  if (isIP(ip) === 4) {
-    const octets = ip.split(".").map(Number);
-    return octets[0] !== 0 && octets[0]! < 224 && !(octets[0] === 169 && octets[1] === 254);
-  }
-  return isIP(ip) === 6 && ip !== "::" && !/^f[e-f][89ab0-9a-f]/.test(ip);
+  return outboundAddressAllowed(address);
 }
 
 // Pin the validated DNS answer to the socket; redirects cannot carry the API key elsewhere.
 export async function requestArrJson(service: ArrService, baseUrl: string, apiKey: string, endpoint: string, method = "GET", body?: unknown, maxBytes = 16 * 1024 * 1024): Promise<unknown> {
   const url = new URL(`${normalizeArrUrl(baseUrl, service)}/api/v3/${endpoint}`);
-  const hostname = url.hostname.replace(/^\[|\]$/g, "");
-  let addresses: Array<{ address: string; family: number }>;
-  let dnsTimer: NodeJS.Timeout | undefined;
-  try {
-    addresses = await Promise.race([
-      lookup(hostname, { all: true }),
-      new Promise<never>((_resolve, reject) => { dnsTimer = setTimeout(() => reject(new Error("DNS timeout")), 5000); })
-    ]);
-  } catch { throw service.error(`${service.name} hostname could not be resolved.`); }
-  finally { if (dnsTimer) clearTimeout(dnsTimer); }
-  if (!addresses.length || addresses.some((entry) => !arrAddressAllowed(entry.address))) {
-    throw service.error(`${service.name} URL resolves to an unsupported network address.`);
+  const resolved = await resolveOutbound(url.hostname);
+  if (!resolved.ok) {
+    throw service.error(resolved.problem === "dns" ? `${service.name} hostname could not be resolved.` : outboundProblemMessage(service.name, resolved.problem));
   }
-  const address = addresses[0]!;
+  const address = resolved.address;
   const data = body === undefined ? undefined : JSON.stringify(body);
   return new Promise((resolve, reject) => {
     const request = (url.protocol === "https:" ? https : http).request(url, {
       method,
       signal: AbortSignal.timeout(10000),
-      lookup: (_hostname, options, callback) => {
-        if (options.all) callback(null, [address]);
-        else callback(null, address.address, address.family);
-      },
+      lookup: pinnedLookup(address),
       headers: { "X-Api-Key": apiKey, Accept: "application/json", ...(data ? { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(data) } : {}) }
     }, (response) => {
       const status = response.statusCode ?? 500;

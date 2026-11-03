@@ -4,6 +4,8 @@ import path from "node:path";
 import type { PathsSettings } from "../shared/types";
 import { mergeEnvSettings, readEnvFile, readProcessEnvSettings } from "./lib/env";
 import { isValidSetupToken } from "./setupToken";
+import { parseOutboundPolicy, type OutboundPolicy } from "./lib/outboundPolicy";
+import type { SecretKeyOptions } from "./lib/secretBox";
 
 /** Anonymous requests allowed per client address per minute. */
 export const defaultAnonymousRequestsPerMinute = 600;
@@ -33,7 +35,23 @@ export interface AppConfig {
   jobHistoryRetentionDays: number;
   jobConcurrency: JobConcurrencySettings;
   paths: PathsSettings;
+  /** Addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr (SRTL_OUTBOUND_ALLOW_CIDRS). */
+  outboundPolicy: OutboundPolicy;
+  /** SRTL_DISCARD_UNREADABLE_CREDENTIALS: start without the credentials a lost secret key sealed. */
+  discardUnreadableCredentials: boolean;
+  nowPlayingStreams: NowPlayingStreamLimits;
 }
+
+export interface NowPlayingStreamLimits {
+  /** Open Now Playing streams one signed-in session may hold. */
+  perSession: number;
+  /** Open Now Playing streams across all sessions. */
+  total: number;
+  /** How often an open stream re-checks that its session is still signed in. */
+  revalidateMs: number;
+}
+
+export const defaultNowPlayingStreamLimits: NowPlayingStreamLimits = { perSession: 4, total: 32, revalidateMs: 20_000 };
 
 /**
  * Reverse proxies whose forwarding headers are trusted: `false`, or a list of
@@ -255,11 +273,33 @@ function loadJobConcurrency(envFile: ReturnType<typeof readEnvFile>, overrides: 
   return settings;
 }
 
+function dataDirSetting(rootDir: string, envFile: ReturnType<typeof readEnvFile>, override?: string): string {
+  return override ?? process.env.SRTL_DATA_DIR ?? envFile.SRTL_DATA_DIR ?? path.join(rootDir, "data");
+}
+
+/**
+ * Where the key for stored credentials comes from: SRTL_SECRET_KEY, SRTL_SECRET_KEY_FILE, or `secret.key` in the
+ * data directory. Kept out of AppConfig so the key never travels with the rest of the configuration.
+ */
+export function secretKeyOptions(rootDir = process.cwd(), dataDir?: string): SecretKeyOptions {
+  const envFile = readEnvFile(path.join(rootDir, ".env"));
+  return {
+    key: process.env.SRTL_SECRET_KEY ?? envFile.SRTL_SECRET_KEY ?? null,
+    keyFile: process.env.SRTL_SECRET_KEY_FILE ?? envFile.SRTL_SECRET_KEY_FILE ?? null,
+    dataDir: dataDirSetting(rootDir, envFile, dataDir)
+  };
+}
+
+export function discardUnreadableCredentialsSetting(rootDir = process.cwd()): boolean {
+  const envFile = readEnvFile(path.join(rootDir, ".env"));
+  return booleanSetting(process.env.SRTL_DISCARD_UNREADABLE_CREDENTIALS ?? envFile.SRTL_DISCARD_UNREADABLE_CREDENTIALS, false);
+}
+
 export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   const rootDir = overrides.rootDir ?? process.cwd();
   const envFile = readEnvFile(path.join(rootDir, ".env"));
   const environment = mergeEnvSettings(envFile, readProcessEnvSettings());
-  const dataDir = overrides.dataDir ?? process.env.SRTL_DATA_DIR ?? envFile.SRTL_DATA_DIR ?? path.join(rootDir, "data");
+  const dataDir = dataDirSetting(rootDir, envFile, overrides.dataDir);
   const databaseUrl = overrides.databaseUrl ? databaseUrlSetting(overrides.databaseUrl) : resolveDatabaseUrl(envFile);
   const publicWebPortValue = process.env.SRTL_WEB_PORT ?? envFile.SRTL_WEB_PORT;
   const publicWebPort = publicWebPortValue ? portSetting(publicWebPortValue, 5179) : null;
@@ -311,6 +351,9 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       0
     ),
     jobConcurrency: loadJobConcurrency(envFile, overrides.jobConcurrency),
+    outboundPolicy: overrides.outboundPolicy ?? parseOutboundPolicy(process.env.SRTL_OUTBOUND_ALLOW_CIDRS ?? envFile.SRTL_OUTBOUND_ALLOW_CIDRS),
+    discardUnreadableCredentials: overrides.discardUnreadableCredentials ?? discardUnreadableCredentialsSetting(rootDir),
+    nowPlayingStreams: { ...defaultNowPlayingStreamLimits, ...overrides.nowPlayingStreams },
     paths: overrides.paths ?? {
       symlinkDir: environment.SYMLINK_DIR ?? "",
       // The two-location engine currently maps numbered deployment slots to
