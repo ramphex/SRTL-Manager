@@ -48,6 +48,7 @@ import type {
   OrphanReview
 } from "../shared/types";
 
+import type { AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSettingsInput, SonarrState } from "../shared/sonarr";
 
@@ -88,13 +89,17 @@ export async function mediaLinksByIds(ids: number[]): Promise<MediaLinkRow[]> {
 }
 
 export const api = {
-  me: () => request<{ authenticated: boolean; setupRequired: boolean; user: { id: number; username: string } | null }>("/api/auth/me"),
-  setup: (body: { username: string; password: string; confirmPassword: string }) =>
+  me: () => request<AuthMe>("/api/auth/me"),
+  setup: (body: { setupToken: string; username: string; password: string; confirmPassword: string }) =>
     request<{ ok: true }>("/api/auth/setup", { method: "POST", body: JSON.stringify(body) }),
   login: (body: { username: string; password: string }) => request<{ ok: true }>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
   logout: () => request<{ ok: true }>("/api/auth/logout", { method: "POST" }),
   updateUser: (body: { username: string; currentPassword: string; newPassword?: string; confirmNewPassword?: string }) =>
     request<{ user: { id: number; username: string } }>("/api/auth/user", { method: "PUT", body: JSON.stringify(body) }),
+  sessions: () => request<AuthSessionList>("/api/auth/sessions"),
+  revokeSession: (id: number) => request<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
+  revokeOtherSessions: () => request<{ ok: true; revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" }),
+  securityEvents: (before?: number) => request<SecurityEventPage>(`/api/auth/security-events?limit=50${before ? `&before=${before}` : ""}`),
   appVersion: (refresh = false) => request<AppVersionInfo>(`/api/system/version${refresh ? "?refresh=true" : ""}`),
   getPaths: () => request<PathsSettings>("/api/settings/paths"),
   getStorageLocations: () => request<StorageLocationsSettings>("/api/settings/storage-locations"),

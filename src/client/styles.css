@@ -2150,6 +2150,7 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
 }
 
 .panel > .form-grid,
+.panel > .security-settings,
 .panel > .display-preferences,
 .panel > .account-settings-form,
 .panel > .inline-form,
@@ -6491,6 +6492,37 @@ button.danger-button:hover:not(:disabled) {
   flex: 0 0 auto;
 }
 
+.auth-help {
+  color: var(--muted-strong);
+  font-size: 13px;
+  line-height: 1.45;
+  margin: 0;
+}
+
+.auth-help code,
+.security-settings code {
+  overflow-wrap: anywhere;
+}
+
+.auth-link-button {
+  background: transparent;
+  border: 0;
+  box-shadow: none;
+  color: var(--selected-accent);
+  font-size: 13px;
+  font-weight: 600;
+  justify-self: center;
+  min-height: 0;
+  padding: 2px 4px;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.auth-link-button:hover:not(:disabled) {
+  background: transparent;
+  color: var(--text-strong);
+}
+
 .error {
   color: var(--bad);
   margin: 0;
@@ -8098,4 +8130,69 @@ button.danger-button:hover:not(:disabled) {
   .np-card { grid-template-columns: 64px minmax(0, 1fr); padding: 10px; }
   .np-poster { width: 64px; }
   .np-details > div { grid-template-columns: 76px minmax(0, 1fr); }
+}
+
+.security-settings {
+  display: grid;
+  gap: 12px;
+}
+
+.security-table-scroll {
+  max-height: 480px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.security-table-scroll table {
+  border-collapse: collapse;
+  min-width: 620px;
+  width: 100%;
+}
+
+.security-table-scroll th {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.security-table-scroll td,
+.security-table-scroll th {
+  border-bottom: 1px solid var(--border);
+  padding: 10px 12px;
+  vertical-align: top;
+}
+
+.security-table-scroll td {
+  font-size: 13px;
+}
+
+.security-table-scroll td:last-child button {
+  min-height: 32px;
+  padding: 0 10px;
+}
+
+.security-nowrap {
+  white-space: nowrap;
+}
+
+.security-current-pill {
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.security-event-warning {
+  color: var(--warn);
+  font-weight: 600;
+}
+
+.security-event-detail {
+  color: var(--muted);
+  display: block;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.security-load-more {
+  justify-self: start;
 }
