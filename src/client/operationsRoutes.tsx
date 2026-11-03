@@ -6,6 +6,8 @@ import { api } from "./api";
 import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
 import { MediaServerSettingsPanel } from "./mediaServerSettings";
+import { SecurityEventsPanel, SessionsPanel } from "./securitySettings";
+import { minimumPasswordLength } from "../shared/auth";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
 import { normalizeAuditTargets } from "./jobScopeLocks";
@@ -458,7 +460,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
         ? "Tune job behavior and verification defaults."
         : activeView === "media-servers"
           ? "Plex and Jellyfin connections shared by watch sync and other features."
-          : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences and account access.";
+          : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences, account access, and signed-in sessions.";
   const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
@@ -1076,6 +1078,8 @@ function UserSettingsPanel() {
     mutationFn: api.updateUser,
     onSuccess: (data) => {
       queryClient.setQueryData(["me"], { authenticated: true, setupRequired: false, user: data.user });
+      void queryClient.invalidateQueries({ queryKey: ["auth-sessions"] });
+      void queryClient.invalidateQueries({ queryKey: ["security-events"] });
       setCurrentPassword("");
       setNewPassword("");
       setConfirmNewPassword("");
@@ -1111,8 +1115,8 @@ function UserSettingsPanel() {
       setFormError("Passwords do not match.");
       return;
     }
-    if (newPassword && newPassword.length < 8) {
-      setFormError("Password must be at least 8 characters.");
+    if (newPassword && newPassword.length < minimumPasswordLength) {
+      setFormError(`Password must be at least ${minimumPasswordLength} characters.`);
       return;
     }
     setFormError(null);
@@ -1188,7 +1192,7 @@ function UserSettingsPanel() {
             </label>
             <label>
               New password
-              <input autoComplete="new-password" type="password" value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+              <input autoComplete="new-password" type="password" placeholder={`At least ${minimumPasswordLength} characters`} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
             </label>
             <label>
               Confirm new password
@@ -1203,8 +1207,11 @@ function UserSettingsPanel() {
             {accountMessage ? <p className="success">{accountMessage}</p> : null}
             {error ? <p className="error">{error}</p> : null}
           </div>
+          <p className="section-settings-help">A new password signs out every other session.</p>
         </form>
       </Panel>
+      <SessionsPanel />
+      <SecurityEventsPanel />
     </>
   );
 }

@@ -25,6 +25,9 @@ export interface EnvSettings {
   SRTL_ALLOWED_ORIGINS?: string;
   SRTL_PUBLIC_ORIGIN?: string;
   SRTL_COOKIE_SECURE?: string;
+  SRTL_SESSION_IDLE_HOURS?: string;
+  SRTL_SESSION_MAX_AGE_DAYS?: string;
+  SRTL_SETUP_TOKEN?: string;
   SRTL_API_DOCS?: string;
   SRTL_AUTO_MIGRATE?: string;
   SRTL_TRUST_PROXY?: string;
@@ -56,6 +59,9 @@ const supportedKeys = [
   "SRTL_ALLOWED_ORIGINS",
   "SRTL_PUBLIC_ORIGIN",
   "SRTL_COOKIE_SECURE",
+  "SRTL_SESSION_IDLE_HOURS",
+  "SRTL_SESSION_MAX_AGE_DAYS",
+  "SRTL_SETUP_TOKEN",
   "SRTL_API_DOCS",
   "SRTL_AUTO_MIGRATE",
   "SRTL_TRUST_PROXY",

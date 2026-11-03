@@ -210,11 +210,44 @@ export const sessions = pgTable(
   "sessions",
   {
     tokenHash: text("token_hash").primaryKey(),
+    id: serial("id").notNull(),
     userId: integer("user_id").notNull(),
+    /** Absolute end of the session, set at sign-in. */
     expiresAt: text("expires_at").notNull(),
-    createdAt: text("created_at").notNull()
+    createdAt: text("created_at").notNull(),
+    lastSeenAt: text("last_seen_at"),
+    /** Idle deadline, moved forward when the session is used. Null for sessions from before migration 25 until first use. */
+    idleExpiresAt: text("idle_expires_at"),
+    ip: text("ip"),
+    userAgent: text("user_agent"),
+    /** When a cookie under the pre-`__Host-` name was last exchanged for the current name. */
+    cookieReissuedAt: text("cookie_reissued_at")
   },
-  (table) => [index("sessions_expires_idx").on(table.expiresAt)]
+  (table) => [
+    index("sessions_expires_idx").on(table.expiresAt),
+    uniqueIndex("sessions_id_idx").on(table.id),
+    index("sessions_user_idx").on(table.userId)
+  ]
+);
+
+/** Sign-ins, failures, lockouts, setup, account changes and session revocations. */
+export const securityEvents = pgTable(
+  "security_events",
+  {
+    id: serial("id").primaryKey(),
+    createdAt: text("created_at").notNull(),
+    event: text("event").notNull(),
+    userId: integer("user_id"),
+    username: text("username"),
+    sessionId: integer("session_id"),
+    /** Client address as resolved through the trusted proxies. */
+    ip: text("ip"),
+    /** Address of the peer that opened the connection. */
+    socketIp: text("socket_ip"),
+    userAgent: text("user_agent"),
+    details: text("details").notNull().default("{}")
+  },
+  (table) => [index("security_events_created_idx").on(table.createdAt, table.id)]
 );
 
 export const sections = pgTable("sections", {

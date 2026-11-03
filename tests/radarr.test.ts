@@ -18,6 +18,7 @@ import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
 import { generateRadarrWebhookSecret, type RadarrOverview, type RadarrSettingsInput } from "../src/shared/radarr";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 let app: AppContext;
 let database: TestDatabaseHandle;
@@ -461,7 +462,7 @@ describe("Radarr policy and webhook integration", () => {
 
   it("requires a webhook secret even with an admin cookie and protects settings with session authentication", async () => {
     await connected();
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     expect((await app.app.inject({ method: "GET", url: "/api/settings/radarr" })).statusCode).toBe(401);
     expect((await app.app.inject({ method: "POST", url: `/api/integrations/radarr/${instanceId}/webhook`, headers: { cookie }, payload: { eventType: "Test" } })).statusCode).toBe(401);
@@ -471,7 +472,7 @@ describe("Radarr policy and webhook integration", () => {
   });
 
   it("supports the authenticated configuration and policy workflow through the HTTP API", async () => {
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     expect(setup.statusCode).toBe(200);
     const cookie = String(setup.headers["set-cookie"]);
     expect((await app.app.inject({ method: "POST", url: `/api/settings/radarr/instances/${instanceId}/test`, headers: { cookie }, payload: input })).json()).toEqual({ version: "6.0.0", rootFolders: ["/library"], automaticMappings: [], unmatchedRootFolders: ["/library"], conflictingRootFolders: [] });
@@ -1104,7 +1105,7 @@ describe("multiple Radarr instances", () => {
     const hd = await fakeRadarr([titleIn("/library", 1, "Alpha", [1])], ["/library"]);
     await saveRadarrSettings(app.database.db, instanceId, settingsFor(hd, [{ rootPath: "/library", section: "movies" }], { webhookSecret }));
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
 
     const created = await app.app.inject({ method: "POST", url: "/api/settings/radarr/instances", headers: { cookie }, payload: { name: "  Anime  " } });

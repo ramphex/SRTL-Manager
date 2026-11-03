@@ -16,6 +16,7 @@ import type { SonarrEpisode, SonarrEpisodeFile, SonarrSeries } from "../src/serv
 import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
 import type { SonarrSettingsInput } from "../src/shared/sonarr";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 interface FakeSonarr {
   url: string;
@@ -598,7 +599,7 @@ describe("Sonarr media expectations and copy defaults", () => {
 
   it("supports the authenticated configuration workflow and copy option through the HTTP API", async () => {
     const hd = await fakeSonarr([show(1, "Alpha", "/tv")], ["/tv"]);
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     const created = await app.app.inject({ method: "POST", url: "/api/settings/sonarr/instances", headers: { cookie }, payload: { name: "Sonarr" } });
     expect(created.statusCode).toBe(200);

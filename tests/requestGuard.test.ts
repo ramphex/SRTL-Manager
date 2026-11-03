@@ -9,6 +9,7 @@ import type { AppConfig } from "../src/server/config";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { isReservedPath, normalizedRequestPath } from "../src/server/routeAccess";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 const shellMarker = '<div id="root"></div>';
 const remoteClient = "203.0.113.10";
@@ -57,7 +58,7 @@ async function createAdminSession(app: AppContext, completeOnboarding = true): P
   const setup = await app.app.inject({
     method: "POST",
     url: "/api/auth/setup",
-    payload: { username: "admin", password: "password123", confirmPassword: "password123" }
+    payload: { setupToken: readSetupToken(app), username: "admin", password: "password-1234", confirmPassword: "password-1234" }
   });
   expect(setup.statusCode).toBe(200);
   if (completeOnboarding) await markOnboardingCompleteForExistingInstall(app.database.db);

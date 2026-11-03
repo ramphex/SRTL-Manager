@@ -7,6 +7,7 @@ import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdat
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
 import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
+import { minimumPasswordLength } from "../shared/auth";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
 import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useModalLifecycle, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
@@ -751,6 +752,8 @@ function LoginGate() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const online = useOnlineStatus();
+  // Setup status is only reported to local clients, so the sign-in screen also offers setup.
+  const [setupChosen, setSetupChosen] = useState(false);
   if (!online && !me.data) return <OfflineSessionGate />;
   if (me.isPending) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
   if (me.error) {
@@ -766,8 +769,18 @@ function LoginGate() {
       </AuthShell>
     );
   }
-  if (me.data?.setupRequired) return <SetupForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
-  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
+  if (!me.data?.authenticated && (me.data?.setupRequired || setupChosen)) {
+    return (
+      <SetupForm
+        onDone={() => {
+          setSetupChosen(false);
+          void queryClient.invalidateQueries({ queryKey: ["me"] });
+        }}
+        onSignIn={me.data?.setupRequired ? undefined : () => setSetupChosen(false)}
+      />
+    );
+  }
+  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} onSetup={() => setSetupChosen(true)} />;
   return <AuthenticatedApp />;
 }
 
@@ -1380,8 +1393,9 @@ function PathMigrationGate({ state }: { state: PathConfigurationState }) {
   );
 }
 
-function SetupForm({ onDone }: { onDone: () => void }) {
-  const [username, setUsername] = useState("admin");
+function SetupForm({ onDone, onSignIn }: { onDone: () => void; onSignIn?: () => void }) {
+  const [setupToken, setSetupToken] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -1389,16 +1403,24 @@ function SetupForm({ onDone }: { onDone: () => void }) {
 
   function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (!setupToken.trim()) {
+      setFormError("Enter the setup token from the server log.");
+      return;
+    }
+    if (!username.trim()) {
+      setFormError("Username is required.");
+      return;
+    }
     if (password !== confirmPassword) {
       setFormError("Passwords do not match.");
       return;
     }
-    if (password.length < 8) {
-      setFormError("Password must be at least 8 characters.");
+    if (password.length < minimumPasswordLength) {
+      setFormError(`Password must be at least ${minimumPasswordLength} characters.`);
       return;
     }
     setFormError(null);
-    mutation.mutate({ username, password, confirmPassword });
+    mutation.mutate({ setupToken: setupToken.trim(), username, password, confirmPassword });
   }
 
   const error = formError ?? mutation.error?.message;
@@ -1406,13 +1428,21 @@ function SetupForm({ onDone }: { onDone: () => void }) {
   return (
     <AuthShell title="Initial setup" icon={<Shield size={22} />}>
       <form className="auth-form" onSubmit={handleSubmit}>
+        <p className="auth-help">
+          Enter the setup token printed in the server log when SRTL Manager started, for example with <code>docker compose logs api</code>. It is also saved in the
+          data directory as <code>setup-token</code>.
+        </p>
+        <label>
+          Setup token
+          <input autoComplete="off" spellCheck={false} value={setupToken} onChange={(event) => setSetupToken(event.target.value)} />
+        </label>
         <label>
           Username
           <input autoComplete="username" value={username} onChange={(event) => setUsername(event.target.value)} />
         </label>
         <label>
           Password
-          <input autoComplete="new-password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} />
+          <input autoComplete="new-password" type="password" placeholder={`At least ${minimumPasswordLength} characters`} value={password} onChange={(event) => setPassword(event.target.value)} />
         </label>
         <label>
           Confirm password
@@ -1423,12 +1453,17 @@ function SetupForm({ onDone }: { onDone: () => void }) {
           Create admin
         </button>
         {error ? <p className="error">{error}</p> : null}
+        {onSignIn ? (
+          <button type="button" className="auth-link-button" onClick={onSignIn}>
+            Back to sign in
+          </button>
+        ) : null}
       </form>
     </AuthShell>
   );
 }
 
-function LoginForm({ onDone }: { onDone: () => void }) {
+function LoginForm({ onDone, onSetup }: { onDone: () => void; onSetup: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const mutation = useMutation({ mutationFn: api.login, onSuccess: onDone });
@@ -1451,6 +1486,9 @@ function LoginForm({ onDone }: { onDone: () => void }) {
           Sign in
         </button>
         {mutation.error ? <p className="error">{mutation.error.message}</p> : null}
+        <button type="button" className="auth-link-button" onClick={onSetup}>
+          First start? Set up with a setup token
+        </button>
       </form>
     </AuthShell>
   );

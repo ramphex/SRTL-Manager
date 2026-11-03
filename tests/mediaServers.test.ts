@@ -14,6 +14,7 @@ import { watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import { MockMediaServers } from "./watchSyncMocks";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 describe("media server migration", () => {
   it("moves watch sync servers into media_servers with their ids, tokens, and status, keeping pairs and history", async () => {
@@ -108,7 +109,7 @@ describe("media servers API", () => {
     plexEndpoints.plexTv = `${mock.base}/plextv`;
     plexEndpoints.plexApp = "https://app.plex.invalid";
     watchSyncHttpTiming.backoffMs = 1;
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     cookie = String(setup.headers["set-cookie"]);
   });
 

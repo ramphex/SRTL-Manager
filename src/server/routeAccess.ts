@@ -61,6 +61,8 @@ const routePolicies: readonly RoutePolicy[] = [
   { methods: ["POST"], url: "/api/auth/login", auth: "public", bodyLimit: publicBodyLimitBytes },
   { methods: ["POST"], url: "/api/auth/logout", auth: "public", bodyLimit: publicBodyLimitBytes },
   { methods: ["PUT"], url: "/api/auth/user", libraryLock: "exempt", bodyLimit: publicBodyLimitBytes },
+  { methods: ["DELETE"], url: "/api/auth/sessions/:id", libraryLock: "exempt" },
+  { methods: ["POST"], url: "/api/auth/sessions/revoke-others", libraryLock: "exempt", bodyLimit: publicBodyLimitBytes },
   { methods: ["POST"], url: radarrWebhookPath, auth: "webhook", webhook: "radarr" },
   { methods: ["POST"], url: radarrInstanceWebhookPath, auth: "webhook", webhook: "radarr" },
   { methods: ["POST"], url: sonarrWebhookPath, auth: "webhook", webhook: "sonarr" },

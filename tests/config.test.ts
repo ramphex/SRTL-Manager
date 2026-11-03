@@ -233,11 +233,28 @@ describe("config", () => {
 
   it("documents every security setting in the checked-in example environment", async () => {
     const example = await fs.readFile(new URL("../.env.example", import.meta.url), "utf8");
-    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE"]) {
+    for (const key of ["SRTL_PUBLIC_ORIGIN", "SRTL_TRUST_PROXY", "SRTL_ALLOWED_ORIGINS", "SRTL_COOKIE_SECURE", "SRTL_SESSION_IDLE_HOURS", "SRTL_SESSION_MAX_AGE_DAYS", "SRTL_SETUP_TOKEN"]) {
       expect(example, key).toContain(key);
     }
     expect(example).not.toMatch(/^SRTL_TRUST_PROXY=true/m);
     await fs.writeFile(path.join(tmpDir, ".env"), example.replace(/^SRTL_POSTGRES_PASSWORD=$/m, "SRTL_POSTGRES_PASSWORD=example"));
     expect(() => loadConfig({ rootDir: tmpDir })).not.toThrow();
+  });
+
+  it("loads session lifetimes and an optional fixed setup token", async () => {
+    await fs.writeFile(path.join(tmpDir, ".env"), "SRTL_DATABASE_URL=postgres://test:test@db:5432/test\n");
+    const defaults = loadConfig({ rootDir: tmpDir });
+    expect(defaults).toMatchObject({ sessionIdleTimeoutHours: 12, sessionMaxAgeDays: 14, setupToken: null });
+
+    await fs.writeFile(
+      path.join(tmpDir, ".env"),
+      ["SRTL_DATABASE_URL=postgres://test:test@db:5432/test", "SRTL_SESSION_IDLE_HOURS=48", "SRTL_SESSION_MAX_AGE_DAYS=30", "SRTL_SETUP_TOKEN=example-setup-token-0123456789"].join("\n")
+    );
+    expect(loadConfig({ rootDir: tmpDir })).toMatchObject({ sessionIdleTimeoutHours: 48, sessionMaxAgeDays: 30, setupToken: "example-setup-token-0123456789" });
+
+    for (const line of ["SRTL_SESSION_IDLE_HOURS=0", "SRTL_SESSION_IDLE_HOURS=1.5", "SRTL_SESSION_MAX_AGE_DAYS=366", "SRTL_SETUP_TOKEN=short", "SRTL_SETUP_TOKEN=has spaces in the middle of it"]) {
+      await fs.writeFile(path.join(tmpDir, ".env"), ["SRTL_DATABASE_URL=postgres://test:test@db:5432/test", line].join("\n"));
+      expect(() => loadConfig({ rootDir: tmpDir }), line).toThrow();
+    }
   });
 });

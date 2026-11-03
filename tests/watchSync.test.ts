@@ -30,6 +30,7 @@ import type { MediaServerList } from "../src/shared/mediaServers";
 import type { WatchSyncDirection, WatchSyncSideState, WatchSyncState } from "../src/shared/watchSync";
 import { MockMediaServers, type MockItem } from "./watchSyncMocks";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
+import { readSetupToken } from "./authHelpers";
 
 let app: AppContext;
 let database: TestDatabaseHandle;
@@ -485,7 +486,7 @@ describe("watch sync", () => {
 
   it("serves the settings API to signed-in admins and runs watch sync jobs on the worker", async () => {
     expect((await app.app.inject({ method: "GET", url: "/api/settings/watch-sync" })).statusCode).toBe(401);
-    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     const created = await app.app.inject({ method: "POST", url: "/api/media-servers", headers: { cookie }, payload: { kind: "jellyfin", name: "jf1", url: `${mock.base}/jf1`, token: mock.jellyfin.get("jf1")!.apiKey, prefixMappings: [] } });
     expect(created.statusCode).toBe(200);
