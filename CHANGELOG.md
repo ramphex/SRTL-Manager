@@ -4,10 +4,53 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4-beta.3] - 2026-11-03
+
 ### Added
 
 - Added **Now Playing**, a live-only page in the main navigation: current Plex and Jellyfin streams with play method (hardware or CPU transcode, direct stream, direct play), source and output formats, transcode reasons, bandwidth, LAN or WAN, optional plex.tv location lookup, and whether each file plays from local or remote storage in SRTL; a pinned strip with stream counts, total bandwidth, and host CPU, RAM, network, and NVIDIA GPU sparklines; and Stop with a message (Plex needs Plex Pass). Nothing is stored. See the [Now Playing guide](docs/now-playing.md) for the optional Docker `/proc` mount and GPU setup.
 - Added **Settings > Media servers**: Plex and Jellyfin connections now live in one shared place, with type, URL, status, and version for each server, plus add, edit, remove, Test connection, and Sign in with Plex. Watch sync uses these connections (its Servers tab becomes Users, for per-server user discovery), and a server that watch sync pairs still use cannot be removed. Existing watch sync servers move there with their ids, tokens, and status, so nothing needs to be signed in again (requires database migration 24). See the [media servers guide](docs/media-servers.md).
+
+### Security
+
+- Every API route now requires a signed-in admin unless it is explicitly public (sign-in, first-run setup, the liveness check, and the static app files) or a webhook with its secret, and the check runs before the request body is read.
+- First-run setup now needs a one-time setup token. It is printed in the API log (`docker compose logs api | grep "Setup token"`) and saved as `setup-token` in the API data directory, or can be set with `SRTL_SETUP_TOKEN`. Whether setup is still pending is reported only to local clients. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
+- Hardened sign-in: per-username and per-address backoff with lockouts capped at 15 minutes and 1 hour, the same response and timing for unknown usernames and wrong passwords, no default username, a 12-character minimum for new and changed passwords, and a rate limit on account changes.
+- Password hashes now record their scrypt parameters and use a higher cost. Older hashes are upgraded on the next sign-in.
+- Sessions now end after 12 hours without activity and 14 days after sign-in (`SRTL_SESSION_IDLE_HOURS`, `SRTL_SESSION_MAX_AGE_DAYS`). **Settings > User settings** lists sessions with device, address and last activity, and can sign out one session or all others. Changing the username starts a new session. With secure cookies, the session cookie is named with the `__Host-` prefix.
+- Added a security activity log for sign-ins, failures, lockouts, setup, password and username changes, ended sessions, removed media servers, and stopped Now Playing streams, shown read-only in **Settings > User settings** and kept for `SRTL_JOB_HISTORY_RETENTION_DAYS` (requires database migration 25).
+- SRTL now records who started a copy or an orphan purge, discarded a partial copy, removed a media server or a Radarr or Sonarr instance, or stopped a Now Playing stream, with the time and the item IDs. Signed-in admins can read the record at `/api/system/action-audit`; copies and purges also note the requester in the job's event log. It needs no database migration.
+- Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are now encrypted at rest with AES-256-GCM using `SRTL_SECRET_KEY` (requires database migration 26, which encrypts the existing values in place). SRTL refuses to start with a different key than the one that encrypted them; `SRTL_DISCARD_UNREADABLE_CREDENTIALS=true` removes only the unreadable credentials when the key is lost.
+- A saved token or API key is only sent to the address it was entered for. Changing a Plex server's address signs that server out; Jellyfin, Radarr and Sonarr addresses already required their API key again.
+- Added `SRTL_OUTBOUND_ALLOW_CIDRS` for the addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr. Loopback addresses are refused unless allowed, link-local and cloud metadata addresses are always refused, and every connection, including Now Playing sockets, goes to the address that was checked.
+- Now Playing streams now close when their session signs out or expires, and are limited to 4 per session and 32 in total.
+- `SRTL_TRUST_PROXY` now takes the addresses or CIDR ranges of your reverse proxies, or `loopback` for a proxy on the same host. Only those peers may set forwarding headers.
+- Added `SRTL_PUBLIC_ORIGIN` for reverse-proxy installs. Changes from that origin are accepted, and an `https` origin turns on secure session cookies by default; `SRTL_COOKIE_SECURE=false` together with an `https` public origin is refused at startup. A plain `http` address listed in `SRTL_ALLOWED_ORIGINS` keeps working: sign-ins there use a plain session cookie, because browsers refuse secure ones over plain HTTP.
+- `/api/health` and `/api/health/ready` now answer only direct local requests (such as a container health check) or a signed-in admin. `/api/health/live` stays public and returns only that the service is running.
+- The API documentation at `/documentation` is now off unless `SRTL_API_DOCS=true`, whatever `NODE_ENV` is, and needs a signed-in admin when on.
+- Requests without a session are limited to 600 a minute per client address, request bodies are limited to 256 KB except on the signed-in routes that need more (watch sync restore, large copy, audit and purge selections, bulk policy changes), and sign-in bodies to 16 KB.
+- Unknown paths under `/api`, `/documentation` and `/assets` now always return a plain 404.
+- Error responses no longer include stack traces, file paths, database text, or upstream response bodies. Expected failures keep their plain-language messages (for example "Radarr rejected the API key."); anything unexpected returns a generic message with a request ID, also sent as `X-Request-Id`, that matches the full error in the server log.
+- Responses now send `Permissions-Policy`, deny framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), and send `Strict-Transport-Security` without `includeSubDomains`.
+- Added a [reverse proxy guide](docs/reverse-proxy.md) with Nginx Proxy Manager settings, Authentik forward-auth, brief Caddy and Traefik examples, and a checklist for exposing SRTL to the internet.
+
+### Upgrade notes
+
+The migration service applies database migrations 24, 25 and 26 automatically. Existing sessions keep working, and an existing session cookie moves to the `__Host-` name on its own. Before upgrading, check these:
+
+- **`SRTL_TRUST_PROXY=true` is refused at startup.** Replace it with your proxy's addresses or CIDR ranges, for example `SRTL_TRUST_PROXY=192.168.1.10` or `SRTL_TRUST_PROXY=172.18.0.0/16`, or `loopback` for a proxy on the same host. `false` and an empty value are unchanged.
+- **Docker installs must set `SRTL_SECRET_KEY`.** Generate it once with `openssl rand -base64 32` and add it to `.env` before upgrading; the compose file will not start without it. Keep a copy separately from your database dumps, for example in a password manager: a dump cannot be restored with its credentials without the same key. Outside Docker, a key is created once as `secret.key` in the data directory when none is set; back up that file separately as well.
+- **Loopback connections need `SRTL_OUTBOUND_ALLOW_CIDRS`.** If Plex, Jellyfin, Radarr or Sonarr is reached at a loopback address such as `127.0.0.1` or `localhost`, set `SRTL_OUTBOUND_ALLOW_CIDRS=private,public,loopback`. LAN and internet addresses work without changes.
+- **New installs need a setup token.** First-run setup asks for the token from the API log or the `setup-token` file in the data directory. Installs that already have an administrator are not affected.
+- **New passwords need at least 12 characters.** Existing shorter passwords keep working until they are changed.
+- **Changing a Plex server's address signs it out.** Use **Sign in with Plex** again or paste a token after the change.
+- **The API docs are off by default.** Set `SRTL_API_DOCS=true` to serve `/documentation` to signed-in admins.
+## [0.1.4-beta.2] - 2026-11-02
+
+Includes everything from 0.1.4-beta.1.
+
+### Added
+
 - Recent Jobs now collapses back-to-back finished jobs for the same title (for example repeated webhook-triggered rescans) into one row with a count, a combined status summary such as "3 jobs · 1 failed", and a chevron that expands the individual jobs with their usual actions. Only adjacent jobs of the same type and exactly one title created within 30 minutes of each other are grouped; running and queued jobs, multi-title jobs and whole-section jobs are never grouped.
 - Added an optional Radarr integration: two configurable policy tags follow SRTL storage policies (only those tags are added or removed), automatic or manual folder mapping, a policy preview with review and import actions, and optional webhook-triggered title rescans. See the [integration guide](docs/radarr.md).
 - Added source media checks before every copy, in every verification profile: header and container signature, zero-filled start, end, and sampled regions, hollow (sparse placeholder) files, and a bounded ffprobe that requires a video stream, a duration, and a plausible bitrate. Junk sources fail before any bytes are transferred.
@@ -52,43 +95,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Security
 
-- Every API route now requires a signed-in admin unless it is explicitly public (sign-in, first-run setup, the liveness check, and the static app files) or a webhook with its secret, and the check runs before the request body is read.
-- First-run setup now needs a one-time setup token. It is printed in the API log (`docker compose logs api | grep "Setup token"`) and saved as `setup-token` in the API data directory, or can be set with `SRTL_SETUP_TOKEN`. Whether setup is still pending is reported only to local clients. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
-- Hardened sign-in: per-username and per-address backoff with lockouts capped at 15 minutes and 1 hour, the same response and timing for unknown usernames and wrong passwords, no default username, a 12-character minimum for new and changed passwords, and a rate limit on account changes.
-- Password hashes now record their scrypt parameters and use a higher cost. Older hashes are upgraded on the next sign-in.
-- Sessions now end after 12 hours without activity and 14 days after sign-in (`SRTL_SESSION_IDLE_HOURS`, `SRTL_SESSION_MAX_AGE_DAYS`). **Settings > User settings** lists sessions with device, address and last activity, and can sign out one session or all others. Changing the username starts a new session. With secure cookies, the session cookie is named with the `__Host-` prefix.
-- Added a security activity log for sign-ins, failures, lockouts, setup, password and username changes, ended sessions, removed media servers, and stopped Now Playing streams, shown read-only in **Settings > User settings** and kept for `SRTL_JOB_HISTORY_RETENTION_DAYS` (requires database migration 25).
-- SRTL now records who started a copy or an orphan purge, discarded a partial copy, removed a media server or a Radarr or Sonarr instance, or stopped a Now Playing stream, with the time and the item IDs. Signed-in admins can read the record at `/api/system/action-audit`; copies and purges also note the requester in the job's event log. It needs no database migration.
-- Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are now encrypted at rest with AES-256-GCM using `SRTL_SECRET_KEY` (requires database migration 26, which encrypts the existing values in place). SRTL refuses to start with a different key than the one that encrypted them; `SRTL_DISCARD_UNREADABLE_CREDENTIALS=true` removes only the unreadable credentials when the key is lost.
-- A saved token or API key is only sent to the address it was entered for. Changing a Plex server's address signs that server out; Jellyfin, Radarr and Sonarr addresses already required their API key again.
-- Added `SRTL_OUTBOUND_ALLOW_CIDRS` for the addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr. Loopback addresses are refused unless allowed, link-local and cloud metadata addresses are always refused, and every connection, including Now Playing sockets, goes to the address that was checked.
-- Now Playing streams now close when their session signs out or expires, and are limited to 4 per session and 32 in total.
-- `SRTL_TRUST_PROXY` now takes the addresses or CIDR ranges of your reverse proxies, or `loopback` for a proxy on the same host. Only those peers may set forwarding headers.
-- Added `SRTL_PUBLIC_ORIGIN` for reverse-proxy installs. Changes from that origin are accepted, and an `https` origin turns on secure session cookies by default; `SRTL_COOKIE_SECURE=false` together with an `https` public origin is refused at startup.
-- `/api/health` and `/api/health/ready` now answer only direct local requests (such as a container health check) or a signed-in admin. `/api/health/live` stays public and returns only that the service is running.
-- The API documentation at `/documentation` is now off unless `SRTL_API_DOCS=true`, whatever `NODE_ENV` is, and needs a signed-in admin when on.
-- Requests without a session are limited to 600 a minute per client address, request bodies are limited to 256 KB except on the signed-in routes that need more (watch sync restore, large copy, audit and purge selections, bulk policy changes), and sign-in bodies to 16 KB.
-- Unknown paths under `/api`, `/documentation` and `/assets` now always return a plain 404.
-- Error responses no longer include stack traces, file paths, database text, or upstream response bodies. Expected failures keep their plain-language messages (for example "Radarr rejected the API key."); anything unexpected returns a generic message with a request ID, also sent as `X-Request-Id`, that matches the full error in the server log.
-- Responses now send `Permissions-Policy`, deny framing (`X-Frame-Options: DENY`, `frame-ancestors 'none'`), and send `Strict-Transport-Security` without `includeSubDomains`.
-- Added a [reverse proxy guide](docs/reverse-proxy.md) with Nginx Proxy Manager settings, Authentik forward-auth, brief Caddy and Traefik examples, and a checklist for exposing SRTL to the internet.
 - Cleared the critical and high npm advisories for Fastify, Zod, undici, the router's serializer, Vite, and related packages by updating runtime and development dependencies and refreshing the lockfile.
 - Upgraded Vitest to 5 and jsdom to 30; jsdom 30 requires Node.js 24.15 or newer, which CI and release workflows already use.
 - Pinned GitHub Actions to their newer releases, each checked against its release tag.
 - Pinned a newer Node.js 24 bookworm-slim base image, so the container no longer ships the fixed critical and high vulnerabilities in Debian's perl and pcre2 packages.
-
-### Upgrade notes
-
-The migration service applies database migrations 25 and 26 automatically. Existing sessions keep working, and an existing session cookie moves to the `__Host-` name on its own. Before upgrading, check these:
-
-- **`SRTL_TRUST_PROXY=true` is refused at startup.** Replace it with your proxy's addresses or CIDR ranges, for example `SRTL_TRUST_PROXY=192.168.1.10` or `SRTL_TRUST_PROXY=172.18.0.0/16`, or `loopback` for a proxy on the same host. `false` and an empty value are unchanged.
-- **Docker installs must set `SRTL_SECRET_KEY`.** Generate it once with `openssl rand -base64 32` and add it to `.env` before upgrading; the compose file will not start without it. Keep a copy separately from your database dumps, for example in a password manager: a dump cannot be restored with its credentials without the same key. Outside Docker, a key is created once as `secret.key` in the data directory when none is set; back up that file separately as well.
-- **Loopback connections need `SRTL_OUTBOUND_ALLOW_CIDRS`.** If Plex, Jellyfin, Radarr or Sonarr is reached at a loopback address such as `127.0.0.1` or `localhost`, set `SRTL_OUTBOUND_ALLOW_CIDRS=private,public,loopback`. LAN and internet addresses work without changes.
-- **New installs need a setup token.** First-run setup asks for the token from the API log or the `setup-token` file in the data directory. Installs that already have an administrator are not affected.
-- **New passwords need at least 12 characters.** Existing shorter passwords keep working until they are changed.
-- **Changing a Plex server's address signs it out.** Use **Sign in with Plex** again or paste a token after the change.
-- **The API docs are off by default.** Set `SRTL_API_DOCS=true` to serve `/documentation` to signed-in admins.
-
 ## [0.1.3] - 2026-09-03
 
 ### Added

@@ -17,13 +17,13 @@ All names and addresses here are examples. Replace them with your own:
 
 SRTL reads three things from the connection, so the proxy and SRTL must agree on them.
 
-**`SRTL_PUBLIC_ORIGIN`** is the address people type, for example `https://srtl.example.com`. SRTL accepts changes (saving settings, starting a copy) only from that origin or from its own address, and an `https` origin turns on secure session cookies. Set it in `.env`:
+**`SRTL_PUBLIC_ORIGIN`** is the address people type, for example `https://srtl.example.com`. SRTL then accepts changes (saving settings, starting a copy) only from that origin and any listed in `SRTL_ALLOWED_ORIGINS`, and an `https` origin turns on secure session cookies. Set it in `.env`:
 
 ```
 SRTL_PUBLIC_ORIGIN=https://srtl.example.com
 ```
 
-If you also open SRTL by its LAN address, add that origin to `SRTL_ALLOWED_ORIGINS`, for example `http://192.168.1.20:5179`. Leave it empty otherwise.
+If you also open SRTL by its LAN address, add that origin to `SRTL_ALLOWED_ORIGINS`, for example `http://192.168.1.20:5179`. Browsers refuse `Secure` cookies over plain HTTP, so sign-ins at a listed `http` address use a plain session cookie while the public address keeps its secure one. Leave it empty otherwise.
 
 **`SRTL_TRUST_PROXY`** lists the proxies whose `X-Forwarded-For` and `X-Forwarded-Proto` headers SRTL believes. Those headers decide the client address used for sign-in and request rate limits and for the log, and whether the request counts as HTTPS. Set it to the proxy's address or range, never to `true` (SRTL refuses that value):
 

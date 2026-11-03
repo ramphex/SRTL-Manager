@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import type { AppConfig } from "../src/server/config";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
 import { isReservedPath, normalizedRequestPath } from "../src/server/routeAccess";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
@@ -331,6 +332,20 @@ describe("request guard", () => {
     const preferences = await app.app.inject({ method: "PUT", url: "/api/auth/user", headers: { cookie }, payload: { username: "admin", currentPassword: "wrong-password" } });
     expect(preferences.statusCode).toBe(401);
     expect(preferences.json()).toEqual({ error: "Current password is incorrect" });
+  });
+
+  it("keys the path migration lock off the matched route", async () => {
+    const app = await startApp();
+    const cookie = await createAdminSession(app);
+    const moved = path.join(tmpDir, "plex-moved");
+    await fs.mkdir(moved);
+    await reconcileEnvironmentPaths(app.database.db, { ...app.config.paths, symlinkDir: moved });
+    for (const url of ["/api/scans", "/%61pi/scans", "/%61%70%69/scans", "/ap%69/scans"]) {
+      const response = await app.app.inject({ method: "POST", url, headers: { cookie }, payload: { scanSymlinks: true, scanLocal: false, scanRemote: false } });
+      expect(response.statusCode, url).toBe(423);
+      expect(response.json(), url).toMatchObject({ error: expect.stringContaining("Complete the required path migration") });
+    }
+    expect(await app.jobs.listJobs()).toHaveLength(0);
   });
 
   it("answers unknown paths with a plain 404 and serves the app shell only to page loads", async () => {

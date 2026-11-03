@@ -45,7 +45,7 @@ Each browser you sign in with has its own session.
 - A session ends after 12 hours without activity (`SRTL_SESSION_IDLE_HOURS`) and 14 days after sign-in however active it is (`SRTL_SESSION_MAX_AGE_DAYS`).
 - **Settings > User settings > Sessions** lists every session with its device, address, sign-in time, last activity, and when it ends. **Sign out** ends one session; **Sign out all other sessions** ends every session except the one you are using.
 - Changing the password signs out every session and signs this browser in again. Changing the username starts a new session for this browser.
-- With secure cookies (an `https` `SRTL_PUBLIC_ORIGIN`, or `SRTL_COOKIE_SECURE=true`), the session cookie is named `__Host-srtl_session` (with the port suffix in development). Browsers accept that name only over HTTPS, for this exact host, so other sites and subdomains cannot plant or overwrite it.
+- With secure cookies (an `https` `SRTL_PUBLIC_ORIGIN`, or `SRTL_COOKIE_SECURE=true`), the session cookie is named `__Host-srtl_session` (with the port suffix in development). Browsers accept that name only over HTTPS, for this exact host, so other sites and subdomains cannot plant or overwrite it. A plain `http` address listed in `SRTL_ALLOWED_ORIGINS` keeps the plain cookie name, because browsers refuse secure cookies there.
 
 ## Security Activity
 
