@@ -45,18 +45,30 @@ The migration service applies database migrations 24, 25 and 26 automatically. E
 - **New passwords need at least 12 characters.** Existing shorter passwords keep working until they are changed.
 - **Changing a Plex server's address signs it out.** Use **Sign in with Plex** again or paste a token after the change.
 - **The API docs are off by default.** Set `SRTL_API_DOCS=true` to serve `/documentation` to signed-in admins.
-## [0.1.4-beta.2] - 2026-11-02
 
-Includes everything from 0.1.4-beta.1.
+## [0.1.4-beta.2] - 2026-11-02
 
 ### Added
 
 - Recent Jobs now collapses back-to-back finished jobs for the same title (for example repeated webhook-triggered rescans) into one row with a count, a combined status summary such as "3 jobs · 1 failed", and a chevron that expands the individual jobs with their usual actions. Only adjacent jobs of the same type and exactly one title created within 30 minutes of each other are grouped; running and queued jobs, multi-title jobs and whole-section jobs are never grouped.
+- The dashboard Storage overview orphan counts are now links to the orphan review for that location (the total opens the first location, with a picker in Library). The review adds "Purge all eligible", which holds or deletes every unprotected orphan through the existing purge job, with leftover folders only when you opt in. A confirmation dialog shows the count, size, category breakdown, mode, and stale-inventory warnings, defaults to hold, and requires typing a phrase for deletes on remote storage and for any purge over 1,000 items. Purges over 50,000 items are queued as several jobs, and the dialog links to their progress.
+- Added the Sonarr integration, replacing the "Coming soon" tab: any number of Sonarr instances, each owning SRTL Shows folders; two policy tags on series that follow SRTL storage policies, with review and import actions for conflicts; copy monitoring that unmonitors exactly the copied episodes when they reach Location 1 and monitors them again on the way back, as each file is verified, while the series stays monitored; Sonarr's episode file size in the pre-copy media check; and optional per-instance webhooks with a generated secret that rescan just the affected series folder. The copy dialog's monitoring checkbox now takes its default from the Radarr or Sonarr instance that owns the folder. See the [Sonarr guide](docs/sonarr.md).
+- Added **Watch sync** between Plex and Jellyfin in Settings > Integrations: watched state and resume positions follow each user across both servers, one way or both ways per user pair. Items are matched by their exact SRTL symlink path, so titles never need to match. Plex connects with **Sign in with Plex** (PIN sign-in, two-factor friendly) and every user, including Home, managed, and friend accounts, syncs with their own server token; Jellyfin uses an API key. SRTL suggests pairs from similar names (such as `alex_03` and `Alex`), allows one-to-many pairs, and writes nothing for a pair until you approve its preview. A snapshot of the last synced state lets unwatched propagate and the newest change win without bouncing back. Checks every 5 minutes read only what changed; a weekly full reconciliation runs as a job. Each pair is isolated with retries, so one offline server never stops the others. Pairs can be paused, backed up, and restored, and an activity log lists every change. See the [watch sync guide](docs/watch-sync.md).
+- Added partially hollow file detection. Local storage scans now read 24 evenly spaced 256 KB samples (about 6 MB) from files of 50 MB or more that have under 90% of their size stored on disk, and mark a file Damaged when 2 or more samples are all zeros. Files are only sampled when their size, modification time, or stored size changes, remote files are skipped, and read errors are recorded as unknown, never as damaged. Well-compressed files with no zero samples stay fine. Storage views show a Damaged pill, the orphan review counts damaged files, and a new Library > Damaged files view lists every hollow and damaged local file with its size, percent stored, zero samples, whether it is linked, and whether a remote copy exists, with a CSV export. Audits and the pre-copy source check use the same rules (requires database migration 23).
+- Added a per-folder default storage policy for new titles in Settings > Library. Titles first seen after it is set (for example Seerr requests imported by Radarr) get Location 1 or Location 2 instead of staying unassigned, recorded with source `default`. Existing titles and existing policies are never changed, a movie that already has the opposite Radarr tag stays in review, and no copy starts automatically. **Apply to unassigned titles now** assigns the default to a folder's unassigned titles after a confirmation. See [Default Policy For New Titles](docs/default-policy.md).
+
+### Changed
+
+- Radarr and Sonarr webhooks now batch per title: events for one movie or series are processed together once it has been quiet for 10 seconds (at most 60 seconds after its first pending event), and queue a single rescan that every event links to. Deleting a season in Sonarr used to create two rescans for ten events; it now creates one, and the job log reads "Title refresh requested by Sonarr (10 events)". Movie and series "added" events only update the catalog and queue no rescan unless the title folder already holds media symlinks.
+
+## [0.1.4-beta.1] - 2026-11-02
+
+### Added
+
 - Added an optional Radarr integration: two configurable policy tags follow SRTL storage policies (only those tags are added or removed), automatic or manual folder mapping, a policy preview with review and import actions, and optional webhook-triggered title rescans. See the [integration guide](docs/radarr.md).
 - Added source media checks before every copy, in every verification profile: header and container signature, zero-filled start, end, and sampled regions, hollow (sparse placeholder) files, and a bounded ffprobe that requires a video stream, a duration, and a plausible bitrate. Junk sources fail before any bytes are transferred.
 - Added Radarr size and runtime checks for mapped movies: a source smaller than Radarr's recorded file or under half of the movie's runtime is rejected as incomplete or a sample.
 - Added orphan purge for both storage locations: a review panel groups orphans into older or duplicate versions, copy leftovers, titles no longer in the library, SRTL leftovers, and unlinked files, with sizes, bulk selection, and a stale-inventory warning. Purges run as durable jobs that recheck every file immediately before touching it, can hold files in a restorable `.srtl-purged` area for a configurable period or delete them immediately, and clean up subtitles, artwork, and empty folders with the last video in a folder.
-- The dashboard Storage overview orphan counts are now links to the orphan review for that location (the total opens the first location, with a picker in Library). The review adds "Purge all eligible", which holds or deletes every unprotected orphan through the existing purge job, with leftover folders only when you opt in. A confirmation dialog shows the count, size, category breakdown, mode, and stale-inventory warnings, defaults to hold, and requires typing a phrase for deletes on remote storage and for any purge over 1,000 items. Purges over 50,000 items are queued as several jobs, and the dialog links to their progress.
 - Added an option to delete the remote source after a verified, byte-compared copy to local when no other symlink uses it.
 - Added Radarr copy monitoring: copies to Location 1 can unmonitor movies in Radarr and copies back to Location 2 can monitor them again, once every file of the movie reaches the destination. A checkbox beside copy buttons defaults to a setting in Settings > Integrations.
 - Added a daily full inventory scan, on by default after 05:00 server time and configurable in Settings > Advanced. The worker queues it once a day through the configured folder scheduling, starting the day after the upgrade, and skips it while another scan is queued or running.
@@ -65,15 +77,20 @@ Includes everything from 0.1.4-beta.1.
 - Added "Folders with no video" to the orphan review: folders left with only subtitles, artwork, samples, or nothing at all. They can be held or deleted with the same purge job, which walks each folder again right before touching it and skips it if a video, symlink, unfinished copy, or recent change appears.
 - The orphan review now warns when the storage inventory is unknown or more than 24 hours old. The warning does not block purges, which re-check every file.
 - Added support for any number of Radarr instances, such as 1080p, 4K, anime, and remuxes. Each instance has its own connection, policy tag names, copy monitoring default, webhook URL and secret, preview, and activity, and owns the SRTL folders mapped to it; a folder can belong to only one instance. Instances synchronize independently, so one offline Radarr never delays the others. Copy monitoring and media checks use the instance that owns the copied folder. Settings > Integrations > Radarr lists all instances with their status, folders, and last sync, and can add, rename, and remove them. Removing an instance only forgets SRTL's records; tags and monitoring in Radarr are left unchanged. An existing Radarr connection becomes the first instance with its key, secret, and sync state intact, and its webhook URL keeps working.
-- Added the Sonarr integration, replacing the "Coming soon" tab: any number of Sonarr instances, each owning SRTL Shows folders; two policy tags on series that follow SRTL storage policies, with review and import actions for conflicts; copy monitoring that unmonitors exactly the copied episodes when they reach Location 1 and monitors them again on the way back, as each file is verified, while the series stays monitored; Sonarr's episode file size in the pre-copy media check; and optional per-instance webhooks with a generated secret that rescan just the affected series folder. The copy dialog's monitoring checkbox now takes its default from the Radarr or Sonarr instance that owns the folder. See the [Sonarr guide](docs/sonarr.md).
 - Added **Generate secret** to each Radarr instance's Webhooks tab. It fills in a random 43-character webhook secret, shows it once with a Copy button, and applies it when you save. Typing your own secret still works.
 - Added a copyable `X-SRTL-Webhook-Secret` header key to each Radarr instance's Webhooks tab, next to the webhook URL and the secret value, each with its own Copy button.
 - Turned Radarr webhook setup into seven numbered steps with inline Copy buttons, in the order the work is done. The steps stay open until the instance has a saved secret, then collapse, and the setup guide and `docs/radarr.md` list the same steps and the six triggers to enable.
 - Copy buttons now work on plain HTTP installs, where the browser's clipboard API is unavailable, and the webhook URL has its own Copy button.
 - Added a per-operation **Discard partial copy** action to Settings > Advanced > Copy recovery for copies interrupted mid-transfer. It previews the temporary file and its size, requires confirmation, and the server re-checks that no active job touches the media before deleting anything.
-- Added **Watch sync** between Plex and Jellyfin in Settings > Integrations: watched state and resume positions follow each user across both servers, one way or both ways per user pair. Items are matched by their exact SRTL symlink path, so titles never need to match. Plex connects with **Sign in with Plex** (PIN sign-in, two-factor friendly) and every user, including Home, managed, and friend accounts, syncs with their own server token; Jellyfin uses an API key. SRTL suggests pairs from similar names (such as `alex_03` and `Alex`), allows one-to-many pairs, and writes nothing for a pair until you approve its preview. A snapshot of the last synced state lets unwatched propagate and the newest change win without bouncing back. Checks every 5 minutes read only what changed; a weekly full reconciliation runs as a job. Each pair is isolated with retries, so one offline server never stops the others. Pairs can be paused, backed up, and restored, and an activity log lists every change. See the [watch sync guide](docs/watch-sync.md).
-- Added partially hollow file detection. Local storage scans now read 24 evenly spaced 256 KB samples (about 6 MB) from files of 50 MB or more that have under 90% of their size stored on disk, and mark a file Damaged when 2 or more samples are all zeros. Files are only sampled when their size, modification time, or stored size changes, remote files are skipped, and read errors are recorded as unknown, never as damaged. Well-compressed files with no zero samples stay fine. Storage views show a Damaged pill, the orphan review counts damaged files, and a new Library > Damaged files view lists every hollow and damaged local file with its size, percent stored, zero samples, whether it is linked, and whether a remote copy exists, with a CSV export. Audits and the pre-copy source check use the same rules (requires database migration 23).
-- Added a per-folder default storage policy for new titles in Settings > Library. Titles first seen after it is set (for example Seerr requests imported by Radarr) get Location 1 or Location 2 instead of staying unassigned, recorded with source `default`. Existing titles and existing policies are never changed, a movie that already has the opposite Radarr tag stays in review, and no copy starts automatically. **Apply to unassigned titles now** assigns the default to a folder's unassigned titles after a confirmation. See [Default Policy For New Titles](docs/default-policy.md).
+
+### Changed
+
+- Radarr copy monitoring now updates each movie as soon as all of its files are copied and verified, instead of after the whole copy job ends, so long batches no longer leave copied movies monitored for hours. Each movie is updated once per copy and instance; the end-of-job pass still catches anything missed and lists titles that did not fully copy, and a job that fails on other titles or never finishes keeps the updates for titles that did copy. Terminating a copy now restores the monitoring of movies it had already changed, since their files are rolled back.
+- Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
+- Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
+- Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
+- Split the Radarr settings into tabs (Connection, Folder mappings, Policy sync, Copy monitoring, Webhooks, and Activity) under one persistent header with the status, enable toggle, and a single Save. Tabs with unsaved edits show a marker, a save blocked by an invalid field on a hidden tab switches to that tab, and the selected tab is remembered per browser.
+- Sped up the orphan review on large libraries. Review queries now use set-based joins with indexed path columns, so a library with about 19,000 remote files and 72,000 links loads in under a second instead of about three minutes.
 
 ### Fixed
 
@@ -83,22 +100,13 @@ Includes everything from 0.1.4-beta.1.
 - Copy jobs that partially failed no longer leave the replaced local versions of their successful copies behind; upgrades now clean up the previous local file even when another item in the same job fails. Year-numbered seasons such as `S1941E38` are now matched when detecting earlier local versions.
 - Mount checks now accept a FUSE or NFS mount whose listing fails partway through a large directory, since one readable entry proves it is mounted. The error is reported instead of the mount being treated as unmounted or empty, and storage walks keep the entries they read before the error without marking anything under the unscanned folder as missing.
 
-### Changed
-
-- Radarr and Sonarr webhooks now batch per title: events for one movie or series are processed together once it has been quiet for 10 seconds (at most 60 seconds after its first pending event), and queue a single rescan that every event links to. Deleting a season in Sonarr used to create two rescans for ten events; it now creates one, and the job log reads "Title refresh requested by Sonarr (10 events)". Movie and series "added" events only update the catalog and queue no rescan unless the title folder already holds media symlinks.
-- Radarr copy monitoring now updates each movie as soon as all of its files are copied and verified, instead of after the whole copy job ends, so long batches no longer leave copied movies monitored for hours. Each movie is updated once per copy and instance; the end-of-job pass still catches anything missed and lists titles that did not fully copy, and a job that fails on other titles or never finishes keeps the updates for titles that did copy. Terminating a copy now restores the monitoring of movies it had already changed, since their files are rolled back.
-- Media validation after copies and in audits now fails truncated streams (playback ending before the stated duration), structural container errors, and bursts of damaged packets or decoding errors. Previously only ffmpeg's exit status was checked, which let truncated, half-zeroed, and partially corrupted files pass.
-- Audits run the same source media checks before ffmpeg and report hollow or junk files directly.
-- Symlink scans check up to twelve link targets at once, and scan results are written in batches. Scans of large libraries on NFS finish much sooner.
-- Split the Radarr settings into tabs (Connection, Folder mappings, Policy sync, Copy monitoring, Webhooks, and Activity) under one persistent header with the status, enable toggle, and a single Save. Tabs with unsaved edits show a marker, a save blocked by an invalid field on a hidden tab switches to that tab, and the selected tab is remembered per browser.
-- Sped up the orphan review on large libraries. Review queries now use set-based joins with indexed path columns, so a library with about 19,000 remote files and 72,000 links loads in under a second instead of about three minutes.
-
 ### Security
 
 - Cleared the critical and high npm advisories for Fastify, Zod, undici, the router's serializer, Vite, and related packages by updating runtime and development dependencies and refreshing the lockfile.
 - Upgraded Vitest to 5 and jsdom to 30; jsdom 30 requires Node.js 24.15 or newer, which CI and release workflows already use.
 - Pinned GitHub Actions to their newer releases, each checked against its release tag.
 - Pinned a newer Node.js 24 bookworm-slim base image, so the container no longer ships the fixed critical and high vulnerabilities in Debian's perl and pcre2 packages.
+
 ## [0.1.3] - 2026-09-03
 
 ### Added
@@ -125,6 +133,26 @@ Includes everything from 0.1.4-beta.1.
 
 - Patched the newly disclosed `fast-uri` vulnerabilities by resolving the runtime dependency to 3.1.7 and 4.1.4, and updated Fastify to 5.12.1.
 - Passed npm audit, dependency review, CodeQL, the full test/build/browser suite, and container vulnerability scanning before stable promotion.
+
+## [0.1.3-beta.3] - 2026-09-01
+
+### Added
+
+- Added safe cleanup of symlinks left behind by failed copy jobs, with eligibility determined from durable copy-operation records and revalidated by the worker immediately before unlinking.
+- Added per-item trash actions and multi-select cleanup controls directly in failed-copy progress details, including explicit confirmation and cleanup-job progress.
+- Protected media and directories during cleanup: it only unlinks the selected managed symlink and refuses links that changed, were superseded, require reconciliation, or cannot be safely verified.
+
+### Changed
+
+- Made the mobile navigation drawer more compact, with reduced dead space, clearer hierarchy, and touch-sized controls.
+
+### Fixed
+
+- Corrected inventory-scan folder counts when a source such as Local files is not selected.
+
+### Security
+
+- Updated browser compatibility metadata to resolve the current high-severity Browserslist advisories used by the development toolchain.
 
 ## [0.1.3-beta.2] - 2026-08-12
 
@@ -212,6 +240,48 @@ Includes everything from 0.1.4-beta.1.
 
 - Patched current high- and moderate-severity transitive dependency advisories in `fast-uri`, `brace-expansion`, `undici`, and `postcss`.
 - Updated the pinned Docker registry login action to its hardened 4.6.0 release.
+
+## [0.1.2-beta.4] - 2026-08-01
+
+### Fixed
+
+- Prevented superseded legacy copy-reconciliation records from blocking newly scanned media while retaining exact media and managed-path safeguards for genuinely unresolved filesystem state.
+- Limited newly queued scoped copy jobs to their actionable media so already satisfied title links no longer inflate job totals or selected-title details.
+- Batched large selected-link title lookups and restored title tooltips for multi-link jobs without exceeding the API request limit.
+- Derived storage-file assignment exclusively from current linked symlinks so unlinked files cannot remain assigned to a storage location.
+- Reconciled legacy storage-file policies during migration and after scans or policy updates.
+
+## [0.1.2-beta.3] - 2026-07-31
+
+### Changed
+
+- Added configurable in-process worker slots and independent global, per-job-type, and copy-transfer concurrency limits without an arbitrary worker-count ceiling.
+- Kept example deployments at one worker slot by default while honoring any positive `SRTL_WORKER_COUNT` value from `.env`.
+- Allowed non-overlapping copy, audit, and targeted title-rescan work to run concurrently while broad scans and path migrations remain exclusive.
+
+### Fixed
+
+- Made queue admission, worker claims, stale-job recovery, and job updates lease-aware so overlapping or superseded workers cannot mutate the same job.
+- Preserved immutable job resource scopes so later inventory changes cannot remove an active job's overlap protection.
+- Scoped legacy failed-copy reconciliation locks to their exact media records and managed paths so newly scanned items from the same title can still be queued.
+- Allowed filesystem-read-only scans and audits to run while terminal legacy copy records await reconciliation; path migration and exact conflicting mutations remain fenced.
+- Loaded every page of dashboard work lists and made show and season copy actions server-scoped so large sections are never truncated to the first 250 links.
+- Accepted routine FUSE and NFS remounts without a false path migration when the canonical path and stable mount signature are unchanged, while retaining exact identity checks during active mutations.
+
+## [0.1.2-beta.2] - 2026-07-29
+
+### Changed
+
+- Made targeted title rescans validate readable symlink targets, reconcile their exact storage files, and report persistent read failures.
+- Retried transient source and transfer I/O failures before failing a copy.
+- Matched administrator usernames case-insensitively for login and account conflicts while preserving display capitalization.
+
+## [0.1.2-beta.1] - 2026-07-27
+
+### Changed
+
+- Replaced layout-shifting dashboard action messages with responsive overlay notifications.
+- Displayed a copy job's title directly when all selected links belong to one title, while retaining the title list for multi-title jobs.
 
 ## [0.1.1] - 2026-07-25
 
