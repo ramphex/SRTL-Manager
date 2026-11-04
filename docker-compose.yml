@@ -117,6 +117,14 @@ services:
       - type: bind
         source: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
         target: ${SRTL_LOCATION_2_PATH:?Set SRTL_LOCATION_2_PATH in .env}
+      # Database backups. Only the worker reads or writes this folder. SRTL_UID
+      # must own it: a folder Docker creates here belongs to root, and Settings >
+      # Backups says so until that is fixed.
+      - type: bind
+        source: ${SRTL_BACKUP_HOST_PATH:-./backups}
+        target: /backups
+        bind:
+          create_host_path: true
     tmpfs:
       - /tmp:size=256m,mode=1777
     security_opt:

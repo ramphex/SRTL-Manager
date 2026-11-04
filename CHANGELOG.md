@@ -4,6 +4,18 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- Added scheduled database backups in **Settings > Backups**: on by default, nightly at 03:30 server time, keeping 7, with a **Back up now** button, the last result, the next run, and a list of backups with their age, size and verified state. Each run is a job in Logs, and runs next to other jobs without using one of their slots. A backup counts only once its checksum and `pg_restore --list` pass, older ones are removed only after that, and at least two verified backups always stay. A failed or overdue backup, or a location that cannot be written, shows on every page and in `/api/health`. Restoring is done by hand, following the tested steps in the [database backups guide](docs/backups.md) (requires database migration 27).
+
+### Upgrade notes
+
+The migration service applies database migration 27 automatically. Backups are on after the upgrade and start at the next 03:30.
+
+- **Docker installs should create the backup folder.** Set `SRTL_BACKUP_HOST_PATH` in `.env` to a folder owned by `SRTL_UID`, outside your media roots. Without it, Compose creates `./backups` owned by root, and Settings > Backups says it cannot be written until you change the owner. A custom Compose file needs the same folder mounted at `/backups` in the worker.
+- **Installs outside Docker need the PostgreSQL 17 client tools.** Install `pg_dump` and `pg_restore` version 17 or newer, and set `SRTL_PG_BIN_DIR` if they are not first on `PATH`. Backups go in `backups` inside `SRTL_DATA_DIR` unless `SRTL_BACKUP_DIR` says otherwise.
+- **Keep `SRTL_SECRET_KEY` separately from the backups.** A backup cannot restore saved Plex tokens and API keys without it.
+
 ### Security
 
 - The sign-in page no longer has a setup link, so it never appears on a server that is already set up. Browsers on the host or the local network still get the setup form on their own while no administrator exists. Anyone else opens `/setup`, an address printed in the API log with the setup token. It looks the same whether or not an administrator exists, and setup still needs the token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).

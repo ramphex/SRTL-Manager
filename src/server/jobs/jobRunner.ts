@@ -36,6 +36,8 @@ import { discardPartialCopy, previewPartialCopyDiscard } from "./partialCopyDisc
 import { schedulerLockKey } from "./scheduling";
 import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
 import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
+import { runBackup, type BackupRuntime } from "../lib/backups";
+import type { BackupTrigger } from "../../shared/backups";
 import type {
   AuditMode,
   AuditOptions,
@@ -190,6 +192,8 @@ export interface JobWorkerOptions {
   // Called for copies that update Radarr or Sonarr monitoring, with titles whose files may all have reached the destination.
   // The callee checks which titles are complete, so calling it again for the same title is harmless.
   copiedTitles?: (copy: { jobId: number; direction: CopyOptions["direction"]; radarrMonitoring: boolean; sonarrMonitoring: boolean }, titles: Array<{ section: string; itemName: string }>) => Promise<void>;
+  // Where database backups go and how to reach the database. Without it, backup jobs fail with a clear message.
+  backup?: BackupRuntime;
 }
 
 function normalizeSelectedSections(selectedSections: string[] | undefined, configuredSections: string[], label: string): string[] {
@@ -2756,6 +2760,21 @@ export class JobRunner {
     }));
   }
 
+  async startBackup(trigger: BackupTrigger): Promise<number> {
+    return this.enqueuePreparedJob("backup", async (transaction) => {
+      const active = await first(
+        transaction.select({ id: schema.jobs.id }).from(schema.jobs).where(and(eq(schema.jobs.type, "backup"), inArray(schema.jobs.status, ["queued", "running"]))).limit(1)
+      );
+      if (active) throw new ConflictError(`A database backup is already running as job #${active.id}.`);
+      return {
+        progress: { options: { trigger }, stage: "queued", message: "Waiting to back up the database" },
+        options: { trigger },
+        exclusive: false,
+        claims: [{ resourceType: "database_backup", resourceKey: "database", access: "exclusive" }]
+      };
+    });
+  }
+
   async copyFailures(jobId: number): Promise<CopyFailureList> {
     return (await resolveCopyFailures(this.db, jobId)).list;
   }
@@ -2948,8 +2967,10 @@ export class JobWorker {
   private readonly copyTransferLimiter: CopyTransferLimiter;
   private readonly mediaExpectations: JobWorkerOptions["mediaExpectations"];
   private readonly copiedTitles: JobWorkerOptions["copiedTitles"];
+  private readonly backupRuntime: JobWorkerOptions["backup"];
   private readonly activeAbortControllers = new Map<number, AbortController>();
   private readonly activeRuns = new Set<Promise<void>>();
+  private activeBackupRuns = 0;
   private stopRequested = false;
   private loopRunning = false;
   private sleepTimer: NodeJS.Timeout | null = null;
@@ -2970,6 +2991,7 @@ export class JobWorker {
     this.copyTransferLimiter = options.copyTransferLimiter ?? new CopyTransferLimiter(this.concurrency.maxActiveCopyFiles);
     this.mediaExpectations = options.mediaExpectations;
     this.copiedTitles = options.copiedTitles;
+    this.backupRuntime = options.backup;
   }
 
   async start(): Promise<void> {
@@ -2982,26 +3004,30 @@ export class JobWorker {
     try {
       while (!this.stopRequested) {
         let claimedAny = false;
-        while (!this.stopRequested && this.activeRuns.size < this.dispatchConcurrency) {
-          if (await isPathConfigurationBlocked(this.db)) await this.requeueInterruptedJobsForPathMigration();
-          const claimed = await this.claimNextJob();
+        while (!this.stopRequested && (this.hasFreeJobSlot() || this.activeBackupRuns === 0)) {
+          const freeJobSlot = this.hasFreeJobSlot();
+          if (freeJobSlot && (await isPathConfigurationBlocked(this.db))) await this.requeueInterruptedJobsForPathMigration();
+          const claimed = await this.claimNextJob(!freeJobSlot);
           if (this.stopRequested) {
             if (claimed) await this.requeueInterruptedJob(claimed.job);
             break;
           }
           if (!claimed) break;
           claimedAny = true;
+          const isBackup = claimed.job.type === "backup";
+          if (isBackup) this.activeBackupRuns += 1;
           const run = this.runClaimedJob(claimed.job)
             .catch((error: unknown) => {
               this.logger.error(`SRTL worker ${this.workerId} dispatcher failed job #${claimed.job.id}: ${errorMessage(error)}`);
             })
             .finally(() => {
+              if (isBackup) this.activeBackupRuns -= 1;
               this.activeRuns.delete(run);
               this.wake();
             });
           this.activeRuns.add(run);
         }
-        if (!this.stopRequested && (!claimedAny || this.activeRuns.size >= this.dispatchConcurrency)) {
+        if (!this.stopRequested && (!claimedAny || !this.hasFreeJobSlot())) {
           await this.sleep(this.pollIntervalMs);
         }
       }
@@ -3014,6 +3040,11 @@ export class JobWorker {
       this.loopRunning = false;
       this.logger.info(`SRTL worker ${this.workerId} stopped`);
     }
+  }
+
+  // A backup runs beside the job slots: it neither takes one from normal jobs nor waits hours for one to free up.
+  private hasFreeJobSlot(): boolean {
+    return this.activeRuns.size - this.activeBackupRuns < this.dispatchConcurrency;
   }
 
   stop(): void {
@@ -3072,7 +3103,7 @@ export class JobWorker {
     return processHeartbeatStale && isStaleRunningJob(job, this.reclaimOwnInterruptedAfterMs);
   }
 
-  private async claimNextJob(): Promise<ClaimedJob | null> {
+  private async claimNextJob(backupOnly = false): Promise<ClaimedJob | null> {
     return this.db.transaction(async (transaction) => {
       await transaction.execute(sql`select pg_advisory_xact_lock(${schedulerLockKey})`);
       const pathConfigurationBlocked = await isPathConfigurationBlocked(transaction);
@@ -3186,9 +3217,10 @@ export class JobWorker {
       let candidate: JobRow | undefined;
       for (const queuedJob of candidates) {
         const jobType = queuedJob.type as JobRecord["type"];
+        if (backupOnly && jobType !== "backup") continue;
         const typeLimit = this.limitForType(jobType);
         if (typeLimit < 1) continue;
-        if (runningJobs.length >= this.concurrency.maxRunningJobs) continue;
+        if (jobType !== "backup" && runningJobs.filter((job) => job.type !== "backup").length >= this.concurrency.maxRunningJobs) continue;
         if (runningJobs.filter((job) => job.type === jobType).length >= typeLimit) continue;
         if (queuedJob.exclusive) {
           if (runningJobs.length === 0) candidate = queuedJob;
@@ -3243,6 +3275,7 @@ export class JobWorker {
     if (type === "scan") return this.concurrency.maxRunningScans;
     if (type === "audit") return this.concurrency.maxRunningAudits;
     if (type === "copy" || type === "symlink_cleanup" || type === "orphan_purge") return this.concurrency.maxRunningCopies;
+    if (type === "backup") return 1;
     return this.concurrency.maxRunningJobs;
   }
 
@@ -3526,6 +3559,11 @@ export class JobWorker {
       const result = await runWatchSyncJob(this.db, jobProgressOptions<WatchSyncJobOptions>(job) ?? { mode: "reconcile", pairIds: [] }, ctx);
       if (result.failedPairs > 0) throw new PartialJobFailureError(result.summary);
       await ctx.event("info", result.summary);
+      return;
+    }
+    if (job.type === "backup") {
+      if (!this.backupRuntime) throw new Error("This worker has no database backup configuration");
+      await runBackup(this.db, this.backupRuntime, ctx, jobProgressOptions<{ trigger?: BackupTrigger }>(job)?.trigger ?? "manual");
       return;
     }
     if (job.type === "path_migration") {

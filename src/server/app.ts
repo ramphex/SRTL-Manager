@@ -41,6 +41,8 @@ import { registerOrphanRoutes } from "./routes/orphanRoutes";
 import { registerMediaServerRoutes } from "./routes/mediaServerRoutes";
 import { registerWatchSyncRoutes } from "./routes/watchSyncRoutes";
 import { registerNowPlayingRoutes } from "./routes/nowPlayingRoutes";
+import { registerBackupRoutes } from "./routes/backupRoutes";
+import { getBackupState } from "./lib/backups";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
 import { registerSonarrRoutes, sonarrWebhookInstanceId } from "./routes/sonarrRoutes";
@@ -273,9 +275,12 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
     }, 0);
     const expectedWorkerCount = config.jobConcurrency.maxRunningJobs;
     const ready = readyWorkerCount >= expectedWorkerCount;
+    // Only the kind of problem: this answer goes to local health checks, which have no business seeing paths.
+    const backupState = await getBackupState(database.db, { defaultLocation: config.backupDir, paths: config.paths }).catch(() => null);
     return {
       ok: ready,
       database: "ready",
+      backups: backupState ? backupState.alert?.kind ?? (backupState.settings.enabled ? "ok" : "disabled") : "unknown",
       worker: ready ? "ready" : workers.length > 0 ? "stale" : "not_started",
       workerHeartbeatAt: latestWorker?.heartbeatAt ?? null,
       expectedWorkerCount,
@@ -309,6 +314,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   registerDamagedRoutes(app, database.db);
   registerJobRoutes(app, jobs, database.db);
   registerActionAuditRoutes(app, database.db);
+  registerBackupRoutes(app, database.db, jobs, { defaultLocation: config.backupDir, paths: config.paths });
   registerSystemRoutes(app);
   registerPathConfigurationRoutes(app, database.db, jobs, config.paths);
 

@@ -10,6 +10,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period.
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles. Each folder can optionally give new titles a [default policy](docs/default-policy.md).
 - Fast and deep audits across local and remote targets.
+- Nightly verified database backups with retention, and a warning on every page if one fails or is overdue. See [database backups](docs/backups.md).
 - Bidirectional copies with live progress, transient transfer retry, conflict handling, configurable verification, source/title risk checks, and source media checks that reject hollow, zero-filled, truncated, or unreadable files before transferring.
 - Safe job termination, complete event timelines, restart recovery, and durable per-file copy journals.
 - Configurable parallel job and copy-file execution with database-backed overlap protection.
@@ -53,6 +54,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SYMLINK_DIR`: the existing absolute path containing the managed symlinks.
 - `SRTL_LOCATION_1_PATH` and `SRTL_LOCATION_2_PATH`: existing absolute storage paths. Their friendly names are set during onboarding and can be changed later in Settings > Library.
 - `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
+- `SRTL_BACKUP_HOST_PATH`: the folder for scheduled database backups, outside your media roots and owned by `SRTL_UID`. Create it first, or Docker creates it as root and Settings > Backups will say it cannot be written. See [Database backups](docs/backups.md).
 - `SRTL_SECRET_KEY`: the key that encrypts saved Plex tokens and Jellyfin, Radarr and Sonarr API keys. Generate it once with `openssl rand -base64 32` and keep a copy with your backups. Compose will not start without it. See [Backup And Restore](#backup-and-restore).
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
@@ -131,13 +133,17 @@ Error responses from the API never include stack traces, file paths, database te
 
 ## Backup And Restore
 
-Create a database backup before upgrades or path changes:
+SRTL Manager backs up its database every night, verifies each backup, and shows a failed or overdue one on every page. Configure it in **Settings > Backups**, or use **Back up now** before an upgrade or a path change. The [database backups guide](docs/backups.md) covers the location, what gets removed, and how to restore.
+
+Backups need `SRTL_BACKUP_HOST_PATH`: a folder owned by `SRTL_UID` and outside your media roots. They are not useful for restoring saved credentials without `SRTL_SECRET_KEY`, so keep a copy of that key separately. See [Secret key](#secret-key).
+
+To take a one-off plain SQL dump by hand instead:
 
 ```bash
 (umask 077 && docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" "$POSTGRES_DB"' > srtl-manager-backup.sql)
 ```
 
-Restore into an empty database while app services are stopped:
+Restore that plain dump into an empty database while app services are stopped:
 
 ```bash
 docker compose stop api worker
@@ -181,6 +187,8 @@ npm run test:e2e
 ```
 
 Stop the disposable database with `docker stop srtl-manager-dev-postgres`. To use an existing Postgres instance instead, provide the `SRTL_POSTGRES_*` settings or `SRTL_DATABASE_URL` in a local `.env`.
+
+Scheduled backups need `pg_dump` and `pg_restore` version 17 or newer on the machine running the worker; set `SRTL_PG_BIN_DIR` if they are not first on `PATH`. Without them, Settings > Backups says what is missing and the rest of the app is unaffected.
 
 The optional `npm run sync:server` helper synchronizes source to an existing development server selected by `SRTL_REMOTE` (or `SRTL_REMOTE_HOST`). It preserves remote `.env`, data, dependencies, and logs, refuses an unrelated non-empty destination, and supports a non-mutating preview with `SRTL_SYNC_DRY_RUN=1`. A normal first sync initializes the destination marker that later syncs require.
 

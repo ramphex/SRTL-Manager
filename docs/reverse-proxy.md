@@ -359,7 +359,7 @@ Work through this list in order. Each item is something that has gone wrong on r
 **Afterwards**
 - [ ] Treat database dumps and the `data` folder as secrets. Media server tokens and Radarr and Sonarr API keys are stored encrypted with `SRTL_SECRET_KEY`, so keep the key apart from the dumps, and keep both off shared storage.
 - [ ] Watch the SRTL [releases](https://github.com/ramphex/SRTL-Manager/releases) and update when a security fix ships.
-- [ ] Review account activity from time to time. Settings > User settings lists open sessions and a security activity log of sign-ins, failures, lockouts, account changes, removed media servers and stopped streams. `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, and stopped streams, with who, when and the item IDs.
+- [ ] Review account activity from time to time. Settings > User settings lists open sessions and a security activity log of sign-ins, failures, lockouts, account changes, removed media servers and stopped streams. `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, stopped streams, and database backup settings changes and manual runs, with who, when and the item IDs.
 - [ ] Decide how long you keep proxy and SRTL logs. They contain client addresses, which are personal data.
 
 ## When something goes wrong

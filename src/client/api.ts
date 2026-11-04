@@ -49,6 +49,7 @@ import type {
 } from "../shared/types";
 
 import type { AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
+import type { BackupSettings, BackupState } from "../shared/backups";
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSettingsInput, SonarrState } from "../shared/sonarr";
 
@@ -103,6 +104,9 @@ export const api = {
   revokeSession: (id: number) => request<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
   revokeOtherSessions: () => request<{ ok: true; revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" }),
   securityEvents: (before?: number) => request<SecurityEventPage>(`/api/auth/security-events?limit=50${before ? `&before=${before}` : ""}`),
+  backups: () => request<BackupState>("/api/backups"),
+  saveBackupSettings: (body: BackupSettings) => request<BackupState>("/api/backups/settings", { method: "PUT", body: JSON.stringify(body) }),
+  runBackup: () => request<{ jobId: number }>("/api/backups/run", { method: "POST" }),
   appVersion: (refresh = false) => request<AppVersionInfo>(`/api/system/version${refresh ? "?refresh=true" : ""}`),
   getPaths: () => request<PathsSettings>("/api/settings/paths"),
   getStorageLocations: () => request<StorageLocationsSettings>("/api/settings/storage-locations"),

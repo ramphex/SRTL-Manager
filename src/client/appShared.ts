@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { useInfiniteQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
-import { FolderCog, Gauge, ListChecks, Monitor, Moon, Plug, Search, Server, Sun, UserCog } from "lucide-react";
+import { DatabaseBackup, FolderCog, Gauge, ListChecks, Monitor, Moon, Plug, Search, Server, Sun, UserCog } from "lucide-react";
 import { api } from "./api";
 import { scanOptionsFromJob } from "./jobScopeLocks";
 import { mergeJobEventPages } from "./jobEvents";
@@ -12,7 +12,7 @@ export type ThemePreference = "light" | "dark" | "system";
 
 export type SymlinkKindFilter = Exclude<MediaLinkTreeKindFilter, "other" | "non_media"> | "all";
 
-export type SettingsView = "library" | "advanced" | "media-servers" | "integrations" | "user";
+export type SettingsView = "library" | "advanced" | "backups" | "media-servers" | "integrations" | "user";
 
 export type SidebarGroup = "history" | "settings";
 
@@ -120,6 +120,7 @@ export const historySections = [
 export const settingsSections = [
   { view: "library", to: "/settings", label: "Library", icon: FolderCog },
   { view: "advanced", to: "/settings/advanced", label: "Advanced", icon: Gauge },
+  { view: "backups", to: "/settings/backups", label: "Backups", icon: DatabaseBackup },
   { view: "media-servers", to: "/settings/media-servers", label: "Media servers", icon: Server },
   { view: "integrations", to: "/settings/integrations", label: "Integrations", icon: Plug },
   { view: "user", to: "/settings/user", label: "User settings", icon: UserCog }

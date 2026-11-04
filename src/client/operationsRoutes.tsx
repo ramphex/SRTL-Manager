@@ -3,6 +3,7 @@ import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, Trash2, TriangleAlert, UserCog, X } from "lucide-react";
 import { api } from "./api";
+import { BackupSettingsPanel } from "./backupSettings";
 import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
 import { MediaServerSettingsPanel } from "./mediaServerSettings";
@@ -458,10 +459,12 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
       ? "Name storage locations, review mounted paths, and manage library sections."
       : activeView === "advanced"
         ? "Tune job behavior and verification defaults."
+        : activeView === "backups"
+          ? "Scheduled database backups, checked after every run."
         : activeView === "media-servers"
           ? "Plex and Jellyfin connections shared by watch sync and other features."
           : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences, account access, and signed-in sessions.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "backups" ? "Backups" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -491,6 +494,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
         </>
       ) : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
+      {activeView === "backups" ? <BackupSettingsPanel /> : null}
       {activeView === "media-servers" ? <MediaServerSettingsPanel /> : null}
       {activeView === "integrations" ? <IntegrationSettings /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
@@ -1393,6 +1397,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "orphan_purge", label: "Orphan purges" },
   { value: "path_migration", label: "Path migrations" },
   { value: "watch_sync", label: "Watch sync" },
+  { value: "backup", label: "Database backups" },
 ];
 
 const logLevelFilters: Array<{ value: EventLevelFilter; label: string }> = [

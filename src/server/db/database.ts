@@ -7,6 +7,7 @@ import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
+import { applyBackupMigration } from "./backupMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -28,7 +29,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 26;
+export const currentSchemaVersion = 27;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -860,6 +861,17 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // Stored Plex tokens and Jellyfin, Radarr and Sonarr API keys are sealed with the secret key.
         await encryptStoredSecrets(client, activeSecretBox(), nowIso());
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (26, 'encrypt_stored_credentials', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(27)) {
+      await client.query("BEGIN");
+      try {
+        await applyBackupMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, 'database_backups', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

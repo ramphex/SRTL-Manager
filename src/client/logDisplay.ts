@@ -148,6 +148,7 @@ export function formatJobType(type: JobType): string {
   if (type === "orphan_purge") return "Orphan purge";
   if (type === "path_migration") return "Path migration";
   if (type === "watch_sync") return "Watch sync";
+  if (type === "backup") return "Database backup";
   return "Integration sync";
 }
 

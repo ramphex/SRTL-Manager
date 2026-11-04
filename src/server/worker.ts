@@ -6,12 +6,14 @@ import type { PathsSettings } from "../shared/types";
 import { CopyTransferLimiter } from "./jobs/copyLimiter";
 import { JobRunner, JobWorker } from "./jobs/jobRunner";
 import { startScheduledInventoryScan } from "./jobs/scheduledScans";
+import { refreshBackupStatusIfDue, startScheduledBackup } from "./jobs/scheduledBackups";
 import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
 import { pruneExpiredSessions, pruneTerminalJobHistory } from "./lib/historyRetention";
 import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/workerHeartbeats";
 import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
 import { queueCopiedSonarrEpisodes, sonarrMediaExpectation, startSonarrWork } from "./lib/sonarr";
+import { refreshBackupStatus } from "./lib/backups";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 import { runWatchSyncWork } from "./lib/watchSyncEngine";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
@@ -56,8 +58,10 @@ const bootId = randomUUID();
 const workerId = `${workerBaseId}:${bootId}`;
 const copyTransferLimiter = new CopyTransferLimiter(config.jobConcurrency.maxActiveCopyFiles);
 const startedAt = nowIso();
+const backupRuntime = { databaseUrl: config.databaseUrl, defaultLocation: config.backupDir, pgBinDir: config.pgBinDir, paths: config.paths };
 const worker = new JobWorker(database.db, {
   workerId,
+  backup: backupRuntime,
   concurrency: config.jobConcurrency,
   copyTransferLimiter,
   dispatchConcurrency: config.jobConcurrency.maxRunningJobs,
@@ -110,6 +114,17 @@ let watchSyncTimer: NodeJS.Timeout | null = null;
 let watchSyncRun: Promise<void> | null = null;
 let scheduledScanTimer: NodeJS.Timeout | null = null;
 let scheduledScanRun: Promise<void> | null = null;
+let scheduledBackupTimer: NodeJS.Timeout | null = null;
+let scheduledBackupRun: Promise<void> | null = null;
+let backupStatusCheckedSinceStart = false;
+async function runScheduledBackupWork(): Promise<void> {
+  const jobId = await startScheduledBackup(database.db, scheduledScanRunner);
+  if (jobId) console.warn(`Queued the scheduled database backup as job #${jobId}.`);
+  // A restart may have changed what is mounted, so the first check after one always looks.
+  if (backupStatusCheckedSinceStart) await refreshBackupStatusIfDue(database.db, backupRuntime);
+  else await refreshBackupStatus(database.db, backupRuntime);
+  backupStatusCheckedSinceStart = true;
+}
 const scheduledScanRunner = new JobRunner(database.db);
 try {
   await recordHeartbeat("running");
@@ -152,6 +167,16 @@ try {
         });
     }, 5 * 60 * 1_000);
     scheduledScanTimer.unref();
+    scheduledBackupRun = runScheduledBackupWork()
+      .catch((error: unknown) => { console.error("Scheduled database backup could not be checked; it will be retried.", error); })
+      .finally(() => { scheduledBackupRun = null; });
+    scheduledBackupTimer = setInterval(() => {
+      if (shuttingDown || scheduledBackupRun) return;
+      scheduledBackupRun = runScheduledBackupWork()
+        .catch((error: unknown) => { console.error("Scheduled database backup could not be checked; it will be retried.", error); })
+        .finally(() => { scheduledBackupRun = null; });
+    }, 30_000);
+    scheduledBackupTimer.unref();
     heartbeatTimer = setInterval(() => {
       if (shuttingDown || heartbeatRun) return;
       heartbeatRun = recordHeartbeat("running")
@@ -185,6 +210,7 @@ try {
   if (sonarrTimer) clearInterval(sonarrTimer);
   if (watchSyncTimer) clearInterval(watchSyncTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
+  if (scheduledBackupTimer) clearInterval(scheduledBackupTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
   await maintenanceRun;
@@ -193,6 +219,7 @@ try {
   await sonarrRun;
   await Promise.allSettled([...sonarrInstanceRuns.values()]);
   await scheduledScanRun;
+  await scheduledBackupRun;
   await watchSyncRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);

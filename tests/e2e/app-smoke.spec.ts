@@ -454,6 +454,7 @@ test("renders every authenticated route without page errors or global overflow",
     { path: "/logs", expected: "Logs" },
     { path: "/settings", expected: "Settings > Library" },
     { path: "/settings/advanced", expected: "Settings > Advanced" },
+    { path: "/settings/backups", expected: "Settings > Backups" },
     { path: "/settings/user", expected: "Settings > User settings" }
   ];
 

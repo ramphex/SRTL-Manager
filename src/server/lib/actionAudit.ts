@@ -26,7 +26,9 @@ export type ActionAuditAction =
   | "media_server.remove"
   | "radarr_instance.remove"
   | "sonarr_instance.remove"
-  | "now_playing.stop_stream";
+  | "now_playing.stop_stream"
+  | "backup.settings_change"
+  | "backup.run";
 
 export interface ActionAuditActor {
   userId: number;

@@ -3,6 +3,7 @@ import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, O
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
+import { BackupAlertBanner } from "./backupSettings";
 import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdateReadyEvent, type PwaUpdateReadyDetail } from "./pwa";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
@@ -300,6 +301,8 @@ function RootLayout() {
             ? "Audit history"
             : pathname === "/settings/advanced"
               ? "Advanced settings"
+              : pathname === "/settings/backups"
+                ? "Backup settings"
               : pathname === "/settings/media-servers"
                 ? "Media servers"
                 : pathname === "/settings/integrations"
@@ -475,6 +478,7 @@ function RootLayout() {
         </div>
       </aside>
       <main ref={contentRef} className="content" tabIndex={-1}>
+        {pathname === "/settings/backups" ? null : <BackupAlertBanner />}
         <StorageLocationsContext.Provider value={storageLocations.data ?? defaultStorageLocations}>
           <UserPreferencesContext.Provider value={userPreferences.data ?? defaultUserPreferences}>
             <Outlet />
@@ -1595,6 +1599,7 @@ const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audit
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });
 const settingsSectionsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/sections", component: () => <SettingsPage activeView="library" /> });
 const settingsAdvancedRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/advanced", component: () => <SettingsPage activeView="advanced" /> });
+const settingsBackupsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/backups", component: () => <SettingsPage activeView="backups" /> });
 const settingsMediaServersRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/media-servers", component: () => <SettingsPage activeView="media-servers" /> });
 const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
@@ -1618,6 +1623,7 @@ const routeTree = rootRoute.addChildren([
   settingsMediaServersRoute,
   settingsIntegrationsRoute,
   settingsAdvancedRoute,
+  settingsBackupsRoute,
   settingsUserRoute,
   logsRoute,
   setupRoute

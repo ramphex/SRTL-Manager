@@ -28,7 +28,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration" | "watch_sync";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration" | "watch_sync" | "backup";
 
 export type AuditMode = "fast" | "deep";
 

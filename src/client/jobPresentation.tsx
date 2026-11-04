@@ -1549,6 +1549,16 @@ export function JobScope({
     );
   }
 
+  if (job.type === "backup") {
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
+    return (
+      <span className="job-scope-cell">
+        <span>Database</span>
+        <small>{options?.trigger === "scheduled" ? "Scheduled" : "Started manually"}</small>
+      </span>
+    );
+  }
+
   if (job.type === "path_migration") {
     const progress = recordFromUnknown(job.progress);
     const migrationId = finiteNumberFromUnknown(progress?.migrationId);
