@@ -26,7 +26,7 @@ Use Node.js 24 and Postgres 17. To run a disposable database that matches the de
 docker run --name srtl-manager-dev-postgres --rm -d -p 5432:5432 -e POSTGRES_DB=srtl_manager -e POSTGRES_USER=srtl -e POSTGRES_PASSWORD=srtl postgres:17-alpine
 ```
 
-Install dependencies with `npm ci`, then run `npm run dev`. The development UI and API default to ports `5178` and `3009`. Stop the database with `docker stop srtl-manager-dev-postgres` when finished. An existing Postgres instance can be used through a local `.env` instead.
+Install dependencies with `npm ci`, then run `npm run dev`. The development UI and API default to ports `5178` and `3009`; set `SRTL_WEB_PORT` in the environment to run the UI on another port. Stop the database with `docker stop srtl-manager-dev-postgres` when finished. An existing Postgres instance can be used through a local `.env` instead.
 
 New filesystem mutations require server-side containment checks, durable recovery behavior, cancellation handling, and failure-path tests.
 
