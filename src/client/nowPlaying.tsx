@@ -7,6 +7,7 @@ import type { StoragePolicyKind } from "../shared/types";
 import { Page } from "./App";
 import { request } from "./api";
 import { storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations } from "./appShared";
+import { useAccess } from "./access";
 import { mediaServerApi, mediaServersKey } from "./mediaServerApi";
 import { MediaServersRequired } from "./mediaServersRequired";
 import {
@@ -185,6 +186,7 @@ function MediaIcon({ type }: { type: NowPlayingStream["mediaType"] }) {
 }
 
 function StreamCard({ stream, now, onStop }: { stream: NowPlayingStream; now: number; onStop: (stream: NowPlayingStream) => void }) {
+  const canStop = useAccess().can("streams.stop");
   const [posterFailed, setPosterFailed] = useState(false);
   const title = streamTitle(stream);
   const position = livePosition(stream, now);
@@ -207,7 +209,7 @@ function StreamCard({ stream, now, onStop }: { stream: NowPlayingStream; now: nu
             <h3 title={title.primary}>{title.primary}</h3>
             {title.secondary ? <p title={title.secondary}>{title.secondary}</p> : null}
           </div>
-          {stream.stop.available ? (
+          {stream.stop.available && canStop ? (
             <button type="button" className="np-stop-button" onClick={() => onStop(stream)} aria-label={`Stop stream for ${stream.user.name}`}>
               <OctagonX size={15} />Stop
             </button>
@@ -329,6 +331,7 @@ function GeoSetting() {
 }
 
 function LiveNowPlaying() {
+  const canManageSettings = useAccess().can("settings.manage");
   const { snapshot, host, connection } = useNowPlayingEvents();
   const [stopping, setStopping] = useState<NowPlayingStream | null>(null);
   const streams = useMemo(() => snapshot?.streams ?? [], [snapshot]);
@@ -346,18 +349,22 @@ function LiveNowPlaying() {
           {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} onStop={setStopping} />)}
         </div>
       )}
-      <GeoSetting />
+      {canManageSettings ? <GeoSetting /> : null}
       <StopDialog key={stopping?.id ?? "none"} stream={stopping} onClose={() => setStopping(null)} />
     </>
   );
 }
 
 export function NowPlayingPage() {
-  const servers = useQuery({ queryKey: mediaServersKey, queryFn: mediaServerApi.list });
+  const canManageServers = useAccess().can("settings.manage");
+  // Only people who manage connections can read them or act on the list being empty.
+  const servers = useQuery({ queryKey: mediaServersKey, queryFn: mediaServerApi.list, enabled: canManageServers });
   const connected = servers.data?.servers.some((server) => server.hasToken) ?? false;
   return (
     <Page title="Now Playing" subtitle="Live streams on your Plex and Jellyfin servers, with host load. Nothing here is recorded.">
-      {servers.isLoading ? (
+      {!canManageServers ? (
+        <LiveNowPlaying />
+      ) : servers.isLoading ? (
         <p className="panel-message" role="status"><LoaderCircle className="is-spinning" size={16} /> Loading media servers</p>
       ) : servers.isError ? (
         <p className="panel-message action-error" role="alert">{servers.error instanceof Error ? servers.error.message : "Media servers could not be loaded."}</p>

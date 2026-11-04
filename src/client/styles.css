@@ -8227,3 +8227,144 @@ button.danger-button:hover:not(:disabled) {
 .backup-table-scroll th { color: var(--muted); font-size: 12px; text-align: left; }
 .backup-table-scroll td, .backup-table-scroll th { border-bottom: 1px solid var(--border); padding: 10px 12px 10px 0; vertical-align: top; }
 .backup-table-scroll td { font-size: 13px; }
+
+.sidebar-user-role {
+  background: var(--sidebar-hover);
+  border-radius: 999px;
+  color: var(--sidebar-link);
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  margin-left: auto;
+  padding: 1px 7px;
+}
+
+.not-allowed {
+  align-items: flex-start;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  gap: 12px;
+  padding: 20px;
+}
+
+.not-allowed h1 {
+  font-size: 18px;
+  margin: 0 0 6px;
+}
+
+.not-allowed p {
+  margin: 0 0 12px;
+}
+
+.auth-form-help {
+  margin: 0;
+}
+
+.account-list,
+.account-activity {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.account-row {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.account-row-summary,
+.account-row-actions {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.account-row-summary strong {
+  overflow-wrap: anywhere;
+}
+
+.account-row-history {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.account-form {
+  display: grid;
+  gap: 12px;
+  max-width: 560px;
+  min-width: 0;
+}
+
+.account-form label {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.account-form small {
+  color: var(--muted);
+}
+
+.account-form input,
+.account-form select,
+.account-role-select select {
+  max-width: 100%;
+  min-width: 0;
+}
+
+.account-password-row {
+  align-items: stretch;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.account-password-row input {
+  flex: 1 1 200px;
+  font-family: var(--mono, monospace);
+}
+
+.account-inline-form {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.account-inline-form p {
+  margin: 0 0 8px;
+}
+
+.account-activity li {
+  display: grid;
+  gap: 2px 12px;
+  grid-template-columns: minmax(0, 170px) minmax(0, 1fr);
+  overflow-wrap: anywhere;
+}
+
+.account-activity li > span:first-child {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+@media (max-width: 600px) {
+  .account-activity li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.account-role-owner {
+  font-weight: 700;
+}

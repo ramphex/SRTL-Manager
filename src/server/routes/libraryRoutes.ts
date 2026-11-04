@@ -1,11 +1,12 @@
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { desc, eq, inArray } from "drizzle-orm";
 import { first, getJsonSetting, type Db } from "../db/database";
 import { AppError } from "../errors";
 import { recordActionAudit } from "../lib/actionAudit";
 import * as schema from "../db/schema";
 import type { JobRunner } from "../jobs/jobRunner";
+import { requestHasPermission, requirePermission } from "../routeAccess";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
 import { applyDefaultPolicyToUnassigned, listUnassignedSectionTitles, previewDefaultPolicyForUnassigned } from "../lib/defaultPolicy";
 import {
@@ -166,6 +167,12 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
   return [...recordedRuns, ...legacyRuns].sort((a, b) => b.jobId - a.jobId).slice(0, 25);
 }
 
+function requireCopyPermissions(request: FastifyRequest, body: z.infer<typeof copyInputSchema>): void {
+  if (body.direction === "to_remote") requirePermission(request, "library.manage", "You can only copy titles to local storage.");
+  // Replacing removes the file already at the destination.
+  if (body.localConflictStrategy === "replace") requirePermission(request, "library.delete", "You can keep both files, but not replace the existing one.");
+}
+
 export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
   app.post("/api/scans", async (request) => {
     const options = scanOptionsSchema.parse(request.body ?? undefined);
@@ -286,7 +293,9 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
 
   app.post("/api/copies", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = copyInputSchema.parse(request.body);
-    const jobId = await jobs.startCopy(body);
+    requireCopyPermissions(request, body);
+    // Admission freezes this into the job, so what the job may do is settled by who started it.
+    const jobId = await jobs.startCopy(body, { keepRemoteSource: !requestHasPermission(request, "library.delete") });
     await recordActionAudit(db, request, {
       action: "copy.start",
       summary: `Started a copy ${body.direction === "to_local" ? "to local" : "to remote"} storage`,
@@ -305,6 +314,7 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
 
   app.post("/api/copies/conflicts", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = copyInputSchema.parse(request.body);
+    requireCopyPermissions(request, body);
     return jobs.previewCopyConflicts(body);
   });
 

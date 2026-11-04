@@ -50,7 +50,7 @@ async function fixture(page: Page, initial: BackupState = healthyState()) {
     let response: unknown = [];
     let status = 200;
     if (url.pathname.startsWith("/api/backups")) calls.push({ method, path: url.pathname, body });
-    if (url.pathname === "/api/auth/me") response = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test" } };
+    if (url.pathname === "/api/auth/me") response = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") response = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") response = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Archive", path: "/remote" }] };

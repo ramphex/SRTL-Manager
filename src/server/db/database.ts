@@ -8,6 +8,7 @@ import { inferSectionContentType, normalizeSectionContentType } from "../../shar
 import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
 import { applyBackupMigration } from "./backupMigration";
+import { applyAccountsMigration } from "./accountsMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -29,7 +30,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 27;
+export const currentSchemaVersion = 28;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -872,6 +873,17 @@ async function initializeDatabase(pool: Pool): Promise<void> {
       try {
         await applyBackupMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, 'database_backups', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(28)) {
+      await client.query("BEGIN");
+      try {
+        await applyAccountsMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (28, 'accounts_and_roles', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

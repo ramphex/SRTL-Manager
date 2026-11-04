@@ -84,9 +84,9 @@ describe("backup job", () => {
     expect(fs.statSync(folder()).mode & 0o777).toBe(0o700);
     for (const file of files) expect(fs.statSync(path.join(folder(), file)).mode & 0o777).toBe(0o600);
     const [backup] = await listBackups(folder());
-    expect(backup?.entry).toMatchObject({ verified: true, migration: 27 });
+    expect(backup?.entry).toMatchObject({ verified: true, migration: 28 });
     const manifest = JSON.parse(fs.readFileSync(path.join(folder(), files.find((file) => file.endsWith(".manifest.json"))!), "utf8")) as Record<string, unknown>;
-    expect(manifest).toMatchObject({ format: "srtl-manager-database-backup", appVersion: expect.any(String), migration: 27, databaseSizeBytes: expect.any(Number), trigger: "manual" });
+    expect(manifest).toMatchObject({ format: "srtl-manager-database-backup", appVersion: expect.any(String), migration: 28, databaseSizeBytes: expect.any(Number), trigger: "manual" });
   });
 
   it("keeps the database password out of arguments, job history and manifests", async () => {

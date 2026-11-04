@@ -12,6 +12,7 @@ import { groupAdjacentJobs } from "./jobGrouping";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
 import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
+import { useAccess } from "./access";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
 import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
@@ -184,6 +185,7 @@ export function CopyDialog({
   prompt: CopyPrompt | null;
   onClose: () => void;
 }) {
+  const canDelete = useAccess().can("library.delete");
   const queryClient = useQueryClient();
   const { timeFormat } = useUserPreferences();
   const [jobId, setJobId] = useState<number | null>(prompt?.jobId ?? null);
@@ -262,7 +264,7 @@ export function CopyDialog({
         ) : needsSourceTitleResolution && prompt.conflicts ? (
           <CopySourceTitleResolution conflicts={prompt.conflicts} onContinue={() => setAllowSourceTitleMismatch(true)} />
         ) : needsLocalConflictResolution && prompt.conflicts ? (
-          <CopyConflictResolution conflicts={prompt.conflicts} onKeepBoth={() => setLocalConflictStrategy("keep_both")} onReplace={() => setLocalConflictStrategy("replace")} />
+          <CopyConflictResolution conflicts={prompt.conflicts} onKeepBoth={() => setLocalConflictStrategy("keep_both")} onReplace={!canDelete ? undefined : () => setLocalConflictStrategy("replace")} />
         ) : (
           <CopyProgressPanel
             job={currentJob}
@@ -339,7 +341,8 @@ function CopyConflictResolution({
 }: {
   conflicts: CopyConflictPreview;
   onKeepBoth: () => void;
-  onReplace: () => void;
+  /** Absent for someone who may not delete files. */
+  onReplace?: () => void;
 }) {
   return (
     <div className="copy-conflict-panel">
@@ -374,13 +377,15 @@ function CopyConflictResolution({
           <Copy size={14} />
           Keep both
         </button>
-        <button type="button" className="danger" onClick={onReplace}>
-          <Trash2 size={14} />
-          Replace old local files
-        </button>
+        {onReplace ? (
+          <button type="button" className="danger" onClick={onReplace}>
+            <Trash2 size={14} />
+            Replace old local files
+          </button>
+        ) : null}
       </div>
       <p className="copy-conflict-note">
-        Keep both preserves the listed files, but if there is only one active symlink for the item, the previous local file will become an orphan. Replace copies and verifies
+        Keep both preserves the listed files, but if there is only one active symlink for the item, the previous local file will become an orphan. {onReplace ? null : "Replacing them needs an admin. "}Replace copies and verifies
         the new file first, repoints the symlink, then removes the listed old local files.
       </p>
     </div>
@@ -901,6 +906,7 @@ function CopyFailedItemsTooltip({
   loading: boolean;
   error?: string | null;
 }) {
+  const canDelete = useAccess().can("library.delete");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set());
   const [cleanupSelection, setCleanupSelection] = useState<number[] | null>(null);
   const failures = useQuery({
@@ -960,7 +966,7 @@ function CopyFailedItemsTooltip({
         loading={loading || (reviewReady && failures.isLoading)}
         error={error ?? failures.error?.message}
         toolbar={
-          jobId && failures.data && eligibleIds.length > 0 ? (
+          canDelete && jobId && failures.data && eligibleIds.length > 0 ? (
             <div className="failed-symlink-inline-toolbar">
               <strong>{formatNumber(selectedIds.size)} selected</strong>
               <button type="button" onClick={() => setSelectedIds(allSelected ? new Set() : new Set(eligibleIds))}>
@@ -980,7 +986,7 @@ function CopyFailedItemsTooltip({
           ) : null
         }
         itemControls={
-          failures.data
+          canDelete && failures.data
             ? (item) => {
                 const removable = Boolean(item.removable && item.mediaLinkId);
                 const itemLabel = item.fileName ? `${item.title}, ${item.fileName}` : item.title;
@@ -1742,6 +1748,7 @@ export function JobsTable({
   onAuditJobSelect?: (job: JobRecord) => void;
   onCopyJobSelect?: (job: JobRecord) => void;
 }) {
+  const { canStopJob } = useAccess();
   const preferences = useUserPreferences();
   const { timeFormat } = preferences;
   const queryClient = useQueryClient();
@@ -1778,7 +1785,7 @@ export function JobsTable({
     const canViewScanJob = job.type === "scan" && Boolean(onScanJobSelect);
     const canViewAuditJob = job.type === "audit" && Boolean(onAuditJobSelect);
     const canViewCopyJob = job.type === "copy" && Boolean(onCopyJobSelect);
-    const canTerminate = canTerminateJob(job);
+    const canTerminate = canTerminateJob(job) && canStopJob(job);
     const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
     return (
       <tr key={job.id} className={`mobile-card-row${className ? ` ${className}` : ""}`}>

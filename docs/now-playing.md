@@ -30,7 +30,7 @@ Posters load through SRTL, so Plex tokens and Jellyfin API keys never reach the 
 
 ## Stopping a stream
 
-**Stop** asks for confirmation with an editable message, sends it, and then checks whether the server still lists the stream. If it does, the dialog says so: some players ignore the request.
+Owners and admins can stop a stream; moderators can only watch this page. **Stop** asks for confirmation with an editable message, sends it, and then checks whether the server still lists the stream. If it does, the dialog says so: some players ignore the request.
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.

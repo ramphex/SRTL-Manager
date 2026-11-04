@@ -164,7 +164,7 @@ describe("request guard", () => {
       }
       if (auth === "internal") internalRoutes.push(key);
       else if (auth === "webhook") webhookRoutes.push(key);
-      else if (auth !== "admin") failures.push(`${key}: unexpected access ${String(auth)}`);
+      else if (auth !== "session") failures.push(`${key}: unexpected access ${String(auth)}`);
       if (response.statusCode !== 401) failures.push(`${key}: expected 401 without a session, got ${response.statusCode}`);
     }
 

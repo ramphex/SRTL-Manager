@@ -64,7 +64,7 @@ describe("a real backup, restored", () => {
   it("dumps through the job system, verifies, and restores into a throwaway database with the data intact", async () => {
     const sealed = activeSecretBox().seal("saved-plex-token", secretPurposes.sonarrApiKey);
     await setSetting(database.db, "backupRoundTripCheck", { value: "survives", sealed });
-    await database.pool.query(`INSERT INTO admin_users (username, password_hash, created_at) VALUES ('restored-admin', 'hash', $1)`, [nowIso()]);
+    await database.pool.query(`INSERT INTO admin_users (username, password_hash, created_at, role) VALUES ('restored-admin', 'hash', $1, 'owner')`, [nowIso()]);
 
     const runtime: BackupRuntime = { databaseUrl: source.databaseUrl, defaultLocation: root, pgBinDir: binDir, paths: { symlinkDir: "", localDir: "", remoteDir: "" } };
     const jobId = await new JobRunner(database.db).startBackup("manual");
@@ -77,7 +77,7 @@ describe("a real backup, restored", () => {
     expect((await fs.stat(directory)).mode & 0o777).toBe(0o700);
     const sets = await listBackups(directory);
     expect(sets).toHaveLength(1);
-    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: 27 } });
+    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: 28 } });
     expect(sets[0]!.entry.sizeBytes).toBeGreaterThan(1_000);
     const dumpPath = path.join(directory, `${sets[0]!.entry.name}.dump`);
     expect((await fs.stat(dumpPath)).mode & 0o777).toBe(0o600);

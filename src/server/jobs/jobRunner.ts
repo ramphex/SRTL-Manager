@@ -2709,7 +2709,8 @@ export class JobRunner {
     });
   }
 
-  async startCopy(input: CopyOptions): Promise<number> {
+  /** `keepRemoteSource` holds back the remote-delete setting for a copy started by someone who may not delete. */
+  async startCopy(input: CopyOptions, admission: { keepRemoteSource?: boolean } = {}): Promise<number> {
     const normalizedOptions = await normalizeCopyOptions(this.db, input);
     const links = await listMediaLinks(this.db, undefined, "current");
     const orderedSelectedLinks = orderedCopySelection(links, normalizedOptions);
@@ -2719,7 +2720,7 @@ export class JobRunner {
     const storedOptions: StoredCopyOptions = {
       ...optionsWithResolvedLinks,
       behavior: advancedSettings.copy,
-      ...(normalizedOptions.direction === "to_local" && advancedSettings.cleanup.deleteRemoteSourceAfterCopy ? { deleteRemoteSource: true } : {})
+      ...(normalizedOptions.direction === "to_local" && advancedSettings.cleanup.deleteRemoteSourceAfterCopy && !admission.keepRemoteSource ? { deleteRemoteSource: true } : {})
     };
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     if (!paths.localDir || !paths.remoteDir) throw new AdmissionError("Path settings are incomplete");

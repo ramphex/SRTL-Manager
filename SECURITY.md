@@ -10,6 +10,10 @@ Do not open a public issue for a suspected vulnerability. Use [GitHub private vu
 
 Never include real credentials, access tokens, mounted paths, file names, logs, or database contents in a report unless they have been fully redacted.
 
+## Accounts And Roles
+
+One owner, plus admins and moderators, as set out in [Accounts, Sessions And Security Activity](docs/accounts-and-sessions.md#roles). The server decides every request from a single table of routes and required permissions. A route with no entry is refused, and a test fails if one is missing. Webhooks keep their own per-instance secret and have no role. Hiding a control in the browser is only a convenience.
+
 ## Deployment
 
 SRTL Manager is intended for a trusted host and still requires authentication. Do not expose it directly to the public internet. Use HTTPS at a trusted reverse proxy, set `SRTL_PUBLIC_ORIGIN` to the proxied address (which turns on secure cookies for `https`), list only the proxy's addresses in `SRTL_TRUST_PROXY`, keep the published API port reachable only by the proxy, keep `SRTL_API_DOCS` off, and keep Postgres off externally published ports. Complete first-run setup before exposing a new instance; setup needs the one-time token from the API log. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md), [Reverse proxy and network security](README.md#reverse-proxy-and-network-security) and the [reverse proxy guide](docs/reverse-proxy.md), which includes a checklist to finish before exposing SRTL to the internet.

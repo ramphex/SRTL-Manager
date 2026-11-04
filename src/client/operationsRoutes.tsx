@@ -7,6 +7,9 @@ import { BackupSettingsPanel } from "./backupSettings";
 import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
 import { MediaServerSettingsPanel } from "./mediaServerSettings";
+import { useAccess } from "./access";
+import { NotAllowed } from "./notAllowed";
+import { AccountSettingsPanel } from "./accountSettings";
 import { SecurityEventsPanel, SessionsPanel } from "./securitySettings";
 import { minimumPasswordLength } from "../shared/auth";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -16,7 +19,7 @@ import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
 import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
-import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
+import { auditModeOptions, AuditStatusPrompt, settingsSections, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
 import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
 
@@ -433,6 +436,12 @@ function MetricGroup({ title, description, metrics }: { title: string; descripti
 }
 
 export function SettingsPage({ activeView }: { activeView: SettingsView }) {
+  const { can } = useAccess();
+  const section = settingsSections.find((item) => item.view === activeView);
+  return section && can(section.permission) ? <AllowedSettingsPage activeView={activeView} /> : <NotAllowed />;
+}
+
+function AllowedSettingsPage({ activeView }: { activeView: SettingsView }) {
   const queryClient = useQueryClient();
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths, enabled: activeView === "library" });
   const sections = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections, enabled: activeView === "library" });
@@ -463,8 +472,8 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
           ? "Scheduled database backups, checked after every run."
         : activeView === "media-servers"
           ? "Plex and Jellyfin connections shared by watch sync and other features."
-          : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences, account access, and signed-in sessions.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "backups" ? "Backups" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
+          : activeView === "integrations" ? "External connections and synchronization." : activeView === "accounts" ? "Who can help run this instance, and what they can do." : "Manage display preferences, account access, and signed-in sessions.";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "accounts" ? "Accounts" : activeView === "advanced" ? "Advanced" : activeView === "backups" ? "Backups" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -497,6 +506,7 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
       {activeView === "backups" ? <BackupSettingsPanel /> : null}
       {activeView === "media-servers" ? <MediaServerSettingsPanel /> : null}
       {activeView === "integrations" ? <IntegrationSettings /> : null}
+      {activeView === "accounts" ? <AccountSettingsPanel /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
     </Page>
   );
@@ -1068,6 +1078,7 @@ function AdvancedSettingsPanel() {
 
 function UserSettingsPanel() {
   const queryClient = useQueryClient();
+  const canViewActivity = useAccess().can("activity.view");
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const userPreferences = useQuery({ queryKey: ["user-preferences"], queryFn: api.getUserPreferences });
   const currentPreferences: UserPreferences = { ...defaultUserPreferences, ...userPreferences.data };
@@ -1215,7 +1226,7 @@ function UserSettingsPanel() {
         </form>
       </Panel>
       <SessionsPanel />
-      <SecurityEventsPanel />
+      {canViewActivity ? <SecurityEventsPanel /> : null}
     </>
   );
 }

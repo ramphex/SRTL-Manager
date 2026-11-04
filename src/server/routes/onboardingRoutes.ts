@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { Db } from "../db/database";
 import { getOnboardingState, OnboardingConflictError, OnboardingInputError, startOnboarding } from "../lib/onboarding";
+import { emptyPaths, isRestrictedRequest } from "../lib/restrictedView";
 import { parseSectionSettings, sectionSettingsSchema } from "../lib/sectionSettings";
 import { storageLocationNamesUpdateSchema } from "../lib/storageLocations";
 
@@ -12,7 +13,10 @@ const startOnboardingSchema = z.object({
 }).strict();
 
 export function registerOnboardingRoutes(app: FastifyInstance, db: Db): void {
-  app.get("/api/onboarding", async () => getOnboardingState(db));
+  app.get("/api/onboarding", async (request) => {
+    const state = await getOnboardingState(db);
+    return isRestrictedRequest(request) ? { ...state, errorMessage: null, paths: emptyPaths, pathChecks: [], storageLocations: { locations: state.storageLocations.locations.map((location) => ({ ...location, path: "" })) }, detectedSections: [] } : state;
+  });
 
   app.post("/api/onboarding/start", async (request, reply) => {
     const body = startOnboardingSchema.parse(request.body);

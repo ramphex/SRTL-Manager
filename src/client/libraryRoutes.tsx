@@ -15,6 +15,9 @@ import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, fo
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { DamageIntegrityPill, DamagedFilesPanel } from "./damagedFiles";
 import { useDamagedFiles } from "./damagedFilesQuery";
+import { useAccess } from "./access";
+import { NotAllowed } from "./notAllowed";
+import type { Permission } from "../shared/permissions";
 import { OrphanReviewPanel } from "./orphanReview";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
 
@@ -87,7 +90,9 @@ export function DashboardPage() {
   const sectionSummaries = useQuery({ queryKey: ["sections"], queryFn: api.sections, refetchInterval: 5000 });
   const damagedFiles = useDamagedFiles();
   const sectionSettings = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
-  const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths });
+  const { can } = useAccess();
+  const canManageSettings = can("settings.manage");
+  const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths, enabled: canManageSettings });
   const scanSettings = useQuery({ queryKey: ["scan-settings"], queryFn: api.getScanSettings });
   const auditSettings = useQuery({ queryKey: ["audit-settings"], queryFn: api.getAuditSettings });
   const advancedSettings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
@@ -206,7 +211,7 @@ export function DashboardPage() {
     hasScanScope &&
     (!scanOptions.scanSymlinks || selectedSymlinkSections.length > 0) &&
     (!scanOptions.scanLocal || selectedLocalSections.length > 0) &&
-    (!scanOptions.scanRemote || Boolean(paths.data?.remoteDir)) &&
+    (!scanOptions.scanRemote || !canManageSettings || Boolean(paths.data?.remoteDir)) &&
     selectedActiveScanSections.length === 0 &&
     selectedActiveLocalScanSections.length === 0 &&
     (!scanOptions.scanRemote || !activeRemoteScan);
@@ -273,7 +278,7 @@ export function DashboardPage() {
   const dashboardAttentionState = dashboardInventoryLoading ? "loading" : dashboardAttentionCount > 0 ? "attention" : "clear";
   const dashboardMetric = (value: number) => (dashboardInventoryLoading ? "..." : formatNumber(value));
   const orphanLink = (view: "local-orphans" | "remote-orphans", count: number, name: string) =>
-    dashboardInventoryLoading || count === 0 ? (
+    dashboardInventoryLoading || count === 0 || !can("library.delete") ? (
       dashboardMetric(count)
     ) : (
       <Link to="/library" search={{ view }} className="storage-overview-link" aria-label={`Review ${formatNumber(count)} ${name}orphans`}>
@@ -302,12 +307,13 @@ export function DashboardPage() {
   function updateScanOptions(nextOptions: ScanOptions) {
     const normalizedOptions = stripLegacyScanSections(nextOptions);
     setScanOptions(normalizedOptions);
-    saveScanSettings.mutate(normalizedOptions);
+    // These remembered defaults are shared settings; other people's choices last only for this visit.
+    if (canManageSettings) saveScanSettings.mutate(normalizedOptions);
   }
 
   function updateAuditSettings(nextSettings: AuditSettings) {
     setAuditSettingsDraft(nextSettings);
-    saveAuditSettings.mutate(nextSettings);
+    if (canManageSettings) saveAuditSettings.mutate(nextSettings);
   }
 
   function toggleScanSection(scope: "symlinkSections" | "localSections", section: string, checked: boolean) {
@@ -713,6 +719,7 @@ function SectionTable({
   selectedRemoteWork: SectionWorkSelection | null;
   onRemoteWorkSelect: (selection: SectionWorkSelection) => void;
 }) {
+  const canCopyToRemote = useAccess().can("library.manage");
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
@@ -800,7 +807,7 @@ function SectionTable({
                   )}
                 </td>
                 <td className="mobile-card-metric" data-label={`Copy to ${remoteName}`}>
-                  {copyToRemote > 0 ? (
+                  {copyToRemote > 0 && canCopyToRemote ? (
                     <button
                       type="button"
                       className={selectedRemoteWork?.section === section.section && selectedRemoteWork.kind === "copy_to_remote" ? "table-count-button selected" : "table-count-button"}
@@ -988,7 +995,10 @@ function RemoteWorkLinksTable({
   const selectedSection = selection?.section ?? null;
   const selectedPrefix = selection?.relativePathPrefix ?? "";
   const detail = selection ? remoteWorkDetail(selection.kind, storageLocations) : null;
-  const copyDirection = selection ? copyDirectionForWorkKind(selection.kind) : null;
+  const { can } = useAccess();
+  const canManageLibrary = can("library.manage");
+  const workDirection = selection ? copyDirectionForWorkKind(selection.kind) : null;
+  const copyDirection = workDirection === "to_remote" && !canManageLibrary ? null : workDirection;
   const selectedSummary = sections.find((section) => section.section === selectedSection);
   const selectedContentType = selectedSummary ? sectionContentType(selectedSummary) : selectedSection ? inferSectionContentType(selectedSection) : "other";
   const isShowSection = selectedContentType === "shows";
@@ -1071,7 +1081,7 @@ function RemoteWorkLinksTable({
   const monitoringAvailable = canCopy && Boolean(monitoringOwner);
   const monitoring = monitoringAvailable && (monitoringChoice?.direction === copyDirection && monitoringChoice.section === selectedSection ? monitoringChoice.monitor : monitoringOwner?.monitorOnCopy ?? false);
   const canChangeRowPolicy = selectedContentType === "movies";
-  const policyButtonState = policyButtonsForWorkKind(selection.kind);
+  const policyButtonState = canManageLibrary ? policyButtonsForWorkKind(selection.kind) : { assignLocal: false, assignRemote: false };
   const actionPending = updatePolicy.isPending;
   const pendingPolicy = actionPending ? updatePolicy.variables?.policy ?? null : null;
   const pendingTitleCount = actionPending ? updatePolicy.variables?.titles.length ?? 0 : 0;
@@ -1827,7 +1837,20 @@ function JobLockBadge({ jobs, className = "" }: { jobs: JobRecord[]; className?:
 
 type LibraryView = "overview" | "links" | "local" | "remote" | "local-orphans" | "remote-orphans" | "policies" | "damaged";
 
+function libraryViewAllowed(view: LibraryView, can: (permission: Permission) => boolean): boolean {
+  if (view === "local-orphans" || view === "remote-orphans") return can("library.delete");
+  if (view === "policies") return can("library.manage");
+  return true;
+}
+
 export function LibraryPage() {
+  const { can } = useAccess();
+  const routeSearch = useSearch({ strict: false }) as { view?: LibraryView };
+  return libraryViewAllowed(routeSearch.view ?? "overview", can) ? <AllowedLibraryPage /> : <NotAllowed />;
+}
+
+function AllowedLibraryPage() {
+  const { can } = useAccess();
   const queryClient = useQueryClient();
   const { autoOpenTaskStatus } = useUserPreferences();
   const storageLocations = useStorageLocations();
@@ -1966,7 +1989,7 @@ export function LibraryPage() {
           { value: "remote-orphans", label: `${remoteName} orphans`, icon: Unlink },
           { value: "policies", label: "Storage Policies", icon: Shield },
           { value: "damaged", label: "Damaged files", icon: TriangleAlert }
-        ].map((option) => {
+        ].filter((option) => libraryViewAllowed(option.value as LibraryView, can)).map((option) => {
           const Icon = option.icon;
           return (
             <button key={option.value} className={view === option.value ? "selected" : ""} onClick={() => handleLibraryViewChange(option.value as LibraryView)}>
@@ -2087,6 +2110,7 @@ function LibraryOverview({
   error?: string;
   onSelect: (view: LibraryView) => void;
 }) {
+  const { can } = useAccess();
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
@@ -2147,7 +2171,7 @@ function LibraryOverview({
     <>
       {error ? <p className="panel-message error">{error}</p> : null}
       <div className="library-overview">
-        {cards.map((item) => {
+        {cards.filter((item) => libraryViewAllowed(item.value, can)).map((item) => {
         const Icon = item.icon;
         return (
           <button key={item.value} className="library-entry" type="button" onClick={() => onSelect(item.value as LibraryView)}>

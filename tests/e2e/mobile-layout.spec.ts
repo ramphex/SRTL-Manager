@@ -100,7 +100,7 @@ async function mockPopulatedDashboard(
     const url = new URL(route.request().url());
     let body: unknown;
 
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "mobile-layout-admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "mobile-layout-admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };

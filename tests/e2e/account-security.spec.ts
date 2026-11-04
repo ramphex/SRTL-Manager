@@ -151,7 +151,7 @@ async function signedIn(page: Page) {
     const method = request.method();
     let body: unknown = [];
     if (url.pathname.startsWith("/api/auth/sessions") || url.pathname === "/api/auth/security-events") calls.push({ method, path: url.pathname });
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "alex_03" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "alex_03", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Archive", path: "/remote" }] };

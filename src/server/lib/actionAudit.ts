@@ -28,7 +28,14 @@ export type ActionAuditAction =
   | "sonarr_instance.remove"
   | "now_playing.stop_stream"
   | "backup.settings_change"
-  | "backup.run";
+  | "backup.run"
+  | "account.create"
+  | "account.role_change"
+  | "account.disable"
+  | "account.enable"
+  | "account.delete"
+  | "account.password_reset"
+  | "account.ownership_transfer";
 
 export interface ActionAuditActor {
   userId: number;
@@ -57,7 +64,7 @@ export interface ActionAuditInput {
 
 declare module "fastify" {
   interface FastifyRequest {
-    /** The signed-in admin for this request, set by the access guard. */
+    /** The signed-in account for this request, set by the access guard. */
     adminUser: ActionAuditActor | null;
   }
 }
@@ -90,7 +97,14 @@ export function boundedTargets(targets: Record<string, unknown>): Record<string,
 /** Audit actions that also appear in Settings > User settings > Security activity. */
 const securityEventFor: Partial<Record<ActionAuditAction, SecurityEventType>> = {
   "media_server.remove": "media_server_removed",
-  "now_playing.stop_stream": "stream_stopped"
+  "now_playing.stop_stream": "stream_stopped",
+  "account.create": "account_created",
+  "account.role_change": "account_role_changed",
+  "account.disable": "account_disabled",
+  "account.enable": "account_enabled",
+  "account.delete": "account_deleted",
+  "account.password_reset": "account_password_reset",
+  "account.ownership_transfer": "ownership_transferred"
 };
 
 async function appendActionAudit(db: Db, entry: ActionAuditEntry): Promise<void> {
@@ -124,7 +138,7 @@ export async function listActionAudit(db: Db, limit = 100): Promise<ActionAuditE
 }
 
 /**
- * Records an action the signed-in admin just performed. Call it after the
+ * Records an action the signed-in account just performed. Call it after the
  * action succeeded. A failure to write the record is logged and never turns a
  * finished action into an error response.
  */

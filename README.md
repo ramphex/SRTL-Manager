@@ -59,7 +59,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
 
-The administrator username and password are created in the browser during first-run setup and do not belong in `.env`. Setup asks for a one-time setup token from the server log, so nobody else who can reach a new instance can claim it first.
+The owner's username and password are created in the browser during first-run setup and do not belong in `.env`. Setup asks for a one-time setup token from the server log, so nobody else who can reach a new instance can claim it first.
 
 Run `cp .env.example .env`, protect it with `chmod 600 .env`, validate it with `docker compose config --quiet`, then pull and start the stack:
 
@@ -70,7 +70,7 @@ docker compose up -d
 
 Open `http://<server-ip>:5179` unless a different port was selected. The browser then completes account creation, section setup, initial policy strategy, and the first scan.
 
-Creating the administrator account needs the one-time setup token that the API prints when it starts without an account. Find it with:
+Creating the owner account needs the one-time setup token that the API prints when it starts without an account. Find it with:
 
 ```bash
 docker compose logs api | grep "Setup token"
@@ -110,14 +110,14 @@ When a configured root changes, restart the stack. The UI enters maintenance mod
 
 ### Reverse proxy and network security
 
-Every API route needs a signed-in admin except sign-in, first-run setup, `/api/health/live`, and the static app files. Radarr and Sonarr webhooks need their per-instance secret. `/api/health` and `/api/health/ready` report worker detail only to direct local requests, such as a container health check, or to a signed-in admin.
+Every API route needs a signed-in account whose role allows it, except sign-in, first-run setup, `/api/health/live`, and the static app files. Radarr and Sonarr webhooks need their per-instance secret. `/api/health` and `/api/health/ready` report worker detail only to direct local requests, such as a container health check, or to a signed-in admin.
 
 Direct LAN access over HTTP needs no extra settings. Behind a reverse proxy that terminates HTTPS, such as Nginx Proxy Manager:
 
 - `SRTL_PUBLIC_ORIGIN`: the address people use, for example `https://srtl.example.com`. Changes from that origin are accepted, and an `https` origin makes session cookies `Secure`. If you also open SRTL by its LAN address, add that origin to `SRTL_ALLOWED_ORIGINS`, for example `http://192.168.1.20:5179`. Browsers refuse `Secure` cookies over plain HTTP, so sign-ins at a listed `http` address use a plain session cookie, and that address stays as exposed as any plain HTTP connection.
 - `SRTL_TRUST_PROXY`: the proxy's address or CIDR range, for example `192.168.1.10`, `172.18.0.0/16` for a shared Docker network, or `loopback` when the proxy runs on the same host. Only these peers may set `X-Forwarded-For` and `X-Forwarded-Proto`, which SRTL uses for client addresses in rate limits and logs and for the request protocol. `true` is refused at startup because it would trust headers any client can send; replace it with the proxy's address when upgrading.
 - Published port: keep it reachable only by the proxy. Set `SRTL_BIND_HOST=127.0.0.1` when the proxy runs on the same host, or remove the `ports` block and use the commented proxy network in `docker-compose.yml` when the proxy is another container.
-- `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to signed-in admins only.
+- `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to owners and admins only.
 - `SRTL_SESSION_IDLE_HOURS` and `SRTL_SESSION_MAX_AGE_DAYS`: a browser is signed out after 12 hours without activity and 14 days after sign-in by default. Settings > User settings lists every session and can sign out one or all others, and shows a log of sign-ins, failures, lockouts and account changes.
 - `SRTL_OUTBOUND_ALLOW_CIDRS`: the addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr. The default, `private,public`, allows LAN and internet addresses but not loopback; add `loopback` for a server on the same host outside Docker, or list CIDR ranges such as `192.168.1.0/24` to allow only those. Link-local and cloud metadata addresses are always refused, every request connects to the address it checked, and plex.tv sign-in is not affected.
 

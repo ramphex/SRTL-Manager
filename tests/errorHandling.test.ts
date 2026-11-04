@@ -41,7 +41,7 @@ describe("error responses", () => {
     database = await createTestDatabase();
     app = await createApp(
       { rootDir: root, databaseUrl: database.databaseUrl, autoMigrate: true, anonymousRequestsPerMinute: 100_000, paths: { symlinkDir: path.join(root, "links"), localDir: path.join(root, "local"), remoteDir: path.join(root, "remote") } },
-      { logStream }
+      { logStream, extraRouteEntries: [...["database-error", "plain-error", "foreign-status-error", "typed-error"].map((name) => ({ methods: ["GET"], url: `/api/test/${name}`, permission: "library.view" as const }))] }
     );
     // Routes that fail in the ways real ones can. They go through the same access guard and error handler.
     app.app.get("/api/test/database-error", async () => {

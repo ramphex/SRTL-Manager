@@ -4,14 +4,11 @@ import { LogOut, MonitorSmartphone, RefreshCw, ShieldCheck } from "lucide-react"
 import { api } from "./api";
 import { Panel } from "./App";
 import { formatDate, useUserPreferences } from "./appShared";
-import { securityEventLabel, type SecurityEventRecord } from "../shared/auth";
+import { eventDetail, plural } from "./securityEventDetail";
+import { securityEventLabel } from "../shared/auth";
 
 const sessionsKey = ["auth-sessions"] as const;
 const securityEventsKey = ["security-events"] as const;
-
-function plural(count: number, singular: string, pluralForm = `${singular}s`): string {
-  return `${count} ${count === 1 ? singular : pluralForm}`;
-}
 
 export function SessionsPanel() {
   const queryClient = useQueryClient();
@@ -126,30 +123,6 @@ export function SessionsPanel() {
       </div>
     </Panel>
   );
-}
-
-function eventDetail(event: SecurityEventRecord): string | null {
-  const details = event.details;
-  switch (event.event) {
-    case "login_locked":
-      return typeof details.retryAfterSeconds === "number" ? `Locked for ${plural(details.retryAfterSeconds, "second")}` : null;
-    case "login_succeeded":
-      return details.passwordRehashed ? "Password hash upgraded" : null;
-    case "username_changed":
-      return typeof details.previousUsername === "string" ? `Was ${details.previousUsername}` : null;
-    case "password_changed":
-      return typeof details.sessionsSignedOut === "number" && details.sessionsSignedOut > 0 ? `${plural(details.sessionsSignedOut, "other session")} signed out` : null;
-    case "sessions_revoked":
-      return typeof details.count === "number" ? plural(details.count, "session") : null;
-    case "session_revoked":
-      return details.current ? "This browser" : null;
-    case "setup_rejected":
-      return details.reason === "token" ? "Wrong setup token" : details.reason === "completed" ? "Setup already completed" : null;
-    case "media_server_removed":
-      return typeof details.name === "string" ? details.name : null;
-    default:
-      return null;
-  }
 }
 
 const warningEvents = new Set(["login_failed", "login_locked", "setup_rejected", "reauthentication_failed"]);

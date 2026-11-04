@@ -13,7 +13,7 @@ describe("job history retention", () => {
       const user = await first(
         database.db
           .insert(schema.adminUsers)
-          .values({ username: "retention-admin", passwordHash: "unused", createdAt: "2026-01-01T00:00:00.000Z" })
+          .values({ username: "retention-admin", passwordHash: "unused", role: "owner", createdAt: "2026-01-01T00:00:00.000Z" })
           .returning({ id: schema.adminUsers.id })
       );
       if (!user) throw new Error("Session retention user was not created");

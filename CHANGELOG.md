@@ -7,10 +7,17 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Added
 
 - Added scheduled database backups in **Settings > Backups**: on by default, nightly at 03:30 server time, keeping 7, with a **Back up now** button, the last result, the next run, and a list of backups with their age, size and verified state. Each run is a job in Logs, and runs next to other jobs without using one of their slots. A backup counts only once its checksum and `pg_restore --list` pass, older ones are removed only after that, and at least two verified backups always stay. A failed or overdue backup, or a location that cannot be written, shows on every page and in `/api/health`. Restoring is done by hand, following the tested steps in the [database backups guide](docs/backups.md) (requires database migration 27).
+- Added accounts and roles, so several people can help run an instance: one owner, plus admins and moderators, each with their own password, sessions and display preferences. **Settings > Accounts** adds, disables, deletes and resets accounts, changes roles, shows who created and changed what, and transfers ownership. Moderators can see the library, jobs and Now Playing, run scans and audits, retry jobs and copy titles to local. See [Accounts, Sessions And Security Activity](docs/accounts-and-sessions.md#roles).
+
+### Changed
+
+- Display preferences in **Settings > User settings** now belong to each account. Accounts without their own read the ones saved before this version.
 
 ### Upgrade notes
 
-The migration service applies database migration 27 automatically. Backups are on after the upgrade and start at the next 03:30.
+The migration service applies database migrations 27 and 28 automatically. Migration 28 makes your existing administrator the owner, keeping their password and sessions, so you stay signed in. On a new install, the account made during first-run setup is the owner.
+
+Backups are on after the upgrade and start at the next 03:30.
 
 - **Docker installs should create the backup folder.** Set `SRTL_BACKUP_HOST_PATH` in `.env` to a folder owned by `SRTL_UID`, outside your media roots. Without it, Compose creates `./backups` owned by root, and Settings > Backups says it cannot be written until you change the owner. A custom Compose file needs the same folder mounted at `/backups` in the worker.
 - **Installs outside Docker need the PostgreSQL 17 client tools.** Install `pg_dump` and `pg_restore` version 17 or newer, and set `SRTL_PG_BIN_DIR` if they are not first on `PATH`. Backups go in `backups` inside `SRTL_DATA_DIR` unless `SRTL_BACKUP_DIR` says otherwise.
@@ -19,6 +26,12 @@ The migration service applies database migration 27 automatically. Backups are o
 ### Security
 
 - The sign-in page no longer has a setup link, so it never appears on a server that is already set up. Browsers on the host or the local network still get the setup form on their own while no administrator exists. Anyone else opens `/setup`, an address printed in the API log with the setup token. It looks the same whether or not an administrator exists, and setup still needs the token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
+
+- Every route now resolves to a required permission through one table, and a route with no entry is refused. Webhooks keep their own secret and have no role.
+- There is always exactly one owner, enforced by the database as well as the app. Ownership moves only by a transfer that asks for the owner's password again, and leaves the previous owner an admin.
+- New accounts and password resets set a temporary password, which opens nothing except the screen that replaces it. Disabling, deleting and resetting end that person's sessions at once, and a role change applies to their next request. A disabled account gets the same sign-in answer as a wrong password.
+- Moderators receive no tokens, API keys, connection addresses, path settings or backup locations from any route, including through job logs, job data and error messages. A copy a moderator starts never deletes a file, whatever the settings say.
+- Account, role and ownership changes are written to the security activity and the action audit, with who did what. Only owners and admins can read those logs.
 
 ## [0.1.4-beta.3] - 2026-11-03
 

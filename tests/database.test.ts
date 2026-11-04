@@ -51,7 +51,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -259,7 +259,8 @@ describe("database bootstrap", () => {
         { version: 24 },
         { version: 25 },
         { version: 26 },
-        { version: 27 }
+        { version: 27 },
+        { version: 28 }
       ]);
     } finally {
       await database.close();
@@ -461,7 +462,8 @@ describe("database bootstrap", () => {
         { version: 24, name: "shared_media_servers" },
         { version: 25, name: "auth_sessions_and_security_events" },
         { version: 26, name: "encrypt_stored_credentials" },
-        { version: 27, name: "database_backups" }
+        { version: 27, name: "database_backups" },
+        { version: 28, name: "accounts_and_roles" }
       ]);
     } finally {
       await database.close();
@@ -502,7 +504,7 @@ describe("database bootstrap", () => {
       await initial.pool.query(`DROP INDEX sessions_user_idx`);
       await initial.pool.query(`ALTER TABLE sessions DROP COLUMN id, DROP COLUMN last_seen_at, DROP COLUMN idle_expires_at, DROP COLUMN ip, DROP COLUMN user_agent, DROP COLUMN cookie_reissued_at`);
       await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 25`);
-      await initial.pool.query(`INSERT INTO admin_users (username, password_hash, created_at) VALUES ('alex_03', 'scrypt$salt$digest', now()::text)`);
+      await initial.pool.query(`INSERT INTO admin_users (username, password_hash, created_at, role) VALUES ('alex_03', 'scrypt$salt$digest', now()::text, 'owner')`);
       await initial.pool.query(`INSERT INTO sessions (token_hash, user_id, expires_at, created_at) SELECT $1, id, $2, now()::text FROM admin_users`, [hashToken("legacy-token"), expiresAt]);
     } finally {
       await initial.close();

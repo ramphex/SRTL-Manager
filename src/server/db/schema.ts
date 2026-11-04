@@ -203,7 +203,16 @@ export const adminUsers = pgTable("admin_users", {
   id: serial("id").primaryKey(),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
-  createdAt: text("created_at").notNull()
+  createdAt: text("created_at").notNull(),
+  /** One of `accountRoles`. The database keeps exactly one owner. */
+  role: text("role").notNull().default("moderator"),
+  /** Set by a temporary password; nothing but changing it works until it is changed. */
+  mustChangePassword: boolean("must_change_password").notNull().default(false),
+  /** Username of whoever created the account; null for the owner made at setup. */
+  createdBy: text("created_by"),
+  disabledAt: text("disabled_at"),
+  disabledBy: text("disabled_by"),
+  lastSignInAt: text("last_sign_in_at")
 });
 
 export const sessions = pgTable(

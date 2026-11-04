@@ -48,7 +48,8 @@ import type {
   OrphanReview
 } from "../shared/types";
 
-import type { AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
+import type { AccountList, AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
+import type { AccountRecord, AccountRole } from "../shared/permissions";
 import type { BackupSettings, BackupState } from "../shared/backups";
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSettingsInput, SonarrState } from "../shared/sonarr";
@@ -99,7 +100,15 @@ export const api = {
   login: (body: { username: string; password: string }) => request<{ ok: true }>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
   logout: () => request<{ ok: true }>("/api/auth/logout", { method: "POST" }),
   updateUser: (body: { username: string; currentPassword: string; newPassword?: string; confirmNewPassword?: string }) =>
-    request<{ user: { id: number; username: string } }>("/api/auth/user", { method: "PUT", body: JSON.stringify(body) }),
+    request<{ user: NonNullable<AuthMe["user"]> }>("/api/auth/user", { method: "PUT", body: JSON.stringify(body) }),
+  accounts: () => request<AccountList>("/api/accounts"),
+  createAccount: (body: { username: string; role: AccountRole; temporaryPassword: string }) => request<AccountRecord>("/api/accounts", { method: "POST", body: JSON.stringify(body) }),
+  changeAccountRole: (id: number, role: AccountRole) => request<{ ok: true }>(`/api/accounts/${id}/role`, { method: "PUT", body: JSON.stringify({ role }) }),
+  disableAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}/disable`, { method: "POST" }),
+  enableAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}/enable`, { method: "POST" }),
+  deleteAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}`, { method: "DELETE" }),
+  resetAccountPassword: (id: number, temporaryPassword: string) => request<{ ok: true }>(`/api/accounts/${id}/reset-password`, { method: "POST", body: JSON.stringify({ temporaryPassword }) }),
+  transferOwnership: (targetId: number, currentPassword: string) => request<{ ok: true }>("/api/accounts/transfer-ownership", { method: "POST", body: JSON.stringify({ targetId, currentPassword }) }),
   sessions: () => request<AuthSessionList>("/api/auth/sessions"),
   revokeSession: (id: number) => request<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
   revokeOtherSessions: () => request<{ ok: true; revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" }),

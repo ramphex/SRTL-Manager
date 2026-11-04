@@ -62,7 +62,7 @@ A failed backup, a backup that did not finish within two hours of its start time
 
 ## Keep them safe
 
-Dumps contain password hashes, encrypted keys, paths and library history, so treat them like passwords. Only signed-in admins can see backup details, and the app has no way to download a backup. Settings changes and manual runs are recorded in the action audit at `/api/system/action-audit`.
+Dumps contain password hashes, encrypted keys, paths and library history, so treat them like passwords. Only the owner and admins can see backup details, and the app has no way to download a backup. Settings changes and manual runs are recorded in the action audit at `/api/system/action-audit`.
 
 Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are encrypted with `SRTL_SECRET_KEY`, which is not in the backup. **Keep a copy of that key somewhere separate from the backups.** Without the same key, those credentials cannot be read after a restore; see [Secret key](../README.md#secret-key) for what happens then.
 
