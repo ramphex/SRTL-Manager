@@ -1,3 +1,4 @@
+import { isIPv6 } from "node:net";
 import type { FastifyRequest } from "fastify";
 import type { Db } from "../db/database";
 import { getJsonSetting } from "../db/database";
@@ -9,8 +10,8 @@ import type { JobEventPage, JobEventRecord, JobRecord, JobType, PathsSettings } 
 /**
  * What an account without `settings.manage` is allowed to read. Routes that
  * exist for settings are refused outright by the route table; this covers
- * everything else such a person can open, so a path root, address or credential
- * cannot reach them through a job log, an error message or a new field somebody
+ * everything else such a person can open, so a path root, IP address, connection
+ * address or credential cannot reach them through a job log, an error message or a new field somebody
  * adds later. Every response to them passes through `scrubValue`.
  */
 
@@ -27,9 +28,15 @@ export interface RestrictedViewRuntime {
 
 const sensitiveKey = /password|passwd|passphrase|secret|token|api[-_]?key|authorization|credential|cookie|private[-_]?key/i;
 const pathKey = /(path|dir|directory|root)$/i;
+// Case matters: `socketIp` and `client_ip` are addresses, `skip` and `zip` are not.
+const addressKey = /(?:^ips?|[a-z0-9]Ips?|_ips?|[A-Za-z0-9]IPs?|[aA]ddress(?:es)?)$/;
 const addressPattern = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 const hostPortPattern = /(?:\b\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]|\blocalhost|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/gi;
 // `>` is left out of what may come before a path, so that `<remote>/Movies` stays as it is.
+// Each is checked with isIPv6, so clock times, MAC addresses and `std::string` stay as they are.
+const ipv6Candidate = /(?<![\w.%])[0-9a-f]*:[0-9a-f:.]*(?:%[\w.-]+)?/gi;
+// Not part of a longer dotted name, so `Movie.1.2.3.4.mkv` and `DDP5.1.2.0` stay as they are.
+const ipv4Pattern = /(?<![A-Za-z0-9.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![A-Za-z0-9]|\.[A-Za-z0-9])/g;
 const absolutePathPattern = /(^|[\s"'`(=,:{[])(\/(?!api\/(?!\.\.))[^\s"'`<>,;:)\]]+(?:\/[^\s"'`<>,;:)\]]+)+)/g;
 
 function baseName(value: string): string {
@@ -50,19 +57,41 @@ function replaceRoot(text: string, root: SensitiveRoot): string {
   return result + text.slice(cursor);
 }
 
+function replaceIpv6(text: string): string {
+  return text.replace(ipv6Candidate, (found) => {
+    const address = found.split("%", 1)[0]!;
+    if (isIPv6(address)) return "<address>";
+    // Punctuation after the address, as in `refused by fe80::1: timed out`.
+    const trailing = /[:.]+$/.exec(found)?.[0] ?? "";
+    return trailing && isIPv6(found.slice(0, -trailing.length)) ? `<address>${trailing}` : found;
+  });
+}
+
+function replaceIpAddresses(text: string): string {
+  return replaceIpv6(text).replace(ipv4Pattern, "<address>");
+}
+
+/** Removes IP addresses from a response that holds nothing else about this instance. */
+export function scrubIpAddresses(value: unknown): unknown {
+  if (typeof value === "string") return replaceIpAddresses(value);
+  if (Array.isArray(value)) return value.map(scrubIpAddresses);
+  if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, scrubIpAddresses(entry)]));
+  return value;
+}
+
 /** Removes configured roots, addresses and any other absolute path from text, keeping the library part people need to read. */
 export function scrubText(text: string, roots: readonly SensitiveRoot[]): string {
-  if (!text.includes("/") && !text.includes(":")) return text;
+  if (!text.includes("/") && !text.includes(":") && !text.includes(".")) return text;
   let result = text;
   for (const root of roots) result = replaceRoot(result, root);
-  return result
-    .replace(addressPattern, "<address>")
-    .replace(hostPortPattern, "<address>")
+  return replaceIpAddresses(result.replace(addressPattern, "<address>").replace(hostPortPattern, "<address>"))
     .replace(absolutePathPattern, (_match, before: string, found: string) => `${before}…/${baseName(found)}`);
 }
 
 export function scrubValue(value: unknown, roots: readonly SensitiveRoot[], key = ""): unknown {
   if (typeof value === "string") {
+    // A field that exists to hold an address, whatever its value looks like.
+    if (addressKey.test(key)) return null;
     // A field that holds nothing but a path outside the known roots, where spaces cannot end the match early.
     if (pathKey.test(key) && value.startsWith("/") && !roots.some((root) => value === root.path || value.startsWith(`${root.path}/`))) return `…/${baseName(value)}`;
     return scrubText(value, roots);

@@ -1,18 +1,20 @@
 import fs from "node:fs/promises";
-import net from "node:net";
+import net, { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { eq } from "drizzle-orm";
+import fastify from "fastify";
 import { createApp, type AppContext } from "../src/server/app";
 import { first, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
-import { scrubText, scrubValue } from "../src/server/lib/restrictedView";
+import { scrubIpAddresses, scrubText, scrubValue } from "../src/server/lib/restrictedView";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { routeTableEntries, routeTableEntry } from "../src/server/routeAccess";
 import { accountRoles, canManageRole, manageableRoles, rolePermissions, roleHasPermission, type AccountRole, type Permission } from "../src/shared/permissions";
+import { jellyfinVideoTranscodeWithBurnIn } from "./nowPlayingFixtures";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
 
@@ -120,6 +122,13 @@ async function createAccount(harness: Harness, username: string, role: AccountRo
   const created = await send(harness, harness.cookies[actor], "POST", "/api/accounts", { username, role, temporaryPassword });
   expect(created.statusCode).toBe(201);
   return created.json<{ id: number }>().id;
+}
+
+/** Any IP address in a response, found independently of the scrubbing it is checking. */
+function addressesIn(text: string): string[] {
+  const dotted = text.match(/\d{1,3}(?:\.\d{1,3}){3}/g) ?? [];
+  const colons = text.match(/[0-9a-fA-F:.]*:[0-9a-fA-F:.]*/g) ?? [];
+  return [...dotted, ...colons.map((token) => token.replace(/[:.]+$/, ""))].filter((token) => isIP(token) !== 0);
 }
 
 const everyRole = ["owner", "admin", "moderator"] as const;
@@ -752,6 +761,7 @@ describe("what a moderator can read", () => {
   const secretKey = "plantedapikey0123456789";
   const serverAddress = "https://media.internal.example:32400";
   const backupFolder = "/srv/planted-backups/database";
+  let startedCopy = 0;
 
   beforeAll(async () => {
     harness = await startHarness();
@@ -785,6 +795,21 @@ describe("what a moderator can read", () => {
       { sourcePath: path.join(remote, "x.mkv"), url: `${serverAddress}/x`, token: secretToken, nested: { "X-Api-Key": secretKey, folder: "/mnt/not-a-known-root/deep/file.mkv" } }
     );
     await addJob("scan", {}, {}, `connect ECONNREFUSED 203.0.113.40:7878 while reading ${path.join(links, "movies")}`, {});
+    // Addresses in every shape a log line or a data field might hold them.
+    await addJob(
+      "scan",
+      { lastClient: "198.51.100.41", clientIp: "198.51.100.42", currentItem: "reading from 2001:db8::43" },
+      {},
+      `Refused by 198.51.100.44. Also 2001:db8::45: timed out, [2001:db8::46]:443, fe80::47%eth0, ::ffff:198.51.100.48 and 2001:0db8:0000:0000:0000:0000:0000:0049 (from ::1)`,
+      { ip: "2001:db8::4a", remoteAddress: "198.51.100.50", addresses: ["198.51.100.51", "2001:db8::52"], note: "peer=198.51.100.53 peer6=2001:db8::54" }
+    );
+    // What a real copy writes to its log about who started it, and from where.
+    const started = await harness.app.app.inject({ method: "POST", url: "/api/copies", remoteAddress: "198.51.100.60", headers: { cookie: harness.cookies.admin }, payload: { direction: "to_local", linkIds: [link!.id] } });
+    expect(started.statusCode, started.body).toBe(200);
+    startedCopy = started.json<{ jobId: number }>().jobId;
+    // This account's own sessions, signed in from addresses of both kinds.
+    await harness.app.app.inject({ method: "POST", url: "/api/auth/login", remoteAddress: "198.51.100.61", payload: { username: roleUsers.moderator, password: finalPassword(roleUsers.moderator) } });
+    await harness.app.app.inject({ method: "POST", url: "/api/auth/login", remoteAddress: "2001:db8::62", payload: { username: roleUsers.moderator, password: finalPassword(roleUsers.moderator) } });
     // Settings work, whose log is about the settings themselves.
     await addJob("backup", { location: backupFolder }, { location: backupFolder }, `Could not write to ${backupFolder}`, { location: backupFolder });
     await addJob("watch_sync", { server: serverAddress }, {}, `${serverAddress} refused the request`, {});
@@ -838,6 +863,41 @@ describe("what a moderator can read", () => {
     expect(answered).toEqual(expect.arrayContaining(["/api/jobs", "/api/media-links/page?status=all", "/api/damaged-files.csv", "/api/system/path-migration", "/api/onboarding", "/api/settings/storage-locations"]));
   });
 
+  it("never carries an IP address on any route they can read, including IPv6 and free text", async () => {
+    const found: string[] = [];
+    const answered: string[] = [];
+    for (const url of await everyReadableUrl("moderator")) {
+      const response = await send(harness, harness.cookies.moderator, "GET", url);
+      if (response.statusCode < 400) answered.push(url);
+      for (const address of addressesIn(response.body)) found.push(`${url} carries ${address}`);
+    }
+    expect(found).toEqual([]);
+    expect(answered).toEqual(expect.arrayContaining(["/api/jobs", "/api/auth/sessions", "/api/system/version"]));
+  });
+
+  it("the address sweep finds them for an owner, so it can see what it is looking for", async () => {
+    const seen = new Set<string>();
+    for (const url of await everyReadableUrl("owner")) {
+      for (const address of addressesIn((await send(harness, harness.cookies.owner, "GET", url)).body)) seen.add(address);
+    }
+    expect([...seen]).toEqual(expect.arrayContaining(["198.51.100.41", "198.51.100.44", "2001:db8::45", "2001:db8::46", "::ffff:198.51.100.48", "198.51.100.60"]));
+  });
+
+  it("keeps the rest of a job log line, with the address replaced", async () => {
+    const events = (await send(harness, harness.cookies.moderator, "GET", `/api/jobs/${startedCopy}/events`)).json<Array<{ message: string }>>();
+    expect(events.map((event) => event.message)).toContain(`Started a copy to local storage (requested by ${roleUsers.admin} from <address>)`);
+    const ownerEvents = (await send(harness, harness.cookies.owner, "GET", `/api/jobs/${startedCopy}/events`)).json<Array<{ message: string }>>();
+    expect(ownerEvents.map((event) => event.message)).toContain(`Started a copy to local storage (requested by ${roleUsers.admin} from 198.51.100.60)`);
+  });
+
+  it("removes the address from their own sessions, and only theirs", async () => {
+    const own = (await send(harness, harness.cookies.moderator, "GET", "/api/auth/sessions")).json<{ sessions: Array<{ ip: string | null; device: string }> }>();
+    expect(own.sessions.length).toBeGreaterThanOrEqual(3);
+    expect(own.sessions.every((session) => session.ip === null && session.device.length > 0)).toBe(true);
+    const owner = (await send(harness, harness.cookies.owner, "GET", "/api/auth/sessions")).json<{ sessions: Array<{ ip: string | null }> }>();
+    expect(owner.sessions.some((session) => session.ip !== null)).toBe(true);
+  });
+
   it("the same sweep finds them for an admin, so the sweep can see what it is looking for", async () => {
     const seen = new Set<string>();
     for (const url of await everyReadableUrl("owner")) {
@@ -881,8 +941,105 @@ describe("what a moderator can read", () => {
     expect(scrubText("path:/srv/a/b.mkv and `/srv/c/d.mkv` and {/srv/e/f.mkv", roots)).toBe("path:…/b.mkv and `…/d.mkv` and {…/f.mkv");
     expect(scrubText("/api/../srv/x/y.mkv", roots)).toBe("…/y.mkv");
     expect(scrubText("/srv/a/b.mkv?X-Plex-Token=abc", roots)).toBe("…/b.mkv");
-    expect(scrubValue({ "/mnt/media/Movies": 1, movies: 2 }, roots)).toEqual({ "<local>/Movies": 1, movies: 2 });
     expect(scrubValue({ filePath: "/mnt/other root/a b/c.mkv", plexPass: true, apiKey: "x", password: "y", mustChangePassword: true }, roots)).toEqual({ filePath: "…/c.mkv", plexPass: true, mustChangePassword: true });
+    expect(scrubValue({ "/mnt/media/Movies": 1, movies: 2 }, roots)).toEqual({ "<local>/Movies": 1, movies: 2 });
+  });
+
+  it.each([
+    ["from 198.51.100.7", "from <address>"],
+    ["(198.51.100.7)", "(<address>)"],
+    ["peer=198.51.100.7, next", "peer=<address>, next"],
+    ["ended at 198.51.100.7.", "ended at <address>."],
+    ["client_198.51.100.7_log", "client_<address>_log"],
+    ["2001:db8::7", "<address>"],
+    ["2001:0DB8:0000:0000:0000:0000:0000:0007", "<address>"],
+    ["from 2001:db8:1:2:3:4:5:6 ok", "from <address> ok"],
+    ["::1", "<address>"],
+    ["fe80::7%eth0 failed", "<address> failed"],
+    ["refused by fe80::7: timed out", "refused by <address>: timed out"],
+    ["addr:fe80::7", "addr:<address>"],
+    ["::ffff:198.51.100.7", "<address>"],
+    ["[2001:db8::7]", "[<address>]"],
+    ["[2001:db8::7]:32400", "<address>"],
+    ["198.51.100.7:32400", "<address>"]
+  ])("removes the address from %s", (input, expected) => {
+    expect(scrubText(input, [])).toBe(expected);
+    expect(scrubIpAddresses({ note: [input] })).toEqual({ note: [expect.not.stringMatching(/198\.51|2001:|fe80|::1/i)] });
+  });
+
+  it.each([
+    "12:30:45",
+    "2026-11-04T02:40:22.123Z",
+    "Show.S01E02.1080p.DDP5.1.2.0.mkv",
+    "Movie.2012.1.2.3.4.mkv",
+    "version 0.1.4-beta.4",
+    "aa:bb:cc:dd:ee:ff",
+    "std::string",
+    "Star Trek: The Next Generation",
+    "Mission: Impossible 2.5"
+  ])("leaves %s alone", (input) => {
+    expect(scrubText(input, [])).toBe(input);
+  });
+
+  it("empties a field that exists to hold an address, and no other", () => {
+    expect(scrubValue({ ip: "not.even.an.address", socketIp: "x", client_ip: "x", clientIP: "x", ips: ["x"], remoteAddress: "x", addresses: ["x"], skip: "yes", zip: "90210", relationship: "kept", ip6: null }, [])).toEqual({
+      ip: null, socketIp: null, client_ip: null, clientIP: null, ips: [null], remoteAddress: null, addresses: [null], skip: "yes", zip: "90210", relationship: "kept", ip6: null
+    });
+  });
+
+  it("removes viewer addresses from the Now Playing stream, keeping everything else", async () => {
+    const upstream = fastify();
+    upstream.get("/jf/Sessions", async () => [
+      jellyfinVideoTranscodeWithBurnIn(),
+      { ...jellyfinVideoTranscodeWithBurnIn(), Id: "jf-session-v6", RemoteEndPoint: "2001:db8::77" }
+    ]);
+    const base = await upstream.listen({ host: "127.0.0.1", port: 0 });
+    const added = await send(harness, harness.cookies.owner, "POST", "/api/media-servers", { kind: "jellyfin", name: "Address test", url: `${base}/jf`, token: "abc123" });
+    expect(added.statusCode, added.body).toBe(200);
+    await harness.app.app.listen({ port: 0, host: "127.0.0.1" });
+    const address = harness.app.app.server.address();
+    const appBase = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
+    const readUntilStreams = async (cookie: string) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 20_000);
+      const response = await fetch(`${appBase}/api/now-playing/events`, { headers: { cookie }, signal: controller.signal });
+      expect(response.status).toBe(200);
+      const reader = response.body!.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      try {
+        while (!/"jf-session-v6"/.test(text) || !/\n\n$/.test(text)) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+      } finally {
+        clearTimeout(timer);
+        controller.abort();
+      }
+      return text;
+    };
+    try {
+      const owner = await readUntilStreams(harness.cookies.owner);
+      expect(owner).toContain("203.0.113.77");
+      expect(owner).toContain("2001:db8::77");
+      const moderator = await readUntilStreams(harness.cookies.moderator);
+      expect(moderator).toContain("jf-session-v6");
+      expect(moderator).toContain('"user":{"id"');
+      expect(moderator).toContain('"ip":null');
+      expect(addressesIn(moderator)).toEqual([]);
+      expect(moderator).not.toContain(base);
+    } finally {
+      await upstream.close();
+      await send(harness, harness.cookies.owner, "DELETE", `/api/media-servers/${added.json<{ servers: Array<{ id: string }> }>().servers[0]!.id}`);
+    }
+  }, 40_000);
+
+  it("keeps ordinary release notes readable while removing addresses from them", () => {
+    expect(scrubIpAddresses({ releaseUrl: "https://github.com/example/releases/tag/v1", releaseNotes: "For example `198.51.100.9` or 2001:db8::9." })).toEqual({
+      releaseUrl: "https://github.com/example/releases/tag/v1",
+      releaseNotes: "For example `<address>` or <address>."
+    });
   });
 });
 

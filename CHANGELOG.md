@@ -30,7 +30,7 @@ Backups are on after the upgrade and start at the next 03:30.
 - Every route now resolves to a required permission through one table, and a route with no entry is refused. Webhooks keep their own secret and have no role.
 - There is always exactly one owner, enforced by the database as well as the app. Ownership moves only by a transfer that asks for the owner's password again, and leaves the previous owner an admin.
 - New accounts and password resets set a temporary password, which opens nothing except the screen that replaces it. Disabling, deleting and resetting end that person's sessions at once, and a role change applies to their next request. A disabled account gets the same sign-in answer as a wrong password.
-- Moderators receive no tokens, API keys, connection addresses, path settings or backup locations from any route, including through job logs, job data and error messages. A copy a moderator starts never deletes a file, whatever the settings say.
+- Moderators receive no tokens, API keys, IP addresses, connection addresses, path settings or backup locations from any route, including through job logs, job data, error messages and the Now Playing stream. A copy a moderator starts never deletes a file, whatever the settings say.
 - Account, role and ownership changes are written to the security activity and the action audit, with who did what. Only owners and admins can read those logs.
 
 ## [0.1.4-beta.3] - 2026-11-03

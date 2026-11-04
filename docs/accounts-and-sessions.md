@@ -49,11 +49,11 @@ The account made during setup is the owner. There is always exactly one.
 
 The server enforces this on every request. Controls a role cannot use are also hidden, and opening a page directly that a role cannot use shows a plain "Not allowed" screen.
 
-**What moderators do not receive.** No route gives a moderator a token, API key, connection address, path setting or backup location, including through job logs, job data and error messages:
+**What moderators do not receive.** No route gives a moderator a token, API key, IP address, connection address, path setting or backup location, including through job logs, job data, error messages and the Now Playing stream:
 
 - In library data and job logs, the configured folders are replaced with labels, so `/your/remote/Movies/Title.mkv` reads `<remote>/Movies/Title.mkv`. Any other absolute path is shortened to its file name, and addresses read `<address>`.
 - Backup, watch sync and path migration jobs appear in the job list with their type and status only. Their logs are empty for moderators.
-- Moderators do see who is watching in Now Playing, including the viewer's address, and the sign-in address and username written into a job log when someone starts a copy.
+- IP addresses, both IPv4 and IPv6, are removed everywhere. In Now Playing a moderator sees who is watching and their approximate location, without the address. Job logs show the username of whoever started a copy, with `<address>` in place of where they were, and **Sessions** leaves out addresses, including their own.
 
 **What a moderator's copy does.** A copy started by a moderator never removes anything. It always keeps the remote source, even when **Delete remote source after copies to local** is on, and if files already exist at the destination it can keep both, with the old file kept under a new name, but not replace them. Moderators can stop scans, audits and copies to local, but not copies to remote, cleanups, backups, watch sync or path migrations.
 

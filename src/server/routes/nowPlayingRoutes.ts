@@ -70,7 +70,7 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
       return reply.code(429).header("Retry-After", "10").send({ error: "Too many Now Playing streams are open. Try again shortly." });
     }
     // Fixed for the stream's life: any change to the account closes it.
-    const restrictedRoots: readonly SensitiveRoot[] | null = isRestrictedRequest(request) && options.restrictedView ? await loadSensitiveRoots(db, options.restrictedView) : null;
+    const restrictedRoots: readonly SensitiveRoot[] | null = !isRestrictedRequest(request) ? null : options.restrictedView ? await loadSensitiveRoots(db, options.restrictedView) : [];
     reply.hijack();
     const response = reply.raw;
     response.writeHead(200, {

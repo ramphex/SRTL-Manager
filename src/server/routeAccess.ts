@@ -30,7 +30,7 @@ declare module "fastify" {
     permission?: Permission;
     /** Stays available while the account must replace a temporary password. */
     duringPasswordChange?: boolean;
-    /** Holds nothing about this instance, so its response skips the restricted view. */
+    /** Holds nothing about this instance, so its response keeps its links and paths in the restricted view. */
     publicData?: boolean;
     libraryLock?: LibraryLock;
     webhook?: WebhookKind;

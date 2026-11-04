@@ -48,7 +48,7 @@ import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
 import { registerSonarrRoutes, sonarrWebhookInstanceId } from "./routes/sonarrRoutes";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
-import { isRestrictedRequest, loadSensitiveRoots, scrubText, scrubValue, type RestrictedViewRuntime } from "./lib/restrictedView";
+import { isRestrictedRequest, loadSensitiveRoots, scrubIpAddresses, scrubText, scrubValue, type RestrictedViewRuntime } from "./lib/restrictedView";
 import { loadAndInstallSecretKey } from "./lib/secretBox";
 import { applyRouteAccessPolicy, defaultBodyLimitBytes, isDirectLoopbackRequest, isReservedPath, type RouteEntry, type WebhookKind } from "./routeAccess";
 import { roleHasPermission } from "../shared/permissions";
@@ -283,12 +283,14 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   const restrictedViewRuntime: RestrictedViewRuntime = { paths: config.paths, backupDir: config.backupDir, dataDir: config.dataDir };
   const scrubbed = new WeakSet<FastifyRequest>();
   app.addHook("preSerialization", async (request, _reply, payload) => {
-    if (!isRestrictedRequest(request) || request.routeOptions.config?.publicData) return payload;
+    if (!isRestrictedRequest(request)) return payload;
     scrubbed.add(request);
+    if (request.routeOptions.config?.publicData) return scrubIpAddresses(payload);
     return scrubValue(payload, await loadSensitiveRoots(database.db, restrictedViewRuntime));
   });
   app.addHook("onSend", async (request, _reply, payload) => {
-    if (typeof payload !== "string" || scrubbed.has(request) || !isRestrictedRequest(request) || request.routeOptions.config?.publicData) return payload;
+    if (typeof payload !== "string" || scrubbed.has(request) || !isRestrictedRequest(request)) return payload;
+    if (request.routeOptions.config?.publicData) return scrubIpAddresses(payload) as string;
     return scrubText(payload, await loadSensitiveRoots(database.db, restrictedViewRuntime));
   });
 

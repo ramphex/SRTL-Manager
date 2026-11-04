@@ -85,6 +85,8 @@ test.describe("roles in the browser", () => {
     await expect(page.locator(".account-form").filter({ hasText: "Create account" }).locator("select option")).toHaveText(["Admin", "Moderator"]);
     await expect(page.getByRole("heading", { name: "Recent account changes" })).toBeVisible();
     await expect(page.getByText(moderatorName).first()).toBeVisible();
+    await page.goto(`${baseUrl}/settings/user`);
+    await expect(page.getByRole("region", { name: "Signed-in sessions" }).getByRole("columnheader", { name: "Address" })).toBeVisible();
   });
 
   test("the owner's accounts page works at phone width", async ({ page }) => {
@@ -144,6 +146,8 @@ test.describe("roles in the browser", () => {
     await expect(page.getByRole("heading", { name: "Sessions" })).toBeVisible();
     await expect(page.getByLabel("Current password")).toBeVisible();
     await expect(page.getByRole("heading", { name: "Security activity" })).toHaveCount(0);
+    await expect(page.getByRole("columnheader", { name: "Device" })).toBeVisible();
+    await expect(page.getByRole("columnheader", { name: "Address" })).toHaveCount(0);
 
     // The client asked for nothing it would be refused, so nothing the screens did was hidden by an error.
     expect(refused).toEqual([]);

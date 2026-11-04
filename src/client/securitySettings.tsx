@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { LogOut, MonitorSmartphone, RefreshCw, ShieldCheck } from "lucide-react";
+import { useAccess } from "./access";
 import { api } from "./api";
 import { Panel } from "./App";
 import { formatDate, useUserPreferences } from "./appShared";
@@ -12,6 +13,7 @@ const securityEventsKey = ["security-events"] as const;
 
 export function SessionsPanel() {
   const queryClient = useQueryClient();
+  const showAddresses = useAccess().can("settings.manage");
   const { timeFormat } = useUserPreferences();
   const sessions = useQuery({ queryKey: sessionsKey, queryFn: api.sessions });
   const [message, setMessage] = useState<string | null>(null);
@@ -77,7 +79,7 @@ export function SessionsPanel() {
               <thead>
                 <tr>
                   <th scope="col">Device</th>
-                  <th scope="col">Address</th>
+                  {showAddresses ? <th scope="col">Address</th> : null}
                   <th scope="col">Signed in</th>
                   <th scope="col">Last seen</th>
                   <th scope="col">Ends</th>
@@ -93,7 +95,7 @@ export function SessionsPanel() {
                       <strong>{session.device}</strong>
                       {session.current ? <span className="pill pill-info security-current-pill">This browser</span> : null}
                     </td>
-                    <td>{session.ip ?? "-"}</td>
+                    {showAddresses ? <td>{session.ip ?? "-"}</td> : null}
                     <td className="security-nowrap">{formatDate(session.createdAt, timeFormat)}</td>
                     <td className="security-nowrap">{formatDate(session.lastSeenAt, timeFormat)}</td>
                     <td className="security-nowrap">{formatDate(session.expiresAt, timeFormat)}</td>
@@ -102,7 +104,7 @@ export function SessionsPanel() {
                         type="button"
                         className="secondary"
                         disabled={busy}
-                        aria-label={session.current ? "Sign out this browser" : `Sign out ${session.device} at ${session.ip ?? "unknown address"}`}
+                        aria-label={session.current ? "Sign out this browser" : session.ip ? `Sign out ${session.device} at ${session.ip}` : `Sign out ${session.device}, signed in ${formatDate(session.createdAt, timeFormat)}`}
                         onClick={() => {
                           setMessage(null);
                           revoke.mutate(session.id);
