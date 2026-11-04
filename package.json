@@ -16,10 +16,10 @@
   },
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k -n api,web,worker -c cyan,green,magenta \"SRTL_HOST=127.0.0.1 SRTL_PORT=3009 SRTL_WEB_PORT=5178 tsx watch src/server/index.ts\" \"SRTL_API_TARGET=http://127.0.0.1:3009 SRTL_WEB_PORT=5178 vite --host 0.0.0.0 --strictPort\" \"SRTL_WORKER_ID=dev-worker tsx watch src/server/worker.ts\"",
+    "dev": "concurrently -k -n api,web,worker -c cyan,green,magenta \"SRTL_HOST=127.0.0.1 SRTL_PORT=3009 SRTL_WEB_PORT=${SRTL_WEB_PORT:-5178} tsx watch src/server/index.ts\" \"SRTL_API_TARGET=http://127.0.0.1:3009 SRTL_WEB_PORT=${SRTL_WEB_PORT:-5178} vite --host 0.0.0.0 --strictPort\" \"SRTL_WORKER_ID=dev-worker tsx watch src/server/worker.ts\"",
     "dev:server": "npm run dev",
-    "dev:api": "SRTL_HOST=127.0.0.1 SRTL_PORT=3009 SRTL_WEB_PORT=5178 tsx watch src/server/index.ts",
-    "dev:web": "SRTL_API_TARGET=http://127.0.0.1:3009 SRTL_WEB_PORT=5178 vite --host 0.0.0.0 --strictPort",
+    "dev:api": "SRTL_HOST=127.0.0.1 SRTL_PORT=3009 SRTL_WEB_PORT=${SRTL_WEB_PORT:-5178} tsx watch src/server/index.ts",
+    "dev:web": "SRTL_API_TARGET=http://127.0.0.1:3009 SRTL_WEB_PORT=${SRTL_WEB_PORT:-5178} vite --host 0.0.0.0 --strictPort",
     "dev:worker": "SRTL_WORKER_ID=dev-worker tsx watch src/server/worker.ts",
     "build": "node scripts/build.mjs",
     "sync:server": "bash scripts/dev-sync.sh",
