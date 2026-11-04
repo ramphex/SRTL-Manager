@@ -1,5 +1,5 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, redirect, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { api } from "./api";
@@ -7,7 +7,7 @@ import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdat
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
 import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
-import { minimumPasswordLength } from "../shared/auth";
+import { minimumPasswordLength, setupPagePath } from "../shared/auth";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
 import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useModalLifecycle, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
@@ -752,8 +752,10 @@ function LoginGate() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const online = useOnlineStatus();
-  // Setup status is only reported to local clients, so the sign-in screen also offers setup.
-  const [setupChosen, setSetupChosen] = useState(false);
+  // Setup status is only reported to local clients. Everyone else opens the setup form at its
+  // direct address from the server log, which looks the same whether or not an admin exists.
+  const pathname = useSyncExternalStore(router.history.subscribe, () => router.history.location.pathname);
+  const setupAddressOpen = pathname.replace(/\/+$/, "") === setupPagePath;
   if (!online && !me.data) return <OfflineSessionGate />;
   if (me.isPending) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
   if (me.error) {
@@ -769,18 +771,15 @@ function LoginGate() {
       </AuthShell>
     );
   }
-  if (!me.data?.authenticated && (me.data?.setupRequired || setupChosen)) {
+  if (!me.data?.authenticated && (me.data?.setupRequired || setupAddressOpen)) {
     return (
       <SetupForm
-        onDone={() => {
-          setSetupChosen(false);
-          void queryClient.invalidateQueries({ queryKey: ["me"] });
-        }}
-        onSignIn={me.data?.setupRequired ? undefined : () => setSetupChosen(false)}
+        onDone={() => void queryClient.invalidateQueries({ queryKey: ["me"] })}
+        onSignIn={me.data?.setupRequired ? undefined : () => router.history.replace("/")}
       />
     );
   }
-  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} onSetup={() => setSetupChosen(true)} />;
+  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
   return <AuthenticatedApp />;
 }
 
@@ -1463,7 +1462,7 @@ function SetupForm({ onDone, onSignIn }: { onDone: () => void; onSignIn?: () => 
   );
 }
 
-function LoginForm({ onDone, onSetup }: { onDone: () => void; onSetup: () => void }) {
+function LoginForm({ onDone }: { onDone: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const mutation = useMutation({ mutationFn: api.login, onSuccess: onDone });
@@ -1486,9 +1485,6 @@ function LoginForm({ onDone, onSetup }: { onDone: () => void; onSetup: () => voi
           Sign in
         </button>
         {mutation.error ? <p className="error">{mutation.error.message}</p> : null}
-        <button type="button" className="auth-link-button" onClick={onSetup}>
-          First start? Set up with a setup token
-        </button>
       </form>
     </AuthShell>
   );
@@ -1603,6 +1599,14 @@ const settingsMediaServersRoute = createRoute({ getParentRoute: () => rootRoute,
 const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
+// Signed-in browsers have no setup to do, including the one that just finished it here.
+const setupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: setupPagePath,
+  beforeLoad: () => {
+    throw redirect({ to: "/", replace: true });
+  }
+});
 const routeTree = rootRoute.addChildren([
   indexRoute,
   nowPlayingRoute,
@@ -1615,7 +1619,8 @@ const routeTree = rootRoute.addChildren([
   settingsIntegrationsRoute,
   settingsAdvancedRoute,
   settingsUserRoute,
-  logsRoute
+  logsRoute,
+  setupRoute
 ]);
 
 function RoutePending() {

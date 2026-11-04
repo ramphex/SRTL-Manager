@@ -3,6 +3,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import type { FastifyRequest } from "fastify";
+import { setupPagePath } from "../shared/auth";
 
 export const setupTokenFileName = "setup-token";
 const setupTokenPattern = /^[A-Za-z0-9_-]{24,256}$/;
@@ -68,7 +69,7 @@ export class SetupTokenGate {
     const { configuredToken, log } = this.options;
     if (configuredToken) {
       this.tokenDigest = digest(configuredToken);
-      log.warn("SRTL Manager setup required. Open the web UI and enter the setup token from SRTL_SETUP_TOKEN to create the first admin user.");
+      log.warn(`SRTL Manager setup required. Open ${setupPagePath} on this server's web address and enter the setup token from SRTL_SETUP_TOKEN to create the first admin user.`);
       return;
     }
     // Reuse a token from an earlier start so the log, the file and any copy the operator made still agree.
@@ -80,7 +81,7 @@ export class SetupTokenGate {
     }
     this.tokenDigest = digest(token);
     const location = saved ? ` It is also saved in ${this.filePath}.` : ` It could not be saved to ${this.filePath}.`;
-    log.warn(`SRTL Manager setup required. Setup token: ${token}${location} Open the web UI and enter this token to create the first admin user.`);
+    log.warn(`SRTL Manager setup required. Setup token: ${token}${location} Open ${setupPagePath} on this server's web address and enter this token to create the first admin user.`);
   }
 
   /** Constant-time check of a submitted token. False when no setup is pending. */
@@ -124,8 +125,9 @@ export function isLocalNetworkAddress(address: string | undefined | null): boole
 /**
  * Whether a client may learn that the instance still needs setup. The client
  * address is resolved through the trusted proxies, so internet clients behind
- * a correctly configured proxy never see it. They can still open the setup
- * form, which needs the token either way.
+ * a correctly configured proxy never see it. They open the setup form at its
+ * direct address from the server log. That page looks the same whether or not
+ * an admin exists, and setup needs the token either way.
  */
 export function setupStatusVisibleTo(request: FastifyRequest): boolean {
   return isLocalNetworkAddress(request.ip);

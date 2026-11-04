@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Security
+
+- The sign-in page no longer has a setup link, so it never appears on a server that is already set up. Browsers on the host or the local network still get the setup form on their own while no administrator exists. Anyone else opens `/setup`, an address printed in the API log with the setup token. It looks the same whether or not an administrator exists, and setup still needs the token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
+
 ## [0.1.4-beta.3] - 2026-11-03
 
 ### Added

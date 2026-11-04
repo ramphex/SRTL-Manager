@@ -1,6 +1,9 @@
 /** Minimum length for new and changed passwords. Existing shorter passwords still sign in. */
 export const minimumPasswordLength = 12;
 
+/** The setup form's direct address, printed in the server log with the setup token. */
+export const setupPagePath = "/setup";
+
 export interface AuthMe {
   authenticated: boolean;
   /** Shown only to clients on this host or the local network; everyone else sees false. */

@@ -9,7 +9,7 @@ A new instance cannot be claimed by whoever opens it first. Creating the adminis
 When SRTL Manager starts and no administrator exists yet, it:
 
 - generates a random setup token,
-- prints it in the API log, in a line that starts with `SRTL Manager setup required. Setup token:`,
+- prints it in the API log, in a line that starts with `SRTL Manager setup required. Setup token:` and also gives the setup address, `/setup`,
 - saves it as `setup-token` in the API data directory (`SRTL_DATA_DIR`, which is `/tmp/srtl-data` in the Docker image).
 
 To find it with Docker Compose, run one of these from the folder that holds `docker-compose.yml`:
@@ -21,13 +21,13 @@ docker compose exec api cat /tmp/srtl-data/setup-token
 
 Without Compose, use `docker logs <api container name>` instead. For a source install, the token is in the terminal running the API and in `data/setup-token` under the project folder unless `SRTL_DATA_DIR` points elsewhere.
 
-Open SRTL Manager, enter the token on the **Initial setup** screen, then choose a username and a password of at least 12 characters.
+Open `/setup` on your SRTL Manager address, for example `https://srtl.example.com/setup`, enter the token on the **Initial setup** screen, then choose a username and a password of at least 12 characters.
 
 - The token works once. After setup it is discarded and the file is deleted.
 - Until setup is done, the token stays the same across restarts while its file exists. In the Docker image the data directory is temporary, so a new token is printed each time the API container starts; use the newest one.
 - To choose the token yourself, for example in automated installs, set `SRTL_SETUP_TOKEN` to 24 or more letters, digits, `-` or `_`. It is then not printed or saved. Remove it once setup is done.
-- The setup screen opens on its own only for browsers on this host or the local network. Behind a reverse proxy with `SRTL_TRUST_PROXY` set, internet visitors see the sign-in screen, which has a **First start? Set up with a setup token** link. Either way, setup needs the token.
-- A wrong token, or an attempt after setup is complete, gets the same answer, so it does not reveal whether setup is still open.
+- The setup screen opens on its own at any address only for browsers on this host or the local network. Behind a reverse proxy with `SRTL_TRUST_PROXY` set, internet visitors see the sign-in screen, which has no setup link, and use `/setup` instead. Either way, setup needs the token.
+- `/setup` looks the same whether or not an administrator exists. A wrong token, or an attempt after setup is complete, gets the same answer, so neither reveals whether setup is still open. A signed-in browser that opens `/setup` goes to the dashboard.
 
 ## Sign-In Protection
 

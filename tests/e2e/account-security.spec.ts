@@ -59,15 +59,62 @@ test("first-run setup asks for the setup token and explains where to find it", a
   expect(calls[1]).toEqual({ setupToken: "example-setup-token-0123456789", username: "alex_03", password: "correct-horse-battery", confirmPassword: "correct-horse-battery" });
 });
 
-test("sign-in offers setup when the server does not reveal whether it is needed", async ({ page }) => {
+async function expectNoSetupOnSignIn(page: Page) {
+  await expect(page.locator(".auth-header .brand h1")).toHaveText("Sign in");
+  await expect(page.getByText(/set ?up/i)).toHaveCount(0);
+}
+
+test("sign-in has no setup link, and the setup address opens the form", async ({ page }) => {
   await signedOut(page, { authenticated: false, setupRequired: false, user: null }, () => ({ status: 403, body: { error: "Setup is not available. Check the setup token in the server log." } }));
   await page.goto(baseUrl!);
-  await expect(page.locator(".auth-header .brand h1")).toHaveText("Sign in");
-  await page.getByRole("button", { name: "First start? Set up with a setup token" }).click();
+  await expectNoSetupOnSignIn(page);
+
+  await page.goto(`${baseUrl}/setup`);
   await expect(page.locator(".auth-header .brand h1")).toHaveText("Initial setup");
   await expect(page.getByLabel("Setup token")).toBeVisible();
   await page.getByRole("button", { name: "Back to sign in" }).click();
-  await expect(page.locator(".auth-header .brand h1")).toHaveText("Sign in");
+  await expectNoSetupOnSignIn(page);
+  expect(new URL(page.url()).pathname).toBe("/");
+});
+
+test("a server that is already set up shows no setup link and refuses setup at its setup address", async ({ page }) => {
+  test.skip(!process.env.SRTL_E2E_SESSION_TOKEN, "Needs a real server that is already set up.");
+  await page.goto(baseUrl!);
+  await expectNoSetupOnSignIn(page);
+
+  await page.goto(`${baseUrl}/setup`);
+  await expect(page.locator(".auth-header .brand h1")).toHaveText("Initial setup");
+  await page.getByLabel("Setup token").fill("example-setup-token-0123456789");
+  await page.getByLabel("Username", { exact: true }).fill("alex_03");
+  await page.getByLabel("Password", { exact: true }).fill("correct-horse-battery");
+  await page.getByLabel("Confirm password").fill("correct-horse-battery");
+  const refused = page.waitForResponse("**/api/auth/setup");
+  await page.getByRole("button", { name: "Create admin" }).click();
+  const response = await refused;
+  expect(response.status()).toBe(403);
+  expect(await response.json()).toMatchObject({ code: "setup_unavailable" });
+  await expect(page.locator(".auth-form .error")).toHaveText("Setup is not available. Check the setup token in the server log.");
+});
+
+test("finishing setup at the setup address leaves it", async ({ page }) => {
+  await signedOut(page, { authenticated: false, setupRequired: false, user: null }, () => ({ status: 403, body: { error: "Setup is not available." } }));
+  await page.goto(`${baseUrl}/setup`);
+  await page.getByLabel("Setup token").fill("example-setup-token-0123456789");
+  await page.getByLabel("Username", { exact: true }).fill("alex_03");
+  await page.getByLabel("Password", { exact: true }).fill("correct-horse-battery");
+  await page.getByLabel("Confirm password").fill("correct-horse-battery");
+  // From here on the server answers as if the admin now exists and this browser is signed in.
+  await signedIn(page);
+  await page.getByRole("button", { name: "Create admin" }).click();
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/");
+  await expect(page.getByLabel("Setup token")).toHaveCount(0);
+});
+
+test("a signed-in browser never sees the setup form", async ({ page }) => {
+  await signedIn(page);
+  await page.goto(`${baseUrl}/setup`);
+  await expect.poll(() => new URL(page.url()).pathname).toBe("/");
+  await expect(page.getByLabel("Setup token")).toHaveCount(0);
 });
 
 function sessionList(): AuthSessionList {
