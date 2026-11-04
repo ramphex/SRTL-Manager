@@ -261,8 +261,6 @@ function StreamCard({ stream, now, onStop }: { stream: NowPlayingStream; now: nu
           <div><dt>Bandwidth</dt><dd>{stream.bandwidth.kbps === null ? "Unknown" : `${stream.bandwidth.kind === "estimate" ? "≈ " : ""}${formatKbps(stream.bandwidth.kbps)}`}{stream.bandwidth.kind === "estimate" && stream.bandwidth.kbps !== null ? <span className="np-decision"> (estimate)</span> : null}{stream.state === "paused" ? <span className="np-decision"> (paused, not counted)</span> : null}</dd></div>
           {stream.network.ip ? (
             <div><dt>Address</dt><dd>{stream.network.ip}{geo ? <span className="np-geo"><Globe size={12} />{geo}</span> : null}</dd></div>
-          ) : geo ? (
-            <div><dt>Location</dt><dd><span className="np-geo"><Globe size={12} />{geo}</span></dd></div>
           ) : null}
         </dl>
       </div>

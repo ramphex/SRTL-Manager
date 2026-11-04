@@ -10,8 +10,8 @@ import type { JobEventPage, JobEventRecord, JobRecord, JobType, PathsSettings } 
 /**
  * What an account without `settings.manage` is allowed to read. Routes that
  * exist for settings are refused outright by the route table; this covers
- * everything else such a person can open, so a path root, IP address, connection
- * address or credential cannot reach them through a job log, an error message or a new field somebody
+ * everything else such a person can open, so a path root, IP address, viewer
+ * location, connection address or credential cannot reach them through a job log, an error message or a new field somebody
  * adds later. Every response to them passes through `scrubValue`.
  */
 
@@ -27,6 +27,9 @@ export interface RestrictedViewRuntime {
 }
 
 const sensitiveKey = /password|passwd|passphrase|secret|token|api[-_]?key|authorization|credential|cookie|private[-_]?key/i;
+// Where someone is. Whole names only, so `capacity`, `geometry` and a storage `locationName` stay; `network.location` is only LAN or WAN.
+const locationWord = /^(?:geo|geoip|geolocation|city|region|country|country_?code|subdivisions?|latitude|longitude|lat|lon|lng|long|coordinates|coords|isp|asn|postal(?:_?code)?|zip(?:_?code)?|time_?zone|continent)$/i;
+const locationPart = /^[gG]eo[A-Z_]|[a-z0-9](?:City|Region|Country|CountryCode|Latitude|Longitude|Coordinates|Isp|Geo)$|_(?:city|region|country|country_code|latitude|longitude|coordinates|isp|geo)$/;
 const pathKey = /(path|dir|directory|root)$/i;
 // Case matters: `socketIp` and `client_ip` are addresses, `skip` and `zip` are not.
 const addressKey = /(?:^ips?|[a-z0-9]Ips?|_ips?|[A-Za-z0-9]IPs?|[aA]ddress(?:es)?)$/;
@@ -100,8 +103,8 @@ export function scrubValue(value: unknown, roots: readonly SensitiveRoot[], key 
   if (value && typeof value === "object") {
     const output: Record<string, unknown> = {};
     for (const [entryKey, entry] of Object.entries(value)) {
-      // A flag such as `mustChangePassword` says nothing secret.
-      if (!sensitiveKey.test(entryKey) || typeof entry === "boolean") output[scrubText(entryKey, roots)] = scrubValue(entry, roots, entryKey);
+      // A flag such as `mustChangePassword` or `geoLookup` says nothing secret.
+      if (typeof entry === "boolean" || !(sensitiveKey.test(entryKey) || locationWord.test(entryKey) || locationPart.test(entryKey))) output[scrubText(entryKey, roots)] = scrubValue(entry, roots, entryKey);
     }
     return output;
   }

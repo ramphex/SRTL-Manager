@@ -75,9 +75,15 @@ function host(): NowPlayingHostEvent {
 
 const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 
-// What the server's restricted view sends a moderator.
-function withoutAddresses(value: NowPlayingSnapshot): NowPlayingSnapshot {
-  return { ...value, streams: value.streams.map((stream) => ({ ...stream, network: { ...stream.network, ip: null } })) };
+// What the server's restricted view sends a moderator: no address, and no location field at all.
+function restrictedSnapshot(value: NowPlayingSnapshot): NowPlayingSnapshot {
+  return {
+    ...value,
+    streams: value.streams.map((stream) => {
+      const { geo: _geo, ...network } = stream.network;
+      return { ...stream, network: { ...network, ip: null } } as unknown as NowPlayingSnapshot["streams"][number];
+    })
+  };
 }
 
 async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean } = {}) {
@@ -87,7 +93,7 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     const url = new URL(request.url());
     let response: unknown = [];
     if (url.pathname === "/api/now-playing/events") {
-      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(options.moderator ? withoutAddresses(snapshot(options.plexPass ?? true)) : snapshot(options.plexPass ?? true))}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
+      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(options.moderator ? restrictedSnapshot(snapshot(options.plexPass ?? true)) : snapshot(options.plexPass ?? true))}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
       await route.fulfill({ status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" }, body });
       return;
     }
@@ -177,15 +183,18 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Home Plex");
 });
 
-test("shows a moderator the viewer and location, with no address or Stop", async ({ page }) => {
+test("shows a moderator the viewer, with no address, location or Stop", async ({ page }) => {
   await fixture(page, { moderator: true });
   await openNowPlaying(page);
   const hw = page.getByRole("article", { name: "Example Show — sam" });
   await expect(hw).toContainText("sam");
-  await expect(hw).toContainText("Location");
-  await expect(hw).toContainText("Example City, Netherlands");
+  await expect(hw).toContainText("Transcode (HW)");
   await expect(hw).not.toContainText("198.51.100.23");
   await expect(hw.getByText("Address", { exact: true })).toHaveCount(0);
+  await expect(hw.getByText("Location", { exact: true })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("Example City");
+  await expect(page.locator("body")).not.toContainText("Netherlands");
+  await expect(hw.locator(".np-geo")).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Stop stream/ })).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("192.168.1.40");
 });

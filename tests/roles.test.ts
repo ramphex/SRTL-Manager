@@ -10,11 +10,12 @@ import { first, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { plexEndpoints } from "../src/server/lib/plexClient";
 import { scrubIpAddresses, scrubText, scrubValue } from "../src/server/lib/restrictedView";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { routeTableEntries, routeTableEntry } from "../src/server/routeAccess";
 import { accountRoles, canManageRole, manageableRoles, rolePermissions, roleHasPermission, type AccountRole, type Permission } from "../src/shared/permissions";
-import { jellyfinVideoTranscodeWithBurnIn } from "./nowPlayingFixtures";
+import { jellyfinVideoTranscodeWithBurnIn, plexHardwareTranscodeEpisode } from "./nowPlayingFixtures";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
 
@@ -762,6 +763,15 @@ describe("what a moderator can read", () => {
   const serverAddress = "https://media.internal.example:32400";
   const backupFolder = "/srv/planted-backups/database";
   let startedCopy = 0;
+  const plantedLocation = {
+    city: "Plantedville", region: "Planted Region", country: "Plantedland", countryCode: "PX", code: "keeps-this-one",
+    latitude: 52.37123, longitude: 4.89456, lat: 52.37124, lon: 4.89457, lng: 4.89458, coordinates: [52.37125, 4.89459],
+    isp: "Planted ISP", asn: "AS64512-planted", postalCode: "PLANTED-1", timeZone: "Planted/Zone", continent: "Plantedia",
+    geo: { city: "Plantedgeo City", region: "Plantedgeo Region", country: "Plantedgeo Land", code: "PY" },
+    viewerCity: "Plantedcamel City", client_country: "Plantedsnake Land", geoData: { label: "Plantedprefix Label" }
+  };
+  const plantedLocationValues = ["Plantedville", "Planted Region", "Plantedland", "PX", "52.3712", "4.8945", "Planted ISP", "AS64512", "PLANTED-1", "Planted/Zone", "Plantedia", "Plantedgeo", "Plantedcamel", "Plantedsnake", "Plantedprefix"];
+  const locationFieldNames = /"(?:geo|city|region|country|countryCode|latitude|longitude|lat|lon|lng|coordinates|isp|asn|postalCode|timeZone|continent|viewerCity|client_country|geoData)":/;
 
   beforeAll(async () => {
     harness = await startHarness();
@@ -803,6 +813,8 @@ describe("what a moderator can read", () => {
       `Refused by 198.51.100.44. Also 2001:db8::45: timed out, [2001:db8::46]:443, fe80::47%eth0, ::ffff:198.51.100.48 and 2001:0db8:0000:0000:0000:0000:0000:0049 (from ::1)`,
       { ip: "2001:db8::4a", remoteAddress: "198.51.100.50", addresses: ["198.51.100.51", "2001:db8::52"], note: "peer=198.51.100.53 peer6=2001:db8::54" }
     );
+    // Location fields in every shape a job's data might hold them.
+    await addJob("scan", plantedLocation, plantedLocation, "Finished looking up viewers", { ...plantedLocation, viewer: plantedLocation, viewers: [plantedLocation] });
     // What a real copy writes to its log about who started it, and from where.
     const started = await harness.app.app.inject({ method: "POST", url: "/api/copies", remoteAddress: "198.51.100.60", headers: { cookie: harness.cookies.admin }, payload: { direction: "to_local", linkIds: [link!.id] } });
     expect(started.statusCode, started.body).toBe(200);
@@ -873,6 +885,23 @@ describe("what a moderator can read", () => {
     }
     expect(found).toEqual([]);
     expect(answered).toEqual(expect.arrayContaining(["/api/jobs", "/api/auth/sessions", "/api/system/version"]));
+  });
+
+  it("never carries a viewer location on any route they can read", async () => {
+    const found: string[] = [];
+    for (const url of await everyReadableUrl("moderator")) {
+      const { body } = await send(harness, harness.cookies.moderator, "GET", url);
+      for (const value of plantedLocationValues) if (body.includes(value)) found.push(`${url} carries ${value}`);
+      if (locationFieldNames.test(body)) found.push(`${url} has a location field: ${locationFieldNames.exec(body)?.[0]}`);
+    }
+    expect(found).toEqual([]);
+    const seen = new Set<string>();
+    for (const url of await everyReadableUrl("owner")) {
+      const { body } = await send(harness, harness.cookies.owner, "GET", url);
+      for (const value of plantedLocationValues) if (body.includes(value)) seen.add(value);
+    }
+    // The sweep can see what it is looking for: an owner's view of the same routes has all of it.
+    expect([...seen].sort()).toEqual([...plantedLocationValues].sort());
   });
 
   it("the address sweep finds them for an owner, so it can see what it is looking for", async () => {
@@ -981,25 +1010,43 @@ describe("what a moderator can read", () => {
     expect(scrubText(input, [])).toBe(input);
   });
 
+  it("removes location fields, and only those", () => {
+    const location = { city: "x", City: "x", region: "x", country: "x", country_code: "x", countryCode: "x", subdivisions: ["x"], latitude: 1, longitude: 2, lat: 1, lon: 2, lng: 2, long: 2, coordinates: [1, 2], coords: [1, 2], isp: "x", ISP: "x", asn: "x", postal: "x", postalCode: "x", zip: "x", zipCode: "x", timeZone: "x", time_zone: "x", continent: "x", geo: { city: "x" }, geoip: {}, GeoIP: {}, geolocation: {}, geoData: {}, geo_data: {}, viewerCity: "x", clientRegion: "x", peerCountry: "x", clientIsp: "x", viewerGeo: {}, viewer_city: "x", client_isp: "x" };
+    expect(scrubValue(location, [])).toEqual({});
+    const kept = { capacity: 4, velocity: 2, opacity: 1, geometry: "16:9", location: "wan", locationName: "Home NAS", language: "eng", codec: "hevc", code: "PX", longitude_note: "kept", cityscape: "kept", isolated: true, geoLookup: true, displayName: "Library" };
+    expect(scrubValue(kept, [])).toEqual(kept);
+    expect(scrubValue({ network: { location: "wan", geo: { city: "x" }, relayed: false } }, [])).toEqual({ network: { location: "wan", relayed: false } });
+  });
+
   it("empties a field that exists to hold an address, and no other", () => {
-    expect(scrubValue({ ip: "not.even.an.address", socketIp: "x", client_ip: "x", clientIP: "x", ips: ["x"], remoteAddress: "x", addresses: ["x"], skip: "yes", zip: "90210", relationship: "kept", ip6: null }, [])).toEqual({
-      ip: null, socketIp: null, client_ip: null, clientIP: null, ips: [null], remoteAddress: null, addresses: [null], skip: "yes", zip: "90210", relationship: "kept", ip6: null
+    expect(scrubValue({ ip: "not.even.an.address", socketIp: "x", client_ip: "x", clientIP: "x", ips: ["x"], remoteAddress: "x", addresses: ["x"], skip: "yes", clip: "kept", relationship: "kept", ip6: null }, [])).toEqual({
+      ip: null, socketIp: null, client_ip: null, clientIP: null, ips: [null], remoteAddress: null, addresses: [null], skip: "yes", clip: "kept", relationship: "kept", ip6: null
     });
   });
 
-  it("removes viewer addresses from the Now Playing stream, keeping everything else", async () => {
+  it("removes viewer addresses and locations from the Now Playing stream, keeping everything else", async () => {
     const upstream = fastify();
+    // A Plex server with a public viewer, and plex.tv answering where that viewer is, as SRTL's real lookup asks it to.
+    const plexSession = plexHardwareTranscodeEpisode();
+    upstream.get("/plextv/api/v2/user", async () => ({ id: 1, username: "plex-owner", subscription: { active: true, status: "Active", plan: "lifetime" } }));
+    upstream.get("/plextv/api/v2/geoip", async () => ({ code: "PX", country: "Plantedland", city: "Plantedville", subdivisions: "Planted Region" }));
+    upstream.get("/pms/status/sessions", async () => ({ MediaContainer: { size: 1, Metadata: [plexSession.session] } }));
+    upstream.get("/pms/library/metadata/:keys", async () => ({ MediaContainer: { Metadata: [plexSession.library] } }));
     upstream.get("/jf/Sessions", async () => [
       jellyfinVideoTranscodeWithBurnIn(),
       { ...jellyfinVideoTranscodeWithBurnIn(), Id: "jf-session-v6", RemoteEndPoint: "2001:db8::77" }
     ]);
     const base = await upstream.listen({ host: "127.0.0.1", port: 0 });
+    const originalPlexTv = plexEndpoints.plexTv;
+    plexEndpoints.plexTv = `${base}/plextv`;
     const added = await send(harness, harness.cookies.owner, "POST", "/api/media-servers", { kind: "jellyfin", name: "Address test", url: `${base}/jf`, token: "abc123" });
     expect(added.statusCode, added.body).toBe(200);
+    const addedPlex = await send(harness, harness.cookies.owner, "POST", "/api/media-servers", { kind: "plex", name: "Location test", url: `${base}/pms`, token: "abc123" });
+    expect(addedPlex.statusCode, addedPlex.body).toBe(200);
     await harness.app.app.listen({ port: 0, host: "127.0.0.1" });
     const address = harness.app.app.server.address();
     const appBase = `http://127.0.0.1:${typeof address === "object" && address ? address.port : 0}`;
-    const readUntilStreams = async (cookie: string) => {
+    const readUntil = async (cookie: string, ready: (text: string) => boolean) => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 20_000);
       const response = await fetch(`${appBase}/api/now-playing/events`, { headers: { cookie }, signal: controller.signal });
@@ -1008,7 +1055,7 @@ describe("what a moderator can read", () => {
       const decoder = new TextDecoder();
       let text = "";
       try {
-        while (!/"jf-session-v6"/.test(text) || !/\n\n$/.test(text)) {
+        while (!ready(text) || !/\n\n$/.test(text)) {
           const { value, done } = await reader.read();
           if (done) break;
           text += decoder.decode(value, { stream: true });
@@ -1020,18 +1067,24 @@ describe("what a moderator can read", () => {
       return text;
     };
     try {
-      const owner = await readUntilStreams(harness.cookies.owner);
+      // Waits for the owner's stream to show the location, so the lookup has finished before the moderator's stream opens.
+      const owner = await readUntil(harness.cookies.owner, (text) => text.includes("jf-session-v6") && text.includes("Plantedville"));
       expect(owner).toContain("203.0.113.77");
       expect(owner).toContain("2001:db8::77");
-      const moderator = await readUntilStreams(harness.cookies.moderator);
+      expect(owner).toContain("198.51.100.23");
+      for (const value of ["Plantedville", "Planted Region", "Plantedland", '"geo":{']) expect(owner).toContain(value);
+      const moderator = await readUntil(harness.cookies.moderator, (text) => text.includes("jf-session-v6") && text.includes('"serverKind":"plex"'));
       expect(moderator).toContain("jf-session-v6");
+      expect(moderator).toContain('"location":"wan"');
+      for (const value of ["Plantedville", "Planted Region", "Plantedland", '"PX"', '"geo"', '"city"', '"region"', '"country"']) expect(moderator).not.toContain(value);
       expect(moderator).toContain('"user":{"id"');
       expect(moderator).toContain('"ip":null');
       expect(addressesIn(moderator)).toEqual([]);
       expect(moderator).not.toContain(base);
     } finally {
+      plexEndpoints.plexTv = originalPlexTv;
+      for (const server of addedPlex.json<{ servers: Array<{ id: string }> }>().servers) await send(harness, harness.cookies.owner, "DELETE", `/api/media-servers/${server.id}`);
       await upstream.close();
-      await send(harness, harness.cookies.owner, "DELETE", `/api/media-servers/${added.json<{ servers: Array<{ id: string }> }>().servers[0]!.id}`);
     }
   }, 40_000);
 
