@@ -58,6 +58,14 @@ Sonarr monitoring changes **episodes, not series**. The series stays monitored, 
 
 Results appear in the instance's Activity tab, one row per episode, and in the copy job's event history as one line per series, for example "Unmonitored 8 episodes in Sonarr 4K: Show (2020)".
 
+## Re-Requesting After A Delete
+
+Deleting a file from **Library > Damaged files** or an orphan review can also ask Sonarr to search for a new copy. It is off until you tick it for that delete. [The Radarr page](radarr.md#re-requesting-after-a-delete) covers the confirmation, pacing, results and retries, which are the same here. What differs:
+
+- SRTL requests **exactly the episodes in the deleted file**. It finds them through Sonarr's file record, so `S01E03-E04` requests both. If Sonarr no longer has the record, it reads the season and episode numbers from the file name, and leaves alone any episode that has a different file.
+- A name with no episode number, such as a daily show, needs Sonarr to still have its record. The confirmation asks Sonarr about these before the delete.
+- Only those episodes are monitored. **The series is never changed.** If the series is unmonitored, the search still runs because you asked for it, and the result says only this search will look for the episode.
+
 ## Media Checks Before Copying
 
 Before copying an episode, SRTL asks the instance that owns the folder for that series' episode files. When the file being copied matches a Sonarr episode file by path (or, failing that, by a unique file name), Sonarr's recorded size is used to reject partial files, as Radarr's is for movies. Samples and extras have no Sonarr size and are checked as usual. Episode lists are cached for a minute, so copying a whole season asks Sonarr once.

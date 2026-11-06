@@ -7,7 +7,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 ## Highlights
 
 - Guided first-run account, path, section, policy, and initial-scan setup, protected by a one-time setup token. Session list, sign-out of other devices, and a security activity log in Settings. See [accounts and sessions](docs/accounts-and-sessions.md).
-- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period.
+- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period. Damaged files can be deleted the same way, and any delete can optionally [ask Radarr or Sonarr to search for a new copy](docs/radarr.md#re-requesting-after-a-delete).
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles. Each folder can optionally give new titles a [default policy](docs/default-policy.md).
 - Fast and deep audits across local and remote targets.
 - Nightly verified database backups with retention, and a warning on every page if one fails or is overdue. See [database backups](docs/backups.md).
