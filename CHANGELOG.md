@@ -6,7 +6,17 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Added
 
+- Added `SRTL_EXTRA_SYMLINK_DIRS`, for folders of symlinks kept by other tools. Their targets show as still linked in the orphan review and purges refuse them, checking again right before each delete, and refusing altogether if a folder cannot be read. The folders need a read-only mount in the API and worker containers. See [Symlinks kept by other tools](docs/orphan-review.md#symlinks-kept-by-other-tools).
 - Added **Retry failed** to copy jobs that finished with failed items, on the job's window, on **Logs** and in **Recent Jobs**. The label says how many items it will retry. It starts a new job through the same checks as any other copy and leaves the old job's history alone. Items that no longer need it are skipped, and it says how many and why: already copied by a later job, a link that has gone or changed, waiting for reconciliation, or already queued. If the original job replaced local files or deleted remote sources, it asks first, and neither happens unless you tick it. See [what a moderator's retry does](docs/accounts-and-sessions.md#roles).
+
+### Changed
+
+- Orphan purges now need a complete symlink scan of every library folder that started in the last 24 hours. Before, rescanning one title made its whole folder look scanned. Rescans of single titles and scans that failed or were cancelled no longer count, and the warning names the folders to scan. Folders with nothing in them do not hold purges up. Damaged file deletes follow the same rule.
+- The orphan review is easier to review by. Unlinked files are split into **Title is in the library** and **No title match**, a name comparison that the page says can be wrong. Each file shows whether its release is partly linked, and **Older or duplicate versions**, now **Other versions of linked titles**, shows how each file's size compares with the linked file and flags larger ones. The list can be filtered and sorted by all of these. The API keeps its existing fields, and adds `label` and the others beside them. See [Orphan review and purge](docs/orphan-review.md).
+
+### Fixed
+
+- Multi-episode names such as `S01E01E02` are now read as their episodes, in the orphan review. They were read as having no episode at all, so a multi-episode file was called an older version whenever anything of that show was linked. It now only is when every episode it holds has a linked file.
 
 ## [0.1.4-beta.4] - 2026-11-06
 

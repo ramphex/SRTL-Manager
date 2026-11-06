@@ -21,7 +21,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, extraSymlinksForPurge, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -2843,8 +2843,11 @@ export class JobRunner {
     return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
       const staleness = await symlinkInventoryStaleness(transaction);
       if (staleness.warning) throw new AdmissionError(staleness.warning);
-      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested) : { eligible: [], rejected: [] };
-      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders);
+      const extra = await extraSymlinksForPurge(transaction, paths).catch((error: unknown) => {
+        throw new AdmissionError(errorMessage(error));
+      });
+      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested, undefined, extra) : { eligible: [], rejected: [] };
+      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders, undefined, extra);
       const allRejected = [...rejected, ...folders.rejected];
       if (allRejected.length > 0) {
         throw new AdmissionError(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);

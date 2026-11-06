@@ -2071,14 +2071,9 @@ function selectedScanSections(sections: string[] | undefined, legacySections: st
   return [...new Set(selectedSections)].filter((section) => configured.has(section));
 }
 
-export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanTimestamps> {
-  const configuredSections = (await getSectionSettings(db)).sections;
-  const symlinkSectionTimestamps = new Map<string, string>();
-  const localSectionTimestamps = new Map<string, string>();
-  let remoteRoot: string | null = null;
-
+async function completedScanRows(db: Db): Promise<CompletedScanTimestampRow[]> {
   // Scan runs keep their own options, so timestamps survive pruning of old job history.
-  const completedScans = await dbAll<CompletedScanTimestampRow>(db, sql`
+  return dbAll<CompletedScanTimestampRow>(db, sql`
     select
       sr.started_at as "startedAt",
       sr.finished_at as "finishedAt",
@@ -2089,6 +2084,29 @@ export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanT
     where sr.status = 'completed'
     order by sr.finished_at asc, sr.started_at asc
   `);
+}
+
+/**
+ * When the newest completed scan of each whole section began. Title rescans and scans that failed or were cancelled
+ * do not count, and neither do link sightings. A link made after a scan began may not have been seen, so its start is what counts.
+ */
+export async function completeSymlinkScanTimes(db: Db, configuredSections: string[]): Promise<Map<string, string>> {
+  const times = new Map<string, string>();
+  for (const scan of await completedScanRows(db)) {
+    const options = scanOptionsFromProgress(scan.progress, scan.options);
+    if (!options?.scanSymlinks || options.titleScopes?.length) continue;
+    for (const section of selectedScanSections(options.symlinkSections, options.sections, configuredSections)) setLatestTimestamp(times, section, scan.startedAt);
+  }
+  return times;
+}
+
+export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanTimestamps> {
+  const configuredSections = (await getSectionSettings(db)).sections;
+  const symlinkSectionTimestamps = new Map<string, string>();
+  const localSectionTimestamps = new Map<string, string>();
+  let remoteRoot: string | null = null;
+
+  const completedScans = await completedScanRows(db);
 
   for (const scan of completedScans) {
     const options = scanOptionsFromProgress(scan.progress, scan.options);

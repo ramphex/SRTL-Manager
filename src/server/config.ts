@@ -3,6 +3,7 @@ import net from "node:net";
 import path from "node:path";
 import type { PathsSettings } from "../shared/types";
 import { mergeEnvSettings, readEnvFile, readProcessEnvSettings } from "./lib/env";
+import { parseExtraSymlinkFolders } from "./lib/extraSymlinkFolders";
 import { isValidSetupToken } from "./setupToken";
 import { parseOutboundPolicy, type OutboundPolicy } from "./lib/outboundPolicy";
 import type { SecretKeyOptions } from "./lib/secretBox";
@@ -35,6 +36,8 @@ export interface AppConfig {
   jobHistoryRetentionDays: number;
   jobConcurrency: JobConcurrencySettings;
   paths: PathsSettings;
+  /** Read-only folders of symlinks kept by other tools, checked before a purge (SRTL_EXTRA_SYMLINK_DIRS). */
+  extraSymlinkFolders: string[];
   /** Addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr (SRTL_OUTBOUND_ALLOW_CIDRS). */
   outboundPolicy: OutboundPolicy;
   /** SRTL_DISCARD_UNREADABLE_CREDENTIALS: start without the credentials a lost secret key sealed. */
@@ -377,6 +380,7 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
       // the Local and Remote interface roles.
       localDir: environment.SRTL_LOCATION_1_PATH ?? "",
       remoteDir: environment.SRTL_LOCATION_2_PATH ?? ""
-    }
+    },
+    extraSymlinkFolders: overrides.extraSymlinkFolders ?? parseExtraSymlinkFolders(process.env.SRTL_EXTRA_SYMLINK_DIRS ?? envFile.SRTL_EXTRA_SYMLINK_DIRS)
   };
 }

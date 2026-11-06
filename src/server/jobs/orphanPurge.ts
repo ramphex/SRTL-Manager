@@ -1,22 +1,25 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
-import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
+import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
+import { getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
+import { parseEpisodeNumbers } from "../lib/episodeNumbers";
+import { extraLinkCovering, extraLinkTouchingFolder, extraSymlinkFolders, extraSymlinkRefusal, readExtraSymlinks, type ExtraSymlinks } from "../lib/extraSymlinkFolders";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { removeExpectedSymlink } from "./symlinkCleanup";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
-import { getInventoryScanTimestamps } from "../lib/scanner";
+import { buildTitleIndex, matchReleaseTitle, releaseKeyOf, releaseNameOf, type TitleIndex } from "../lib/releaseTitles";
+import { completeSymlinkScanTimes, getInventoryScanTimestamps } from "../lib/scanner";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
 
 export { holdingFolderName };
 // Files changed this recently may still be importing or downloading, so they are never purged.
 export const purgeGraceMs = 24 * 60 * 60_000;
-// Remote files cannot be checked against their title folder, so the symlink inventory must be this fresh.
+// Remote files cannot be checked against their title folder, so a complete symlink scan must be this recent.
 const maxSymlinkInventoryAgeMs = 24 * 60 * 60_000;
 const maxStorageInventoryAgeMs = 24 * 60 * 60_000;
 const sidecarExtensions = new Set([".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn"]);
@@ -46,9 +49,17 @@ export function rootPathFor(paths: PathsSettings, rootType: StorageRootType): st
   return rootType === "local" ? paths.localDir : paths.remoteDir;
 }
 
+// Every episode a file name holds: S01E01E02, S01E01-E02 and S01E01-02 are two each.
+export function episodeKeys(relativePath: string): string[] {
+  const parsed = parseEpisodeNumbers(relativePath);
+  if (parsed) return parsed.episodes.map((episode) => `s${parsed.season}e${episode}`);
+  // A range too wide to believe is more likely a tag than episodes, so only its first episode counts.
+  const match = path.basename(relativePath).match(/\bs(\d{1,4})e(\d{1,4})/i);
+  return match ? [`s${Number(match[1])}e${Number(match[2])}`] : [];
+}
+
 export function episodeKey(relativePath: string): string | null {
-  const match = path.basename(relativePath).match(/\bs(\d{1,4})e(\d{1,4})\b/i);
-  return match ? `s${Number(match[1])}e${Number(match[2])}` : null;
+  return episodeKeys(relativePath)[0] ?? null;
 }
 
 function errorCode(error: unknown): string | null {
@@ -81,32 +92,88 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
   ).rows;
 }
 
-async function linkedTitleKeys(db: DbExecutor): Promise<{ titles: Set<string>; episodes: Set<string> }> {
-  const links = await db
-    .select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, relativePath: schema.mediaLinks.relativePath })
-    .from(schema.mediaLinks)
-    .where(and(isNull(schema.mediaLinks.missingSince), eq(schema.mediaLinks.isMedia, true)));
+type LinkedFile = { linkPath: string; sizeBytes: number | null };
+type LibraryLinks = {
+  titles: Set<string>;
+  // Linked files by title and episode, and by title for files that name no episode.
+  episodes: Map<string, LinkedFile[]>;
+  plainFiles: Map<string, LinkedFile[]>;
+  titleIndex: TitleIndex;
+  targetPaths: string[];
+};
+
+async function libraryLinks(db: DbExecutor, settings: SectionSettings, now: number): Promise<LibraryLinks> {
+  const links = (
+    await db.execute<{ section: string; item_name: string; relative_path: string; link_path: string; target_path: string; is_media: boolean; size_bytes: number | string | null }>(sql`
+      select ml.section, ml.item_name, ml.relative_path, ml.link_path, ml.target_path, ml.is_media, coalesce(ml.size_bytes, sf.size_bytes) as size_bytes
+      from media_links ml
+      left join storage_files sf on sf.id = ml.resolved_storage_file_id
+      where ml.missing_since is null
+    `)
+  ).rows;
   const titles = new Set<string>();
-  const episodes = new Set<string>();
+  const episodes = new Map<string, LinkedFile[]>();
+  const plainFiles = new Map<string, LinkedFile[]>();
+  const libraryTitles = new Map<string, { itemName: string; isShow: boolean | null }>();
+  const add = (files: Map<string, LinkedFile[]>, key: string, file: LinkedFile) => {
+    const entries = files.get(key);
+    if (entries) entries.push(file);
+    else files.set(key, [file]);
+  };
   for (const link of links) {
-    const title = `${link.section}\0${link.itemName}`;
+    if (!link.is_media) continue;
+    const title = `${link.section}\0${link.item_name}`;
     titles.add(title);
-    const episode = episodeKey(link.relativePath);
-    if (episode) episodes.add(`${title}\0${episode}`);
+    if (!libraryTitles.has(title)) {
+      const type = settings.sectionTypes?.[link.section];
+      libraryTitles.set(title, { itemName: link.item_name, isShow: type === "shows" ? true : type === "movies" ? false : null });
+    }
+    const file = { linkPath: link.link_path, sizeBytes: link.size_bytes === null ? null : Number(link.size_bytes) };
+    const keys = episodeKeys(link.relative_path);
+    if (keys.length === 0) add(plainFiles, title, file);
+    for (const key of keys) add(episodes, `${title}\0${key}`, file);
   }
-  return { titles, episodes };
+  return { titles, episodes, plainFiles, titleIndex: buildTitleIndex(libraryTitles.values(), new Date(now)), targetPaths: links.map((link) => link.target_path) };
 }
 
-function classify(row: OrphanRow, keys: { titles: Set<string>; episodes: Set<string> }): OrphanCategory {
+function classify(row: OrphanRow, keys: Pick<LibraryLinks, "titles" | "episodes">): OrphanCategory {
   // SRTL's temporary, kept, displaced, and backup files all carry a ".srtl-" marker in their names.
   if (/\.srtl-/.test(row.relative_path)) return "srtl_artifact";
   if (row.copy_leftover) return "copy_leftover";
   if (!row.section) return "unlinked";
   const title = `${row.section}\0${row.item_name}`;
   if (!keys.titles.has(title)) return "not_in_library";
-  const episode = episodeKey(row.relative_path);
-  // A movie folder or episode that still has a linked file means this one is an older or duplicate version.
-  return !episode || keys.episodes.has(`${title}\0${episode}`) ? "superseded" : "not_in_library";
+  const fileEpisodes = episodeKeys(row.relative_path);
+  // A movie folder or episode that still has a linked file means this one is another version of it.
+  // A multi-episode file is only that when every episode it holds has a linked file: otherwise it is the sole copy of the rest.
+  return fileEpisodes.every((episode) => keys.episodes.has(`${title}\0${episode}`)) ? "superseded" : "not_in_library";
+}
+
+function episodeCoverageOf(row: OrphanRow, keys: Pick<LibraryLinks, "episodes">): { linked: number; total: number } | null {
+  const fileEpisodes = episodeKeys(row.relative_path);
+  if (fileEpisodes.length < 2 || !row.section) return null;
+  const title = `${row.section}\0${row.item_name}`;
+  return { linked: fileEpisodes.filter((episode) => keys.episodes.has(`${title}\0${episode}`)).length, total: fileEpisodes.length };
+}
+
+// Largest linked file for each thing this one could replace. Bytes say nothing about quality, so this only ever informs a review.
+function linkedSizeOf(row: OrphanRow, keys: Pick<LibraryLinks, "episodes" | "plainFiles">): number | null {
+  const title = `${row.section}\0${row.item_name}`;
+  const fileEpisodes = episodeKeys(row.relative_path);
+  const groups = fileEpisodes.length > 0 ? fileEpisodes.map((episode) => keys.episodes.get(`${title}\0${episode}`) ?? []) : [keys.plainFiles.get(title) ?? []];
+  const counted = new Map<string, number>();
+  for (const files of groups) {
+    const sized = files.filter((file) => file.sizeBytes !== null);
+    if (sized.length === 0) return null;
+    const largest = sized.reduce((best, file) => (file.sizeBytes! > best.sizeBytes! ? file : best));
+    counted.set(largest.linkPath, largest.sizeBytes!);
+  }
+  return counted.size > 0 ? [...counted.values()].reduce((total, size) => total + size, 0) : null;
+}
+
+function compareSizes(sizeBytes: number, linkedSizeBytes: number | null): OrphanSizeComparison | null {
+  if (linkedSizeBytes === null) return null;
+  return sizeBytes > linkedSizeBytes ? "larger" : sizeBytes < linkedSizeBytes ? "smaller" : "same";
 }
 
 function integrityOf(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity">) {
@@ -118,25 +185,51 @@ function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "inte
   return integrity === "hollow" || integrity === "partial_hollow";
 }
 
-function protectedReason(row: OrphanRow, now: number): string | null {
+function protectedReason(row: OrphanRow, now: number, extra?: ExtraSymlinks): string | null {
   if (row.active_copy) return "Part of an unfinished copy";
+  if (extra) {
+    const link = extraLinkCovering(extra, row.file_path);
+    if (link) return `Still linked from ${link}`;
+  }
   if (now - Number(row.mtime_ms) < purgeGraceMs) return "Modified in the last 24 hours";
   return null;
 }
 
-export async function symlinkInventoryStaleness(db: DbExecutor, now = Date.now()): Promise<{ at: string | null; warning: string | null }> {
-  // Each section's newest sighting shows when it was last scanned; the oldest of those bounds the whole inventory.
-  const rows = (
-    await db.execute<{ newest: string | null }>(sql`
-      select max(last_seen_at) as newest from media_links where missing_since is null group by section
-    `)
-  ).rows;
-  const sightings = rows.map((row) => row.newest).filter((value): value is string => Boolean(value)).sort();
-  const at = sightings[0] ?? null;
-  if (!at) return { at, warning: "Symlinks have not been scanned yet. Run a symlink scan before purging." };
-  if (now - Date.parse(at) > maxSymlinkInventoryAgeMs) {
-    return { at, warning: "Symlinks were last scanned more than 24 hours ago. Run a symlink scan before purging so newly linked files are not treated as orphans." };
+// A folder with nothing in it holds no links, whether or not a scan has been past. If it cannot be read, assume it might.
+async function sectionFolderMayHoldLinks(symlinkDir: string, section: string): Promise<boolean> {
+  if (!symlinkDir) return true;
+  const folder = path.join(symlinkDir, section);
+  try {
+    return (await withFilesystemTimeout(fs.readdir(folder), `Reading symlink folder ${folder}`)).length > 0;
+  } catch (error) {
+    return errorCode(error) !== "ENOENT";
   }
+}
+
+export async function symlinkInventoryStaleness(db: DbExecutor, now = Date.now()): Promise<{ at: string | null; warning: string | null }> {
+  const settings = await getSectionSettings(db);
+  const sectionsWithLinks = new Set(
+    (await db.execute<{ section: string }>(sql`select distinct section from media_links where missing_since is null`)).rows.map((row) => row.section)
+  );
+  const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+  const scanned = await completeSymlinkScanTimes(db, settings.sections);
+  const isFresh = (at: string | undefined) => Boolean(at) && now - Date.parse(at!) <= maxSymlinkInventoryAgeMs;
+  const never: string[] = [];
+  const stale: string[] = [];
+  const counted: string[] = [];
+  for (const section of settings.sections) {
+    const at = scanned.get(section);
+    if (at) counted.push(at);
+    if (isFresh(at)) continue;
+    // A section that holds no links has nothing a scan could miss, so it must not hold purges up.
+    if (!sectionsWithLinks.has(section) && !(await sectionFolderMayHoldLinks(paths.symlinkDir, section))) continue;
+    (at ? stale : never).push(settings.sectionTitles?.[section]?.trim() || section);
+  }
+  const at = never.length > 0 ? null : (counted.sort((left, right) => Date.parse(left) - Date.parse(right))[0] ?? null);
+  if (settings.sections.length === 0) return { at, warning: "No library folders are set up yet, so there is nothing to compare files against." };
+  const rescan = "Run a full symlink scan of those folders before purging, so linked files are not treated as orphans. A rescan of a single title does not count.";
+  if (never.length > 0) return { at, warning: `No complete symlink scan has finished for ${never.join(", ")}. ${rescan}` };
+  if (stale.length > 0) return { at, warning: `The last complete symlink scan of ${stale.join(", ")} started more than 24 hours ago. ${rescan}` };
   return { at, warning: null };
 }
 
@@ -154,7 +247,7 @@ function ancestorDirectories(paths: Iterable<string>): Set<string> {
   return ancestors;
 }
 
-async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now()): Promise<Array<LeftoverFolderRow & { protectedReason: string | null }>> {
+async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<Array<LeftoverFolderRow & { protectedReason: string | null }>> {
   const rows = await db
     .select()
     .from(schema.storageLeftoverFolders)
@@ -172,21 +265,23 @@ async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, fol
   ).rows.map((row) => row.path);
   const linkedDirectories = ancestorDirectories(linkTargets.map((link) => link.targetPath));
   const copyDirectories = ancestorDirectories(copyPaths);
-  return rows.map((row) => ({ ...row, protectedReason: leftoverProtectedReason(row, copyDirectories, linkedDirectories, now) }));
+  const extraDirectories = ancestorDirectories(extra?.targets.keys() ?? []);
+  return rows.map((row) => ({ ...row, protectedReason: leftoverProtectedReason(row, copyDirectories, linkedDirectories, extraDirectories, extra, now) }));
 }
 
-function leftoverProtectedReason(row: LeftoverFolderRow, copyDirectories: Set<string>, linkedDirectories: Set<string>, now: number): string | null {
+function leftoverProtectedReason(row: LeftoverFolderRow, copyDirectories: Set<string>, linkedDirectories: Set<string>, extraDirectories: Set<string>, extra: ExtraSymlinks | undefined, now: number): string | null {
   const directory = path.resolve(row.dirPath);
   if (copyDirectories.has(directory)) return "Part of an unfinished copy";
   if (linkedDirectories.has(directory)) return "A symlink points into this folder";
+  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return "A symlink in an extra symlink folder points into this folder";
   if (now - Number(row.newestMtimeMs) < purgeGraceMs) return "Modified in the last 24 hours";
   return null;
 }
 
 // Recomputed under the job's admission transaction so only folders that are still leftovers can be queued.
-export async function purgeableLeftoverFolders(db: DbExecutor, rootType: StorageRootType, folderIds: number[], now = Date.now()): Promise<{ eligible: LeftoverFolderRow[]; rejected: string[] }> {
+export async function purgeableLeftoverFolders(db: DbExecutor, rootType: StorageRootType, folderIds: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<{ eligible: LeftoverFolderRow[]; rejected: string[] }> {
   if (folderIds.length === 0) return { eligible: [], rejected: [] };
-  const found = new Map((await leftoverFolderRows(db, rootType, folderIds, now)).map((row) => [row.id, row]));
+  const found = new Map((await leftoverFolderRows(db, rootType, folderIds, now, extra)).map((row) => [row.id, row]));
   const eligible: LeftoverFolderRow[] = [];
   const rejected: string[] = [];
   for (const id of folderIds) {
@@ -217,12 +312,14 @@ function storageStaleness(at: string | null, now: number): string | null {
 }
 
 export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDays: number, now = Date.now()): Promise<OrphanReview> {
-  const [rows, keys, staleness, storageInventory, folders] = await Promise.all([
+  const [settings, paths] = await Promise.all([getSectionSettings(db), getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" })]);
+  const extra = await readExtraSymlinks(paths, settings.sections);
+  const [rows, library, staleness, storageInventory, folders] = await Promise.all([
     orphanRows(db, rootType),
-    linkedTitleKeys(db),
+    libraryLinks(db, settings, now),
     symlinkInventoryStaleness(db, now),
     storageInventoryAt(db, rootType),
-    leftoverFolderRows(db, rootType, undefined, now)
+    leftoverFolderRows(db, rootType, undefined, now, extra)
   ]);
   const leftoverFolders: OrphanLeftoverFolder[] = folders.map((folder) => ({
     folderId: folder.id,
@@ -234,40 +331,99 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     newestMtimeMs: Number(folder.newestMtimeMs),
     protectedReason: folder.protectedReason
   }));
-  const items: OrphanReviewItem[] = rows.map((row) => ({
-    storageFileId: row.id,
-    rootType,
-    relativePath: row.relative_path,
-    filePath: row.file_path,
-    section: row.section,
-    itemName: row.item_name,
-    sizeBytes: Number(row.size_bytes),
-    mtimeMs: Number(row.mtime_ms),
-    category: classify(row, keys),
-    protectedReason: protectedReason(row, now),
-    hollow: integrityOf(row) === "hollow",
-    integrity: integrityOf(row),
-    zeroSamples: row.integrity_zero_samples
-  }));
+  const containers = new Set(settings.sections);
+  const rootPrefix = `${path.resolve(rootPathFor(paths, rootType))}${path.sep}`;
+  // Files in use per release: library link targets and extra folder targets, each counted once.
+  const linkedByRelease = new Map<string, Set<string>>();
+  for (const target of [...library.targetPaths, ...extra.targets.keys()]) {
+    if (!target.startsWith(rootPrefix)) continue;
+    const key = releaseKeyOf(target.slice(rootPrefix.length), containers);
+    const linked = linkedByRelease.get(key);
+    if (linked) linked.add(target);
+    else linkedByRelease.set(key, new Set([target]));
+  }
+  const releaseKeys = rows.map((row) => releaseKeyOf(row.relative_path, containers));
+  const unlinkedByRelease = new Map<string, number>();
+  for (const [index, row] of rows.entries()) {
+    if (extraLinkCovering(extra, row.file_path)) continue;
+    unlinkedByRelease.set(releaseKeys[index]!, (unlinkedByRelease.get(releaseKeys[index]!) ?? 0) + 1);
+  }
+  // Packs repeat one release name many times, so each name is only compared once.
+  const titleMatches = new Map<string, string | null>();
+  const titleMatch = (name: string): string | null => {
+    let match = titleMatches.get(name);
+    if (match === undefined) {
+      match = matchReleaseTitle(library.titleIndex, name, new Date(now));
+      titleMatches.set(name, match);
+    }
+    return match;
+  };
+  const items: OrphanReviewItem[] = rows.map((row, index) => {
+    const category = classify(row, library);
+    const sizeBytes = Number(row.size_bytes);
+    const releaseKey = releaseKeys[index]!;
+    const releaseName = releaseNameOf(releaseKey, row.relative_path);
+    // A folder named after a hash still has a file name to go on.
+    const matchedTitle = category === "unlinked" ? (titleMatch(releaseName) ?? titleMatch(releaseNameOf(row.relative_path, row.relative_path))) : null;
+    const label: OrphanReviewLabel = category !== "unlinked" ? category : matchedTitle ? "title_in_library" : "no_title_match";
+    const releaseLinkedCount = linkedByRelease.get(releaseKey)?.size ?? 0;
+    const linkedSizeBytes = category === "superseded" ? linkedSizeOf(row, library) : null;
+    return {
+      storageFileId: row.id,
+      rootType,
+      relativePath: row.relative_path,
+      filePath: row.file_path,
+      section: row.section,
+      itemName: row.item_name,
+      sizeBytes,
+      mtimeMs: Number(row.mtime_ms),
+      category,
+      protectedReason: protectedReason(row, now, extra),
+      hollow: integrityOf(row) === "hollow",
+      integrity: integrityOf(row),
+      zeroSamples: row.integrity_zero_samples,
+      label,
+      matchedTitle,
+      releaseName,
+      releaseStatus: releaseLinkedCount > 0 ? "partly_linked" : "none_linked",
+      releaseFileCount: releaseLinkedCount + (unlinkedByRelease.get(releaseKey) ?? 0),
+      releaseLinkedCount,
+      linkedSizeBytes,
+      sizeComparison: compareSizes(sizeBytes, linkedSizeBytes),
+      episodeCoverage: episodeCoverageOf(row, library),
+      extraLinkPath: extraLinkCovering(extra, row.file_path)
+    };
+  });
+  const totalsFor = (matching: OrphanReviewItem[]) => ({
+    count: matching.length,
+    sizeBytes: matching.reduce((total, item) => total + item.sizeBytes, 0),
+    purgeableCount: matching.filter((item) => !item.protectedReason).length
+  });
   const categories: OrphanCategory[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "unlinked"];
-  const summary = categories
-    .map((category) => {
-      const matching = items.filter((item) => item.category === category);
-      return {
-        category,
-        count: matching.length,
-        sizeBytes: matching.reduce((total, item) => total + item.sizeBytes, 0),
-        purgeableCount: matching.filter((item) => !item.protectedReason).length
-      };
-    })
-    .filter((entry) => entry.count > 0);
+  const summary = categories.map((category) => ({ category, ...totalsFor(items.filter((item) => item.category === category)) })).filter((entry) => entry.count > 0);
+  const labels: OrphanReviewLabel[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "title_in_library", "no_title_match"];
+  const labelSummary = labels.map((label) => ({ label, ...totalsFor(items.filter((item) => item.label === label)) })).filter((entry) => entry.count > 0);
   const hollowCount = items.filter((item) => item.hollow).length;
   const damagedCount = items.filter((item) => item.integrity === "partial_hollow").length;
-  return { rootType, items, leftoverFolders, summary, hollowCount, damagedCount, symlinkInventoryAt: staleness.at, storageInventoryAt: storageInventory, staleWarning: staleness.warning, storageStaleWarning: storageStaleness(storageInventory, now), holdDays };
+  return {
+    rootType,
+    items,
+    leftoverFolders,
+    summary,
+    labelSummary,
+    hollowCount,
+    damagedCount,
+    symlinkInventoryAt: staleness.at,
+    storageInventoryAt: storageInventory,
+    staleWarning: staleness.warning,
+    storageStaleWarning: storageStaleness(storageInventory, now),
+    extraSymlinks: { folders: extra.folders, linkCount: extra.linkCount, unmatchedCount: extra.unmatchedCount, problems: extra.problems },
+    holdDays
+  };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.
-export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType, storageFileIds: number[], now = Date.now()): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
+export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType, storageFileIds: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
   const rows = await orphanRows(db, rootType, storageFileIds);
   const found = new Map(rows.map((row) => [row.id, row]));
   const eligible: OrphanRow[] = [];
@@ -278,11 +434,19 @@ export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType
       rejected.push(`file #${id} is no longer an orphan on this storage`);
       continue;
     }
-    const reason = protectedReason(row, now);
+    const reason = protectedReason(row, now, extra);
     if (reason) rejected.push(`${path.basename(row.relative_path)}: ${reason}`);
     else eligible.push(row);
   }
   return { eligible, rejected };
+}
+
+/** A fresh read of the extra symlink folders for a purge; refuses when any of them cannot be read in full. Empty when none are set. */
+export async function extraSymlinksForPurge(db: DbExecutor, paths: PathsSettings): Promise<ExtraSymlinks> {
+  const extra = await readExtraSymlinks(paths, extraSymlinkFolders().length > 0 ? (await getSectionSettings(db)).sections : []);
+  const refusal = extraSymlinkRefusal(extra);
+  if (refusal) throw new ConflictError(refusal);
+  return extra;
 }
 
 // Recomputed under the job's admission transaction, like purgeableOrphans. A damaged file may have library symlinks: they go with it.
@@ -389,7 +553,7 @@ async function assertFolderStillLeftover(directory: string, now: number): Promis
   }
 }
 
-async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperation, root: string, now: number): Promise<PurgeOutcome> {
+async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperation, root: string, paths: PathsSettings, now: number): Promise<PurgeOutcome> {
   const folder = (
     await db.select().from(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, operation.storageFileId)).for("update").limit(1)
   )[0];
@@ -430,6 +594,8 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
   if (!stat.isDirectory()) throw new Error("Path is no longer a folder; nothing was purged");
   await assertExistingPathInside(root, directory, "Leftover folder");
   await assertFolderStillLeftover(directory, now);
+  const extraLink = extraLinkTouchingFolder(await extraSymlinksForPurge(db, paths), directory);
+  if (extraLink) throw new Error(`Symlink ${extraLink} points into this folder; nothing was purged`);
 
   const heldPath = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`, path.relative(root, directory)) : null;
   try {
@@ -452,7 +618,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   const rootType = operation.rootType as StorageRootType;
   const root = rootPathFor(context.paths, rootType);
   if (!root) throw new Error("Storage root is not configured");
-  if (operation.targetKind === "folder") return executeLeftoverFolderPurge(db, operation, root, now);
+  if (operation.targetKind === "folder") return executeLeftoverFolderPurge(db, operation, root, context.paths, now);
   if (operation.targetKind === "damaged_file") return executeDamagedFilePurge(db, operation, root, context, now);
   const storageFile = (
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
@@ -489,6 +655,9 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
     const liveLink = await findLiveSymlinkTo(titleFolder, path.resolve(operation.filePath));
     if (liveLink) throw new Error(`Symlink ${liveLink} points to this file; it is no longer an orphan`);
   }
+  // The last check before the file goes: another tool can add a link at any time, and no scan would have seen it.
+  const extraLink = extraLinkCovering(await extraSymlinksForPurge(db, context.paths), operation.filePath);
+  if (extraLink) throw new Error(`Symlink ${extraLink} points to this file; it is still in use`);
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
   const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
