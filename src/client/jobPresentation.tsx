@@ -1521,9 +1521,10 @@ export function JobScope({
     const total = finiteNumberFromUnknown(options?.total);
     const where = options?.rootType === "remote" ? "remote" : "local";
     const how = options?.mode === "hold" ? "held for restore" : "deleted";
+    const kind = options?.source === "damaged" ? "damaged file" : "orphan";
     return (
       <span className="job-scope-cell">
-        <span>{total === 1 ? `1 ${where} orphan` : `${formatNumber(total)} ${where} orphans`}, {how}</span>
+        <span>{total === 1 ? `1 ${where} ${kind}` : `${formatNumber(total)} ${where} ${kind}s`}, {how}{options?.reRequest === true ? ", re-requested" : ""}</span>
       </span>
     );
   }

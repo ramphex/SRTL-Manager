@@ -8,6 +8,7 @@ import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, useModalLifecycle } from "./appShared";
 import { purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, planPurgeAll } from "./orphanPurgePlan";
+import { ReRequestActivity, ReRequestOption } from "./reRequest";
 
 const pageSize = 50;
 
@@ -40,10 +41,10 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const [purgeAllOpen, setPurgeAllOpen] = useState(autoOpenPurgeAll);
   const [selectedHeld, setSelectedHeld] = useState<Set<number>>(new Set());
   const refresh = () => {
-    for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary", "jobs"]) void queryClient.invalidateQueries({ queryKey: [key] });
+    for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary", "re-requests", "jobs"]) void queryClient.invalidateQueries({ queryKey: [key] });
   };
   const purge = useMutation({
-    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode }),
+    mutationFn: (reRequest: boolean) => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode, reRequest }),
     onSuccess: () => {
       setSelected(new Set());
       setSelectedFolders(new Set());
@@ -78,7 +79,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   // Results land when the purge job finishes, not when it is queued, so refresh once it stops running.
   useEffect(() => {
     if (wasRunning.current && !purgeRunning) {
-      for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary"]) void queryClient.invalidateQueries({ queryKey: [key] });
+      for (const key of ["orphan-review", "held-orphans", "storage-file-tree", "inventory-summary", "re-requests"]) void queryClient.invalidateQueries({ queryKey: [key] });
     }
     wasRunning.current = purgeRunning;
   }, [purgeRunning, queryClient]);
@@ -276,21 +277,19 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
               </button>
             </div>
             {confirming ? (
-              <div className="orphan-confirmation" role="group" aria-label="Confirm orphan purge">
-                <p>
-                  {mode === "hold"
+              <PurgeConfirmation
+                question={
+                  mode === "hold"
                     ? `Move ${selectionLabel()} (${formatBytes(selectedBytes)}) on ${rootLabel} to the holding area? They can be restored for ${review.data.holdDays} days, then they are permanently deleted.`
-                    : `Permanently delete ${selectionLabel()} (${formatBytes(selectedBytes)}) on ${rootLabel}? This cannot be undone.`}
-                </p>
-                <div className="orphan-toolbar">
-                  <button type="button" disabled={busy} onClick={() => purge.mutate()}>
-                    {purge.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {mode === "hold" ? "Move to holding area" : "Delete permanently"}
-                  </button>
-                  <button type="button" className="secondary" disabled={busy} onClick={() => setConfirming(false)}>
-                    <X size={16} /> Cancel
-                  </button>
-                </div>
-              </div>
+                    : `Permanently delete ${selectionLabel()} (${formatBytes(selectedBytes)}) on ${rootLabel}? This cannot be undone.`
+                }
+                confirmLabel={mode === "hold" ? "Move to holding area" : "Delete permanently"}
+                storageFileIds={[...selected]}
+                busy={busy}
+                pending={purge.isPending}
+                onConfirm={(reRequest) => purge.mutate(reRequest)}
+                onCancel={() => setConfirming(false)}
+              />
             ) : null}
             {purge.data ? (
               <p className="panel-message success">
@@ -317,6 +316,8 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
               document.body
             )
           : null}
+
+        <ReRequestActivity />
 
         <section className="orphan-held" aria-labelledby={`held-${rootType}-heading`}>
           <h3 id={`held-${rootType}-heading`}>Held files on {rootLabel}</h3>
@@ -377,11 +378,31 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   );
 }
 
+// Holds the re-request choice, so every new confirmation starts with it off.
+function PurgeConfirmation({ question, confirmLabel, storageFileIds, busy, pending, onConfirm, onCancel }: { question: string; confirmLabel: string; storageFileIds: number[]; busy: boolean; pending: boolean; onConfirm: (reRequest: boolean) => void; onCancel: () => void }) {
+  const [reRequest, setReRequest] = useState(false);
+  return (
+    <div className="orphan-confirmation" role="group" aria-label="Confirm orphan purge">
+      <p>{question}</p>
+      {storageFileIds.length > 0 ? <ReRequestOption storageFileIds={storageFileIds} checked={reRequest} onChange={setReRequest} disabled={busy} /> : null}
+      <div className="orphan-toolbar">
+        <button type="button" disabled={busy} onClick={() => onConfirm(reRequest && storageFileIds.length > 0)}>
+          {pending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {confirmLabel}
+        </button>
+        <button type="button" className="secondary" disabled={busy} onClick={onCancel}>
+          <X size={16} /> Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { review: OrphanReview; rootType: StorageRootType; rootLabel: string; onClose: () => void; onDone: () => void }) {
   const dialogRef = useModalLifecycle(true, onClose);
   const [includeFolders, setIncludeFolders] = useState(false);
   const [mode, setMode] = useState<OrphanPurgeMode>("hold");
   const [phrase, setPhrase] = useState("");
+  const [reRequest, setReRequest] = useState(false);
   const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
   const batches = useMemo(() => purgeBatches(plan), [plan]);
   const eligibleFolders = review.leftoverFolders.filter((folder) => !folder.protectedReason);
@@ -393,7 +414,7 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { revi
     mutationFn: async () => {
       const jobIds: number[] = [];
       for (const batch of batches) {
-        const result = await api.purgeOrphans({ rootType, ...batch, mode });
+        const result = await api.purgeOrphans({ rootType, ...batch, mode, reRequest: reRequest && batch.storageFileIds.length > 0 });
         jobIds.push(result.jobId);
       }
       return jobIds;
@@ -464,6 +485,7 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { revi
             : "Files are removed immediately. This cannot be undone."}
           {batches.length > 1 ? ` This will be queued as ${batches.length} purge jobs.` : ""}
         </p>
+        <ReRequestOption storageFileIds={plan.fileIds} checked={reRequest} onChange={setReRequest} disabled={start.isPending || start.isSuccess} />
         {needsPhrase ? (
           <label className="orphan-phrase">
             <span>

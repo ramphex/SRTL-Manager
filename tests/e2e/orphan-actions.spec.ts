@@ -30,6 +30,7 @@ async function fixture(page: Page, options: { remoteCount?: number; stale?: bool
     else if (url.pathname === "/api/inventory/summary") body = { totalLinks: 0, remoteLinks: 10, localLinks: 5, brokenLinks: 0, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 0, actionableLocalLinks: 0, assignedRemoteLinks: 0, unassignedRemoteLinks: 0, unassignedLocalLinks: 0, localFiles: 20, remoteFiles: 30, actionableRemoteFiles: 0, actionableLocalFiles: 0, assignedRemoteFiles: 0, unassignedRemoteFiles: 0, unassignedLocalFiles: 0, localOrphanFiles: 4, remoteOrphanFiles: options.remoteCount ?? 1500, missingLinks: 0, missingLocalFiles: 0, missingRemoteFiles: 0 };
     else if (url.pathname === "/api/orphans") body = url.searchParams.get("rootType") === "local" ? orphanReview("local", 4, options) : orphanReview("remote", options.remoteCount ?? 1500, options);
     else if (url.pathname === "/api/orphans/purge") { purges.push(request.postDataJSON()); body = { jobId: 99 }; }
+    else if (url.pathname === "/api/re-requests") body = { items: [], counts: { queued: 0, pending: 0, requested: 0, failed: 0, unmatched: 0, skipped: 0 }, perMinute: 6 };
     else if (url.pathname === "/api/settings/sections") body = { sections: ["movies"], sectionTitles: { movies: "Movies" }, sectionTypes: { movies: "movies" } };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/links", localDir: "/local", remoteDir: "/remote" };
     else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: {}, localSections: {}, remoteRoot: null };

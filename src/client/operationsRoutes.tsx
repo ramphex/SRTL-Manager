@@ -987,7 +987,7 @@ function AdvancedSettingsPanel() {
           <div className="advanced-settings-heading">
             <div>
               <h3>Cleanup</h3>
-              <p>Controls how purged orphans are held and whether remote copies are removed after a verified copy to local.</p>
+              <p>Controls how purged orphans are held, how fast deleted files are re-requested, and whether remote copies are removed after a verified copy to local.</p>
             </div>
           </div>
           <div className="advanced-settings-grid">
@@ -997,6 +997,16 @@ function AdvancedSettingsPanel() {
                 {[1, 3, 7, 14, 30, 60, 90].map((days) => (
                   <option key={days} value={days}>
                     {days} {days === 1 ? "day" : "days"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="advanced-field">
+              <span>Re-request searches per minute, per instance</span>
+              <select value={draft.cleanup.reRequestsPerMinute} onChange={(event) => updateCleanup({ reRequestsPerMinute: Number(event.target.value) })}>
+                {[1, 2, 6, 12, 30, 60].map((perMinute) => (
+                  <option key={perMinute} value={perMinute}>
+                    {perMinute}
                   </option>
                 ))}
               </select>

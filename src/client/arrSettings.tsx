@@ -543,7 +543,7 @@ function ArrMonitorActivity({ updates }: { updates: ArrUiState["monitorUpdates"]
   const { key, name: serviceName } = useService();
   return <section className="radarr-section" aria-labelledby={`${key}-monitor-activity-heading`}>
     <div className="radarr-heading"><h2 id={`${key}-monitor-activity-heading`}>Monitoring updates</h2></div>
-    <p className="radarr-lede">Recent {serviceName} monitoring changes made after copies finished.</p>
+    <p className="radarr-lede">Recent {serviceName} monitoring changes made after copies finished and when deleted files were re-requested.</p>
     <div className="radarr-table-scroll" tabIndex={0} aria-label={`Recent ${serviceName} monitoring updates`}>
       <table><thead><tr><th>Queued</th><th>Title</th><th>Change</th><th>Status</th><th>Copy job</th></tr></thead>
         <tbody>{updates.map((update) => <tr key={update.id}>

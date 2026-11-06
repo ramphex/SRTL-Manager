@@ -1,3 +1,4 @@
+import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
   AuditOptions,
   AuditResultPage,
@@ -192,8 +193,13 @@ export const api = {
   damagedFiles: () => request<DamagedFileRow[]>("/api/damaged-files"),
   damagedFilesCsvUrl: "/api/damaged-files.csv",
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
-  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode }) =>
+  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
+  deleteDamagedFiles: (body: { storageFileIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
+    request<{ jobId: number }>("/api/damaged-files/delete", { method: "POST", body: JSON.stringify(body) }),
+  reRequests: () => request<ReRequestList>("/api/re-requests"),
+  previewReRequests: (storageFileIds: number[]) => request<ReRequestPreview>("/api/re-requests/preview", { method: "POST", body: JSON.stringify({ storageFileIds }) }),
+  retryReRequests: (ids: number[] | "all_failed") => request<{ retried: number }>("/api/re-requests/retry", { method: "POST", body: JSON.stringify({ ids }) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>
     request<{ restored: number; errors: string[] }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),
