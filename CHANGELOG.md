@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- Added **Retry failed** to copy jobs that finished with failed items, on the job's window, on **Logs** and in **Recent Jobs**. The label says how many items it will retry. It starts a new job through the same checks as any other copy and leaves the old job's history alone. Items that no longer need it are skipped, and it says how many and why: already copied by a later job, a link that has gone or changed, waiting for reconciliation, or already queued. If the original job replaced local files or deleted remote sources, it asks first, and neither happens unless you tick it. See [what a moderator's retry does](docs/accounts-and-sessions.md#roles).
+
 ## [0.1.4-beta.4] - 2026-11-06
 
 ### Added

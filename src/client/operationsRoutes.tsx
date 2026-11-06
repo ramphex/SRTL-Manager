@@ -20,7 +20,7 @@ import { jobEventCountLabel } from "./jobEvents";
 import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
 import { auditModeOptions, AuditStatusPrompt, settingsSections, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
-import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
+import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, CopyRetryAction, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
 import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
 
 const logsRouteApi = getRouteApi("/logs");
@@ -1351,6 +1351,7 @@ export function LogsPage() {
             actions={effectiveJob ? <a className="mobile-change-job secondary" href="#log-job-picker">Change job</a> : undefined}
           >
             {effectiveJob ? <SelectedLogJobSummary job={effectiveJob} sections={sectionRows} timeFormat={timeFormat} /> : <p className="panel-message">No job selected.</p>}
+            {effectiveJob ? <CopyRetryAction key={effectiveJob.id} job={effectiveJob} /> : null}
             {effectiveJob ? (
               <div className="log-toolbar event-toolbar">
                 <label className="log-search">

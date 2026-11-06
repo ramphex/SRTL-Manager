@@ -153,6 +153,7 @@ const routeTable: readonly RouteEntry[] = [
   { methods: ["GET"], url: "/api/jobs/:id/events", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/events/page", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/copy-failures", permission: "library.view" },
+  { methods: ["GET"], url: "/api/jobs/:id/copy-retry", permission: "library.view" },
   { methods: ["POST"], url: "/api/jobs/:id/terminate", permission: "jobs.run", libraryLock: "exempt" },
   { methods: ["POST"], url: "/api/jobs/:id/cancel", permission: "jobs.run", libraryLock: "exempt" },
   { methods: ["GET"], url: "/api/job-reconciliation", permission: "library.view" },
@@ -161,6 +162,7 @@ const routeTable: readonly RouteEntry[] = [
   // Copies. The direction and conflict handling are checked against the role by the route.
   { methods: ["POST"], url: "/api/copies", permission: "copies.to_local" },
   { methods: ["POST"], url: "/api/copies/conflicts", permission: "copies.to_local" },
+  { methods: ["POST"], url: "/api/jobs/:id/copy-retry", permission: "copies.to_local" },
 
   // Removing things.
   { methods: ["POST"], url: "/api/jobs/:id/copy-failures/remove-symlinks", permission: "library.delete" },

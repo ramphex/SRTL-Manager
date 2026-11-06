@@ -57,6 +57,8 @@ The server enforces this on every request. Controls a role cannot use are also h
 
 **What a moderator's copy does.** A copy started by a moderator never removes anything. It always keeps the remote source, even when **Delete remote source after copies to local** is on, and if files already exist at the destination it can keep both, with the old file kept under a new name, but not replace them. Moderators can stop scans, audits and copies to local, but not copies to remote, cleanups, backups, watch sync or path migrations.
 
+**Retrying failed copies.** Moderators can use **Retry failed** on a copy to local, and it follows the same rule: a retry of a job that replaced existing files keeps both instead, and the remote source stays. Owners and admins are asked first, and a retry only replaces or deletes if they tick that option. A copy to remote can only be retried by someone who may start one.
+
 ## Managing Accounts
 
 **Settings > Accounts** is for owners and admins. It lists every account with its role, status, who created it and when, last sign-in, and the latest account changes with who made them. There is no self sign-up.

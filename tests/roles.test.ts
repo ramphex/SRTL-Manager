@@ -141,9 +141,9 @@ const adminsAndUp = ["owner", "admin"] as const;
  * another reason, such as a missing title.
  */
 const approvedTable: Array<{ row: string; allowed: readonly AccountRole[]; requests: Array<[Method, string, unknown?]> }> = [
-  { row: "See library, jobs and Now Playing", allowed: everyRole, requests: [["GET", "/api/media-links/page"], ["GET", "/api/sections"], ["GET", "/api/inventory/summary"], ["GET", "/api/jobs"], ["GET", "/api/jobs/1/events"], ["GET", "/api/now-playing/settings"], ["GET", "/api/now-playing/poster/abcdefghijklmnopqrstuvwxyz012345"]] },
+  { row: "See library, jobs and Now Playing", allowed: everyRole, requests: [["GET", "/api/media-links/page"], ["GET", "/api/sections"], ["GET", "/api/inventory/summary"], ["GET", "/api/jobs"], ["GET", "/api/jobs/1/events"], ["GET", "/api/jobs/1/copy-retry"], ["GET", "/api/now-playing/settings"], ["GET", "/api/now-playing/poster/abcdefghijklmnopqrstuvwxyz012345"]] },
   { row: "Run scans, retry jobs", allowed: everyRole, requests: [["POST", "/api/scans", { scanSymlinks: true }], ["POST", "/api/audits", { mode: "fast" }], ["POST", "/api/jobs/999999/terminate"], ["POST", "/api/job-reconciliation/recheck"]] },
-  { row: "Copy titles to local", allowed: everyRole, requests: [["POST", "/api/copies", { direction: "to_local", linkIds: [999_999] }], ["POST", "/api/copies/conflicts", { direction: "to_local", linkIds: [999_999] }]] },
+  { row: "Copy titles to local", allowed: everyRole, requests: [["POST", "/api/copies", { direction: "to_local", linkIds: [999_999] }], ["POST", "/api/copies/conflicts", { direction: "to_local", linkIds: [999_999] }], ["POST", "/api/jobs/999999/copy-retry", {}]] },
   {
     row: "Purge, delete, orphan cleanup",
     allowed: adminsAndUp,

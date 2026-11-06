@@ -1,3 +1,4 @@
+import type { CopyRetryStarted } from "../shared/types";
 import { auditOptionsFromJob, copyOptionsFromJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { type AuditMode, type AuditOptions, type AuditRunRecord, type JobEventRecord, type JobRecord, type JobStatus, type JobType, type CopyOptions, type MediaLinkRow, type ScanOptions, type ScanRunRecord, type ScanTitleScope, type StorageLocationsSettings } from "../shared/types";
 import { AuditStatusPrompt, CopyPrompt, finiteNullableNumberFromUnknown, finiteNumberFromUnknown, formatBytes, formatDuration, formatDurationMs, formatNumber, recordFromUnknown, ScanStatusPrompt, sectionDisplayTitle, storageLocationName } from "./appShared";
@@ -622,4 +623,9 @@ export function copyPromptKey(options: CopyOptions): string {
     options.localConflictStrategy ?? "",
     options.allowSourceTitleMismatch ? "allow-source-title-mismatch" : ""
   ].join(":");
+}
+
+export function copyRetryStartedMessage(started: CopyRetryStarted): string {
+  const items = `${started.retried} failed item${started.retried === 1 ? "" : "s"}`;
+  return [`Job #${started.jobId} is retrying ${items}.`, started.summary].filter(Boolean).join(" ");
 }

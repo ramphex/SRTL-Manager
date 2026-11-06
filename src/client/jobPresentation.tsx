@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode }
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, Search, Trash2, TriangleAlert, X } from "lucide-react";
+import { Activity, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, RotateCcw, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogData, jobProgressChips } from "./logDisplay";
@@ -10,11 +10,11 @@ import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./j
 import { jobEventCountLabel } from "./jobEvents";
 import { groupAdjacentJobs } from "./jobGrouping";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
+import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { useAccess } from "./access";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyRetryStartedMessage, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -192,6 +192,7 @@ export function CopyDialog({
   const [startedPromptKey, setStartedPromptKey] = useState<string | null>(null);
   const [localConflictStrategy, setLocalConflictStrategy] = useState<CopyLocalConflictStrategy | null>(null);
   const [allowSourceTitleMismatch, setAllowSourceTitleMismatch] = useState(false);
+  const [retryNotice, setRetryNotice] = useState<string | null>(null);
   const [terminatePrompt, setTerminatePrompt] = useState<JobRecord | null>(null);
   const terminateJob = useTerminateJobMutation(() => setTerminatePrompt(null));
   const jobQuery = useQuery({
@@ -214,6 +215,7 @@ export function CopyDialog({
     setStartedPromptKey(null);
     setLocalConflictStrategy(null);
     setAllowSourceTitleMismatch(false);
+    setRetryNotice(null);
   }, [prompt?.key, prompt?.jobId, resetStartCopy]);
 
   useEffect(() => {
@@ -253,10 +255,19 @@ export function CopyDialog({
             <h2 id="copy-dialog-title">{prompt.title}</h2>
             <p>{jobId ? `Job #${jobId} - ${prompt.description}` : prompt.description}</p>
             <JobStatusTerminateAction job={currentJob} isTerminating={terminateJob.isPending} onTerminate={setTerminatePrompt} />
+            <CopyRetryAction
+              key={currentJobId}
+              job={currentJob}
+              onStarted={(started) => {
+                setRetryNotice(copyRetryStartedMessage(started));
+                setJobId(started.jobId);
+              }}
+            />
           </div>
           <JobStatusHeaderActions closeLabel="Close copy window" onClose={onClose} />
         </div>
 
+        {retryNotice ? <p className="panel-message" role="status">{retryNotice}</p> : null}
         {startCopy.error ? <p className="panel-message action-error">{startCopy.error.message}</p> : null}
 
         {startCopy.error && !jobId ? (
@@ -1736,6 +1747,175 @@ function SelectedLinkTitlesTooltip({
   );
 }
 
+/**
+ * Runs a finished copy job's failed items again as a new job. One click, unless the original job removed files:
+ * then a dialog asks first, and nothing is removed unless it is ticked. The server applies the same rules.
+ */
+export function CopyRetryAction({ job, compact = false, onStarted }: { job: JobRecord | null; compact?: boolean; onStarted?: (started: CopyRetryStarted) => void }) {
+  const { can } = useAccess();
+  const queryClient = useQueryClient();
+  const [reasonsOpen, setReasonsOpen] = useState(false);
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const [started, setStarted] = useState<CopyRetryStarted | null>(null);
+  const jobId = job?.id ?? null;
+  const finishedWithFailures = job?.type === "copy" && (job.status === "failed" || job.status === "partially_failed");
+  const planQuery = useQuery({
+    queryKey: ["copy-retry", jobId],
+    queryFn: () => api.copyRetryPlan(jobId!),
+    enabled: finishedWithFailures,
+    staleTime: 2_000,
+    refetchInterval: 10_000
+  });
+  // A double click lands both clicks before `isPending` has rendered.
+  const pressed = useRef(false);
+  const retry = useMutation({
+    mutationFn: (choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean }) => api.retryFailedCopies(jobId!, choices),
+    onSuccess: (result) => {
+      setOptionsOpen(false);
+      setStarted(result);
+      onStarted?.(result);
+    },
+    onSettled: () => {
+      pressed.current = false;
+      invalidateCopyJobData(queryClient);
+    }
+  });
+  const startRetry = (choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean }) => {
+    if (pressed.current) return;
+    pressed.current = true;
+    retry.mutate(choices);
+  };
+  const plan = planQuery.data;
+  if (!finishedWithFailures || !plan || plan.totalFailed === 0) return null;
+  if (!can(plan.direction === "to_remote" ? "library.manage" : "copies.to_local")) return null;
+
+  const canDelete = can("library.delete");
+  const needsOptions = plan.replaceOffered || (plan.deleteRemoteSourceOffered && canDelete);
+  const hasWork = plan.retryCount > 0;
+  const itemLabel = `${formatNumber(plan.retryCount)} failed item${plan.retryCount === 1 ? "" : "s"}`;
+  const buttonClass = compact ? "table-action-button secondary copy-retry-button" : "status-terminate-button secondary copy-retry-button";
+  const note = retry.error ? null : started && !onStarted ? copyRetryStartedMessage(started) : !compact || (!hasWork && reasonsOpen) ? plan.summary : null;
+
+  return (
+    <div className={compact ? "copy-retry-action compact" : "status-title-actions copy-retry-action"}>
+      {hasWork ? (
+        <button
+          type="button"
+          className={buttonClass}
+          aria-label={`Retry ${itemLabel} from job #${plan.jobId}`}
+          title={plan.summary || `Retry ${itemLabel} as a new job`}
+          disabled={retry.isPending}
+          onClick={() => (needsOptions ? setOptionsOpen(true) : startRetry({}))}
+        >
+          <RotateCcw size={15} />
+          <span>{retry.isPending ? "Retrying..." : `Retry failed (${formatNumber(plan.retryCount)})`}</span>
+        </button>
+      ) : (
+        <button
+          type="button"
+          className={`${buttonClass} nothing-to-retry`}
+          // The list has no room to keep the reasons open, so this opens them. The job's page always shows them.
+          disabled={!compact}
+          aria-expanded={compact ? reasonsOpen : undefined}
+          aria-label={`Nothing to retry from job #${plan.jobId}`}
+          title={plan.summary}
+          onClick={() => setReasonsOpen((open) => !open)}
+        >
+          <RotateCcw size={15} />
+          <span>Nothing to retry</span>
+        </button>
+      )}
+      {note ? <small className="copy-retry-note" role="status">{note}</small> : null}
+      {retry.error && !optionsOpen ? <small className="copy-retry-note action-error" role="alert">{retry.error.message}</small> : null}
+      {optionsOpen
+        ? createPortal(
+            <CopyRetryOptionsDialog
+              plan={plan}
+              canDelete={canDelete}
+              error={retry.error?.message}
+              isPending={retry.isPending}
+              onClose={() => {
+                if (retry.isPending) return;
+                setOptionsOpen(false);
+                retry.reset();
+              }}
+              onConfirm={startRetry}
+            />,
+            document.body
+          )
+        : null}
+    </div>
+  );
+}
+
+function CopyRetryOptionsDialog({
+  plan,
+  canDelete,
+  error,
+  isPending,
+  onClose,
+  onConfirm
+}: {
+  plan: CopyRetryPlan;
+  canDelete: boolean;
+  error?: string;
+  isPending: boolean;
+  onClose: () => void;
+  onConfirm: (choices: { replaceExisting: boolean; deleteRemoteSources: boolean }) => void;
+}) {
+  const [replaceExisting, setReplaceExisting] = useState(false);
+  const [deleteRemoteSources, setDeleteRemoteSources] = useState(false);
+  const dialogRef = useModalLifecycle(true, onClose);
+  const itemLabel = `${formatNumber(plan.retryCount)} failed item${plan.retryCount === 1 ? "" : "s"}`;
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section ref={dialogRef} className="audit-dialog terminate-dialog" role="dialog" aria-modal="true" aria-labelledby="copy-retry-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <span className="audit-dialog-eyebrow">Retry failed items</span>
+            <h2 id="copy-retry-title">Retry {itemLabel} from job #{plan.jobId}</h2>
+            <p>{plan.summary || "These run as a new job. The original job stays as it is."}</p>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="Close retry options" disabled={isPending}>
+            <X size={18} />
+          </button>
+        </div>
+        {plan.replaceOffered && !canDelete ? (
+          <p className="panel-message">The original job replaced existing local files. Your retry will keep both, with the old file kept under a new name.</p>
+        ) : null}
+        {plan.replaceOffered && canDelete ? (
+          <label className="copy-retry-option">
+            <input type="checkbox" checked={replaceExisting} disabled={isPending} onChange={(event) => setReplaceExisting(event.target.checked)} />
+            <span>
+              <strong>Replace existing local files, as the original job did</strong>
+              <small>This deletes the files already there. Left unticked, both files are kept, with the old one under a new name.</small>
+            </span>
+          </label>
+        ) : null}
+        {plan.deleteRemoteSourceOffered && canDelete ? (
+          <label className="copy-retry-option">
+            <input type="checkbox" checked={deleteRemoteSources} disabled={isPending} onChange={(event) => setDeleteRemoteSources(event.target.checked)} />
+            <span>
+              <strong>Delete remote sources after verified copies, as the original job did</strong>
+              <small>Left unticked, the remote sources stay.</small>
+            </span>
+          </label>
+        ) : null}
+        {error ? <p className="panel-message action-error">{error}</p> : null}
+        <div className="terminate-dialog-actions">
+          <button type="button" className="secondary" onClick={onClose} disabled={isPending}>
+            Cancel
+          </button>
+          <button type="button" disabled={isPending} onClick={() => onConfirm({ replaceExisting, deleteRemoteSources })}>
+            <RotateCcw size={15} />
+            <span>{isPending ? "Retrying..." : `Retry ${itemLabel}`}</span>
+          </button>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 export function JobsTable({
   jobs,
   sections,
@@ -1817,6 +1997,7 @@ export function JobsTable({
                 <Activity size={15} />
               </button>
             ) : null}
+            <CopyRetryAction job={job} compact />
             {canTerminate ? (
               <button
                 type="button"

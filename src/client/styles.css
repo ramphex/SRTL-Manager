@@ -4716,6 +4716,56 @@ button.danger-button:hover:not(:disabled) {
   margin-top: 8px;
 }
 
+.copy-retry-action {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.copy-retry-action.compact {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.copy-retry-button.nothing-to-retry {
+  cursor: help;
+  opacity: 0.7;
+}
+
+.copy-retry-note {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.copy-retry-action.compact .copy-retry-note {
+  max-width: 260px;
+  text-align: right;
+}
+
+.copy-retry-note.action-error {
+  color: var(--bad);
+}
+
+.copy-retry-option {
+  align-items: flex-start;
+  display: flex;
+  gap: 10px;
+}
+
+.copy-retry-option span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.copy-retry-option small {
+  color: var(--muted);
+}
+
 .status-terminate-button {
   gap: 6px;
   min-height: 32px;

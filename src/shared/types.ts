@@ -343,6 +343,42 @@ export interface CopyFailureList {
   items: CopyFailureItem[];
 }
 
+export type CopyRetrySkipReason = "already_copied" | "link_gone" | "no_longer_eligible" | "needs_reconciliation" | "already_queued" | "unidentified";
+
+export interface CopyRetrySkip {
+  reason: CopyRetrySkipReason;
+  count: number;
+  /** The active jobs already holding these items, for `already_queued`. */
+  jobIds?: number[];
+}
+
+export interface CopyRetryPlan {
+  jobId: number;
+  direction: CopyDirection;
+  /** Every failed item in the job, whether or not it can be retried. */
+  totalFailed: number;
+  retryCount: number;
+  skippedCount: number;
+  skipped: CopyRetrySkip[];
+  /** Items the job never got to because it stopped early. They are not failures, so a retry leaves them out. */
+  notReachedCount: number;
+  /** The original job replaced existing local files. A retry keeps both unless asked to replace. */
+  replaceOffered: boolean;
+  /** The original job deleted remote sources and the setting is still on. A retry keeps them unless asked to delete. */
+  deleteRemoteSourceOffered: boolean;
+  /** Says what would be skipped and why, ready to show. */
+  summary: string;
+}
+
+export interface CopyRetryStarted {
+  jobId: number;
+  retried: number;
+  skipped: number;
+  summary: string;
+  localConflictStrategy?: CopyLocalConflictStrategy;
+  deleteRemoteSources: boolean;
+}
+
 export interface SymlinkCleanupOptions {
   sourceJobId: number;
   linkIds: number[];
