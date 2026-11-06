@@ -21,7 +21,7 @@ const kinds = (jobs: JobRecord[]) => groupAdjacentJobs(jobs).map((entry) => (ent
 
 describe("groupAdjacentJobs", () => {
   it("groups adjacent rescans of the same title, keeping the newest first", () => {
-    const entries = groupAdjacentJobs([rescan(3, "The Gift of Deceit"), rescan(2, "The Gift of Deceit"), rescan(1, "The Gift of Deceit")]);
+    const entries = groupAdjacentJobs([rescan(3, "Sample Rescan Title"), rescan(2, "Sample Rescan Title"), rescan(1, "Sample Rescan Title")]);
     expect(entries).toHaveLength(1);
     const [group] = entries;
     expect(group.kind === "group" && group.jobs.map((job) => job.id)).toEqual([3, 2, 1]);

@@ -34,7 +34,7 @@ async function mockApi(page: Page, jobs: JobRecord[]) {
 }
 
 test("consecutive rescans of one title collapse and expand with the chevron", async ({ page }) => {
-  await mockApi(page, [rescan(5, "Other Film"), rescan(4, "The Gift of Deceit", "failed"), rescan(3, "The Gift of Deceit"), rescan(2, "The Gift of Deceit"), rescan(1, "Other Film")]);
+  await mockApi(page, [rescan(5, "Other Film"), rescan(4, "Sample Rescan Title", "failed"), rescan(3, "Sample Rescan Title"), rescan(2, "Sample Rescan Title"), rescan(1, "Other Film")]);
   await page.goto(`${baseUrl}/`);
   const table = page.getByRole("table", { name: "Recent jobs" });
   await expect(table.locator("tbody tr")).toHaveCount(3);

@@ -17,6 +17,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Display preferences in **Settings > User settings** now belong to each account. Accounts without their own read the ones saved before this version.
 - Copies and audits now accept an MKV that is missing only its last few KB, up to 16 KiB less than its header declares, instead of failing it with `File ended prematurely` on every retry. The copy finishes with a warning that says how many bytes are missing, shown on the item and in the job's events, and an audit lists it under **Audit findings** as a warning. The job does not count as failed. A larger shortfall, another container, an MKV with an unknown size, any other structural error, and a copy that does not match its source all still fail.
 
+### Fixed
+
+- Fixed the **Library > Damaged files** link on the dashboard, which opened Library on its Overview tab instead of the Damaged files tab.
+
 ### Upgrade notes
 
 The migration service applies database migrations 27, 28 and 29 automatically. Migration 28 makes your existing administrator the owner, keeping their password and sessions, so you stay signed in. On a new install, the account made during first-run setup is the owner.
@@ -34,7 +38,7 @@ Backups are on after the upgrade and start at the next 03:30.
 - Every route now resolves to a required permission through one table, and a route with no entry is refused. Webhooks keep their own secret and have no role.
 - There is always exactly one owner, enforced by the database as well as the app. Ownership moves only by a transfer that asks for the owner's password again, and leaves the previous owner an admin.
 - New accounts and password resets set a temporary password, which opens nothing except the screen that replaces it. Disabling, deleting and resetting end that person's sessions at once, and a role change applies to their next request. A disabled account gets the same sign-in answer as a wrong password.
-- Moderators receive no tokens, API keys, IP addresses, viewer locations, connection addresses, path settings or backup locations from any route, including through job logs, job data, error messages and the Now Playing stream. A copy a moderator starts never deletes a file, whatever the settings say.
+- Moderators receive no tokens, API keys, IP addresses, viewer locations, connection addresses, path settings or backup locations from any route, including through job logs, job data, error messages and the Now Playing stream. They do still see whether a stream is on the LAN or the WAN, and can read whether Now Playing's location lookup is on. A copy a moderator starts never deletes a file, whatever the settings say.
 - Account, role and ownership changes are written to the security activity and the action audit, with who did what. Only owners and admins can read those logs.
 
 ## [0.1.4-beta.3] - 2026-11-03
