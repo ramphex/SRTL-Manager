@@ -498,10 +498,12 @@ async function moveOrRemove(from: string, to: string | null): Promise<void> {
 }
 
 // When the last video in a folder is purged, its subtitles, artwork, and metadata go with it, then empty folders.
-async function cleanFolderAfterPurge(root: string, stopAt: string, directory: string, holdBase: string | null): Promise<Extra[]> {
+async function cleanFolderAfterPurge(root: string, stopAt: string, directory: string, holdBase: string | null, extra?: ExtraSymlinks): Promise<Extra[]> {
   const extras: Extra[] = [];
   let current = directory;
   while (isPathInside(stopAt, current) && path.resolve(current) !== path.resolve(stopAt)) {
+    // A link from another tool can point at a subtitle here, which is still in use with the video gone.
+    if (extra && extraLinkTouchingFolder(extra, current)) break;
     const entries = await withFilesystemTimeout(fs.readdir(current, { withFileTypes: true }), `Reading ${current}`).catch(() => null);
     if (!entries) break;
     if (entries.some((entry) => entry.isDirectory() || (entry.isFile() && isMediaFile(entry.name)) || (!entry.isFile() && !entry.isDirectory()))) break;
@@ -656,7 +658,8 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
     if (liveLink) throw new Error(`Symlink ${liveLink} points to this file; it is no longer an orphan`);
   }
   // The last check before the file goes: another tool can add a link at any time, and no scan would have seen it.
-  const extraLink = extraLinkCovering(await extraSymlinksForPurge(db, context.paths), operation.filePath);
+  const extraSymlinks = await extraSymlinksForPurge(db, context.paths);
+  const extraLink = extraLinkCovering(extraSymlinks, operation.filePath);
   if (extraLink) throw new Error(`Symlink ${extraLink} points to this file; it is still in use`);
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
@@ -668,7 +671,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
     throw holdingAreaError(error, heldPath);
   }
   const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
-  const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase).catch(() => []);
+  const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase, extraSymlinks).catch(() => []);
   await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
   return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: [], linkErrors: [] };
 }

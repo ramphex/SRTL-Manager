@@ -425,6 +425,17 @@ describe("extra symlink folders", () => {
     expect((await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join()).toContain(link);
   });
 
+  it("keeps a subtitle a link points at when the last video in its folder is purged", async () => {
+    const orphan = await storageFile("remote", "Subtitled.Release.2019/file.mkv");
+    const subtitle = path.join(path.dirname(orphan.filePath), "file.en.srt");
+    await fs.writeFile(subtitle, "subtitle");
+    await pointer("subtitle.srt", subtitle);
+    configureExtraSymlinkFolders([other]);
+    expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed" });
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(subtitle, "utf8")).resolves.toBe("subtitle");
+  });
+
   it("never writes to the folder", async () => {
     const orphan = await storageFile("remote", "Some.Release.2019/file.mkv");
     await pointer("placeholder.mkv", "/nowhere/file.mkv");
