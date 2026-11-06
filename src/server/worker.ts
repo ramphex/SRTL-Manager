@@ -14,6 +14,7 @@ import { pruneWorkerHeartbeatHistory, recordWorkerHeartbeat } from "./lib/worker
 import { queueCopiedTitleMonitorUpdates, radarrMediaExpectation, startRadarrWork } from "./lib/radarr";
 import { queueCopiedSonarrEpisodes, sonarrMediaExpectation, startSonarrWork } from "./lib/sonarr";
 import { refreshBackupStatus } from "./lib/backups";
+import { reRequestPassMs, startReRequestWork } from "./lib/reRequests";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 import { runWatchSyncWork } from "./lib/watchSyncEngine";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
@@ -110,6 +111,10 @@ let sonarrTimer: NodeJS.Timeout | null = null;
 let sonarrRun: Promise<void> | null = null;
 // Sonarr instances run the same way, independently of each other and of Radarr.
 const sonarrInstanceRuns = new Map<string, Promise<void>>();
+let reRequestTimer: NodeJS.Timeout | null = null;
+let reRequestRun: Promise<void> | null = null;
+// One entry per Radarr or Sonarr instance with searches being sent.
+const reRequestInstanceRuns = new Map<string, Promise<void>>();
 let watchSyncTimer: NodeJS.Timeout | null = null;
 let watchSyncRun: Promise<void> | null = null;
 let scheduledScanTimer: NodeJS.Timeout | null = null;
@@ -145,6 +150,13 @@ try {
         .finally(() => { sonarrRun = null; });
     }, 5000);
     sonarrTimer.unref();
+    reRequestTimer = setInterval(() => {
+      if (shuttingDown || reRequestRun) return;
+      reRequestRun = startReRequestWork(database.db, reRequestInstanceRuns, () => { console.error("A re-request pass could not finish; waiting requests will be retried."); })
+        .catch(() => { console.error("A re-request pass could not start; waiting requests will be retried."); })
+        .finally(() => { reRequestRun = null; });
+    }, reRequestPassMs);
+    reRequestTimer.unref();
     // Each pair keeps its own interval; this only checks what is due.
     watchSyncTimer = setInterval(() => {
       if (shuttingDown || watchSyncRun) return;
@@ -208,6 +220,7 @@ try {
   if (maintenanceTimer) clearInterval(maintenanceTimer);
   if (radarrTimer) clearInterval(radarrTimer);
   if (sonarrTimer) clearInterval(sonarrTimer);
+  if (reRequestTimer) clearInterval(reRequestTimer);
   if (watchSyncTimer) clearInterval(watchSyncTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (scheduledBackupTimer) clearInterval(scheduledBackupTimer);
@@ -218,6 +231,8 @@ try {
   await Promise.allSettled([...radarrInstanceRuns.values()]);
   await sonarrRun;
   await Promise.allSettled([...sonarrInstanceRuns.values()]);
+  await reRequestRun;
+  await Promise.allSettled([...reRequestInstanceRuns.values()]);
   await scheduledScanRun;
   await scheduledBackupRun;
   await watchSyncRun;

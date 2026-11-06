@@ -2,7 +2,10 @@ import { z } from "zod";
 import { AppError } from "../errors";
 import { arrAddressAllowed, normalizeArrUrl, requestArrJson, type ArrService } from "./arrHttp";
 
-export class RadarrError extends AppError {}
+export class RadarrError extends AppError {
+  // Radarr's own HTTP status when the error came from a Radarr response.
+  constructor(message: string, readonly httpStatus?: number) { super(message, 400); }
+}
 
 export const radarrMovieSchema = z.object({
   id: z.number().int().positive(),
@@ -13,12 +16,14 @@ export const radarrMovieSchema = z.object({
   tags: z.array(z.number().int().positive()).max(1000),
   monitored: z.boolean().optional(),
   runtime: z.number().nonnegative().optional(),
-  movieFile: z.object({ relativePath: z.string().max(4096), size: z.number().nonnegative().optional() }).nullish()
+  movieFile: z.object({ id: z.number().int().positive().optional(), relativePath: z.string().max(4096), size: z.number().nonnegative().optional() }).nullish()
 });
 export type RadarrMovie = z.infer<typeof radarrMovieSchema>;
 const tagsSchema = z.array(z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) })).max(10000);
 
-const radarrService: ArrService = { name: "Radarr", error: (message) => new RadarrError(message) };
+const commandSchema = z.object({ id: z.number().int().positive() });
+
+const radarrService: ArrService = { name: "Radarr", error: (message, httpStatus) => new RadarrError(message, httpStatus) };
 
 export function normalizeRadarrUrl(input: string): string {
   return normalizeArrUrl(input, radarrService);
@@ -67,5 +72,16 @@ export class RadarrClient {
 
   async setMonitored(movieIds: number[], monitored: boolean): Promise<void> {
     if (movieIds.length) await requestJson(this.baseUrl, this.apiKey, "movie/editor", "PUT", { movieIds, monitored });
+  }
+
+  // Forgets the file record, and removes the file if it is still there. A record already gone is not an error.
+  async deleteMovieFile(id: number): Promise<void> {
+    try { await requestJson(this.baseUrl, this.apiKey, `moviefile/${id}`, "DELETE"); }
+    catch (error) { if (!(error instanceof RadarrError && error.httpStatus === 404)) throw error; }
+  }
+
+  // Runs as a search someone asked for, so it is not limited to what RSS would pick up. Returns Radarr's command id.
+  async searchMovies(movieIds: number[]): Promise<number> {
+    return (await this.read("command", commandSchema, "POST", { name: "MoviesSearch", movieIds })).id;
   }
 }

@@ -250,7 +250,7 @@ describe("orphan purge", () => {
         actor: { userId: expect.any(Number), username: "fixture" },
         ip: expect.any(String),
         requestId: queued.headers["x-request-id"],
-        targets: { jobId: purgeJobId, rootType: "remote", mode: "delete", storageFileIds: [remote.id], folderIds: [] }
+        targets: { jobId: purgeJobId, rootType: "remote", mode: "delete", reRequest: false, storageFileIds: [remote.id], folderIds: [] }
       })
     ]);
     expect((await app.jobs.listEvents(purgeJobId)).map((event) => event.message)).toContain("Deleted 1 orphan file(s) and 0 folder(s) on remote storage (requested by fixture from 127.0.0.1)");

@@ -169,6 +169,11 @@ const routeTable: readonly RouteEntry[] = [
   { methods: ["POST"], url: "/api/orphans/purge", permission: "library.delete" },
   { methods: ["GET"], url: "/api/orphans/held", permission: "library.delete" },
   { methods: ["POST"], url: "/api/orphans/held/restore", permission: "library.delete" },
+  { methods: ["POST"], url: "/api/damaged-files/delete", permission: "library.delete" },
+  // Asking Radarr or Sonarr for a new copy only ever follows a delete, so it takes the same permission.
+  { methods: ["GET"], url: "/api/re-requests", permission: "library.delete" },
+  { methods: ["POST"], url: "/api/re-requests/preview", permission: "library.delete" },
+  { methods: ["POST"], url: "/api/re-requests/retry", permission: "library.delete" },
 
   // Storage policies. They steer Radarr and Sonarr tags as well as where titles belong.
   { methods: ["POST"], url: "/api/storage-policies", permission: "library.manage" },

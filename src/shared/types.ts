@@ -233,6 +233,8 @@ export interface CleanupSettings {
   holdDays: number;
   // Delete the remote source once a verified copy to local finishes and nothing else links to it.
   deleteRemoteSourceAfterCopy: boolean;
+  // Searches sent to each Radarr or Sonarr instance per minute when deleted files are re-requested.
+  reRequestsPerMinute: number;
 }
 
 export interface AdvancedSettings {
@@ -831,4 +833,6 @@ export interface DamagedFileRow {
   linked: boolean;
   // A current remote file with the same relative path, usable as a source for a fresh copy.
   remoteCopyExists: boolean;
+  // Why this file cannot be deleted right now, the same rules orphans follow.
+  protectedReason: string | null;
 }

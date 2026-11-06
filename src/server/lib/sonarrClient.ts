@@ -37,6 +37,7 @@ export const sonarrEpisodeSchema = z.object({
 });
 export type SonarrEpisode = z.infer<typeof sonarrEpisodeSchema>;
 
+const commandSchema = z.object({ id: z.number().int().positive() });
 const tagsSchema = z.array(z.object({ id: z.number().int().positive(), label: z.string().min(1).max(200) })).max(10000);
 const sonarrService: ArrService = { name: "Sonarr", error: (message, httpStatus) => new SonarrError(message, httpStatus) };
 
@@ -106,5 +107,16 @@ export class SonarrClient {
   // Changes only these episodes; the series and its other episodes keep their monitoring.
   async setEpisodesMonitored(episodeIds: number[], monitored: boolean): Promise<void> {
     if (episodeIds.length) await this.request("episode/monitor", "PUT", { episodeIds, monitored });
+  }
+
+  // Forgets the file record, and removes the file if it is still there. A record already gone is not an error.
+  async deleteEpisodeFile(id: number): Promise<void> {
+    try { await this.request(`episodefile/${id}`, "DELETE"); }
+    catch (error) { if (!(error instanceof SonarrError && error.httpStatus === 404)) throw error; }
+  }
+
+  // Runs as a search someone asked for, for exactly these episodes. Returns Sonarr's command id.
+  async searchEpisodes(episodeIds: number[]): Promise<number> {
+    return (await this.read("command", commandSchema, "POST", { name: "EpisodeSearch", episodeIds })).id;
   }
 }

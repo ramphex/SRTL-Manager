@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, ne, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Dirent } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -21,7 +21,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, operationsForJob, purgeableLeftoverFolders, purgeableOrphans, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -140,7 +140,7 @@ interface PreparedJob {
   }>;
   orphanPurgeOperations?: Array<{
     storageFileId: number;
-    targetKind?: "file" | "folder";
+    targetKind?: "file" | "folder" | "damaged_file";
     rootType: StorageRootType;
     filePath: string;
     sizeBytes: number;
@@ -2780,7 +2780,7 @@ export class JobRunner {
     return (await resolveCopyFailures(this.db, jobId)).list;
   }
 
-  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = []): Promise<number> {
+  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = [], reRequest = false): Promise<number> {
     const requested = [...new Set(storageFileIds)];
     const requestedFolders = [...new Set(folderIds)];
     if (requested.length + requestedFolders.length === 0 || [...requested, ...requestedFolders].some((id) => !Number.isInteger(id) || id < 1)) {
@@ -2807,7 +2807,7 @@ export class JobRunner {
         claims.push(...pathClaims.flat());
       }
       const total = eligible.length + folders.eligible.length;
-      const options = { rootType, mode, total };
+      const options = { rootType, mode, total, reRequest };
       return {
         progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to purge orphan files" },
         options,
@@ -2833,6 +2833,62 @@ export class JobRunner {
             mode
           }))
         ]
+      };
+    });
+  }
+
+  // Damaged files can still be linked, so this runs as an orphan purge job whose operations also remove the file's symlinks.
+  async startDamagedFilePurge(storageFileIds: number[], mode: OrphanPurgeMode, reRequest = false): Promise<number> {
+    const requested = [...new Set(storageFileIds)];
+    if (requested.length === 0 || requested.some((id) => !Number.isInteger(id) || id < 1)) throw new AdmissionError("Choose at least one damaged file to delete");
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (!paths.localDir || !paths.symlinkDir) throw new AdmissionError("Storage path settings are incomplete");
+    return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
+      const staleness = await symlinkInventoryStaleness(transaction);
+      if (staleness.warning) throw new AdmissionError(staleness.warning);
+      const { eligible, rejected } = await purgeableDamagedFiles(transaction, requested);
+      if (rejected.length > 0) {
+        throw new AdmissionError(`Some selections cannot be deleted: ${rejected.slice(0, 5).join("; ")}${rejected.length > 5 ? ` and ${rejected.length - 5} more` : ""}. Refresh the list and try again.`);
+      }
+      const links: Array<Pick<MediaLinkRow, "id" | "section" | "itemName" | "linkPath">> = [];
+      for (let offset = 0; offset < eligible.length; offset += 1000) {
+        const batch = eligible.slice(offset, offset + 1000);
+        links.push(...await transaction
+          .select({ id: schema.mediaLinks.id, section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, linkPath: schema.mediaLinks.linkPath })
+          .from(schema.mediaLinks)
+          .where(and(isNull(schema.mediaLinks.missingSince), or(inArray(schema.mediaLinks.resolvedStorageFileId, batch.map((row) => row.id)), inArray(schema.mediaLinks.targetPath, batch.map((row) => row.file_path))))));
+      }
+      const claims: ResourceClaim[] = [
+        ...inventoryScopeResourceClaims("local", eligible.map((row) => row.section), "shared"),
+        ...sectionResourceClaims(links.map((link) => link.section), "shared")
+      ];
+      for (let offset = 0; offset < eligible.length; offset += 16) {
+        const pathClaims = await Promise.all(eligible.slice(offset, offset + 16).map((row) => managedPathResourceClaims(paths.localDir, row.file_path, "Damaged file claim", "exclusive", true)));
+        claims.push(...pathClaims.flat());
+      }
+      for (let offset = 0; offset < links.length; offset += 16) {
+        const pathClaims = await Promise.all(links.slice(offset, offset + 16).map((link) => managedPathResourceClaims(paths.symlinkDir, link.linkPath, "Damaged file symlink claim", "exclusive", true)));
+        claims.push(...pathClaims.flat());
+      }
+      for (const link of links) {
+        claims.push({ resourceType: "media", resourceKey: String(link.id), access: "exclusive" }, { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]), access: "shared" });
+      }
+      const total = eligible.length;
+      const options = { rootType: "local" as const, mode, total, reRequest, source: "damaged" };
+      return {
+        progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to delete damaged files" },
+        options,
+        exclusive: false,
+        claims: normalizeResourceClaims(claims),
+        orphanPurgeOperations: eligible.map((row) => ({
+          storageFileId: row.id,
+          targetKind: "damaged_file" as const,
+          rootType: "local" as const,
+          filePath: row.file_path,
+          sizeBytes: Number(row.size_bytes),
+          mtimeMs: Number(row.mtime_ms),
+          mode
+        }))
       };
     });
   }
@@ -3553,7 +3609,7 @@ export class JobWorker {
       return;
     }
     if (job.type === "orphan_purge") {
-      await this.runOrphanPurgeJob(ctx);
+      await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; source?: string }>(job) ?? {});
       return;
     }
     if (job.type === "watch_sync") {
@@ -4107,7 +4163,7 @@ export class JobWorker {
     }
   }
 
-  private async runOrphanPurgeJob(ctx: JobContext): Promise<void> {
+  private async runOrphanPurgeJob(ctx: JobContext, jobOptions: { reRequest?: boolean; source?: string }): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     const holdDays = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).cleanup.holdDays;
     const operations = await operationsForJob(this.db, ctx.jobId);
@@ -4119,11 +4175,15 @@ export class JobWorker {
     let failed = count("failed");
     let current = held + deleted + alreadyMissing + failed;
     const total = operations.length;
+    const reRequest = jobOptions.reRequest === true;
+    const damaged = jobOptions.source === "damaged";
+    const name = damaged ? "Damaged file delete" : "Orphan purge";
+    const noun = damaged ? "Damaged file" : "Orphan";
     const setProgress = (stage: string, message: string) =>
-      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message });
+      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total, reRequest, ...(damaged ? { source: "damaged" } : {}) }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message });
 
-    await setProgress("preparing", "Preparing orphan purge");
-    await ctx.event("info", "Orphan purge started", { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType });
+    await setProgress("preparing", `Preparing ${name.toLowerCase()}`);
+    await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest });
     for (const operation of operations) {
       if (operation.stage !== "planned") continue;
       if (await ctx.isCancelled()) break;
@@ -4147,6 +4207,7 @@ export class JobWorker {
               stage: result.stage,
               heldPath: result.heldPath,
               extras: JSON.stringify(result.extras),
+              removedLinks: JSON.stringify(result.removedLinks),
               purgeAfter: result.stage === "held" ? new Date(Date.now() + holdDays * 86_400_000).toISOString() : null,
               errorMessage: null,
               updatedAt: timestamp,
@@ -4159,11 +4220,13 @@ export class JobWorker {
         if (outcome.stage === "held") held += 1;
         else if (outcome.stage === "deleted") deleted += 1;
         else alreadyMissing += 1;
-        await ctx.event(outcome.stage === "already_missing" ? "warn" : "info", outcome.stage === "held" ? "Orphan moved to the holding area" : outcome.stage === "deleted" ? "Orphan deleted" : "Orphan was already missing", {
+        await ctx.event(outcome.stage === "already_missing" ? "warn" : "info", outcome.stage === "held" ? `${noun} moved to the holding area` : outcome.stage === "deleted" ? `${noun} deleted` : `${noun} was already missing`, {
           filePath: operation.filePath,
           heldPath: outcome.heldPath,
-          sidecars: outcome.extras.length
+          sidecars: outcome.extras.length,
+          ...(damaged ? { symlinksRemoved: outcome.removedLinks.length } : {})
         });
+        if (outcome.linkErrors.length) await ctx.event("warn", "The file is gone but a symlink to it was left in place", { filePath: operation.filePath, reasons: outcome.linkErrors });
       } catch (error: unknown) {
         if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
         current += 1;
@@ -4175,27 +4238,30 @@ export class JobWorker {
             .set({ stage: "failed", errorMessage: message, updatedAt: nowIso(), completedAt: nowIso() })
             .where(and(eq(schema.orphanPurgeOperations.id, operation.id), eq(schema.orphanPurgeOperations.stage, "planned")))
         );
-        await ctx.event("error", "Orphan was not purged", { filePath: operation.filePath, reason: message });
+        await ctx.event("error", damaged ? "Damaged file was not deleted" : "Orphan was not purged", { filePath: operation.filePath, reason: message });
       }
       await setProgress("purging", `${current} of ${total} processed`);
     }
 
+    // Written once the deletes are done; the worker's re-request pass takes it from here, whatever this job's final status is.
+    if (reRequest) await ctx.withLeaseDb((leaseDb) => queueReRequestsForJob(leaseDb, ctx.jobId));
+
     if (await ctx.isCancelled()) {
-      await setProgress("cancelled", "Orphan purge stopped; completed purges were kept");
-      await ctx.event("warn", "Orphan purge stopped; completed purges were kept", { held, deleted, alreadyMissing, failed, total });
+      await setProgress("cancelled", `${name} stopped; completed work was kept`);
+      await ctx.event("warn", `${name} stopped; completed work was kept`, { held, deleted, alreadyMissing, failed, total });
       return;
     }
     const summary = `${held ? `${held} held` : ""}${held && deleted ? ", " : ""}${deleted ? `${deleted} deleted` : ""}${alreadyMissing ? `, ${alreadyMissing} already missing` : ""}`;
     if (failed > 0) {
       const partial = current - failed > 0;
-      const message = `Orphan purge ${partial ? "partially failed" : "failed"}: ${failed} of ${total} files were not purged`;
+      const message = `${name} ${partial ? "partially failed" : "failed"}: ${failed} of ${total} files were not ${damaged ? "deleted" : "purged"}`;
       await setProgress(partial ? "partially_failed" : "failed", message);
       await ctx.event(partial ? "warn" : "error", message, { held, deleted, alreadyMissing, failed, total });
       if (partial) throw new PartialJobFailureError(message);
       throw new Error(message);
     }
-    await setProgress("completed", `Orphan purge finished: ${summary || "nothing to do"}`);
-    await ctx.event("info", "Orphan purge finished", { held, deleted, alreadyMissing, failed, total });
+    await setProgress("completed", `${name} finished: ${summary || "nothing to do"}`);
+    await ctx.event("info", `${name} finished`, { held, deleted, alreadyMissing, failed, total });
   }
 
   private async runSymlinkCleanupJob(options: SymlinkCleanupOptions, ctx: JobContext): Promise<void> {

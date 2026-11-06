@@ -513,6 +513,8 @@ export const orphanPurgeOperations = pgTable(
     heldPath: text("held_path"),
     // JSON array of { from, to } for sidecar files moved or removed with the media file.
     extras: text("extras").notNull().default("[]"),
+    // JSON array of { linkPath, targetPath } for library symlinks removed with a damaged file, put back if it is restored.
+    removedLinks: text("removed_links").notNull().default("[]"),
     purgeAfter: text("purge_after"),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),
@@ -522,6 +524,50 @@ export const orphanPurgeOperations = pgTable(
   (table) => [
     uniqueIndex("orphan_purge_operations_job_target_idx").on(table.jobId, table.targetKind, table.storageFileId),
     index("orphan_purge_operations_held_idx").on(table.stage, table.purgeAfter)
+  ]
+);
+
+// One deleted file a person asked to have searched for again. Written only once the delete has happened.
+export const reRequests = pgTable(
+  "re_requests",
+  {
+    id: serial("id").primaryKey(),
+    jobId: integer("job_id")
+      .notNull()
+      .references(() => jobs.id, { onDelete: "cascade" }),
+    operationId: integer("operation_id")
+      .notNull()
+      .references(() => orphanPurgeOperations.id, { onDelete: "cascade" }),
+    section: text("section").notNull(),
+    itemName: text("item_name").notNull(),
+    // Relative to the title folder, as Radarr and Sonarr report file paths, including any symlink removed with the file.
+    fileNames: text("file_names").notNull().default("[]"),
+    // Whether the file had a library symlink, which makes it the title's own copy rather than a spare.
+    wasLinked: boolean("was_linked").notNull().default(false),
+    displayName: text("display_name").notNull(),
+    service: text("service"),
+    instanceId: text("instance_id"),
+    instanceName: text("instance_name"),
+    // The movie or series in that instance.
+    arrItemId: integer("arr_item_id"),
+    title: text("title"),
+    // "S01E02, S01E03" once Sonarr has said which episodes were requested.
+    episodes: text("episodes"),
+    // queued, pending, requested, failed, unmatched or skipped.
+    status: text("status").notNull(),
+    message: text("message"),
+    // Whether the item was monitored before the request, kept for the record.
+    previousMonitored: boolean("previous_monitored"),
+    commandId: integer("command_id"),
+    attempts: integer("attempts").notNull().default(0),
+    createdAt: text("created_at").notNull(),
+    updatedAt: text("updated_at").notNull(),
+    requestedAt: text("requested_at")
+  },
+  (table) => [
+    uniqueIndex("re_requests_operation_idx").on(table.operationId),
+    index("re_requests_status_idx").on(table.status, table.instanceId, table.id),
+    index("re_requests_instance_requested_idx").on(table.instanceId, table.requestedAt)
   ]
 );
 

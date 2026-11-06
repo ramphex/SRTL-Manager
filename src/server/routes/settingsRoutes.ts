@@ -72,9 +72,10 @@ const advancedSettingsSchema = z.object({
   cleanup: z
     .object({
       holdDays: z.number().int().min(1).max(90).default(7),
-      deleteRemoteSourceAfterCopy: z.boolean().default(false)
+      deleteRemoteSourceAfterCopy: z.boolean().default(false),
+      reRequestsPerMinute: z.number().int().min(1).max(60).default(6)
     })
-    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false })
+    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6 })
 });
 
 const userPreferencesSchema = z.object({
