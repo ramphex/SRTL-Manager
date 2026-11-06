@@ -203,6 +203,16 @@ describe("copy failure summaries", () => {
 });
 
 describe("copy completion summaries", () => {
+  it("keeps a warning on the completed item without turning it into a failure", () => {
+    const warning = "File is 48 bytes shorter than its header declares; accepted because ffmpeg still read it to the end";
+    const events = [
+      event(1, "Verified copy installed", { itemName: "Short Tail Title (2026)", linkPath: "/links/short.mkv", sourcePath: "/remote/short.mkv", destinationPath: "/local/short.mkv", warning }, "info"),
+      event(2, warning, { itemName: "Short Tail Title (2026)", linkPath: "/links/short.mkv", sourcePath: "/remote/short.mkv", destinationPath: "/local/short.mkv", warning }, "warn")
+    ];
+    expect(copyCompletedItemSummaries(events)).toEqual([expect.objectContaining({ title: "Short Tail Title (2026)", outcome: "Copied and symlinked", warning })]);
+    expect(copyFailedItemSummaries(events)).toEqual([]);
+  });
+
   it("collects copied and matched items, correlates progress titles, deduplicates, and sorts", () => {
     const summaries = copyCompletedItemSummaries([
       event(1, "Promoting verified copy and repointing symlink", {

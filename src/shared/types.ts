@@ -787,7 +787,7 @@ export interface AuditResultRecord {
   linkPath: string;
   targetPath: string;
   sourcePath: string | null;
-  status: "pass" | "fail" | "source_issue";
+  status: "pass" | "warning" | "fail" | "source_issue";
   ffmpegStatus: "pass" | "fail";
   cmpStatus: "pass" | "fail" | "source_unknown" | "source_missing" | "source_error" | "skipped";
   message: string;

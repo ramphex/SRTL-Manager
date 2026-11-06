@@ -643,7 +643,7 @@ export function AuditResultSummary({ results }: { results: AuditResultRecord[] }
               <strong>{basenameFromPath(result.targetPath)}</strong>
               <small>{result.message}</small>
             </div>
-            <StatusPill value={result.status === "source_issue" ? "Source issue" : "Failed"} />
+            {result.status === "warning" ? <span className="pill pill-warning">Warning</span> : <StatusPill value={result.status === "source_issue" ? "Source issue" : "Failed"} />}
           </article>
         ))}
       </div>
@@ -885,7 +885,7 @@ type CopyItemDetail = {
 
 function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
   const items = useMemo(
-    () => copyCompletedItemSummaries(events).map((item) => ({ ...item, detail: item.outcome })),
+    () => copyCompletedItemSummaries(events).map((item) => ({ ...item, detail: item.outcome, statusDetail: item.warning })),
     [events]
   );
   return <CopyItemDetailsTooltip count={count} kind="completed" items={items} loading={loading} error={error} />;

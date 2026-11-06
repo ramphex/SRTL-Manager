@@ -4069,7 +4069,7 @@ export class JobWorker {
           if (await ctx.isCancelled()) break;
           throw error;
         }
-        if (result.status === "pass") passed += 1;
+        if (result.status === "pass" || result.status === "warning") passed += 1;
         else failed += 1;
         if (result.cmpStatus === "source_unknown") sourceUnknown += 1;
         if (result.cmpStatus === "source_missing") sourceMissing += 1;
@@ -4767,6 +4767,7 @@ export class JobWorker {
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, linkUpdate);
           await ctx.event("info", copyBehavior.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
+          if (result.warning) await ctx.event("warn", result.warning, { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.set(link.id, {
               linkId: link.id,
@@ -4781,6 +4782,7 @@ export class JobWorker {
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, linkUpdate);
           await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName });
+          if (result.warning) await ctx.event("warn", result.warning, { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.set(link.id, {
               linkId: link.id,

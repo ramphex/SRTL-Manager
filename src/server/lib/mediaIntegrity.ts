@@ -111,22 +111,44 @@ export interface MediaProbe {
 
 export type MediaProber = (filePath: string, signal?: AbortSignal) => Promise<MediaProbe>;
 
+export interface MatroskaTail {
+  // Declared end of the Segment minus the file size; zero or less means nothing is missing.
+  missingBytes: number;
+  sizeBytes: number;
+  durationSeconds: number | null;
+}
+
 export interface FfmpegRunOutcome {
   exitCode: number | null;
   stderr: string;
   reachedSeconds: number | null;
   durationSeconds: number | null;
+  matroskaTail?: MatroskaTail | null;
 }
 
+export interface FfmpegValidation {
+  status: "pass" | "fail";
+  output: string;
+  warning?: string;
+}
+
+// Some MKV sources stop a few KB short of their own header, inside the last cluster. They always read this way, so
+// retrying never helps, and everything before the cut plays. The largest shortfall seen on real files was 3,862 bytes.
+export const maximumMatroskaShortfallBytes = 16 * 1024;
+const matroskaHeadBytes = 4 * 1024;
+const ebmlHeaderId = 0x1a45dfa3;
+const matroskaSegmentId = 0x18538067;
+
+const prematureEndPattern = /File ended prematurely(?: at pos\. (\d+))?/i;
 // Container-structure messages that mean the file is damaged, not merely unusual.
-const fatalFfmpegPatterns = [
-  /File ended prematurely/i,
+const otherFatalFfmpegPatterns = [
   /invalid as first byte of an EBML number/i,
   /exceeds containing master element/i,
   /Invalid data found when processing input/i,
   /moov atom not found/i,
   /stream \d+, offset 0x[0-9a-f]+: partial file/i
 ];
+const fatalFfmpegPatterns = [prematureEndPattern, ...otherFatalFfmpegPatterns];
 // Packet and decoder complaints also appear in playable recordings; a handful are tolerated, a burst is not.
 const damagePattern = /Packet corrupt|error while decoding|concealing \d+ (?:DC|AC|MV) errors|Invalid NAL unit|corrupt (?:decoded )?frame/i;
 const tolerableDamageLines = 10;
@@ -339,19 +361,89 @@ export function describeInspectionFailure(inspection: MediaInspection): string {
   return inspection.problems.join("; ");
 }
 
-export function evaluateFfmpegValidation(outcome: FfmpegRunOutcome): { status: "pass" | "fail"; output: string } {
+// Returns null for an unset or unknown size, which a live muxer writes as all ones.
+function readEbmlSize(buffer: Buffer, offset: number): { length: number; value: number } | null {
+  const first = buffer[offset];
+  if (!first) return null;
+  const length = Math.clz32(first) - 23;
+  if (offset + length > buffer.length) return null;
+  const firstMask = 0xff >> length;
+  let value = first & firstMask;
+  let unknown = value === firstMask;
+  for (let index = 1; index < length; index += 1) {
+    value = value * 256 + buffer[offset + index];
+    unknown &&= buffer[offset + index] === 0xff;
+  }
+  return unknown ? null : { length, value };
+}
+
+// Where the Segment says the file ends; null when this is not Matroska or the Segment size is unknown.
+export function matroskaDeclaredEnd(head: Buffer): number | null {
+  if (head.length < 4 || head.readUInt32BE(0) !== ebmlHeaderId) return null;
+  const header = readEbmlSize(head, 4);
+  if (!header) return null;
+  const segmentOffset = 4 + header.length + header.value;
+  if (segmentOffset + 4 > head.length || head.readUInt32BE(segmentOffset) !== matroskaSegmentId) return null;
+  const segment = readEbmlSize(head, segmentOffset + 4);
+  if (!segment) return null;
+  const end = segmentOffset + 4 + segment.length + segment.value;
+  return Number.isSafeInteger(end) ? end : null;
+}
+
+export function reportsPrematureEnd(stderr: string): boolean {
+  return prematureEndPattern.test(stderr);
+}
+
+export async function readMatroskaTail(filePath: string, signal?: AbortSignal): Promise<MatroskaTail | null> {
+  let declaredEnd: number | null;
+  let sizeBytes: number;
+  try {
+    const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Media tail open for ${filePath}`);
+    try {
+      sizeBytes = (await withFilesystemTimeout(handle.stat(), `Media tail stat for ${filePath}`)).size;
+      declaredEnd = matroskaDeclaredEnd(await withFilesystemTimeout(readSample(handle, 0, matroskaHeadBytes), `Media tail read for ${filePath}`));
+    } finally {
+      await handle.close().catch(() => undefined);
+    }
+  } catch {
+    return null;
+  }
+  if (declaredEnd === null) return null;
+  // ffprobe prints the same complaint on these files, so the duration has to come from its stdout alone.
+  const probe = await probeMedia(filePath, signal);
+  return { missingBytes: declaredEnd - sizeBytes, sizeBytes, durationSeconds: probe.ok ? probe.durationSeconds : null };
+}
+
+function isStreamShort(reachedSeconds: number, durationSeconds: number): boolean {
+  return reachedSeconds < durationSeconds * minimumReachedFraction - reachedSlackSeconds;
+}
+
+// Returns the warning when a premature end is only a short tail, and null when it has to stay a failure.
+function shortTailWarning(outcome: FfmpegRunOutcome, lines: string[]): string | null {
+  const tail = outcome.matroskaTail;
+  if (!tail || tail.missingBytes <= 0 || tail.missingBytes > maximumMatroskaShortfallBytes) return null;
+  if (lines.some((line) => otherFatalFfmpegPatterns.some((pattern) => pattern.test(line)))) return null;
+  // A stated position before the end of the file means reading stopped early, whatever the header says.
+  if (lines.some((line) => { const position = prematureEndPattern.exec(line)?.[1]; return position !== undefined && Number(position) < tail.sizeBytes; })) return null;
+  if (lines.filter((line) => damagePattern.test(line)).length > tolerableDamageLines) return null;
+  if (!tail.durationSeconds || outcome.reachedSeconds === null || isStreamShort(outcome.reachedSeconds, tail.durationSeconds)) return null;
+  return `File is ${tail.missingBytes} byte${tail.missingBytes === 1 ? "" : "s"} shorter than its header declares; accepted because ffmpeg still read it to the end`;
+}
+
+export function evaluateFfmpegValidation(outcome: FfmpegRunOutcome): FfmpegValidation {
   const lines = outcome.stderr.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   if (outcome.exitCode !== 0) return { status: "fail", output: outcome.stderr.trim() || "ffmpeg exited non-zero" };
   // Error-level output only overflows the capture buffer when a file is badly damaged.
   if (outcome.stderr.startsWith("[earlier command output truncated]")) return { status: "fail", output: `ffmpeg reported more errors than could be recorded; last: ${lines.at(-1) ?? ""}` };
   const fatal = lines.find((line) => fatalFfmpegPatterns.some((pattern) => pattern.test(line)));
-  if (fatal) return { status: "fail", output: fatal };
+  const warning = fatal ? shortTailWarning(outcome, lines) : null;
+  if (fatal && !warning) return { status: "fail", output: fatal };
   const damage = lines.filter((line) => damagePattern.test(line));
   if (damage.length > tolerableDamageLines) {
     return { status: "fail", output: `${damage.length} damaged packet or decoding errors, first: ${damage[0]}` };
   }
-  if (outcome.durationSeconds && outcome.reachedSeconds !== null && outcome.reachedSeconds < outcome.durationSeconds * minimumReachedFraction - reachedSlackSeconds) {
+  if (outcome.durationSeconds && outcome.reachedSeconds !== null && isStreamShort(outcome.reachedSeconds, outcome.durationSeconds)) {
     return { status: "fail", output: `Stream ends at ${minutesLabel(outcome.reachedSeconds)} of a stated ${minutesLabel(outcome.durationSeconds)}; the file is truncated` };
   }
-  return { status: "pass", output: outcome.stderr.trim() };
+  return warning ? { status: "pass", output: outcome.stderr.trim(), warning } : { status: "pass", output: outcome.stderr.trim() };
 }

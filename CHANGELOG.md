@@ -15,6 +15,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Changed
 
 - Display preferences in **Settings > User settings** now belong to each account. Accounts without their own read the ones saved before this version.
+- Copies and audits now accept an MKV that is missing only its last few KB, up to 16 KiB less than its header declares, instead of failing it with `File ended prematurely` on every retry. The copy finishes with a warning that says how many bytes are missing, shown on the item and in the job's events, and an audit lists it under **Audit findings** as a warning. The job does not count as failed. A larger shortfall, another container, an MKV with an unknown size, any other structural error, and a copy that does not match its source all still fail.
 
 ### Upgrade notes
 

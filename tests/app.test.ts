@@ -1,3 +1,4 @@
+import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -230,7 +231,7 @@ async function insertCopySymlink({
   section?: string;
   relativePath?: string;
   sourceRelativePath?: string;
-  content?: string;
+  content?: string | Buffer;
   writeSource?: boolean;
 }): Promise<{ id: number; sourcePath: string; destinationPath: string; linkPath: string; relativePath: string }> {
   const timestamp = new Date().toISOString();
@@ -1765,6 +1766,24 @@ describe("api app", () => {
     expect(await ctx.database.db.select().from(schema.auditResults)).toMatchObject([expect.objectContaining({ cmpStatus: "skipped", status: "pass" })]);
   });
 
+  it("counts an audit warning as passed and lists it among the findings", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Short Tail Audit Movie", kind: "local", storagePolicy: "unassigned" });
+    const warning = "File is 48 bytes shorter than its header declares; accepted because ffmpeg still read it to the end";
+    const auditRunner: AuditCommandRunner = {
+      runFfmpeg: async () => ({ status: "pass", output: "File ended prematurely", warning }),
+      runCmp: async () => ({ status: "pass", output: "" })
+    };
+    const audit = await ctx.app.inject({ method: "POST", url: "/api/audits", headers: { cookie }, payload: { mode: "fast", linkIds: [fixture.id], byteCompare: false } });
+    expect(audit.statusCode).toBe(200);
+    const { jobId } = audit.json<{ jobId: number }>();
+    await expect(runQueuedJob(jobId, { auditRunner })).resolves.toMatchObject({ status: "completed", progress: expect.objectContaining({ checked: 1, passed: 1, failed: 0 }) });
+    const run = (await ctx.app.inject({ method: "GET", url: `/api/audits/job/${jobId}`, headers: { cookie } })).json<{ id: number; passed: number; failed: number }>();
+    expect(run).toMatchObject({ passed: 1, failed: 0 });
+    const findings = await ctx.app.inject({ method: "GET", url: `/api/audits/${run.id}/results/page?attentionOnly=true`, headers: { cookie } });
+    expect(findings.json<{ results: unknown[] }>().results).toEqual([expect.objectContaining({ status: "warning", ffmpegStatus: "pass", message: `Passed ffmpeg; source unknown. ${warning}` })]);
+  });
+
   it("marks audit runs failed with an error message when the audit runner aborts", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({ itemName: "Runner Failure Movie", kind: "local", storagePolicy: "unassigned" });
@@ -2738,6 +2757,57 @@ describe("api app", () => {
     const claims = await ctx.database.db.select().from(schema.jobResourceClaims).where(inArray(schema.jobResourceClaims.jobId, jobIds));
     expect(claims).not.toHaveLength(0);
     expect(claims.every((claim) => claim.access === "shared")).toBe(true);
+  });
+
+  it("finishes a copy accepted with a warning as completed and shows the warning in its events", async () => {
+    const cookie = await createAdminSession();
+    const fixture = await insertCopySymlink({ itemName: "Short Tail Movie", kind: "remote", storagePolicy: "location_1", content: "copy me short" });
+    const warning = "File is 48 bytes shorter than its header declares; accepted because ffmpeg still read it to the end";
+    const copy = await ctx.app.inject({ method: "POST", url: "/api/copies", headers: { cookie }, payload: { direction: "to_local", linkIds: [fixture.id] } });
+    expect(copy.statusCode).toBe(200);
+    const { jobId } = copy.json<{ jobId: number }>();
+    await expect(runQueuedJob(jobId, { copyRunner: { ...testCopyRunner, runFfmpeg: async () => ({ status: "pass", output: "File ended prematurely", warning }) } })).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({ copied: 1, failed: 0 })
+    });
+    const events = await ctx.jobs.listEvents(jobId);
+    expect(events.find((event) => event.message === "Verified copy installed")).toMatchObject({ level: "info", data: expect.objectContaining({ warning, itemName: "Short Tail Movie" }) });
+    expect(events.find((event) => event.message === warning)).toMatchObject({ level: "warn", data: expect.objectContaining({ itemName: "Short Tail Movie" }) });
+    expect(events.some((event) => event.level === "error")).toBe(false);
+  });
+
+  it.runIf(spawnSync("ffmpeg", ["-version"]).status === 0)("runs real copy and audit jobs on a generated MKV cut a few KB short, and fails a longer cut", async () => {
+    const cookie = await createAdminSession();
+    const fixturePath = path.join(tmpDir, "tail-fixture.mkv");
+    execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-f", "lavfi", "-i", "sine=frequency=440", "-t", "20", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac", "-cues_to_front", "1", "-reserve_index_space", "4096", fixturePath]);
+    const complete = await fs.readFile(fixturePath);
+    const copyAndWait = async (id: number) => {
+      const copy = await ctx.app.inject({ method: "POST", url: "/api/copies", headers: { cookie }, payload: { direction: "to_local", linkIds: [id] } });
+      expect(copy.statusCode).toBe(200);
+      const { jobId } = copy.json<{ jobId: number }>();
+      return { jobId, job: await runQueuedJob(jobId) };
+    };
+
+    const short = await insertCopySymlink({ itemName: "Short Cut Movie", kind: "remote", storagePolicy: "location_1", content: complete.subarray(0, complete.length - 3862) });
+    const copied = await copyAndWait(short.id);
+    expect(copied.job).toMatchObject({ status: "completed", progress: expect.objectContaining({ copied: 1, failed: 0 }) });
+    await expect(fs.readlink(short.linkPath)).resolves.toBe(short.destinationPath);
+    const warnings = (await ctx.jobs.listEvents(copied.jobId)).filter((event) => event.level === "warn" && event.message.includes("3862 bytes shorter"));
+    expect(warnings).toHaveLength(1);
+
+    const audit = await ctx.app.inject({ method: "POST", url: "/api/audits", headers: { cookie }, payload: { mode: "fast", linkIds: [short.id] } });
+    expect(audit.statusCode).toBe(200);
+    const auditJobId = audit.json<{ jobId: number }>().jobId;
+    await expect(runQueuedJob(auditJobId)).resolves.toMatchObject({ status: "completed" });
+    const results = await ctx.database.db.select().from(schema.auditResults);
+    expect(results).toEqual([expect.objectContaining({ status: "warning", ffmpegStatus: "pass", cmpStatus: "pass", message: expect.stringContaining("3862 bytes shorter") })]);
+
+    const long = await insertCopySymlink({ itemName: "Long Cut Movie", kind: "remote", storagePolicy: "location_1", content: complete.subarray(0, complete.length - 16 * 1024 - 1) });
+    const failed = await copyAndWait(long.id);
+    expect(failed.job.status).not.toBe("completed");
+    await expect(fs.readlink(long.linkPath)).resolves.toBe(long.sourcePath);
+    await expect(fs.stat(long.destinationPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await ctx.jobs.listEvents(failed.jobId)).some((event) => event.level === "error" && event.message.includes("File ended prematurely"))).toBe(true);
   });
 
   it("uses advanced copy verification settings when copying media", async () => {
