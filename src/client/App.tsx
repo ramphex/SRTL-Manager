@@ -1667,7 +1667,7 @@ const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
 const NowPlayingPage = lazyRouteComponent(() => import("./nowPlaying"), "NowPlayingPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
 const nowPlayingRoute = createRoute({ getParentRoute: () => rootRoute, path: "/now-playing", component: NowPlayingPage });
-const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies"] as const;
+const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies", "damaged"] as const;
 const libraryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/library",

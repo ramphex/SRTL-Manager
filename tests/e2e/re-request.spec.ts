@@ -31,7 +31,7 @@ async function fixture(page: Page, options: Options = {}) {
     { id: 2, jobId: 42, displayName: "Delta - S01E02.mkv", service: "sonarr", instanceName: "Sonarr", title: "Delta (2020)", episodes: "S01E02", status: failed ? "failed" : "pending", message: failed ? "Sonarr returned HTTP 500." : null, previousMonitored: true, attempts: 1, createdAt: "2026-11-05T10:00:00.000Z", requestedAt: null },
     { id: 3, jobId: 42, displayName: "Nobody.mkv", service: null, instanceName: null, title: null, episodes: null, status: "unmatched", message: "This title is not in Radarr.", previousMonitored: null, attempts: 0, createdAt: "2026-11-05T10:00:00.000Z", requestedAt: null }
   ];
-  await page.route("**/api/**", async (route) => {
+  await page.context().route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     let body: unknown = [];
@@ -145,6 +145,47 @@ test("moderators see damaged files read-only", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Delete selected/ })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Re-requests" })).toHaveCount(0);
   expect(posts.previews).toEqual([]);
+});
+
+test("the dashboard link opens the damaged files tab and the address keeps it there", async ({ page }) => {
+  await fixture(page);
+  const damagedTab = page.getByRole("button", { name: "Damaged files" });
+  await page.goto(`${baseUrl}/`);
+  await page.getByRole("link", { name: "Library → Damaged files" }).click();
+  await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
+  await expect(damagedTab).toHaveClass("selected");
+  await expect(page).toHaveURL(/\/library\?view=damaged$/);
+
+  await page.reload();
+  await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
+  await expect(damagedTab).toHaveClass("selected");
+
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+  await page.goForward();
+  await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
+  await expect(damagedTab).toHaveClass("selected");
+});
+
+test("the dashboard link opens the damaged files tab in a new browser tab", async ({ page }) => {
+  await fixture(page);
+  await page.goto(`${baseUrl}/`);
+  const opened = page.context().waitForEvent("page");
+  await page.getByRole("link", { name: "Library → Damaged files" }).click({ modifiers: ["ControlOrMeta"] });
+  const newTab = await opened;
+  await expect(newTab.getByRole("heading", { name: "Damaged files" })).toBeVisible();
+  await expect(newTab.getByRole("button", { name: "Damaged files" })).toHaveClass("selected");
+  await expect(page.getByRole("heading", { name: "Dashboard", exact: true })).toBeVisible();
+});
+
+test("the dashboard link takes a moderator to the read-only damaged files tab", async ({ page }) => {
+  await fixture(page, { role: "moderator" });
+  await page.goto(`${baseUrl}/`);
+  await page.getByRole("link", { name: "Library → Damaged files" }).click();
+  await expect(page.getByRole("heading", { name: "Not allowed" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Damaged files" })).toHaveClass("selected");
+  await expect(page.getByRole("checkbox")).toHaveCount(0);
 });
 
 test("the confirmation fits a phone", async ({ page }) => {

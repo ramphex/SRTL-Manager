@@ -478,7 +478,7 @@ export function DashboardPage() {
       {damagedFiles.data?.length ? (
         <p className="panel-message dashboard-damaged">
           <TriangleAlert size={14} aria-hidden="true" /> {formatNumber(damagedFiles.data.length)} damaged {localName} files (hollow or with zero-filled gaps).{" "}
-          <Link to="/library">Library &rarr; Damaged files</Link>
+          <Link to="/library" search={{ view: "damaged" }}>Library &rarr; Damaged files</Link>
         </p>
       ) : null}
       <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
