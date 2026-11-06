@@ -4,11 +4,12 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4-beta.4] - 2026-11-06
+
 ### Added
 
 - Added scheduled database backups in **Settings > Backups**: on by default, nightly at 03:30 server time, keeping 7, with a **Back up now** button, the last result, the next run, and a list of backups with their age, size and verified state. Each run is a job in Logs, and runs next to other jobs without using one of their slots. A backup counts only once its checksum and `pg_restore --list` pass, older ones are removed only after that, and at least two verified backups always stay. A failed or overdue backup, or a location that cannot be written, shows on every page and in `/api/health`. Restoring is done by hand, following the tested steps in the [database backups guide](docs/backups.md) (requires database migration 27).
 - Added accounts and roles, so several people can help run an instance: one owner, plus admins and moderators, each with their own password, sessions and display preferences. **Settings > Accounts** adds, disables, deletes and resets accounts, changes roles, shows who created and changed what, and transfers ownership. Moderators can see the library, jobs and Now Playing, run scans and audits, retry jobs and copy titles to local. See [Accounts, Sessions And Security Activity](docs/accounts-and-sessions.md#roles).
-
 - Added an option to re-request files when SRTL deletes them. Orphan purges now offer **Also ask Radarr or Sonarr to search for a new copy**, off for every delete until you tick it. The right instance, including a separate 4K one, clears its record of the file, monitors that movie or those exact episodes, and searches, at up to 6 searches a minute per instance (**Settings > Advanced**). The confirmation says which files cannot be re-requested and why, and damaged files and orphan reviews list each result, with a retry for any that failed. See [Radarr](docs/radarr.md#re-requesting-after-a-delete) and [Sonarr](docs/sonarr.md#re-requesting-after-a-delete).
 - Added deleting from **Library > Damaged files**, including files that are still in the library, which had no way to be removed before. It follows the same rules as orphan purges: hold or delete now, restorable while held, and files changed in the last 24 hours or part of an unfinished copy are protected. A library file's symlink is removed with it and put back if the file is restored. Owners and admins only.
 
@@ -34,7 +35,6 @@ Backups are on after the upgrade and start at the next 03:30.
 ### Security
 
 - The sign-in page no longer has a setup link, so it never appears on a server that is already set up. Browsers on the host or the local network still get the setup form on their own while no administrator exists. Anyone else opens `/setup`, an address printed in the API log with the setup token. It looks the same whether or not an administrator exists, and setup still needs the token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
-
 - Every route now resolves to a required permission through one table, and a route with no entry is refused. Webhooks keep their own secret and have no role.
 - There is always exactly one owner, enforced by the database as well as the app. Ownership moves only by a transfer that asks for the owner's password again, and leaves the previous owner an admin.
 - New accounts and password resets set a temporary password, which opens nothing except the screen that replaces it. Disabling, deleting and resetting end that person's sessions at once, and a role change applies to their next request. A disabled account gets the same sign-in answer as a wrong password.
