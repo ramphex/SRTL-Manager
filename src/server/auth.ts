@@ -3,9 +3,9 @@ import { and, asc, eq, isNotNull, lt, ne, or, sql } from "drizzle-orm";
 import type { Db } from "./db/database";
 import { first } from "./db/database";
 import * as schema from "./db/schema";
+import { accountsLockKey } from "./db/accountsMigration";
 import { AppError } from "./errors";
-
-const adminSetupLockKey = 1_558_042_911;
+import { isAccountRole, type AccountRole } from "../shared/permissions";
 
 // ---------------------------------------------------------------------------
 // Password hashing
@@ -123,22 +123,27 @@ export function dummyPasswordHash(): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// Admin account
+// Accounts
 // ---------------------------------------------------------------------------
 
 export type AdminUser = typeof schema.adminUsers.$inferSelect;
 
-export async function hasAdmin(db: Db): Promise<boolean> {
-  return (await db.select({ id: schema.adminUsers.id }).from(schema.adminUsers).limit(1)).length > 0;
+export function accountRole(user: Pick<AdminUser, "role">): AccountRole {
+  // The database constraint allows nothing else; an unknown value gets the least access.
+  return isAccountRole(user.role) ? user.role : "moderator";
 }
 
-/** Creates the single admin. Returns the new user, or null when one already exists. */
-export async function createAdmin(db: Db, username: string, password: string): Promise<AdminUser | null> {
+export async function hasOwner(db: Db): Promise<boolean> {
+  return (await db.select({ id: schema.adminUsers.id }).from(schema.adminUsers).where(eq(schema.adminUsers.role, "owner")).limit(1)).length > 0;
+}
+
+/** Creates the owner during first-run setup. Returns the new user, or null when any account already exists. */
+export async function createOwner(db: Db, username: string, password: string): Promise<AdminUser | null> {
   const passwordHash = await passwordHashing.hash(password);
   return db.transaction(async (transaction) => {
-    await transaction.execute(sql`select pg_advisory_xact_lock(${adminSetupLockKey})`);
+    await transaction.execute(sql`select pg_advisory_xact_lock(${accountsLockKey})`);
     if ((await transaction.select({ id: schema.adminUsers.id }).from(schema.adminUsers).limit(1)).length > 0) return null;
-    const [user] = await transaction.insert(schema.adminUsers).values({ username, passwordHash, createdAt: new Date().toISOString() }).returning();
+    const [user] = await transaction.insert(schema.adminUsers).values({ username, passwordHash, role: "owner", createdAt: new Date().toISOString(), lastSignInAt: new Date().toISOString() }).returning();
     return user ?? null;
   });
 }
@@ -161,8 +166,9 @@ export interface AuthenticationResult {
 
 /**
  * Checks a username and password. Unknown usernames are checked against a
- * dummy hash so they take as long as a wrong password. A correct password
- * stored in an older format is rehashed with the current parameters.
+ * dummy hash so they take as long as a wrong password, and a disabled account
+ * gets the same full check and the same answer as a wrong password. A correct
+ * password stored in an older format is rehashed with the current parameters.
  */
 export async function authenticate(db: Db, username: string, password: string): Promise<AuthenticationResult | null> {
   const user = await findAdminByUsername(db, username);
@@ -171,8 +177,11 @@ export async function authenticate(db: Db, username: string, password: string): 
     return null;
   }
   if (!(await passwordHashing.verify(password, user.passwordHash))) return null;
+  if (user.disabledAt) return null;
   const rehashed = await rehashIfNeeded(db, user, password);
-  return { user, rehashed };
+  if (!rehashed) return { user, rehashed };
+  const current = await findAdminByUsername(db, username);
+  return current ? { user: current, rehashed } : null;
 }
 
 /** Replaces an outdated hash after the password has been verified. */
@@ -207,6 +216,9 @@ export interface ActiveSession {
   tokenHash: string;
   userId: number;
   username: string;
+  /** Read from the account on every request, so a change applies to open sessions at once. */
+  role: AccountRole;
+  mustChangePassword: boolean;
   createdAt: string;
   expiresAt: string;
   idleExpiresAt: string | null;
@@ -272,6 +284,11 @@ export async function deleteInactiveSessions(db: Db, now = Date.now()): Promise<
 
 export async function createSession(db: Db, userId: number, policy: SessionPolicy, client: SessionClient, now = Date.now()): Promise<{ token: string; session: ActiveSession }> {
   await deleteInactiveSessions(db, now);
+  return insertSession(db, userId, policy, client, now);
+}
+
+/** Adds a session without tidying up old ones, for use inside a transaction that holds the account's row. */
+export async function insertSession(db: Db, userId: number, policy: SessionPolicy, client: SessionClient, now = Date.now()): Promise<{ token: string; session: ActiveSession }> {
   const token = crypto.randomBytes(32).toString("base64url");
   const tokenHash = hashToken(token);
   const nowIso = new Date(now).toISOString();
@@ -288,17 +305,35 @@ export async function createSession(db: Db, userId: number, policy: SessionPolic
       userAgent: boundedText(client.userAgent, 512)
     })
     .returning();
-  const user = await first(db.select({ username: schema.adminUsers.username }).from(schema.adminUsers).where(eq(schema.adminUsers.id, userId)).limit(1));
+  const user = await first(db.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, userId)).limit(1));
   if (!row || !user) throw new Error("Session could not be created");
-  return { token, session: toActiveSession(row, user.username) };
+  return { token, session: toActiveSession(row, user) };
 }
 
-function toActiveSession(row: typeof schema.sessions.$inferSelect, username: string): ActiveSession {
+/**
+ * Starts a session for a sign-in, but only if the password just checked is
+ * still the account's password and the account is still enabled. The row lock
+ * means a reset or disable either happens first, and this returns null, or
+ * waits for this to finish and then ends the session it created.
+ */
+export async function createSessionForSignIn(db: Db, user: AdminUser, policy: SessionPolicy, client: SessionClient, now = Date.now()): Promise<{ token: string; session: ActiveSession } | null> {
+  await deleteInactiveSessions(db, now);
+  return db.transaction(async (transaction) => {
+    const current = await first(transaction.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, user.id)).for("update").limit(1));
+    if (!current || current.disabledAt || current.passwordHash !== user.passwordHash) return null;
+    await transaction.update(schema.adminUsers).set({ lastSignInAt: new Date(now).toISOString() }).where(eq(schema.adminUsers.id, user.id));
+    return insertSession(transaction, user.id, policy, client, now);
+  });
+}
+
+function toActiveSession(row: typeof schema.sessions.$inferSelect, user: Pick<AdminUser, "username" | "role" | "mustChangePassword">): ActiveSession {
   return {
     id: row.id,
     tokenHash: row.tokenHash,
     userId: row.userId,
-    username,
+    username: user.username,
+    role: accountRole(user),
+    mustChangePassword: user.mustChangePassword,
     createdAt: row.createdAt,
     expiresAt: row.expiresAt,
     idleExpiresAt: row.idleExpiresAt,
@@ -311,15 +346,15 @@ function toActiveSession(row: typeof schema.sessions.$inferSelect, username: str
 export async function findActiveSession(db: Db, tokenHash: string, now = Date.now()): Promise<ActiveSession | null> {
   const row = await first(
     db
-      .select({ session: schema.sessions, username: schema.adminUsers.username })
+      .select({ session: schema.sessions, user: schema.adminUsers })
       .from(schema.sessions)
       .innerJoin(schema.adminUsers, eq(schema.adminUsers.id, schema.sessions.userId))
       .where(eq(schema.sessions.tokenHash, tokenHash))
       .limit(1)
   );
   if (!row) return null;
-  const session = toActiveSession(row.session, row.username);
-  if (!sessionIsActive(session, now)) {
+  const session = toActiveSession(row.session, row.user);
+  if (row.user.disabledAt || !sessionIsActive(session, now)) {
     await db.delete(schema.sessions).where(eq(schema.sessions.tokenHash, tokenHash));
     return null;
   }

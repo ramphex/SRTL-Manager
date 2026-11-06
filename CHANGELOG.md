@@ -4,6 +4,39 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- Added scheduled database backups in **Settings > Backups**: on by default, nightly at 03:30 server time, keeping 7, with a **Back up now** button, the last result, the next run, and a list of backups with their age, size and verified state. Each run is a job in Logs, and runs next to other jobs without using one of their slots. A backup counts only once its checksum and `pg_restore --list` pass, older ones are removed only after that, and at least two verified backups always stay. A failed or overdue backup, or a location that cannot be written, shows on every page and in `/api/health`. Restoring is done by hand, following the tested steps in the [database backups guide](docs/backups.md) (requires database migration 27).
+- Added accounts and roles, so several people can help run an instance: one owner, plus admins and moderators, each with their own password, sessions and display preferences. **Settings > Accounts** adds, disables, deletes and resets accounts, changes roles, shows who created and changed what, and transfers ownership. Moderators can see the library, jobs and Now Playing, run scans and audits, retry jobs and copy titles to local. See [Accounts, Sessions And Security Activity](docs/accounts-and-sessions.md#roles).
+
+- Added an option to re-request files when SRTL deletes them. Orphan purges now offer **Also ask Radarr or Sonarr to search for a new copy**, off for every delete until you tick it. The right instance, including a separate 4K one, clears its record of the file, monitors that movie or those exact episodes, and searches, at up to 6 searches a minute per instance (**Settings > Advanced**). The confirmation says which files cannot be re-requested and why, and damaged files and orphan reviews list each result, with a retry for any that failed. See [Radarr](docs/radarr.md#re-requesting-after-a-delete) and [Sonarr](docs/sonarr.md#re-requesting-after-a-delete).
+- Added deleting from **Library > Damaged files**, including files that are still in the library, which had no way to be removed before. It follows the same rules as orphan purges: hold or delete now, restorable while held, and files changed in the last 24 hours or part of an unfinished copy are protected. A library file's symlink is removed with it and put back if the file is restored. Owners and admins only.
+
+### Changed
+
+- Display preferences in **Settings > User settings** now belong to each account. Accounts without their own read the ones saved before this version.
+- Copies and audits now accept an MKV that is missing only its last few KB, up to 16 KiB less than its header declares, instead of failing it with `File ended prematurely` on every retry. The copy finishes with a warning that says how many bytes are missing, shown on the item and in the job's events, and an audit lists it under **Audit findings** as a warning. The job does not count as failed. A larger shortfall, another container, an MKV with an unknown size, any other structural error, and a copy that does not match its source all still fail.
+
+### Upgrade notes
+
+The migration service applies database migrations 27, 28 and 29 automatically. Migration 28 makes your existing administrator the owner, keeping their password and sessions, so you stay signed in. On a new install, the account made during first-run setup is the owner.
+
+Backups are on after the upgrade and start at the next 03:30.
+
+- **Docker installs should create the backup folder.** Set `SRTL_BACKUP_HOST_PATH` in `.env` to a folder owned by `SRTL_UID`, outside your media roots. Without it, Compose creates `./backups` owned by root, and Settings > Backups says it cannot be written until you change the owner. A custom Compose file needs the same folder mounted at `/backups` in the worker.
+- **Installs outside Docker need the PostgreSQL 17 client tools.** Install `pg_dump` and `pg_restore` version 17 or newer, and set `SRTL_PG_BIN_DIR` if they are not first on `PATH`. Backups go in `backups` inside `SRTL_DATA_DIR` unless `SRTL_BACKUP_DIR` says otherwise.
+- **Keep `SRTL_SECRET_KEY` separately from the backups.** A backup cannot restore saved Plex tokens and API keys without it.
+
+### Security
+
+- The sign-in page no longer has a setup link, so it never appears on a server that is already set up. Browsers on the host or the local network still get the setup form on their own while no administrator exists. Anyone else opens `/setup`, an address printed in the API log with the setup token. It looks the same whether or not an administrator exists, and setup still needs the token. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
+
+- Every route now resolves to a required permission through one table, and a route with no entry is refused. Webhooks keep their own secret and have no role.
+- There is always exactly one owner, enforced by the database as well as the app. Ownership moves only by a transfer that asks for the owner's password again, and leaves the previous owner an admin.
+- New accounts and password resets set a temporary password, which opens nothing except the screen that replaces it. Disabling, deleting and resetting end that person's sessions at once, and a role change applies to their next request. A disabled account gets the same sign-in answer as a wrong password.
+- Moderators receive no tokens, API keys, IP addresses, viewer locations, connection addresses, path settings or backup locations from any route, including through job logs, job data, error messages and the Now Playing stream. A copy a moderator starts never deletes a file, whatever the settings say.
+- Account, role and ownership changes are written to the security activity and the action audit, with who did what. Only owners and admins can read those logs.
+
 ## [0.1.4-beta.3] - 2026-11-03
 
 ### Added

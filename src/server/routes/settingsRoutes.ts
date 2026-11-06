@@ -1,6 +1,8 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { getJsonSetting, getSectionSettings, setSetting, type Db } from "../db/database";
+import { userPreferencesKey } from "../accounts";
+import { isRestrictedRequest } from "../lib/restrictedView";
 import { parseSectionSettings, persistSectionSettings } from "../lib/sectionSettings";
 import { withQueueConfigurationGuard } from "../jobs/resourceMutationGuard";
 import {
@@ -70,9 +72,10 @@ const advancedSettingsSchema = z.object({
   cleanup: z
     .object({
       holdDays: z.number().int().min(1).max(90).default(7),
-      deleteRemoteSourceAfterCopy: z.boolean().default(false)
+      deleteRemoteSourceAfterCopy: z.boolean().default(false),
+      reRequestsPerMinute: z.number().int().min(1).max(60).default(6)
     })
-    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false })
+    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6 })
 });
 
 const userPreferencesSchema = z.object({
@@ -118,7 +121,10 @@ function normalizeUserPreferences(value: unknown): UserPreferences {
 export function registerSettingsRoutes(app: FastifyInstance, db: Db): void {
   app.get("/api/settings/paths", async () => getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" }));
 
-  app.get("/api/settings/storage-locations", async () => getStorageLocationsSettings(db));
+  app.get("/api/settings/storage-locations", async (request) => {
+    const settings = await getStorageLocationsSettings(db);
+    return isRestrictedRequest(request) ? { locations: settings.locations.map((location) => ({ ...location, path: "" })) } : settings;
+  });
 
   app.put("/api/settings/storage-locations", async (request) => {
     const body: StorageLocationNamesUpdate = storageLocationNamesUpdateSchema.parse(request.body ?? {});
@@ -166,11 +172,14 @@ export function registerSettingsRoutes(app: FastifyInstance, db: Db): void {
     return body;
   });
 
-  app.get("/api/settings/user-preferences", async () => normalizeUserPreferences(await getJsonSetting<unknown>(db, "userPreferences", {})));
+  app.get("/api/settings/user-preferences", async (request) => {
+    const fallback = await getJsonSetting<unknown>(db, "userPreferences", {});
+    return normalizeUserPreferences(await getJsonSetting<unknown>(db, userPreferencesKey(request.adminSession?.userId ?? 0), fallback));
+  });
 
   app.put("/api/settings/user-preferences", async (request) => {
     const body = normalizeUserPreferences(userPreferencesSchema.parse(request.body ?? {}));
-    await setSetting(db, "userPreferences", body);
+    await setSetting(db, userPreferencesKey(request.adminSession?.userId ?? 0), body);
     return body;
   });
 

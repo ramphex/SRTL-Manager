@@ -234,7 +234,7 @@ describe("scan integrity persistence", () => {
       expect(lines[2]).toContain("Half,movies,Damaged,");
       expect(lines[2]).toMatch(/,yes,yes$/);
 
-      registerDamagedRoutes(app, database.db);
+      registerDamagedRoutes(app, database.db, {} as never);
       const json = await app.inject({ method: "GET", url: "/api/damaged-files" });
       expect(json.statusCode).toBe(200);
       expect(json.json()).toHaveLength(2);
@@ -267,7 +267,7 @@ describe("scan integrity persistence", () => {
 describe("csv escaping", () => {
   it("quotes commas and neutralises spreadsheet formulas in file names", () => {
     const csv = damagedFilesCsv([
-      { storageFileId: 1, section: "movies", itemName: "=HYPERLINK(\"x\")", relativePath: "a,b.mkv", filePath: "/l/a,b.mkv", sizeBytes: 1, allocatedBytes: null, storedPercent: null, integrity: "hollow", zeroSamples: null, zeroSamplesTotal: 24, checkedAt: null, linked: false, remoteCopyExists: false }
+      { storageFileId: 1, section: "movies", itemName: "=HYPERLINK(\"x\")", relativePath: "a,b.mkv", filePath: "/l/a,b.mkv", sizeBytes: 1, allocatedBytes: null, storedPercent: null, integrity: "hollow", zeroSamples: null, zeroSamplesTotal: 24, checkedAt: null, linked: false, remoteCopyExists: false, protectedReason: null }
     ]);
     expect(csv).toContain("\"'=HYPERLINK(\"\"x\"\")\"");
     expect(csv).toContain("\"/l/a,b.mkv\"");

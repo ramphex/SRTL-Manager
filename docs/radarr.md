@@ -56,6 +56,26 @@ Copy buttons for mapped Movies sections show a **Unmonitor in Radarr** (copy to 
 
 While a copy with the option runs, SRTL updates each mapped movie as soon as all of its files are copied and verified, in the instance that owns its folder, so the rest of a long batch is not left monitored and open to Radarr upgrades. A movie counts as copied when every media file of it now points to the destination; SRTL then unmonitors it in Radarr (copied to Location 1) or monitors it again (copied to Location 2), usually within a few seconds while the next title copies. Each movie is updated at most once per copy and instance. When the copy ends, SRTL checks the whole selection again: it catches any movie that was not updated yet and lists movies with failed or skipped files as skipped, leaving their monitoring unchanged. A movie whose files finished copying is updated even if the job later fails on other titles or never finishes. Terminating a copy rolls its files back to the source, so SRTL puts monitoring back as it was for movies it had already changed and cancels changes still waiting to be sent. Copies that finished before an instance was added never change that instance's monitoring. Copies started without the option never change monitoring. Results appear under **Recent monitoring updates** and in the copy job's event history as each movie is updated.
 
+## Re-Requesting After A Delete
+
+When you delete a file from **Library > Damaged files** or an orphan review, you can tick **Also ask Radarr or Sonarr to search for a new copy**. It is off for every delete until you tick it. Before anything is deleted, the confirmation lists how many files can be re-requested, in which instance, and why the others cannot: for example a title that is not in Radarr, a folder no instance manages, or a spare file of a title that still has a linked copy.
+
+SRTL only asks once the delete has happened. A file held for restoring counts as deleted. For each file, in the instance that owns its folder (a separate 4K instance gets its own titles):
+
+1. SRTL reads the movie again and checks it is still the same one. It removes the movie's file record, but only when that record is the deleted file. If Radarr already has a different file, or a new copy is already linked, nothing is removed or searched.
+2. It monitors the movie. This comes after the record is removed, because Radarr can be set to unmonitor a movie when its file goes. An unmonitor still waiting from an earlier copy is cancelled.
+3. It sends a movie search, the same as pressing Search in Radarr.
+
+Policy tags are not changed. The movie stays monitored, which is right for a title with no local copy; copying it to Location 1 again with **Unmonitor in Radarr** ticked unmonitors it as usual.
+
+**Pacing.** Each instance is sent at most 6 searches a minute, a few seconds apart, and waiting items survive a restart. Lower or raise this with **Re-request searches per minute** in **Settings > Advanced**. An indexer with a small daily limit may need a lower rate.
+
+**Results.** Damaged files and orphan reviews list recent re-requests, and each result also appears in the delete job's history. "Search sent" means the search started, not that a copy was found. If a request fails, the delete stands and the row shows why, with **Retry** for that row or for all failed rows. A failed request is not retried on its own.
+
+Restoring a held file cancels a request that has not been sent, and puts back its symlink if nothing has taken its place. If the search was already sent, you may end up with two copies, and Radarr will not list the restored file until it rescans.
+
+Deleting and re-requesting need the owner or admin role. Removing a failed copy's symlink and discarding a partial copy do not offer a re-request.
+
 ## Configure Radarr Webhooks (Optional)
 
 Webhooks let Radarr trigger title rescans after imports. Tag synchronization and copy monitoring do not need them. Each instance has its own webhook URL, `/api/integrations/radarr/<instance id>/webhook`, and its own secret. The original URL, `/api/integrations/radarr/webhook`, keeps working for an instance migrated from the single-connection settings.

@@ -39,6 +39,7 @@ class RadarrInstanceNotFound extends RadarrError {
 }
 
 const store = createArrInstanceStore({ name: "Radarr", settingKey: "radarrInstances", lock: 781_889_451, sectionType: "movies", sectionTypeLabel: "Movies", error: (message) => new RadarrError(message), notFound: () => new RadarrInstanceNotFound(), normalizeUrl: normalizeRadarrUrl, apiKeyPurpose: secretPurposes.radarrApiKey });
+export const radarrStoredInstances = store.storedInstances;
 const { storedInstances, settings, writeSettings, locked, commitCurrent, candidateSettings, automaticMappings, assertSectionsAvailable, publicSettings, sectionOwner, webhookInstance } = store;
 export const radarrWebhookSecretSchema = arrWebhookSecretSchema;
 export const radarrInstanceIdSchema = store.instanceIdSchema;
@@ -57,7 +58,7 @@ export const radarrTagPolicy = arrTagPolicy;
 
 const forInstance = (config: Pick<StoredSettings, "id">) => eq(schema.radarrMovies.instanceId, config.id);
 
-function client(config: StoredSettings): RadarrClient {
+export function radarrClient(config: StoredSettings): RadarrClient {
   if (!config.apiKey || !config.baseUrl) throw new RadarrError("Save a Radarr connection first.");
   return new RadarrClient(config.baseUrl, config.apiKey);
 }
@@ -65,7 +66,7 @@ function client(config: StoredSettings): RadarrClient {
 function parseTags(value: string): string[] { return tagsSchema.parse(JSON.parse(value)); }
 
 async function inspectConnection(db: Db, config: StoredSettings): Promise<RadarrConnectionTest> {
-  const connection = await client(config).test();
+  const connection = await radarrClient(config).test();
   const { mappings, conflicts } = await automaticMappings(db, config.id, connection.rootFolders);
   const matched = new Set([...mappings, ...conflicts].map((mapping) => mapping.rootPath));
   return { ...connection, automaticMappings: mappings, unmatchedRootFolders: connection.rootFolders.filter((root) => !matched.has(root)), conflictingRootFolders: conflicts };
@@ -126,7 +127,7 @@ async function storeMovies(db: Db, movies: RadarrMovie[], tags: Catalog["tags"],
 }
 
 async function fetchCatalog(config: StoredSettings): Promise<Catalog> {
-  const connection = client(config);
+  const connection = radarrClient(config);
   const movies = await connection.movies();
   return { movies, tags: await connection.tags() };
 }
@@ -244,7 +245,7 @@ export async function radarrMediaExpectation(db: Db, link: Pick<MediaLinkRow, "s
   if (!config?.enabled || !config.apiKey) return undefined;
   const row = await first(db.select().from(schema.radarrMovies).where(and(forInstance(config), eq(schema.radarrMovies.section, link.section), eq(schema.radarrMovies.itemName, link.itemName))).limit(1));
   if (!row) return undefined;
-  const movie = await client(config).movie(row.movieId);
+  const movie = await radarrClient(config).movie(row.movieId);
   const scope = mapRadarrMovie(movie, config);
   if (movie.tmdbId !== row.tmdbId || scope?.section !== link.section || scope.itemName !== link.itemName) return undefined;
   // Extras and samples share the title folder; only Radarr's own movie file has a known size and runtime.
@@ -284,7 +285,7 @@ export async function reconcileRadarrMovies(db: Db, instanceId: string, movieIds
   if (!config.localTag || !config.remoteTag) throw new RadarrError("Choose and save both policy tags before reconciling titles.");
   const rows = await db.select().from(schema.radarrMovies).where(movieIdsIn(config, movieIds));
   if (rows.length !== new Set(movieIds).size || rows.some((row) => !row.section || !row.itemName)) throw new RadarrError("Select mapped titles before reconciling policies.");
-  const connection = client(config);
+  const connection = radarrClient(config);
   const tags = await connection.tags();
   // Re-read selected records so a stale preview cannot import an outdated tag or changed movie identity.
   const catalog = new Map((await connection.movies()).map((movie) => [movie.id, movie]));
@@ -381,7 +382,7 @@ async function processMovieEvents(db: Db, config: StoredSettings, events: Radarr
   const deleted = events[events.length - 1]!.eventType === "MovieDelete";
   let fetched: { movie: RadarrMovie; tags: Catalog["tags"] } | null = null;
   if (!deleted) {
-    const connection = client(config);
+    const connection = radarrClient(config);
     const movie = await connection.movie(movieId);
     const scope = mapRadarrMovie(movie, config);
     if (!scope) {
@@ -464,7 +465,7 @@ async function observePolicies(db: Db, config: StoredSettings): Promise<void> {
 type TagOutcome = { movieId: number; policy: StoragePolicyKind; labels?: string[]; error?: string };
 
 async function pushTags(config: StoredSettings, rows: MovieRow[], policies: Map<string, StoragePolicyKind>): Promise<TagOutcome[]> {
-  const connection = client(config);
+  const connection = radarrClient(config);
   const tagList = await connection.tags();
   const tagId = (label: string) => tagList.find((tag) => tag.label === label)?.id;
   const policyTagIds = [tagId(config.localTag), tagId(config.remoteTag)].filter((id): id is number => id !== undefined);
@@ -646,7 +647,7 @@ async function applyMonitorUpdates(db: Db, config: StoredSettings): Promise<void
     const movieIds = [...new Set(due.filter((update) => update.monitored === monitored).map((update) => update.movieId))];
     if (!movieIds.length) continue;
     try {
-      await client(config).setMonitored(movieIds, monitored);
+      await radarrClient(config).setMonitored(movieIds, monitored);
       results.set(monitored, null);
     } catch (error) {
       if (!(error instanceof RadarrError)) throw error;

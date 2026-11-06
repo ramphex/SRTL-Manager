@@ -785,6 +785,47 @@ describe("copy runner", () => {
     }
   });
 
+  it("carries a validation warning onto copied and repointed results, and still fails on a byte mismatch", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-warning-"));
+    try {
+      const paths = { symlinkDir: path.join(directory, "symlinks"), localDir: path.join(directory, "local"), remoteDir: path.join(directory, "remote") };
+      const warning = "File is 48 bytes shorter than its header declares; accepted because ffmpeg still read it to the end";
+      const runner = { ...fileRunner, runFfmpeg: async () => ({ status: "pass" as const, output: "File ended prematurely", warning }) };
+      const behavior = { profile: "fast", byteCompare: true, mediaValidation: "fast" } as const;
+      const setUp = async (title: string, content: string) => {
+        const relativePath = path.join(title, "movie.mkv");
+        const sourcePath = path.join(paths.remoteDir, "items", relativePath);
+        const linkPath = path.join(paths.symlinkDir, "items", relativePath);
+        const destinationPath = path.join(paths.localDir, "items", relativePath);
+        await Promise.all([fs.mkdir(path.dirname(sourcePath), { recursive: true }), fs.mkdir(path.dirname(linkPath), { recursive: true }), fs.mkdir(path.dirname(destinationPath), { recursive: true })]);
+        await fs.writeFile(sourcePath, content);
+        await fs.symlink(sourcePath, linkPath);
+        return { link: remoteCopyLink(title, relativePath, linkPath, sourcePath, Buffer.byteLength(content)), destinationPath, linkPath };
+      };
+
+      const copied = await setUp("Copied Title", "short tail contents");
+      await expect(copyMediaLink(copied.link, paths, "to_local", runner, undefined, behavior)).resolves.toMatchObject({ status: "copied", warning });
+
+      const repointed = await setUp("Repointed Title", "short tail contents");
+      await fs.writeFile(repointed.destinationPath, "short tail contents");
+      await expect(copyMediaLink(repointed.link, paths, "to_local", runner, undefined, behavior)).resolves.toMatchObject({ status: "repointed", warning });
+
+      const mismatched = await setUp("Mismatched Title", "short tail contents");
+      const corruptingRunner = {
+        ...runner,
+        copyFile: async (sourcePath: string, tempPath: string) => {
+          const content = await fs.readFile(sourcePath);
+          content[0] ^= 0xff;
+          await fs.writeFile(tempPath, content);
+        }
+      };
+      await expect(copyMediaLink(mismatched.link, paths, "to_local", corruptingRunner, undefined, behavior)).rejects.toThrow("Byte compare failed");
+      await expect(fs.readlink(mismatched.linkPath)).resolves.toBe(mismatched.link.targetPath);
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rechecks cancellation after the lease guard finishes waiting", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-cancel-lease-"));
     try {

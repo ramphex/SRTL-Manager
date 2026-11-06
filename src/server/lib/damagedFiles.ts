@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import { dbAll, type Db } from "../db/database";
 import type { DamagedFileRow } from "../../shared/types";
 import { effectiveIntegrity, hollowAllocationRatio, hollowMinimumBytes, zeroSampleCount } from "./mediaIntegrity";
+import { purgeGraceMs, unfinishedCopyCondition } from "../jobs/orphanPurge";
 
 type RawDamagedRow = {
   id: number;
@@ -10,6 +11,8 @@ type RawDamagedRow = {
   relativePath: string;
   filePath: string;
   sizeBytes: number | string;
+  mtimeMs: number | string;
+  activeCopy: boolean;
   allocatedBytes: number | string | null;
   integrity: string | null;
   zeroSamples: number | null;
@@ -19,7 +22,7 @@ type RawDamagedRow = {
 };
 
 // Local files only: block counts on the remote mount are meaningless, so its files are never classified.
-export async function listDamagedFiles(db: Db): Promise<DamagedFileRow[]> {
+export async function listDamagedFiles(db: Db, now = Date.now()): Promise<DamagedFileRow[]> {
   const rows = await dbAll<RawDamagedRow>(db, sql`
     select
       sf.id,
@@ -28,6 +31,12 @@ export async function listDamagedFiles(db: Db): Promise<DamagedFileRow[]> {
       sf.relative_path as "relativePath",
       sf.file_path as "filePath",
       sf.size_bytes as "sizeBytes",
+      sf.mtime_ms as "mtimeMs",
+      exists (
+        select 1 from copy_operations
+        where ${unfinishedCopyCondition}
+          and sf.file_path in (copy_operations.source_path, copy_operations.destination_path, coalesce(copy_operations.temp_path, ''), coalesce(copy_operations.displaced_path, ''))
+      ) as "activeCopy",
       sf.allocated_bytes as "allocatedBytes",
       sf.integrity,
       sf.integrity_zero_samples as "zeroSamples",
@@ -65,7 +74,8 @@ export async function listDamagedFiles(db: Db): Promise<DamagedFileRow[]> {
         zeroSamplesTotal: zeroSampleCount,
         checkedAt: row.checkedAt,
         linked: Number(row.linkCount) > 0,
-        remoteCopyExists: Boolean(row.remoteCopyExists)
+        remoteCopyExists: Boolean(row.remoteCopyExists),
+        protectedReason: row.activeCopy ? "Part of an unfinished copy" : now - Number(row.mtimeMs) < purgeGraceMs ? "Modified in the last 24 hours" : null
       }
     ];
   });

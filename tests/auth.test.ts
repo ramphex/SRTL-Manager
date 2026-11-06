@@ -12,7 +12,7 @@ import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onbo
 import { FailureThrottle, LoginThrottle, usernameThrottlePolicy } from "../src/server/loginThrottle";
 import { pruneSecurityEvents } from "../src/server/securityEvents";
 import { legacyCookieGraceMs, sessionCookieSettings } from "../src/server/sessionAccess";
-import { isLocalNetworkAddress, setupTokenFileName } from "../src/server/setupToken";
+import { isLocalNetworkAddress, SetupTokenGate, setupTokenFileName } from "../src/server/setupToken";
 import { describeUserAgent } from "../src/shared/auth";
 import { readSetupToken } from "./authHelpers";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
@@ -196,6 +196,62 @@ describe("authentication and sessions", () => {
       });
       expect(setup.statusCode).toBe(200);
       expect((await me("127.0.0.1")).json()).toMatchObject({ setupRequired: false });
+    });
+
+    it("prints the setup address with the setup token", async () => {
+      const warn = vi.fn();
+      const generated = new SetupTokenGate({ dataDir: path.join(tmpDir, "gate"), configuredToken: null, log: { warn, info: vi.fn() } });
+      generated.prepare();
+      const token = (await fs.readFile(generated.filePath, "utf8")).trim();
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls[0]?.[0]).toContain(`Setup token: ${token}`);
+      expect(warn.mock.calls[0]?.[0]).toContain("Open /setup on this server's web address");
+
+      warn.mockClear();
+      new SetupTokenGate({ dataDir: path.join(tmpDir, "gate"), configuredToken: "example-setup-token-0123456789", log: { warn, info: vi.fn() } }).prepare();
+      expect(warn.mock.calls[0]?.[0]).toContain("Open /setup on this server's web address");
+      expect(warn.mock.calls[0]?.[0]).not.toContain("example-setup-token-0123456789");
+    });
+
+    it("answers the setup address and setup attempts the same whether or not an admin exists", async () => {
+      // Only the per-request ID differs.
+      const withoutRequestId = (body: Record<string, unknown>) => ({ ...body, requestId: undefined });
+      const webRoot = path.join(tmpDir, "web");
+      await fs.mkdir(webRoot, { recursive: true });
+      await fs.writeFile(path.join(webRoot, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
+      const app = await startApp({ webRoot });
+      const observe = async () => {
+        const page = await app.app.inject({ method: "GET", url: "/setup", remoteAddress: remoteClient });
+        const me = await app.app.inject({ method: "GET", url: "/api/auth/me", remoteAddress: remoteClient });
+        const attempt = await app.app.inject({
+          method: "POST",
+          url: "/api/auth/setup",
+          remoteAddress: remoteClient,
+          payload: { setupToken: "wrong-token-0000000000000000", username: "alex_03", password, confirmPassword: password }
+        });
+        return {
+          page: { status: page.statusCode, type: page.headers["content-type"], cache: page.headers["cache-control"], body: page.body },
+          me: me.json() as unknown,
+          attempt: { status: attempt.statusCode, body: withoutRequestId(attempt.json()) }
+        };
+      };
+      const unclaimed = await observe();
+      expect(unclaimed.page.status).toBe(200);
+      expect(unclaimed.page.body).toContain('<div id="root">');
+      expect(unclaimed.me).toEqual({ authenticated: false, user: null, setupRequired: false });
+      expect(unclaimed.attempt.status).toBe(403);
+      expect(unclaimed.attempt.body).toMatchObject({ code: "setup_unavailable" });
+
+      const usedToken = readSetupToken(app);
+      await setupAdmin(app);
+      expect(await observe()).toEqual(unclaimed);
+      const replay = await app.app.inject({
+        method: "POST",
+        url: "/api/auth/setup",
+        remoteAddress: remoteClient,
+        payload: { setupToken: usedToken, username: "other_01", password, confirmPassword: password }
+      });
+      expect({ status: replay.statusCode, body: withoutRequestId(replay.json()) }).toEqual(unclaimed.attempt);
     });
 
     it("classifies local network addresses", () => {

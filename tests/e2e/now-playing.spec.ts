@@ -75,14 +75,25 @@ function host(): NowPlayingHostEvent {
 
 const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 
-async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean } = {}) {
+// What the server's restricted view sends a moderator: no address, and no location field at all.
+function restrictedSnapshot(value: NowPlayingSnapshot): NowPlayingSnapshot {
+  return {
+    ...value,
+    streams: value.streams.map((stream) => {
+      const { geo: _geo, ...network } = stream.network;
+      return { ...stream, network: { ...network, ip: null } } as unknown as NowPlayingSnapshot["streams"][number];
+    })
+  };
+}
+
+async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean } = {}) {
   const stops: unknown[] = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     let response: unknown = [];
     if (url.pathname === "/api/now-playing/events") {
-      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(snapshot(options.plexPass ?? true))}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
+      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(options.moderator ? restrictedSnapshot(snapshot(options.plexPass ?? true)) : snapshot(options.plexPass ?? true))}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
       await route.fulfill({ status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" }, body });
       return;
     }
@@ -90,7 +101,7 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
       await route.fulfill({ status: 200, contentType: "image/png", body: pixel });
       return;
     }
-    if (url.pathname === "/api/auth/me") response = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test" } };
+    if (url.pathname === "/api/auth/me") response = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test", role: options.moderator ? "moderator" : "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") response = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") response = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Debrid", path: "/remote" }] };
@@ -170,6 +181,22 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(direct).toContainText("Home NAS");
   await expect(direct).toContainText("(estimate)");
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Home Plex");
+});
+
+test("shows a moderator the viewer, with no address, location or Stop", async ({ page }) => {
+  await fixture(page, { moderator: true });
+  await openNowPlaying(page);
+  const hw = page.getByRole("article", { name: "Example Show — sam" });
+  await expect(hw).toContainText("sam");
+  await expect(hw).toContainText("Transcode (HW)");
+  await expect(hw).not.toContainText("198.51.100.23");
+  await expect(hw.getByText("Address", { exact: true })).toHaveCount(0);
+  await expect(hw.getByText("Location", { exact: true })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("Example City");
+  await expect(page.locator("body")).not.toContainText("Netherlands");
+  await expect(hw.locator(".np-geo")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Stop stream/ })).toHaveCount(0);
+  await expect(page.locator("body")).not.toContainText("192.168.1.40");
 });
 
 test("stops a stream after confirming an edited message", async ({ page }) => {

@@ -62,7 +62,7 @@ test("cold offline launch does not misrepresent the session as signed out", asyn
     await route.fulfill({
       status: 200,
       contentType: "application/json",
-      body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } })
+      body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } })
     });
   });
 
@@ -166,7 +166,7 @@ test("dashboard task notifications overlay without shifting content", async ({ p
     const url = new URL(route.request().url());
     let body: unknown;
 
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
@@ -297,7 +297,7 @@ test("refreshes an open work list when an inventory job finishes", async ({ page
     const url = new URL(route.request().url());
     let body: unknown;
 
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
@@ -390,7 +390,7 @@ test("loads every work-list page and scopes show copies beyond the first page", 
     const url = new URL(route.request().url());
     let body: unknown = {};
 
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
@@ -454,6 +454,7 @@ test("renders every authenticated route without page errors or global overflow",
     { path: "/logs", expected: "Logs" },
     { path: "/settings", expected: "Settings > Library" },
     { path: "/settings/advanced", expected: "Settings > Advanced" },
+    { path: "/settings/backups", expected: "Settings > Backups" },
     { path: "/settings/user", expected: "Settings > User settings" }
   ];
 
@@ -635,7 +636,7 @@ test("a detected path change blocks the app behind a responsive migration gate",
   };
 
   await page.route("**/api/auth/me", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } }) });
   });
   await page.route("**/api/system/path-migration", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(state) });
@@ -699,7 +700,7 @@ test("first-run onboarding configures folders and queues the initial policy scan
   };
 
   await page.route("**/api/auth/me", async (route) => {
-    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } }) });
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } }) });
   });
   await page.route("**/api/system/path-migration", async (route) => {
     await route.fulfill({
@@ -862,7 +863,7 @@ test("parallel folder scans open a batch status window with independently viewab
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     let body: unknown;
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 1440 };
@@ -1068,7 +1069,7 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     let body: unknown = {};
     let status = 200;
 
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 1440 };
@@ -1692,7 +1693,7 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
     let body: unknown;
-    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin" } };
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };

@@ -75,6 +75,22 @@ describe("auditor", () => {
     expect(compared).toBe(false);
     expect(result).toMatchObject({ status: "pass", ffmpegStatus: "pass", cmpStatus: "skipped", message: "Passed ffmpeg; byte compare skipped" });
   });
+
+  it("reports an accepted short tail as a warning, and never over a byte mismatch", async () => {
+    const targetPath = path.join(tmpDir, "short-tail.mkv");
+    const sourcePath = path.join(tmpDir, "short-tail-source.mkv");
+    await fs.writeFile(targetPath, "local");
+    await fs.writeFile(sourcePath, "local");
+    const warning = "File is 48 bytes shorter than its header declares; accepted because ffmpeg still read it to the end";
+    const runFfmpeg = async () => ({ status: "pass" as const, output: "File ended prematurely", warning });
+
+    const matching = await auditMediaLink(link(targetPath), sourcePath, "fast", { runFfmpeg, runCmp: async () => ({ status: "pass", output: "" }) });
+    expect(matching).toMatchObject({ status: "warning", ffmpegStatus: "pass", cmpStatus: "pass" });
+    expect(matching.message).toBe(`Passed ffmpeg and byte compare. ${warning}`);
+
+    const different = await auditMediaLink(link(targetPath), sourcePath, "fast", { runFfmpeg, runCmp: async () => ({ status: "fail", output: "differ" }) });
+    expect(different).toMatchObject({ status: "fail", ffmpegStatus: "pass", cmpStatus: "fail" });
+  });
 });
 
 function link(targetPath: string): MediaLinkRow {

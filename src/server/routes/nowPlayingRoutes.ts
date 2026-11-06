@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { NowPlayingSettings } from "../../shared/nowPlaying";
+import { onAccountChanged } from "../accounts";
 import { assertSessionActive } from "../auth";
 import { defaultNowPlayingStreamLimits, type NowPlayingStreamLimits } from "../config";
 import { getJsonSetting, setSetting, type Db } from "../db/database";
@@ -8,6 +9,7 @@ import { recordActionAudit } from "../lib/actionAudit";
 import { loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema } from "../lib/mediaServers";
 import { NowPlayingHub, type NowPlayingEvent } from "../lib/nowPlaying/hub";
 import { SourceResolver } from "../lib/nowPlaying/sourceResolver";
+import { isRestrictedRequest, loadSensitiveRoots, scrubValue, type RestrictedViewRuntime, type SensitiveRoot } from "../lib/restrictedView";
 
 const settingKey = "nowPlaying";
 const defaultSettings: NowPlayingSettings = { geoLookup: true };
@@ -26,6 +28,7 @@ export async function loadNowPlayingSettings(db: Db): Promise<NowPlayingSettings
 
 export interface NowPlayingRouteOptions {
   limits?: Partial<NowPlayingStreamLimits>;
+  restrictedView?: RestrictedViewRuntime;
 }
 
 // Live sessions over server-sent events. Upstream connections exist only while a browser holds this stream open.
@@ -42,8 +45,14 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
     onError: (message) => app.log.warn(message)
   });
   const openStreams = new Map<string, Set<() => void>>();
+  const streamsByUser = new Map<number, Set<() => void>>();
   let openStreamCount = 0;
+  // A changed account loses its streams at once; the browser's reconnect then goes through the guard as the account now is.
+  const stopListening = onAccountChanged((userId) => {
+    for (const close of [...(streamsByUser.get(userId) ?? [])]) close();
+  });
   app.addHook("onClose", async () => {
+    stopListening();
     for (const streams of [...openStreams.values()]) for (const close of [...streams]) close();
     hub.close();
   });
@@ -60,6 +69,8 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
     if (openStreamCount >= limits.total) {
       return reply.code(429).header("Retry-After", "10").send({ error: "Too many Now Playing streams are open. Try again shortly." });
     }
+    // Fixed for the stream's life: any change to the account closes it.
+    const restrictedRoots: readonly SensitiveRoot[] | null = !isRestrictedRequest(request) ? null : options.restrictedView ? await loadSensitiveRoots(db, options.restrictedView) : [];
     reply.hijack();
     const response = reply.raw;
     response.writeHead(200, {
@@ -79,11 +90,16 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
       unsubscribe();
       sessionStreams.delete(close);
       if (sessionStreams.size === 0 && openStreams.get(sessionKey) === sessionStreams) openStreams.delete(sessionKey);
+      userStreams.delete(close);
+      if (userStreams.size === 0 && streamsByUser.get(session.userId) === userStreams) streamsByUser.delete(session.userId);
       openStreamCount -= 1;
       if (!response.writableEnded) response.end();
     };
+    const userStreams = streamsByUser.get(session.userId) ?? new Set<() => void>();
     sessionStreams.add(close);
     openStreams.set(sessionKey, sessionStreams);
+    userStreams.add(close);
+    streamsByUser.set(session.userId, userStreams);
     openStreamCount += 1;
     const heartbeat = setInterval(() => write(": keep-alive\n\n"), 20_000);
     // A signed-out, expired or revoked session loses the stream; the browser's reconnect then gets a 401.
@@ -92,6 +108,7 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
       if (checking || closed) return;
       checking = true;
       assertSessionActive(db, sessionKey)
+        .then((current) => { if (current.role !== session.role) close(); })
         .catch(() => close())
         .finally(() => { checking = false; });
     }, limits.revalidateMs);
@@ -108,7 +125,8 @@ export function registerNowPlayingRoutes(app: FastifyInstance, db: Db, options: 
     response.on("close", close);
     request.raw.socket?.setKeepAlive?.(true);
     unsubscribe = hub.subscribe((event: NowPlayingEvent) => {
-      write(`event: ${event.type}\ndata: ${JSON.stringify(event.type === "sessions" ? event.snapshot : event.host)}\n\n`);
+      const data = event.type === "sessions" ? event.snapshot : event.host;
+      write(`event: ${event.type}\ndata: ${JSON.stringify(restrictedRoots ? scrubValue(data, restrictedRoots) : data)}\n\n`);
     });
   });
 

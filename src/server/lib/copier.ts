@@ -9,7 +9,7 @@ import type { AuditMode, CopyDirection, CopyJobBehaviorSettings, CopyLocalConfli
 import { isMediaFile, isPathInside } from "./media";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, assertReadableRegularFile } from "./filesystemSafety";
 import { appendBoundedOutput, commandTimeoutMs, terminateChildProcess } from "./processSafety";
-import { describeInspectionFailure, evaluateFfmpegValidation, inspectMediaContent, type MediaExpectation, type MediaInspection } from "./mediaIntegrity";
+import { describeInspectionFailure, evaluateFfmpegValidation, inspectMediaContent, readMatroskaTail, reportsPrematureEnd, type MediaExpectation, type MediaInspection } from "./mediaIntegrity";
 
 const copyDirectoryMode = 0o755;
 const copyFileMode = 0o644;
@@ -17,6 +17,8 @@ const copyFileMode = 0o644;
 export interface CopyCommandResult {
   status: "pass" | "fail";
   output: string;
+  // Set when ffmpeg validation accepted a file with something worth showing on the job.
+  warning?: string;
 }
 
 export interface CopyCommandRunner {
@@ -97,6 +99,7 @@ export interface CopyMediaResult {
   linkPath: string;
   sizeBytes: number;
   message: string;
+  warning?: string;
 }
 
 function abortError(signal?: AbortSignal): Error {
@@ -415,7 +418,8 @@ export async function runFfmpegWithProgress(mode: AuditMode, targetPath: string,
       progressChain
         .then(async () => {
           if (canReportProgress && code === 0) await emitByteProgress(reportProgress, progressState, totalBytes, totalBytes, true);
-          resolve(evaluateFfmpegValidation({ exitCode: code, stderr: output, reachedSeconds, durationSeconds }));
+          const matroskaTail = code === 0 && reportsPrematureEnd(output) ? await readMatroskaTail(targetPath, signal) : null;
+          resolve(evaluateFfmpegValidation({ exitCode: code, stderr: output, reachedSeconds, durationSeconds, matroskaTail }));
         })
         .catch((error: unknown) => reject(error instanceof Error ? error : new Error(String(error))));
     });
@@ -738,7 +742,7 @@ async function validateMediaStream(
   baseUpdate: Omit<CopyProgressUpdate, "stage" | "message">,
   message: string,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<string | undefined> {
   await reportCopyProgress(reportProgress, {
     stage: "verifying",
     message,
@@ -765,6 +769,7 @@ async function validateMediaStream(
   if (ffmpeg.status === "fail") {
     throw new Error(`ffmpeg ${mode} validation failed: ${ffmpeg.output || "ffmpeg exited non-zero"}`);
   }
+  return ffmpeg.warning;
 }
 
 async function verifyCopiedFile(
@@ -775,10 +780,10 @@ async function verifyCopiedFile(
   baseUpdate: Omit<CopyProgressUpdate, "stage" | "message">,
   behavior: CopyJobBehaviorSettings,
   signal?: AbortSignal
-): Promise<void> {
+): Promise<string | undefined> {
   if (!behavior.byteCompare && behavior.mediaValidation === "off") {
     await reportCopyProgress(reportProgress, { stage: "verifying", message: "Copy verification disabled by advanced settings", ...baseUpdate });
-    return;
+    return undefined;
   }
 
   if (behavior.byteCompare) {
@@ -789,10 +794,10 @@ async function verifyCopiedFile(
 
   if (behavior.mediaValidation === "off") {
     await reportCopyProgress(reportProgress, { stage: "verifying", message: "Media validation skipped by advanced settings", ...baseUpdate });
-  } else {
-    const message = behavior.mediaValidation === "fast" ? "Fast media validation" : "Deep media validation";
-    await validateMediaStream(runner, behavior.mediaValidation, targetPath, reportProgress, baseUpdate, message, signal);
+    return undefined;
   }
+  const message = behavior.mediaValidation === "fast" ? "Fast media validation" : "Deep media validation";
+  return validateMediaStream(runner, behavior.mediaValidation, targetPath, reportProgress, baseUpdate, message, signal);
 }
 
 async function reportCopyProgress(reporter: CopyProgressReporter | undefined, update: CopyProgressUpdate): Promise<void> {
@@ -911,8 +916,9 @@ export async function copyMediaLink(
     await assertExistingPathInside(destinationRoot, destinationPath, "Destination path");
     const cmp = await compareMediaBytes(runner, sourcePath, destinationPath, reportProgress, baseProgress, "Comparing existing destination file", signal);
     if (cmp.status === "pass") {
+      let warning: string | undefined;
       if (behavior.mediaValidation !== "off") {
-        await validateMediaStream(runner, behavior.mediaValidation, destinationPath, reportProgress, baseProgress, behavior.mediaValidation === "fast" ? "Fast validation of existing destination media" : "Deep validation of existing destination media", signal);
+        warning = await validateMediaStream(runner, behavior.mediaValidation, destinationPath, reportProgress, baseProgress, behavior.mediaValidation === "fast" ? "Fast validation of existing destination media" : "Deep validation of existing destination media", signal);
       }
       throwIfAborted(signal);
       const finalStat = await statRegularFile(destinationPath, "Destination file");
@@ -937,7 +943,8 @@ export async function copyMediaLink(
         destinationPath,
         linkPath: link.linkPath,
         sizeBytes: finalStat.size,
-        message: "Destination already matched source; symlink repointed"
+        message: "Destination already matched source; symlink repointed",
+        ...(warning ? { warning } : {})
       };
     }
     if (!canResolveLocalDestination) {
@@ -1033,7 +1040,7 @@ export async function copyMediaLink(
     if (tempStat.size !== sourceStatBefore.size) {
       throw new Error(`Size mismatch after copy (${sourceStatBefore.size} != ${tempStat.size})`);
     }
-    await verifyCopiedFile(runner, sourcePath, tempPath, reportProgress, baseProgress, behavior, signal);
+    const copyWarning = await verifyCopiedFile(runner, sourcePath, tempPath, reportProgress, baseProgress, behavior, signal);
     tempIdentity = await requireCopyFileIdentity(tempPath, "Verified temporary copy");
     await reportOperation?.({
       stage: "verified",
@@ -1050,8 +1057,9 @@ export async function copyMediaLink(
     if (destinationStateBeforePromotion) {
       const cmp = await compareMediaBytes(runner, sourcePath, destinationPath, reportProgress, baseProgress, "Destination appeared during copy; comparing before promotion", signal);
       if (cmp.status === "pass") {
+        let warning: string | undefined;
         if (behavior.mediaValidation !== "off") {
-          await validateMediaStream(runner, behavior.mediaValidation, destinationPath, reportProgress, baseProgress, behavior.mediaValidation === "fast" ? "Fast validation of matching destination media" : "Deep validation of matching destination media", signal);
+          warning = await validateMediaStream(runner, behavior.mediaValidation, destinationPath, reportProgress, baseProgress, behavior.mediaValidation === "fast" ? "Fast validation of matching destination media" : "Deep validation of matching destination media", signal);
         }
         await fs.rm(tempPath, { force: true });
         tempIdentity = null;
@@ -1080,7 +1088,8 @@ export async function copyMediaLink(
           destinationPath,
           linkPath: link.linkPath,
           sizeBytes: tempStat.size,
-          message: "Destination appeared during copy and matched source; symlink repointed"
+          message: "Destination appeared during copy and matched source; symlink repointed",
+          ...(warning ? { warning } : {})
         };
       }
       if (!canResolveLocalDestination || !localConflictStrategy) throw new Error("Destination appeared during copy and differs from source");
@@ -1178,7 +1187,8 @@ export async function copyMediaLink(
       destinationPath,
       linkPath: link.linkPath,
       sizeBytes: tempStat.size,
-      message: verificationEnabled ? "Verified copy installed and symlink repointed" : "Copy installed without verification and symlink repointed"
+      message: verificationEnabled ? "Verified copy installed and symlink repointed" : "Copy installed without verification and symlink repointed",
+      ...(copyWarning ? { warning: copyWarning } : {})
     };
   } catch (error) {
     const rollbackErrors: string[] = [];

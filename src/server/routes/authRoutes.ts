@@ -3,11 +3,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { eq } from "drizzle-orm";
 import {
   authenticate,
-  createAdmin,
+  createOwner,
   createSession,
+  createSessionForSignIn,
   deleteSession,
   findAdminByUsername,
-  hasAdmin,
+  hasOwner,
+  insertSession,
   passwordHashing,
   rehashIfNeeded,
   revokeAllUserSessions,
@@ -86,12 +88,14 @@ export interface AuthRouteOptions {
 export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRouteOptions): void {
   const { sessions, setupTokens, throttle } = options;
 
-  const startSession = async (request: FastifyRequest, reply: FastifyReply, userId: number): Promise<ActiveSession> => {
-    const { token, session } = await createSession(db, userId, sessions.policy, sessionClient(request));
-    sessions.issue(reply, token, session.expiresAt);
-    request.adminSession = session;
-    return session;
+  const adoptSession = (request: FastifyRequest, reply: FastifyReply, started: { token: string; session: ActiveSession }): ActiveSession => {
+    sessions.issue(reply, started.token, started.session.expiresAt);
+    request.adminSession = started.session;
+    return started.session;
   };
+
+  const startSession = async (request: FastifyRequest, reply: FastifyReply, userId: number): Promise<ActiveSession> =>
+    adoptSession(request, reply, await createSession(db, userId, sessions.policy, sessionClient(request)));
 
   const requireSession = (request: FastifyRequest): ActiveSession => {
     // The request guard has already resolved the session for admin routes.
@@ -101,9 +105,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
 
   app.get("/api/auth/me", async (request, reply): Promise<AuthMe> => {
     const session = await sessions.resolve(request, reply);
-    if (session) return { authenticated: true, user: { id: session.userId, username: session.username }, setupRequired: false };
+    if (session) {
+      return { authenticated: true, user: { id: session.userId, username: session.username, role: session.role, mustChangePassword: session.mustChangePassword }, setupRequired: false };
+    }
     let setupRequired = false;
-    if (setupStatusVisibleTo(request) && !(await hasAdmin(db))) {
+    if (setupStatusVisibleTo(request) && !(await hasOwner(db))) {
       setupTokens.prepare();
       setupRequired = true;
     }
@@ -112,12 +118,12 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
 
   app.post("/api/auth/setup", { config: { rateLimit: { max: 10, timeWindow: "10 minutes" } } }, async (request, reply) => {
     const body = setupSchema.parse(request.body);
-    if (!(await hasAdmin(db))) setupTokens.prepare();
+    if (!(await hasOwner(db))) setupTokens.prepare();
     if (!setupTokens.verify(body.setupToken)) {
       await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "token" } });
       throw new SetupUnavailableError();
     }
-    const user = await createAdmin(db, body.username, body.password);
+    const user = await createOwner(db, body.username, body.password);
     if (!user) {
       await recordSecurityEvent(db, { event: "setup_rejected", request, username: body.username, details: { reason: "completed" } });
       throw new SetupUnavailableError();
@@ -139,7 +145,8 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
       throw locked;
     }
     const result = await authenticate(db, body.username, body.password);
-    if (!result) {
+    const started = result ? await createSessionForSignIn(db, result.user, sessions.policy, sessionClient(request)) : null;
+    if (!result || !started) {
       const failure = throttle.failure(body.username, request.ip);
       await recordSecurityEvent(db, { event: "login_failed", request, username: body.username });
       if (failure.lockedNow) {
@@ -148,7 +155,7 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
       return reply.code(401).send({ error: loginFailed });
     }
     throttle.success(body.username, request.ip);
-    const session = await startSession(request, reply, result.user.id);
+    const session = adoptSession(request, reply, started);
     await recordSecurityEvent(db, {
       event: "login_succeeded",
       request,
@@ -187,27 +194,44 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
       return reply.code(409).send({ error: "Username is already in use" });
     }
 
+    if (user.mustChangePassword) {
+      if (!body.newPassword) return reply.code(400).send({ error: "Choose a new password to replace your temporary one." });
+      if (body.newPassword === body.currentPassword) return reply.code(400).send({ error: "Your new password must be different from your temporary one." });
+    }
+
     const usernameChanged = username !== user.username;
-    const values: { username: string; passwordHash?: string } = { username };
-    if (body.newPassword) values.passwordHash = await passwordHashing.hash(body.newPassword);
-    else await rehashIfNeeded(db, user, body.currentPassword);
-    await db.update(schema.adminUsers).set(values).where(eq(schema.adminUsers.id, user.id));
+    const values: { username: string; passwordHash?: string; mustChangePassword?: boolean } = { username };
+    if (body.newPassword) {
+      values.passwordHash = await passwordHashing.hash(body.newPassword);
+      values.mustChangePassword = false;
+    } else await rehashIfNeeded(db, user, body.currentPassword);
+    // Held against the password just checked, so a reset by a manager cannot be undone by a change already in flight.
+    const replaced = await db.transaction(async (transaction) => {
+      const current = await first(transaction.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, user.id)).for("update").limit(1));
+      if (!current || current.disabledAt || current.mustChangePassword !== user.mustChangePassword || (body.newPassword && current.passwordHash !== user.passwordHash)) return null;
+      await transaction.update(schema.adminUsers).set(values).where(eq(schema.adminUsers.id, user.id));
+      if (body.newPassword) {
+        // A new password signs out every session, including other devices.
+        const revoked = await revokeAllUserSessions(transaction, user.id);
+        return { revoked, started: await insertSession(transaction, user.id, sessions.policy, sessionClient(request)) };
+      }
+      if (!usernameChanged) return { revoked: 0, started: null };
+      // Rotate the current session after an account change.
+      await deleteSession(transaction, session.tokenHash);
+      return { revoked: 0, started: await insertSession(transaction, user.id, sessions.policy, sessionClient(request)) };
+    });
+    if (!replaced) return reply.code(409).send({ error: "This account changed while you were saving. Sign in and try again." });
 
     if (usernameChanged) {
       await recordSecurityEvent(db, { event: "username_changed", request, userId: user.id, username, sessionId: session.id, details: { previousUsername: user.username } });
     }
-    if (body.newPassword) {
-      // A new password signs out every session, including other devices.
-      const revoked = await revokeAllUserSessions(db, user.id);
-      const replacement = await startSession(request, reply, user.id);
-      await recordSecurityEvent(db, { event: "password_changed", request, userId: user.id, username, sessionId: replacement.id, details: { sessionsSignedOut: Math.max(0, revoked - 1) } });
-    } else if (usernameChanged) {
-      // Rotate the current session after an account change.
-      await deleteSession(db, session.tokenHash);
-      await startSession(request, reply, user.id);
+    if (replaced.started) {
+      const replacement = adoptSession(request, reply, replaced.started);
+      if (!body.newPassword) return { user: { id: user.id, username, role: session.role, mustChangePassword: user.mustChangePassword } };
+      await recordSecurityEvent(db, { event: "password_changed", request, userId: user.id, username, sessionId: replacement.id, details: { sessionsSignedOut: Math.max(0, replaced.revoked - 1), ...(user.mustChangePassword ? { replacedTemporary: true } : {}) } });
     }
 
-    return { user: { id: user.id, username } };
+    return { user: { id: user.id, username, role: session.role, mustChangePassword: user.mustChangePassword && !body.newPassword } };
   });
 
   app.get("/api/auth/sessions", async (request): Promise<AuthSessionList> => {

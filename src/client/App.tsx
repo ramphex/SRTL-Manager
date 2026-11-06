@@ -1,13 +1,16 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, RouterProvider, useLocation } from "@tanstack/react-router";
+import { useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, redirect, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
+import { useAccess } from "./access";
 import { api } from "./api";
+import { BackupAlertBanner } from "./backupSettings";
 import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdateReadyEvent, type PwaUpdateReadyDetail } from "./pwa";
 import { formatJobType, jobProgressChips } from "./logDisplay";
 import { formatCurrentVersionDisplay } from "./versionDisplay";
 import { inventoryJobRefreshKey, isActiveDashboardJob } from "./recentJobs";
-import { minimumPasswordLength } from "../shared/auth";
+import { minimumPasswordLength, setupPagePath } from "../shared/auth";
+import { roleDescriptions, roleLabels } from "../shared/permissions";
 import { inferSectionContentType } from "../shared/sections";
 import { type AppReleaseInfo, type AppVersionInfo, type JobRecord, type OnboardingPolicyMode, type OnboardingState, type PathConfigurationState, type SectionContentType, type StorageLocationKey } from "../shared/types";
 import { SectionDraft, SidebarGroup, StorageLocationsContext, UserPreferencesContext, canTerminateJob, copyElapsedLabel, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatNumber, historySections, isActivePathMigrationStatus, onboardingScanVisibleStats, parseLogsRouteSearch, pathMigrationProgress, pathMigrationProgressTitle, pathMigrationStatusLabel, scanOptionsFromProgress, scanProgressFromJob, scanStageLabel, scanStagePercent, scanStatusDetail, scanVisibleIndexedItemCount, scanVisibleStats, sectionDraftsToSettings, sectionSettingsToDrafts, sectionTypeOptions, settingsSections, storageLocationName, themeOptions, useLiveTimestamp, useModalLifecycle, useStorageLocations, useTerminateJobMutation, useThemePreference, versionChannelLabel, versionCheckIntervalMs, visibleVersionReleases } from "./appShared";
@@ -283,6 +286,8 @@ function RootLayout() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] })
   });
   const username = me.data?.user?.username ?? "Signed in";
+  const { role, can } = useAccess();
+  const visibleSettingsSections = settingsSections.filter((item) => can(item.permission));
   const pathname = location.pathname;
   const isHistoryActive = pathname === "/scans" || pathname === "/audits";
   const isSettingsActive = pathname === "/settings" || pathname.startsWith("/settings/");
@@ -300,10 +305,14 @@ function RootLayout() {
             ? "Audit history"
             : pathname === "/settings/advanced"
               ? "Advanced settings"
+              : pathname === "/settings/backups"
+                ? "Backup settings"
               : pathname === "/settings/media-servers"
                 ? "Media servers"
                 : pathname === "/settings/integrations"
                   ? "Integration settings"
+                  : pathname === "/settings/accounts"
+                    ? "Accounts"
                   : pathname === "/settings/user"
                     ? "User settings"
                     : "Library settings";
@@ -406,7 +415,7 @@ function RootLayout() {
         </button>
         {expandedGroups.settings ? (
           <div id={`${idPrefix}-settings-nav`} className="nav-sublinks">
-            {settingsSections.map((item) => (
+            {visibleSettingsSections.map((item) => (
               <Link key={item.view} to={item.to} className="nav-sublink" activeProps={{ className: "nav-sublink active" }} activeOptions={{ exact: true }}>
                 <item.icon size={15} />
                 {item.label}
@@ -443,9 +452,10 @@ function RootLayout() {
           </div>
         </div>
         <div className="sidebar-account">
-          <div className="sidebar-user-chip" title={username} aria-label={`Signed in as ${username}`}>
+          <div className="sidebar-user-chip" title={`${username}: ${roleDescriptions[role]}`} aria-label={`Signed in as ${username}, ${roleLabels[role]}`}>
             <UserCog size={15} />
             <span>{username}</span>
+            <small className={`sidebar-user-role account-role-${role}`}>{roleLabels[role]}</small>
           </div>
           <div className="sidebar-account-actions">
             <ThemeSwitcher />
@@ -475,6 +485,7 @@ function RootLayout() {
         </div>
       </aside>
       <main ref={contentRef} className="content" tabIndex={-1}>
+        {pathname === "/settings/backups" || !can("settings.manage") ? null : <BackupAlertBanner />}
         <StorageLocationsContext.Provider value={storageLocations.data ?? defaultStorageLocations}>
           <UserPreferencesContext.Provider value={userPreferences.data ?? defaultUserPreferences}>
             <Outlet />
@@ -533,9 +544,10 @@ function RootLayout() {
               {renderNavigationGroups("mobile")}
             </nav>
             <div className="mobile-nav-account">
-              <div className="sidebar-user-chip" title={username} aria-label={`Signed in as ${username}`}>
+              <div className="sidebar-user-chip" title={`${username}: ${roleDescriptions[role]}`} aria-label={`Signed in as ${username}, ${roleLabels[role]}`}>
                 <UserCog size={15} />
                 <span>{username}</span>
+            <small className={`sidebar-user-role account-role-${role}`}>{roleLabels[role]}</small>
               </div>
               <ThemeSwitcher />
               <button type="button" className="ghost-button sidebar-sign-out-button" onClick={() => logout.mutate()}>
@@ -663,7 +675,8 @@ export function ScanProgressPanel({
 
 
 export function JobStatusTerminateAction({ job, isTerminating, onTerminate }: { job: JobRecord | null; isTerminating: boolean; onTerminate: (job: JobRecord) => void }) {
-  if (!canTerminateJob(job)) return null;
+  const { canStopJob } = useAccess();
+  if (!canTerminateJob(job) || !canStopJob(job)) return null;
   return (
     <div className="status-title-actions">
       <button type="button" className="status-terminate-button danger" onClick={() => onTerminate(job)} disabled={isTerminating}>
@@ -752,8 +765,10 @@ function LoginGate() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const online = useOnlineStatus();
-  // Setup status is only reported to local clients, so the sign-in screen also offers setup.
-  const [setupChosen, setSetupChosen] = useState(false);
+  // Setup status is only reported to local clients. Everyone else opens the setup form at its
+  // direct address from the server log, which looks the same whether or not an admin exists.
+  const pathname = useSyncExternalStore(router.history.subscribe, () => router.history.location.pathname);
+  const setupAddressOpen = pathname.replace(/\/+$/, "") === setupPagePath;
   if (!online && !me.data) return <OfflineSessionGate />;
   if (me.isPending) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
   if (me.error) {
@@ -769,23 +784,86 @@ function LoginGate() {
       </AuthShell>
     );
   }
-  if (!me.data?.authenticated && (me.data?.setupRequired || setupChosen)) {
+  if (!me.data?.authenticated && (me.data?.setupRequired || setupAddressOpen)) {
     return (
       <SetupForm
-        onDone={() => {
-          setSetupChosen(false);
-          void queryClient.invalidateQueries({ queryKey: ["me"] });
-        }}
-        onSignIn={me.data?.setupRequired ? undefined : () => setSetupChosen(false)}
+        onDone={() => void queryClient.invalidateQueries({ queryKey: ["me"] })}
+        onSignIn={me.data?.setupRequired ? undefined : () => router.history.replace("/")}
       />
     );
   }
-  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} onSetup={() => setSetupChosen(true)} />;
+  if (!me.data?.authenticated) return <LoginForm onDone={() => queryClient.invalidateQueries({ queryKey: ["me"] })} />;
+  if (me.data.user?.mustChangePassword) return <TemporaryPasswordForm username={me.data.user.username} />;
   return <AuthenticatedApp />;
+}
+
+function SignOutButton() {
+  const queryClient = useQueryClient();
+  const logout = useMutation({ mutationFn: api.logout, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] }) });
+  return (
+    <button type="button" className="secondary" onClick={() => logout.mutate()} disabled={logout.isPending}>
+      <LogOut size={16} />
+      Sign out
+    </button>
+  );
+}
+
+// Nothing else works until a temporary password is replaced, so this is all the app shows.
+function TemporaryPasswordForm({ username }: { username: string }) {
+  const queryClient = useQueryClient();
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmNewPassword, setConfirmNewPassword] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
+  const save = useMutation({
+    mutationFn: api.updateUser,
+    onSuccess: (data) => queryClient.setQueryData(["me"], { authenticated: true, setupRequired: false, user: data.user })
+  });
+  return (
+    <AuthShell title="Choose your password" icon={<Shield size={22} />}>
+      <form className="auth-form" onSubmit={(event) => {
+        event.preventDefault();
+        if (newPassword.length < minimumPasswordLength) return setFormError(`Password must be at least ${minimumPasswordLength} characters.`);
+        if (newPassword !== confirmNewPassword) return setFormError("Passwords do not match.");
+        setFormError(null);
+        save.mutate({ username, currentPassword, newPassword, confirmNewPassword });
+      }}>
+        <p className="auth-form-help">You signed in as {username} with a temporary password. Choose your own to continue. It needs at least {minimumPasswordLength} characters.</p>
+        <label>
+          Temporary password
+          <input type="password" autoComplete="current-password" required value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} />
+        </label>
+        <label>
+          New password
+          <input type="password" autoComplete="new-password" required value={newPassword} onChange={(event) => setNewPassword(event.target.value)} />
+        </label>
+        <label>
+          Confirm new password
+          <input type="password" autoComplete="new-password" required value={confirmNewPassword} onChange={(event) => setConfirmNewPassword(event.target.value)} />
+        </label>
+        <button className="auth-primary-button" type="submit" disabled={save.isPending} aria-busy={save.isPending}>
+          <CheckCircle2 size={17} />
+          Save password
+        </button>
+        {formError ?? save.error ? <p className="error" role="alert">{formError ?? save.error?.message}</p> : null}
+      </form>
+      <SignOutButton />
+    </AuthShell>
+  );
+}
+
+function AdminActionNeeded({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <AuthShell title={title} icon={<HardDrive size={22} />}>
+      <p className="auth-form-help">{children}</p>
+      <SignOutButton />
+    </AuthShell>
+  );
 }
 
 function AuthenticatedApp() {
   const online = useOnlineStatus();
+  const { can } = useAccess();
   const pathConfiguration = useQuery({
     queryKey: ["path-configuration"],
     queryFn: api.pathConfiguration,
@@ -807,7 +885,11 @@ function AuthenticatedApp() {
       </AuthShell>
     );
   }
-  if (pathConfiguration.data?.blocking) return <PathMigrationGate state={pathConfiguration.data} />;
+  if (pathConfiguration.data?.blocking) {
+    return can("settings.manage")
+      ? <PathMigrationGate state={pathConfiguration.data} />
+      : <AdminActionNeeded title="Storage maintenance">The managed storage paths changed. An admin needs to finish the path migration before the library can be used.</AdminActionNeeded>;
+  }
   if (onboarding.isLoading) return <AuthShell title="Loading setup" icon={<Shield size={22} />} />;
   if (onboarding.error) {
     return (
@@ -816,7 +898,11 @@ function AuthenticatedApp() {
       </AuthShell>
     );
   }
-  if (onboarding.data?.required) return <OnboardingGate state={onboarding.data} />;
+  if (onboarding.data?.required) {
+    return can("settings.manage")
+      ? <OnboardingGate state={onboarding.data} />
+      : <AdminActionNeeded title="Setup in progress">An admin needs to finish setting up this library before it can be used.</AdminActionNeeded>;
+  }
   return (
     <>
       <InventoryJobDataRefresher />
@@ -1463,7 +1549,7 @@ function SetupForm({ onDone, onSignIn }: { onDone: () => void; onSignIn?: () => 
   );
 }
 
-function LoginForm({ onDone, onSetup }: { onDone: () => void; onSetup: () => void }) {
+function LoginForm({ onDone }: { onDone: () => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const mutation = useMutation({ mutationFn: api.login, onSuccess: onDone });
@@ -1486,9 +1572,6 @@ function LoginForm({ onDone, onSetup }: { onDone: () => void; onSetup: () => voi
           Sign in
         </button>
         {mutation.error ? <p className="error">{mutation.error.message}</p> : null}
-        <button type="button" className="auth-link-button" onClick={onSetup}>
-          First start? Set up with a setup token
-        </button>
       </form>
     </AuthShell>
   );
@@ -1584,7 +1667,7 @@ const LogsPage = lazyRouteComponent(loadOperationsRoutes, "LogsPage");
 const NowPlayingPage = lazyRouteComponent(() => import("./nowPlaying"), "NowPlayingPage");
 const indexRoute = createRoute({ getParentRoute: () => rootRoute, path: "/", component: DashboardPage });
 const nowPlayingRoute = createRoute({ getParentRoute: () => rootRoute, path: "/now-playing", component: NowPlayingPage });
-const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies"] as const;
+const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "remote-orphans", "policies", "damaged"] as const;
 const libraryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/library",
@@ -1599,10 +1682,20 @@ const auditsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/audit
 const settingsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings", component: () => <SettingsPage activeView="library" /> });
 const settingsSectionsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/sections", component: () => <SettingsPage activeView="library" /> });
 const settingsAdvancedRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/advanced", component: () => <SettingsPage activeView="advanced" /> });
+const settingsBackupsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/backups", component: () => <SettingsPage activeView="backups" /> });
 const settingsMediaServersRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/media-servers", component: () => <SettingsPage activeView="media-servers" /> });
 const settingsIntegrationsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/integrations", component: () => <SettingsPage activeView="integrations" /> });
+const settingsAccountsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/accounts", component: () => <SettingsPage activeView="accounts" /> });
 const settingsUserRoute = createRoute({ getParentRoute: () => rootRoute, path: "/settings/user", component: () => <SettingsPage activeView="user" /> });
 const logsRoute = createRoute({ getParentRoute: () => rootRoute, path: "/logs", validateSearch: parseLogsRouteSearch, component: LogsPage });
+// Signed-in browsers have no setup to do, including the one that just finished it here.
+const setupRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: setupPagePath,
+  beforeLoad: () => {
+    throw redirect({ to: "/", replace: true });
+  }
+});
 const routeTree = rootRoute.addChildren([
   indexRoute,
   nowPlayingRoute,
@@ -1614,8 +1707,11 @@ const routeTree = rootRoute.addChildren([
   settingsMediaServersRoute,
   settingsIntegrationsRoute,
   settingsAdvancedRoute,
+  settingsBackupsRoute,
+  settingsAccountsRoute,
   settingsUserRoute,
-  logsRoute
+  logsRoute,
+  setupRoute
 ]);
 
 function RoutePending() {

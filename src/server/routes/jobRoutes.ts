@@ -1,10 +1,30 @@
 import { z } from "zod";
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Db } from "../db/database";
 import type { JobRunner } from "../jobs/jobRunner";
 import { recordActionAudit } from "../lib/actionAudit";
+import { emptyEventPage, isRestrictedRequest, jobDetailsHidden, restrictedJob } from "../lib/restrictedView";
+import { requestHasPermission, requirePermission } from "../routeAccess";
+import { jobStoppableWithoutDeleting } from "../../shared/permissions";
+import type { JobEventRecord } from "../../shared/types";
 
 export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db): void {
+  // A restricted account sees that a settings job ran, but none of what its log says.
+  const hiddenFrom = async (request: FastifyRequest, jobId: number): Promise<boolean> => {
+    if (!isRestrictedRequest(request)) return false;
+    const job = await jobs.getJob(jobId);
+    return job !== null && jobDetailsHidden(job.type);
+  };
+  const terminateJob = async (request: FastifyRequest, reply: FastifyReply) => {
+    const params = z.object({ id: z.coerce.number() }).parse(request.params);
+    if (!requestHasPermission(request, "library.delete")) {
+      const job = await jobs.getJob(params.id);
+      if (job && !jobStoppableWithoutDeleting(job)) requirePermission(request, "library.delete", "You can only stop scans, audits and copies to local.");
+    }
+    if (!(await jobs.terminate(params.id))) return reply.code(409).send({ error: "Job cannot be terminated" });
+    return { ok: true, jobId: params.id };
+  };
+
   app.get("/api/jobs", async (request) => {
     const query = z
       .object({
@@ -14,14 +34,15 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
       })
       .parse(request.query);
     const completedSince = query.completedWithinMinutes ? new Date(Date.now() - query.completedWithinMinutes * 60_000).toISOString() : undefined;
-    return jobs.listJobs({ activeOnly: query.activeOnly, completedSince, limit: query.limit });
+    const rows = await jobs.listJobs({ activeOnly: query.activeOnly, completedSince, limit: query.limit });
+    return isRestrictedRequest(request) ? rows.map(restrictedJob) : rows;
   });
 
   app.get("/api/jobs/:id", async (request, reply) => {
     const params = z.object({ id: z.coerce.number() }).parse(request.params);
     const row = await jobs.getJob(params.id);
     if (!row) return reply.code(404).send({ error: "Job not found" });
-    return row;
+    return isRestrictedRequest(request) ? restrictedJob(row) : row;
   });
 
   app.get("/api/jobs/:id/copy-failures", async (request, reply) => {
@@ -64,21 +85,14 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     return result;
   });
 
-  app.post("/api/jobs/:id/terminate", async (request, reply) => {
-    const params = z.object({ id: z.coerce.number() }).parse(request.params);
-    if (!(await jobs.terminate(params.id))) return reply.code(409).send({ error: "Job cannot be terminated" });
-    return { ok: true, jobId: params.id };
-  });
+  app.post("/api/jobs/:id/terminate", terminateJob);
 
-  app.post("/api/jobs/:id/cancel", async (request, reply) => {
-    const params = z.object({ id: z.coerce.number() }).parse(request.params);
-    if (!(await jobs.terminate(params.id))) return reply.code(409).send({ error: "Job cannot be terminated" });
-    return { ok: true, jobId: params.id };
-  });
+  app.post("/api/jobs/:id/cancel", terminateJob);
 
   app.get("/api/jobs/:id/events", async (request) => {
     const params = z.object({ id: z.coerce.number() }).parse(request.params);
     const query = z.object({ afterId: z.coerce.number().int().min(0).default(0), limit: z.coerce.number().int().min(1).max(500).default(100) }).parse(request.query);
+    if (await hiddenFrom(request, params.id)) return [] as JobEventRecord[];
     return jobs.listEvents(params.id, query.afterId, query.limit);
   });
 
@@ -90,6 +104,7 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
         limit: z.coerce.number().int().min(1).max(500).default(100)
       })
       .parse(request.query);
+    if (await hiddenFrom(request, params.id)) return emptyEventPage;
     return jobs.listEventPage(params.id, query.beforeId, query.limit);
   });
 }

@@ -40,6 +40,10 @@ export interface AppConfig {
   /** SRTL_DISCARD_UNREADABLE_CREDENTIALS: start without the credentials a lost secret key sealed. */
   discardUnreadableCredentials: boolean;
   nowPlayingStreams: NowPlayingStreamLimits;
+  /** Where database backups go until Settings names another location (SRTL_BACKUP_DIR). */
+  backupDir: string;
+  /** Folder holding pg_dump and pg_restore (SRTL_PG_BIN_DIR); null finds them on PATH. */
+  pgBinDir: string | null;
 }
 
 export interface NowPlayingStreamLimits {
@@ -313,10 +317,17 @@ export function loadConfig(overrides: Partial<AppConfig> = {}): AppConfig {
   }
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
 
+  const backupDir = (overrides.backupDir ?? process.env.SRTL_BACKUP_DIR ?? envFile.SRTL_BACKUP_DIR)?.trim() || path.join(dataDir, "backups");
+  if (!path.isAbsolute(backupDir)) throw new Error(`SRTL_BACKUP_DIR must be an absolute path: ${backupDir}`);
+  const pgBinDir = (overrides.pgBinDir !== undefined ? overrides.pgBinDir : process.env.SRTL_PG_BIN_DIR ?? envFile.SRTL_PG_BIN_DIR)?.trim() || null;
+  if (pgBinDir && !path.isAbsolute(pgBinDir)) throw new Error(`SRTL_PG_BIN_DIR must be an absolute path: ${pgBinDir}`);
+
   return {
     rootDir,
     dataDir,
     databaseUrl,
+    backupDir,
+    pgBinDir,
     host: overrides.host ?? process.env.SRTL_HOST ?? envFile.SRTL_HOST ?? "127.0.0.1",
     port: portSetting(overrides.port ?? process.env.SRTL_PORT ?? envFile.SRTL_PORT, 3010),
     sessionCookieName: overrides.sessionCookieName ?? (publicWebPort ? `srtl_session_${publicWebPort}` : "srtl_session"),

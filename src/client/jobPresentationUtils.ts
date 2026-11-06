@@ -38,6 +38,7 @@ export type CopyCompletedItemSummary = {
   title: string;
   fileName: string | null;
   outcome: "Copied and symlinked" | "Matched existing and symlinked";
+  warning?: string;
 };
 
 function copyFailureReason(message: string): string {
@@ -116,7 +117,8 @@ export function copyCompletedItemSummaries(events: JobEventRecord[]): CopyComple
         : "";
     const title = directTitle || keys.map((key) => titlesByPath.get(key)).find(Boolean) || fileName || "Completed item";
     const key = keys[0] ?? `${title}:${fileName ?? ""}`;
-    completed.set(key, { key, title, fileName, outcome });
+    const warning = typeof data?.warning === "string" ? data.warning : undefined;
+    completed.set(key, { key, title, fileName, outcome, ...(warning ? { warning } : {}) });
   }
 
   return [...completed.values()].sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: "base" }) || (left.fileName ?? "").localeCompare(right.fileName ?? "", undefined, { sensitivity: "base" }));

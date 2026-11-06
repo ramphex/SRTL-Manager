@@ -5,6 +5,8 @@ export interface EnvSettings {
   SRTL_LOCATION_1_PATH?: string;
   SRTL_LOCATION_2_PATH?: string;
   SRTL_DATA_DIR?: string;
+  SRTL_BACKUP_DIR?: string;
+  SRTL_PG_BIN_DIR?: string;
   SRTL_DATABASE_URL?: string;
   SRTL_POSTGRES_HOST?: string;
   SRTL_POSTGRES_PORT?: string;
@@ -44,6 +46,8 @@ const supportedKeys = [
   "SRTL_LOCATION_1_PATH",
   "SRTL_LOCATION_2_PATH",
   "SRTL_DATA_DIR",
+  "SRTL_BACKUP_DIR",
+  "SRTL_PG_BIN_DIR",
   "SRTL_DATABASE_URL",
   "SRTL_POSTGRES_HOST",
   "SRTL_POSTGRES_PORT",

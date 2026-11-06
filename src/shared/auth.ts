@@ -1,11 +1,16 @@
+import type { AccountRecord, AccountRole } from "./permissions";
+
 /** Minimum length for new and changed passwords. Existing shorter passwords still sign in. */
 export const minimumPasswordLength = 12;
+
+/** The setup form's direct address, printed in the server log with the setup token. */
+export const setupPagePath = "/setup";
 
 export interface AuthMe {
   authenticated: boolean;
   /** Shown only to clients on this host or the local network; everyone else sees false. */
   setupRequired: boolean;
-  user: { id: number; username: string } | null;
+  user: { id: number; username: string; role: AccountRole; mustChangePassword: boolean } | null;
 }
 
 export interface AuthSessionInfo {
@@ -38,7 +43,14 @@ export type SecurityEventType =
   | "session_revoked"
   | "sessions_revoked"
   | "media_server_removed"
-  | "stream_stopped";
+  | "stream_stopped"
+  | "account_created"
+  | "account_role_changed"
+  | "account_disabled"
+  | "account_enabled"
+  | "account_deleted"
+  | "account_password_reset"
+  | "ownership_transferred";
 
 export interface SecurityEventRecord {
   id: number;
@@ -56,6 +68,12 @@ export interface SecurityEventPage {
   retentionDays: number;
 }
 
+export interface AccountList {
+  accounts: AccountRecord[];
+  /** The latest account changes, newest first. */
+  activity: SecurityEventRecord[];
+}
+
 export const securityEventLabels: Record<SecurityEventType, string> = {
   setup_completed: "Initial setup completed",
   setup_rejected: "Setup attempt rejected",
@@ -69,7 +87,14 @@ export const securityEventLabels: Record<SecurityEventType, string> = {
   session_revoked: "Session signed out",
   sessions_revoked: "Other sessions signed out",
   media_server_removed: "Media server removed",
-  stream_stopped: "Now Playing stream stopped"
+  stream_stopped: "Now Playing stream stopped",
+  account_created: "Account created",
+  account_role_changed: "Role changed",
+  account_disabled: "Account disabled",
+  account_enabled: "Account enabled",
+  account_deleted: "Account deleted",
+  account_password_reset: "Password reset by a manager",
+  ownership_transferred: "Ownership transferred"
 };
 
 export function securityEventLabel(event: string): string {

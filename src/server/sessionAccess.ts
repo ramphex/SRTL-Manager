@@ -4,7 +4,7 @@ import { findActiveSession, hashToken, markSessionCookieReissued, touchSession, 
 
 declare module "fastify" {
   interface FastifyRequest {
-    /** The signed-in admin session, set by the request guard or by `SessionAccess.resolve`. */
+    /** The signed-in account's session, set by the request guard or by `SessionAccess.resolve`. */
     adminSession: ActiveSession | null;
   }
 }

@@ -28,7 +28,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration" | "watch_sync";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration" | "watch_sync" | "backup";
 
 export type AuditMode = "fast" | "deep";
 
@@ -233,6 +233,8 @@ export interface CleanupSettings {
   holdDays: number;
   // Delete the remote source once a verified copy to local finishes and nothing else links to it.
   deleteRemoteSourceAfterCopy: boolean;
+  // Searches sent to each Radarr or Sonarr instance per minute when deleted files are re-requested.
+  reRequestsPerMinute: number;
 }
 
 export interface AdvancedSettings {
@@ -785,7 +787,7 @@ export interface AuditResultRecord {
   linkPath: string;
   targetPath: string;
   sourcePath: string | null;
-  status: "pass" | "fail" | "source_issue";
+  status: "pass" | "warning" | "fail" | "source_issue";
   ffmpegStatus: "pass" | "fail";
   cmpStatus: "pass" | "fail" | "source_unknown" | "source_missing" | "source_error" | "skipped";
   message: string;
@@ -831,4 +833,6 @@ export interface DamagedFileRow {
   linked: boolean;
   // A current remote file with the same relative path, usable as a source for a fresh copy.
   remoteCopyExists: boolean;
+  // Why this file cannot be deleted right now, the same rules orphans follow.
+  protectedReason: string | null;
 }

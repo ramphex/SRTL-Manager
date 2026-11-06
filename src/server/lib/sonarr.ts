@@ -45,6 +45,7 @@ class SonarrInstanceNotFound extends SonarrError {
 }
 
 const store = createArrInstanceStore({ name: "Sonarr", settingKey: "sonarrInstances", lock: 781_889_452, sectionType: "shows", sectionTypeLabel: "Shows", error: (message) => new SonarrError(message), notFound: () => new SonarrInstanceNotFound(), normalizeUrl: normalizeSonarrUrl, apiKeyPurpose: secretPurposes.sonarrApiKey });
+export const sonarrStoredInstances = store.storedInstances;
 const { storedInstances, settings, writeSettings, locked, commitCurrent, candidateSettings, automaticMappings, assertSectionsAvailable, publicSettings, sectionOwner, webhookInstance } = store;
 export const sonarrInstanceIdSchema = store.instanceIdSchema;
 export const sonarrInstanceNameSchema = store.instanceNameSchema;
@@ -57,14 +58,14 @@ function seriesIdsIn(config: Pick<StoredSettings, "id">, seriesIds: number[]) {
   return and(forInstance(config), inArray(schema.sonarrSeries.seriesId, seriesIds));
 }
 
-function client(config: StoredSettings): SonarrClient {
+export function sonarrClient(config: StoredSettings): SonarrClient {
   if (!config.apiKey || !config.baseUrl) throw new SonarrError("Save a Sonarr connection first.");
   return new SonarrClient(config.baseUrl, config.apiKey);
 }
 
 function parseTags(value: string): string[] { return tagsSchema.parse(JSON.parse(value)); }
 function seriesTitle(series: Pick<SonarrSeries, "title" | "year">): string { return series.year ? `${series.title} (${series.year})` : series.title; }
-function episodeLabel(episode: Pick<SonarrEpisode, "seasonNumber" | "episodeNumber">): string {
+export function sonarrEpisodeLabel(episode: Pick<SonarrEpisode, "seasonNumber" | "episodeNumber">): string {
   return `S${String(episode.seasonNumber).padStart(2, "0")}E${String(episode.episodeNumber).padStart(2, "0")}`;
 }
 const normalizedRelative = (value: string) => value.replace(/\\/g, "/").split("/").filter(Boolean).join("/");
@@ -76,7 +77,7 @@ function seriesRelativePath(link: Pick<MediaLinkRow, "itemName" | "relativePath"
 }
 
 async function inspectConnection(db: Db, config: StoredSettings): Promise<SonarrConnectionTest> {
-  const connection = await client(config).test();
+  const connection = await sonarrClient(config).test();
   const { mappings, conflicts } = await automaticMappings(db, config.id, connection.rootFolders);
   const matched = new Set([...mappings, ...conflicts].map((mapping) => mapping.rootPath));
   return { ...connection, automaticMappings: mappings, unmatchedRootFolders: connection.rootFolders.filter((root) => !matched.has(root)), conflictingRootFolders: conflicts };
@@ -117,7 +118,7 @@ async function storeSeries(db: Db, list: SonarrSeries[], tags: Catalog["tags"], 
 }
 
 async function fetchCatalog(config: StoredSettings): Promise<Catalog> {
-  const connection = client(config);
+  const connection = sonarrClient(config);
   const series = await connection.series();
   return { series, tags: await connection.tags() };
 }
@@ -242,7 +243,7 @@ function cachedEpisodeFiles(config: StoredSettings, seriesId: number) {
   const cached = episodeFileCache.get(key);
   if (cached && now - cached.at < expectationCacheMs) return cached.files;
   for (const [entry, value] of episodeFileCache) if (now - value.at >= expectationCacheMs) episodeFileCache.delete(entry);
-  const connection = client(config);
+  const connection = sonarrClient(config);
   const files = Promise.all([connection.seriesById(seriesId), connection.episodeFiles(seriesId)]).then(([series, list]) => ({ series, files: list }));
   episodeFileCache.set(key, { at: now, files });
   files.catch(() => episodeFileCache.delete(key));
@@ -296,7 +297,7 @@ export async function reconcileSonarrSeries(db: Db, instanceId: string, seriesId
   if (!config.localTag || !config.remoteTag) throw new SonarrError("Choose and save both policy tags before reconciling titles.");
   const rows = await db.select().from(schema.sonarrSeries).where(seriesIdsIn(config, seriesIds));
   if (rows.length !== new Set(seriesIds).size || rows.some((row) => !row.section || !row.itemName)) throw new SonarrError("Select mapped titles before reconciling policies.");
-  const connection = client(config);
+  const connection = sonarrClient(config);
   const tags = await connection.tags();
   // Re-read selected records so a stale preview cannot import an outdated tag or changed series identity.
   const catalog = new Map((await connection.series()).map((series) => [series.id, series]));
@@ -438,7 +439,7 @@ async function processSeriesEvents(db: Db, config: StoredSettings, events: Sonar
   const deleted = events[events.length - 1]!.eventType === "SeriesDelete";
   let fetched: { series: SonarrSeries; tags: Catalog["tags"] } | null = null;
   if (!deleted) {
-    const connection = client(config);
+    const connection = sonarrClient(config);
     const series = await connection.seriesById(seriesId);
     const scope = mapSonarrSeries(series, config);
     if (!scope) {
@@ -517,7 +518,7 @@ async function observePolicies(db: Db, config: StoredSettings): Promise<void> {
 type TagOutcome = { seriesId: number; policy: StoragePolicyKind; labels?: string[]; error?: string };
 
 async function pushTags(config: StoredSettings, rows: SeriesRow[], policies: Map<string, StoragePolicyKind>): Promise<TagOutcome[]> {
-  const connection = client(config);
+  const connection = sonarrClient(config);
   const tagList = await connection.tags();
   const tagId = (label: string) => tagList.find((tag) => tag.label === label)?.id;
   const policyTagIds = [tagId(config.localTag), tagId(config.remoteTag)].filter((id): id is number => id !== undefined);
@@ -722,7 +723,7 @@ async function resolveCopiedFiles(db: Db, config: StoredSettings): Promise<void>
     .orderBy(asc(schema.sonarrCopiedFiles.id)).limit(resolveFileBatchSize);
   const seriesIds = [...new Set(due.map((row) => row.seriesId))].slice(0, resolveSeriesBatchSize);
   if (!seriesIds.length) return;
-  const connection = client(config);
+  const connection = sonarrClient(config);
   const results = await arrMapLimit(seriesIds, 3, async (seriesId): Promise<SeriesEpisodes> => {
     try {
       const [files, episodes] = await Promise.all([connection.episodeFiles(seriesId), connection.episodes(seriesId)]);
@@ -762,7 +763,7 @@ async function resolveCopiedFiles(db: Db, config: StoredSettings): Promise<void>
           continue;
         }
         for (const episode of episodes) {
-          updates.push({ instanceId: config.id, copyJobId: row.copyJobId, seriesId: row.seriesId, episodeId: episode.id, mediaLinkId: row.mediaLinkId, title: `${title} ${episodeLabel(episode)}`, monitored: row.monitored, previousMonitored: episode.monitored, createdAt: timestamp, nextAttemptAt: timestamp, ...(row.skipReason ? { processedAt: timestamp, error: row.skipReason } : {}) });
+          updates.push({ instanceId: config.id, copyJobId: row.copyJobId, seriesId: row.seriesId, episodeId: episode.id, mediaLinkId: row.mediaLinkId, title: `${title} ${sonarrEpisodeLabel(episode)}`, monitored: row.monitored, previousMonitored: episode.monitored, createdAt: timestamp, nextAttemptAt: timestamp, ...(row.skipReason ? { processedAt: timestamp, error: row.skipReason } : {}) });
         }
       }
     }
@@ -784,7 +785,7 @@ async function applyMonitorUpdates(db: Db, config: StoredSettings): Promise<void
     const episodeIds = batch.filter((update) => update.monitored === monitored).map((update) => update.episodeId);
     if (!episodeIds.length) continue;
     try {
-      for (let offset = 0; offset < episodeIds.length; offset += monitorRequestSize) await client(config).setEpisodesMonitored(episodeIds.slice(offset, offset + monitorRequestSize), monitored);
+      for (let offset = 0; offset < episodeIds.length; offset += monitorRequestSize) await sonarrClient(config).setEpisodesMonitored(episodeIds.slice(offset, offset + monitorRequestSize), monitored);
       results.set(monitored, null);
     } catch (error) {
       if (!(error instanceof SonarrError)) throw error;

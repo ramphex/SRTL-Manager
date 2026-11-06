@@ -1,4 +1,4 @@
-import { desc, lt, sql } from "drizzle-orm";
+import { and, desc, inArray, lt, sql } from "drizzle-orm";
 import type { FastifyRequest } from "fastify";
 import type { Db } from "./db/database";
 import * as schema from "./db/schema";
@@ -45,11 +45,11 @@ export async function recordSecurityEvent(db: Db, input: SecurityEventInput): Pr
   }
 }
 
-export async function listSecurityEvents(db: Db, options: { limit: number; beforeId?: number }): Promise<{ events: SecurityEventRecord[]; hasMore: boolean }> {
+export async function listSecurityEvents(db: Db, options: { limit: number; beforeId?: number; events?: string[] }): Promise<{ events: SecurityEventRecord[]; hasMore: boolean }> {
   const rows = await db
     .select()
     .from(schema.securityEvents)
-    .where(options.beforeId === undefined ? undefined : lt(schema.securityEvents.id, options.beforeId))
+    .where(and(options.beforeId === undefined ? undefined : lt(schema.securityEvents.id, options.beforeId), options.events ? inArray(schema.securityEvents.event, options.events) : undefined))
     .orderBy(desc(schema.securityEvents.id))
     .limit(options.limit + 1);
   const events = rows.slice(0, options.limit).map((row): SecurityEventRecord => {

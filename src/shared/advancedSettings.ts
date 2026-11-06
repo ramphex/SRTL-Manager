@@ -34,7 +34,8 @@ export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
 
 export const defaultCleanupSettings: CleanupSettings = {
   holdDays: 7,
-  deleteRemoteSourceAfterCopy: false
+  deleteRemoteSourceAfterCopy: false,
+  reRequestsPerMinute: 6
 };
 
 export const defaultAdvancedSettings: AdvancedSettings = {
@@ -87,9 +88,11 @@ function normalizeScanBehavior(value: unknown): ScanJobBehaviorSettings {
 function normalizeCleanup(value: unknown): CleanupSettings {
   const record = isRecord(value) ? value : {};
   const holdDays = Number(record.holdDays);
+  const reRequestsPerMinute = Number(record.reRequestsPerMinute);
   return {
     holdDays: Number.isInteger(holdDays) && holdDays >= 1 && holdDays <= 90 ? holdDays : defaultCleanupSettings.holdDays,
-    deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true
+    deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true,
+    reRequestsPerMinute: Number.isInteger(reRequestsPerMinute) && reRequestsPerMinute >= 1 && reRequestsPerMinute <= 60 ? reRequestsPerMinute : defaultCleanupSettings.reRequestsPerMinute
   };
 }
 

@@ -1,11 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { and, eq, inArray, isNull, lte, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, PathsSettings, StorageRootType } from "../../shared/types";
 import { getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
+import { removeExpectedSymlink } from "./symlinkCleanup";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
 import { getInventoryScanTimestamps } from "../lib/scanner";
@@ -20,7 +21,7 @@ const maxSymlinkInventoryAgeMs = 24 * 60 * 60_000;
 const maxStorageInventoryAgeMs = 24 * 60 * 60_000;
 const sidecarExtensions = new Set([".srt", ".ass", ".ssa", ".sub", ".idx", ".vtt", ".sup", ".nfo", ".jpg", ".jpeg", ".png", ".webp", ".tbn"]);
 // Copy work that may still move or replace a file: in-flight stages, plus reconciliation records no later copy superseded.
-const unfinishedCopyCondition = sql`(copy_operations.stage not in ('committed', 'failed', 'rolled_back', 'reconciliation_required') or (${unresolvedCopyReconciliation()}))`;
+export const unfinishedCopyCondition = sql`(copy_operations.stage not in ('committed', 'failed', 'rolled_back', 'reconciliation_required') or (${unresolvedCopyReconciliation()}))`;
 
 type OrphanRow = {
   id: number;
@@ -39,6 +40,7 @@ type OrphanRow = {
 type PurgeOperation = typeof schema.orphanPurgeOperations.$inferSelect;
 type LeftoverFolderRow = typeof schema.storageLeftoverFolders.$inferSelect;
 type Extra = { from: string; to: string | null };
+type RemovedLink = { linkPath: string; targetPath: string; relativePath: string };
 
 export function rootPathFor(paths: PathsSettings, rootType: StorageRootType): string {
   return rootType === "local" ? paths.localDir : paths.remoteDir;
@@ -53,7 +55,7 @@ function errorCode(error: unknown): string | null {
   return error !== null && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
 }
 
-async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFileIds?: number[]): Promise<OrphanRow[]> {
+async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFileIds?: number[], includeLinked = false): Promise<OrphanRow[]> {
   const idFilter = storageFileIds ? sql`and sf.id in (select jsonb_array_elements_text(${JSON.stringify(storageFileIds)}::jsonb)::integer)` : sql``;
   // Set-based joins keep this to one pass over each table; per-row subqueries with OR took minutes on real libraries.
   return (
@@ -72,8 +74,8 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
       left join committed_sources cs on cs.path = sf.file_path
       left join active_paths ap on ap.path = sf.file_path
       where sf.missing_since is null and sf.root_type = ${rootType} ${idFilter}
-        and not exists (select 1 from media_links ml where ml.missing_since is null and ml.resolved_storage_file_id = sf.id)
-        and not exists (select 1 from media_links ml where ml.missing_since is null and ml.target_path = sf.file_path)
+        ${includeLinked ? sql`` : sql`and not exists (select 1 from media_links ml where ml.missing_since is null and ml.resolved_storage_file_id = sf.id)
+        and not exists (select 1 from media_links ml where ml.missing_since is null and ml.target_path = sf.file_path)`}
       order by sf.relative_path
     `)
   ).rows;
@@ -107,8 +109,13 @@ function classify(row: OrphanRow, keys: { titles: Set<string>; episodes: Set<str
   return !episode || keys.episodes.has(`${title}\0${episode}`) ? "superseded" : "not_in_library";
 }
 
-function integrityOf(row: OrphanRow) {
+function integrityOf(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity">) {
   return effectiveIntegrity(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes), row.integrity);
+}
+
+function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity">): boolean {
+  const integrity = integrityOf(row);
+  return integrity === "hollow" || integrity === "partial_hollow";
 }
 
 function protectedReason(row: OrphanRow, now: number): string | null {
@@ -278,6 +285,24 @@ export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType
   return { eligible, rejected };
 }
 
+// Recomputed under the job's admission transaction, like purgeableOrphans. A damaged file may have library symlinks: they go with it.
+export async function purgeableDamagedFiles(db: DbExecutor, storageFileIds: number[], now = Date.now()): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
+  const found = new Map((await orphanRows(db, "local", storageFileIds, true)).map((row) => [row.id, row]));
+  const eligible: OrphanRow[] = [];
+  const rejected: string[] = [];
+  for (const id of storageFileIds) {
+    const row = found.get(id);
+    if (!row) {
+      rejected.push(`file #${id} is no longer on this storage`);
+      continue;
+    }
+    const reason = !isDamaged(row) ? "A later scan found this file healthy" : protectedReason(row, now);
+    if (reason) rejected.push(`${path.basename(row.relative_path)}: ${reason}`);
+    else eligible.push(row);
+  }
+  return { eligible, rejected };
+}
+
 async function findLiveSymlinkTo(directory: string, target: string, depth = 3): Promise<string | null> {
   let entries: import("node:fs").Dirent[];
   try {
@@ -335,7 +360,7 @@ export interface PurgeExecutionContext {
   now?: number;
 }
 
-type PurgeOutcome = { stage: "held" | "deleted" | "already_missing"; heldPath: string | null; extras: Extra[] };
+type PurgeOutcome = { stage: "held" | "deleted" | "already_missing"; heldPath: string | null; extras: Extra[]; removedLinks: RemovedLink[]; linkErrors: string[] };
 
 function holdingAreaError(error: unknown, heldPath: string | null): unknown {
   const code = errorCode(error);
@@ -400,7 +425,7 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
     await db.delete(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, folder.id));
-    return { stage: "already_missing", heldPath: null, extras: [] };
+    return { stage: "already_missing", heldPath: null, extras: [], removedLinks: [], linkErrors: [] };
   }
   if (!stat.isDirectory()) throw new Error("Path is no longer a folder; nothing was purged");
   await assertExistingPathInside(root, directory, "Leftover folder");
@@ -419,7 +444,7 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
     throw holdingAreaError(error, heldPath);
   }
   await db.delete(schema.storageLeftoverFolders).where(eq(schema.storageLeftoverFolders.id, folder.id));
-  return { stage: heldPath ? "held" : "deleted", heldPath, extras: [] };
+  return { stage: heldPath ? "held" : "deleted", heldPath, extras: [], removedLinks: [], linkErrors: [] };
 }
 
 export async function executeOrphanPurgeOperation(db: DbExecutor, operation: PurgeOperation, context: PurgeExecutionContext): Promise<PurgeOutcome> {
@@ -428,6 +453,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   const root = rootPathFor(context.paths, rootType);
   if (!root) throw new Error("Storage root is not configured");
   if (operation.targetKind === "folder") return executeLeftoverFolderPurge(db, operation, root, now);
+  if (operation.targetKind === "damaged_file") return executeDamagedFilePurge(db, operation, root, context, now);
   const storageFile = (
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
   )[0];
@@ -441,15 +467,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
     `)
   ).rows[0];
   if (linked) throw new Error("A symlink now points to this file; it is no longer an orphan");
-  const activeCopy = (
-    await db.execute<{ id: number }>(sql`
-      select copy_operations.id from copy_operations
-      where ${unfinishedCopyCondition}
-        and ${operation.filePath} in (copy_operations.source_path, copy_operations.destination_path, coalesce(copy_operations.temp_path, ''), coalesce(copy_operations.displaced_path, ''))
-      limit 1
-    `)
-  ).rows[0];
-  if (activeCopy) throw new Error("This file is part of an unfinished copy");
+  if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
 
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
@@ -457,7 +475,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   } catch (error) {
     if (errorCode(error) !== "ENOENT") throw error;
     await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
-    return { stage: "already_missing", heldPath: null, extras: [] };
+    return { stage: "already_missing", heldPath: null, extras: [], removedLinks: [], linkErrors: [] };
   }
   if (!stat.isFile()) throw new Error("Path is no longer a regular file; nothing was purged");
   await assertExistingPathInside(root, operation.filePath, "Orphan file");
@@ -483,7 +501,83 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
   const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase).catch(() => []);
   await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
-  return { stage: heldPath ? "held" : "deleted", heldPath, extras };
+  return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: [], linkErrors: [] };
+}
+
+async function hasUnfinishedCopy(db: DbExecutor, filePath: string): Promise<boolean> {
+  const row = (
+    await db.execute<{ id: number }>(sql`
+      select copy_operations.id from copy_operations
+      where ${unfinishedCopyCondition}
+        and ${filePath} in (copy_operations.source_path, copy_operations.destination_path, coalesce(copy_operations.temp_path, ''), coalesce(copy_operations.displaced_path, ''))
+      limit 1
+    `)
+  ).rows[0];
+  return Boolean(row);
+}
+
+// The file goes first, then the symlinks that pointed to it, so a refused move leaves the library exactly as it was.
+async function removeLinksToFile(db: DbExecutor, filePath: string, storageFileId: number, symlinkDir: string, titleFolder: string | null): Promise<{ removed: RemovedLink[]; errors: string[] }> {
+  const links = await db
+    .select({ linkPath: schema.mediaLinks.linkPath, targetPath: schema.mediaLinks.targetPath, relativePath: schema.mediaLinks.relativePath })
+    .from(schema.mediaLinks)
+    .where(and(isNull(schema.mediaLinks.missingSince), or(eq(schema.mediaLinks.resolvedStorageFileId, storageFileId), eq(schema.mediaLinks.targetPath, filePath))));
+  // A symlink made since the last scan is not in the inventory yet.
+  const unlisted = titleFolder ? await findLiveSymlinkTo(titleFolder, path.resolve(filePath)) : null;
+  if (unlisted && !links.some((link) => link.linkPath === unlisted)) links.push({ linkPath: unlisted, targetPath: filePath, relativePath: path.relative(path.dirname(titleFolder!), unlisted) });
+  const removed: RemovedLink[] = [];
+  const errors: string[] = [];
+  for (const link of links) {
+    try {
+      await removeExpectedSymlink(symlinkDir, link.linkPath, link.targetPath);
+      await db.update(schema.mediaLinks).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.mediaLinks.linkPath, link.linkPath));
+      removed.push(link);
+    } catch (error) {
+      errors.push(`${path.basename(link.linkPath)}: ${publicErrorMessage(error, "the symlink could not be removed")}`);
+    }
+  }
+  return { removed, errors };
+}
+
+async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation, root: string, context: PurgeExecutionContext, now: number): Promise<PurgeOutcome> {
+  const storageFile = (
+    await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
+  )[0];
+  if (!storageFile || path.resolve(storageFile.filePath) !== path.resolve(operation.filePath)) throw new Error("Inventory record changed after the delete was queued; rescan before deleting");
+  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity })) throw new Error("A later scan found this file healthy; nothing was deleted");
+  if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
+
+  const symlinkDir = context.paths.symlinkDir;
+  const titleFolder = symlinkDir && storageFile.section && storageFile.itemName ? path.join(symlinkDir, storageFile.section, storageFile.itemName) : null;
+  let stat: Awaited<ReturnType<typeof fs.lstat>>;
+  try {
+    stat = await withFilesystemTimeout(fs.lstat(operation.filePath), `Inspection of ${operation.filePath}`);
+  } catch (error) {
+    if (errorCode(error) !== "ENOENT") throw error;
+    const links = await removeLinksToFile(db, operation.filePath, operation.storageFileId, symlinkDir, titleFolder);
+    await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
+    return { stage: "already_missing", heldPath: null, extras: [], removedLinks: links.removed, linkErrors: links.errors };
+  }
+  if (!stat.isFile()) throw new Error("Path is no longer a regular file; nothing was deleted");
+  await assertExistingPathInside(root, operation.filePath, "Damaged file");
+  if (stat.size !== Number(operation.sizeBytes) || Math.trunc(stat.mtimeMs) !== Number(operation.mtimeMs)) {
+    throw new Error("File changed after it was inventoried; rescan before deleting");
+  }
+  if (now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
+
+  const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
+  const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
+  if (heldPath) await assertPathParentInside(root, heldPath, "Holding area").catch(() => undefined);
+  try {
+    await moveOrRemove(operation.filePath, heldPath);
+  } catch (error) {
+    throw holdingAreaError(error, heldPath);
+  }
+  const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
+  const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase).catch(() => []);
+  const links = await removeLinksToFile(db, operation.filePath, operation.storageFileId, symlinkDir, titleFolder);
+  await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
+  return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: links.removed, linkErrors: links.errors };
 }
 
 export async function listHeldOrphans(db: Db): Promise<HeldOrphanFile[]> {
@@ -512,6 +606,28 @@ function parseExtras(raw: string): Extra[] {
   }
 }
 
+function parseRemovedLinks(raw: string): RemovedLink[] {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? value.filter((entry): entry is RemovedLink => Boolean(entry) && typeof entry.linkPath === "string" && typeof entry.targetPath === "string" && typeof entry.relativePath === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+// A symlink is put back only where nothing has taken its place, such as the new copy of the title.
+async function restoreRemovedLinks(db: DbExecutor, symlinkDir: string, links: RemovedLink[]): Promise<void> {
+  for (const link of links) {
+    if (!symlinkDir || !isPathInside(symlinkDir, link.linkPath)) continue;
+    const occupied = await fs.lstat(link.linkPath).then(() => true, () => false);
+    if (occupied) continue;
+    await fs.mkdir(path.dirname(link.linkPath), { recursive: true });
+    await assertPathParentInside(symlinkDir, link.linkPath, "Restored symlink");
+    await fs.symlink(link.targetPath, link.linkPath);
+    await db.update(schema.mediaLinks).set({ missingSince: null, updatedAt: nowIso() }).where(eq(schema.mediaLinks.linkPath, link.linkPath));
+  }
+}
+
 export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operationIds: number[], onError?: (error: unknown, operationId: number) => void): Promise<{ restored: number; errors: string[] }> {
   let restored = 0;
   const errors: string[] = [];
@@ -537,12 +653,18 @@ export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operation
             const holdRoot = path.join(root, holdingFolderName);
             await removeEmptyHoldingFolders(path.dirname(operation.heldPath!), holdRoot);
             await fs.rmdir(holdRoot).catch(() => undefined);
+            await restoreRemovedLinks(transaction, paths.symlinkDir, parseRemovedLinks(operation.removedLinks));
             const timestamp = nowIso();
             // A restored folder is found again by the next storage scan.
             if (operation.targetKind !== "folder") {
               await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
             }
             await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
+            // The file is back, so nothing should go looking for another copy of it.
+            await transaction
+              .update(schema.reRequests)
+              .set({ status: "skipped", message: "The file was restored, so nothing was requested.", updatedAt: timestamp })
+              .where(and(eq(schema.reRequests.operationId, operation.id), inArray(schema.reRequests.status, ["queued", "pending", "failed"])));
           }
         };
       });
@@ -591,6 +713,45 @@ export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date
     expired += 1;
   }
   return expired;
+}
+
+function titleRelativePath(relativePath: string, section: string, itemName: string): string {
+  const parts = relativePath.split("/");
+  if (section && parts[0] === section) parts.shift();
+  if (itemName && parts[0] === itemName) parts.shift();
+  return parts.join("/");
+}
+
+// Called when a delete job ends, so a re-request only ever follows a delete that happened. Files it did not delete are recorded as not requested.
+export async function queueReRequestsForJob(db: DbExecutor, jobId: number): Promise<void> {
+  const operations = (await operationsForJob(db, jobId)).filter((operation) => operation.targetKind !== "folder");
+  const timestamp = nowIso();
+  for (let offset = 0; offset < operations.length; offset += 500) {
+    const batch = operations.slice(offset, offset + 500);
+    const files = new Map((await db.select().from(schema.storageFiles).where(inArray(schema.storageFiles.id, batch.map((operation) => operation.storageFileId)))).map((file) => [file.id, file]));
+    const rows = batch.map((operation): typeof schema.reRequests.$inferInsert => {
+      const file = files.get(operation.storageFileId);
+      const section = file?.section ?? "";
+      const itemName = file?.itemName ?? "";
+      const links = parseRemovedLinks(operation.removedLinks);
+      const names = [file ? titleRelativePath(file.relativePath, section, itemName) : path.basename(operation.filePath), ...links.map((link) => titleRelativePath(link.relativePath, section, itemName))];
+      const deleted = ["held", "deleted", "already_missing"].includes(operation.stage);
+      return {
+        jobId,
+        operationId: operation.id,
+        section,
+        itemName,
+        fileNames: JSON.stringify([...new Set(names)]),
+        wasLinked: links.length > 0,
+        displayName: path.basename(operation.filePath),
+        status: deleted ? "queued" : "skipped",
+        message: deleted ? null : "The file was not deleted, so nothing was requested.",
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+    });
+    await db.insert(schema.reRequests).values(rows).onConflictDoNothing();
+  }
 }
 
 export function purgeModeIsValid(value: unknown): value is OrphanPurgeMode {

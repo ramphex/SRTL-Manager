@@ -3,9 +3,13 @@ import { getRouteApi } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowUp, CheckCircle2, FileText, FolderCog, ListChecks, Plus, Search, ServerCog, Settings, Trash2, TriangleAlert, UserCog, X } from "lucide-react";
 import { api } from "./api";
+import { BackupSettingsPanel } from "./backupSettings";
 import { DefaultPolicySettings } from "./defaultPolicySettings";
 import { IntegrationSettings } from "./integrationSettings";
 import { MediaServerSettingsPanel } from "./mediaServerSettings";
+import { useAccess } from "./access";
+import { NotAllowed } from "./notAllowed";
+import { AccountSettingsPanel } from "./accountSettings";
 import { SecurityEventsPanel, SessionsPanel } from "./securitySettings";
 import { minimumPasswordLength } from "../shared/auth";
 import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -15,7 +19,7 @@ import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
 import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
-import { auditModeOptions, AuditStatusPrompt, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
+import { auditModeOptions, AuditStatusPrompt, settingsSections, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
 import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
 
@@ -432,6 +436,12 @@ function MetricGroup({ title, description, metrics }: { title: string; descripti
 }
 
 export function SettingsPage({ activeView }: { activeView: SettingsView }) {
+  const { can } = useAccess();
+  const section = settingsSections.find((item) => item.view === activeView);
+  return section && can(section.permission) ? <AllowedSettingsPage activeView={activeView} /> : <NotAllowed />;
+}
+
+function AllowedSettingsPage({ activeView }: { activeView: SettingsView }) {
   const queryClient = useQueryClient();
   const paths = useQuery({ queryKey: ["paths"], queryFn: api.getPaths, enabled: activeView === "library" });
   const sections = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections, enabled: activeView === "library" });
@@ -458,10 +468,12 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
       ? "Name storage locations, review mounted paths, and manage library sections."
       : activeView === "advanced"
         ? "Tune job behavior and verification defaults."
+        : activeView === "backups"
+          ? "Scheduled database backups, checked after every run."
         : activeView === "media-servers"
           ? "Plex and Jellyfin connections shared by watch sync and other features."
-          : activeView === "integrations" ? "External connections and synchronization." : "Manage display preferences, account access, and signed-in sessions.";
-  const activeTitle = activeView === "library" ? "Library" : activeView === "advanced" ? "Advanced" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
+          : activeView === "integrations" ? "External connections and synchronization." : activeView === "accounts" ? "Who can help run this instance, and what they can do." : "Manage display preferences, account access, and signed-in sessions.";
+  const activeTitle = activeView === "library" ? "Library" : activeView === "accounts" ? "Accounts" : activeView === "advanced" ? "Advanced" : activeView === "backups" ? "Backups" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (
     <Page title={`Settings > ${activeTitle}`} subtitle={subtitle}>
       {activeView === "library" ? (
@@ -491,8 +503,10 @@ export function SettingsPage({ activeView }: { activeView: SettingsView }) {
         </>
       ) : null}
       {activeView === "advanced" ? <AdvancedSettingsPanel /> : null}
+      {activeView === "backups" ? <BackupSettingsPanel /> : null}
       {activeView === "media-servers" ? <MediaServerSettingsPanel /> : null}
       {activeView === "integrations" ? <IntegrationSettings /> : null}
+      {activeView === "accounts" ? <AccountSettingsPanel /> : null}
       {activeView === "user" ? <UserSettingsPanel /> : null}
     </Page>
   );
@@ -973,7 +987,7 @@ function AdvancedSettingsPanel() {
           <div className="advanced-settings-heading">
             <div>
               <h3>Cleanup</h3>
-              <p>Controls how purged orphans are held and whether remote copies are removed after a verified copy to local.</p>
+              <p>Controls how purged orphans are held, how fast deleted files are re-requested, and whether remote copies are removed after a verified copy to local.</p>
             </div>
           </div>
           <div className="advanced-settings-grid">
@@ -983,6 +997,16 @@ function AdvancedSettingsPanel() {
                 {[1, 3, 7, 14, 30, 60, 90].map((days) => (
                   <option key={days} value={days}>
                     {days} {days === 1 ? "day" : "days"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="advanced-field">
+              <span>Re-request searches per minute, per instance</span>
+              <select value={draft.cleanup.reRequestsPerMinute} onChange={(event) => updateCleanup({ reRequestsPerMinute: Number(event.target.value) })}>
+                {[1, 2, 6, 12, 30, 60].map((perMinute) => (
+                  <option key={perMinute} value={perMinute}>
+                    {perMinute}
                   </option>
                 ))}
               </select>
@@ -1064,6 +1088,7 @@ function AdvancedSettingsPanel() {
 
 function UserSettingsPanel() {
   const queryClient = useQueryClient();
+  const canViewActivity = useAccess().can("activity.view");
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const userPreferences = useQuery({ queryKey: ["user-preferences"], queryFn: api.getUserPreferences });
   const currentPreferences: UserPreferences = { ...defaultUserPreferences, ...userPreferences.data };
@@ -1211,7 +1236,7 @@ function UserSettingsPanel() {
         </form>
       </Panel>
       <SessionsPanel />
-      <SecurityEventsPanel />
+      {canViewActivity ? <SecurityEventsPanel /> : null}
     </>
   );
 }
@@ -1393,6 +1418,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "orphan_purge", label: "Orphan purges" },
   { value: "path_migration", label: "Path migrations" },
   { value: "watch_sync", label: "Watch sync" },
+  { value: "backup", label: "Database backups" },
 ];
 
 const logLevelFilters: Array<{ value: EventLevelFilter; label: string }> = [

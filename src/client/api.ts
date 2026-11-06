@@ -1,3 +1,4 @@
+import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
   AuditOptions,
   AuditResultPage,
@@ -48,7 +49,9 @@ import type {
   OrphanReview
 } from "../shared/types";
 
-import type { AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
+import type { AccountList, AuthMe, AuthSessionList, SecurityEventPage } from "../shared/auth";
+import type { AccountRecord, AccountRole } from "../shared/permissions";
+import type { BackupSettings, BackupState } from "../shared/backups";
 import type { RadarrConnectionTest, RadarrCopyDefaults, RadarrOverview, RadarrSettingsInput, RadarrState } from "../shared/radarr";
 import type { SonarrConnectionTest, SonarrCopyDefaults, SonarrOverview, SonarrSettingsInput, SonarrState } from "../shared/sonarr";
 
@@ -98,11 +101,22 @@ export const api = {
   login: (body: { username: string; password: string }) => request<{ ok: true }>("/api/auth/login", { method: "POST", body: JSON.stringify(body) }),
   logout: () => request<{ ok: true }>("/api/auth/logout", { method: "POST" }),
   updateUser: (body: { username: string; currentPassword: string; newPassword?: string; confirmNewPassword?: string }) =>
-    request<{ user: { id: number; username: string } }>("/api/auth/user", { method: "PUT", body: JSON.stringify(body) }),
+    request<{ user: NonNullable<AuthMe["user"]> }>("/api/auth/user", { method: "PUT", body: JSON.stringify(body) }),
+  accounts: () => request<AccountList>("/api/accounts"),
+  createAccount: (body: { username: string; role: AccountRole; temporaryPassword: string }) => request<AccountRecord>("/api/accounts", { method: "POST", body: JSON.stringify(body) }),
+  changeAccountRole: (id: number, role: AccountRole) => request<{ ok: true }>(`/api/accounts/${id}/role`, { method: "PUT", body: JSON.stringify({ role }) }),
+  disableAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}/disable`, { method: "POST" }),
+  enableAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}/enable`, { method: "POST" }),
+  deleteAccount: (id: number) => request<{ ok: true }>(`/api/accounts/${id}`, { method: "DELETE" }),
+  resetAccountPassword: (id: number, temporaryPassword: string) => request<{ ok: true }>(`/api/accounts/${id}/reset-password`, { method: "POST", body: JSON.stringify({ temporaryPassword }) }),
+  transferOwnership: (targetId: number, currentPassword: string) => request<{ ok: true }>("/api/accounts/transfer-ownership", { method: "POST", body: JSON.stringify({ targetId, currentPassword }) }),
   sessions: () => request<AuthSessionList>("/api/auth/sessions"),
   revokeSession: (id: number) => request<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
   revokeOtherSessions: () => request<{ ok: true; revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" }),
   securityEvents: (before?: number) => request<SecurityEventPage>(`/api/auth/security-events?limit=50${before ? `&before=${before}` : ""}`),
+  backups: () => request<BackupState>("/api/backups"),
+  saveBackupSettings: (body: BackupSettings) => request<BackupState>("/api/backups/settings", { method: "PUT", body: JSON.stringify(body) }),
+  runBackup: () => request<{ jobId: number }>("/api/backups/run", { method: "POST" }),
   appVersion: (refresh = false) => request<AppVersionInfo>(`/api/system/version${refresh ? "?refresh=true" : ""}`),
   getPaths: () => request<PathsSettings>("/api/settings/paths"),
   getStorageLocations: () => request<StorageLocationsSettings>("/api/settings/storage-locations"),
@@ -179,8 +193,13 @@ export const api = {
   damagedFiles: () => request<DamagedFileRow[]>("/api/damaged-files"),
   damagedFilesCsvUrl: "/api/damaged-files.csv",
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
-  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode }) =>
+  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
+  deleteDamagedFiles: (body: { storageFileIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
+    request<{ jobId: number }>("/api/damaged-files/delete", { method: "POST", body: JSON.stringify(body) }),
+  reRequests: () => request<ReRequestList>("/api/re-requests"),
+  previewReRequests: (storageFileIds: number[]) => request<ReRequestPreview>("/api/re-requests/preview", { method: "POST", body: JSON.stringify({ storageFileIds }) }),
+  retryReRequests: (ids: number[] | "all_failed") => request<{ retried: number }>("/api/re-requests/retry", { method: "POST", body: JSON.stringify({ ids }) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>
     request<{ restored: number; errors: string[] }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),

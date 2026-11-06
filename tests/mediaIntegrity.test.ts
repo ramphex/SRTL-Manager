@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { runFfmpegWithProgress } from "../src/server/lib/copier";
-import { containerSignatureMatches, evaluateFfmpegValidation, inspectMediaContent, isHollowAllocation, probeMedia, type MediaProber } from "../src/server/lib/mediaIntegrity";
+import { containerSignatureMatches, evaluateFfmpegValidation, inspectMediaContent, isHollowAllocation, matroskaDeclaredEnd, maximumMatroskaShortfallBytes, probeMedia, readMatroskaTail, type MatroskaTail, type MediaProber } from "../src/server/lib/mediaIntegrity";
 
 const mkvHeader = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
 const healthyProbe: MediaProber = async () => ({ ok: true, error: "", durationSeconds: 60, streamTypes: ["video", "audio"] });
@@ -135,6 +135,141 @@ describe("ffmpeg validation evaluation", () => {
     expect(evaluateFfmpegValidation({ ...healthy, stderr: Array.from({ length: 11 }, (_, index) => `[h264 @ 0x1] error while decoding MB ${index} 1`).join("\n") }).output).toContain("11 damaged packet or decoding errors");
     expect(evaluateFfmpegValidation({ ...healthy, reachedSeconds: 300 }).output).toContain("the file is truncated");
     expect(evaluateFfmpegValidation({ ...healthy, stderr: "[earlier command output truncated]\nlast line" }).status).toBe("fail");
+  });
+});
+
+describe("short Matroska tails", () => {
+  const premature = "[matroska,webm @ 0x1] File ended prematurely";
+  const matroskaTail: MatroskaTail = { missingBytes: 48, sizeBytes: 1_000_000, durationSeconds: 600 };
+  const shortTail = { exitCode: 0, stderr: premature, reachedSeconds: 599.5, durationSeconds: null, matroskaTail };
+  const withTail = (tail: Partial<MatroskaTail>) => ({ ...shortTail, matroskaTail: { ...matroskaTail, ...tail } });
+
+  it("reads the declared end from the Segment size", () => {
+    const ebml = [0x1a, 0x45, 0xdf, 0xa3, 0x82, 0x42, 0x86];
+    const segmentId = [0x18, 0x53, 0x80, 0x67];
+    expect(matroskaDeclaredEnd(Buffer.from([...ebml, ...segmentId, 0x01, 0, 0, 0, 0, 0, 0x10, 0x00]))).toBe(ebml.length + 4 + 8 + 4096);
+    expect(matroskaDeclaredEnd(Buffer.from([...ebml, ...segmentId, 0x40 | 0x10, 0x00]))).toBe(ebml.length + 4 + 2 + 4096);
+  });
+
+  it("finds no declared end for unknown sizes, other containers, and cut-off headers", () => {
+    const ebml = [0x1a, 0x45, 0xdf, 0xa3, 0x82, 0x42, 0x86];
+    const segmentId = [0x18, 0x53, 0x80, 0x67];
+    expect(matroskaDeclaredEnd(Buffer.from([...ebml, ...segmentId, 0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]))).toBeNull();
+    expect(matroskaDeclaredEnd(Buffer.from([...ebml, ...segmentId, 0xff]))).toBeNull();
+    expect(matroskaDeclaredEnd(Buffer.from("\0\0\0\x20ftypisom\0\0\0\0"))).toBeNull();
+    expect(matroskaDeclaredEnd(Buffer.from([...ebml, 0x1f, 0x43, 0xb6, 0x75, 0x81, 0x00]))).toBeNull();
+    expect(matroskaDeclaredEnd(Buffer.from(ebml))).toBeNull();
+  });
+
+  it("accepts up to the limit with a warning naming the missing bytes, and fails one byte over", () => {
+    const atLimit = evaluateFfmpegValidation(withTail({ missingBytes: maximumMatroskaShortfallBytes }));
+    expect(maximumMatroskaShortfallBytes).toBe(16 * 1024);
+    expect(atLimit.status).toBe("pass");
+    expect(atLimit.warning).toContain("16384 bytes shorter");
+    expect(evaluateFfmpegValidation(withTail({ missingBytes: 1 })).warning).toContain("1 byte shorter");
+    expect(evaluateFfmpegValidation(withTail({ missingBytes: maximumMatroskaShortfallBytes + 1 }))).toEqual({ status: "fail", output: premature });
+  });
+
+  it("accepts the message with or without a position, as long as it is the end of the file", () => {
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: "[matroska,webm @ 0x1] File ended prematurely at pos. 1000000 (0xf4240)" }).status).toBe("pass");
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: "[matroska,webm @ 0x1] File ended prematurely at pos. 999000 (0xf3e58)" }).status).toBe("fail");
+  });
+
+  it("still fails when nothing is missing or the file is not a known-size Matroska", () => {
+    expect(evaluateFfmpegValidation(withTail({ missingBytes: 0 })).status).toBe("fail");
+    expect(evaluateFfmpegValidation(withTail({ missingBytes: -10 })).status).toBe("fail");
+    expect(evaluateFfmpegValidation({ ...shortTail, matroskaTail: null })).toEqual({ status: "fail", output: premature });
+    expect(evaluateFfmpegValidation({ ...shortTail, matroskaTail: undefined }).status).toBe("fail");
+  });
+
+  it("still fails alongside a second fatal message, a damage burst, or a bad exit", () => {
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: `${premature}\n[matroska,webm @ 0x1] Element at 0x10 ending at 0x20 exceeds containing master element ending at 0x18` })).toEqual({ status: "fail", output: premature });
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: `[matroska,webm @ 0x1] 0x00 at pos. 5 invalid as first byte of an EBML number\n${premature}` }).status).toBe("fail");
+    const burst = Array.from({ length: 11 }, (_, index) => `[h264 @ 0x1] error while decoding MB ${index} 1`).join("\n");
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: `${burst}\n${premature}` })).toEqual({ status: "fail", output: premature });
+    expect(evaluateFfmpegValidation({ ...shortTail, exitCode: 1 }).status).toBe("fail");
+    expect(evaluateFfmpegValidation({ ...shortTail, stderr: `[earlier command output truncated]\n${premature}` }).status).toBe("fail");
+  });
+
+  it("tolerates a little damage next to the short tail", () => {
+    const result = evaluateFfmpegValidation({ ...shortTail, stderr: `[h264 @ 0x1] error while decoding MB 1 1\n${premature}` });
+    expect(result.status).toBe("pass");
+    expect(result.warning).toContain("48 bytes shorter");
+  });
+
+  it("still fails when the stream fell short or the distance read is unknown", () => {
+    expect(evaluateFfmpegValidation({ ...shortTail, reachedSeconds: 300 })).toEqual({ status: "fail", output: premature });
+    expect(evaluateFfmpegValidation({ ...shortTail, reachedSeconds: null }).status).toBe("fail");
+    expect(evaluateFfmpegValidation(withTail({ durationSeconds: null })).status).toBe("fail");
+  });
+
+  it("never warns on a file ffmpeg had nothing to say about", () => {
+    const clean = evaluateFfmpegValidation({ ...shortTail, stderr: "" });
+    expect(clean.status).toBe("pass");
+    expect(clean.warning).toBeUndefined();
+  });
+});
+
+describe.runIf(hasFfmpeg)("real truncated Matroska files", () => {
+  let complete: Buffer;
+  let unknownSize: string;
+
+  // Cues at the front leave a cluster at the very end, which is what the affected files look like when cut.
+  beforeAll(async () => {
+    const sourceArgs = ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-f", "lavfi", "-i", "sine=frequency=440", "-t", "20", "-c:v", "mpeg4", "-q:v", "3", "-c:a", "aac"];
+    const known = path.join(root, "tail-source.mkv");
+    execFileSync("ffmpeg", [...sourceArgs, "-cues_to_front", "1", "-reserve_index_space", "4096", known]);
+    complete = await fs.readFile(known);
+    const stream = execFileSync("ffmpeg", [...sourceArgs, "-f", "matroska", "pipe:1"], { maxBuffer: 64 * 1024 * 1024 });
+    unknownSize = await writeFile("tail-unknown-size.mkv", stream.subarray(0, stream.length - 100));
+  });
+
+  function cut(name: string, bytes: number): Promise<string> {
+    return writeFile(name, complete.subarray(0, complete.length - bytes));
+  }
+
+  it("passes the complete file without a warning", async () => {
+    const filePath = await cut("tail-complete.mkv", 0);
+    const result = await runFfmpegWithProgress("fast", filePath);
+    expect(result.status).toBe("pass");
+    expect(result.warning).toBeUndefined();
+  });
+
+  it("accepts a small cut in both validation modes and reads the shortfall from the header", async () => {
+    const filePath = await cut("tail-small.mkv", 3862);
+    expect(await readMatroskaTail(filePath)).toMatchObject({ missingBytes: 3862, sizeBytes: complete.length - 3862 });
+    for (const mode of ["fast", "deep"] as const) {
+      const result = await runFfmpegWithProgress(mode, filePath);
+      expect(result.status).toBe("pass");
+      expect(result.warning).toContain("3862 bytes shorter");
+    }
+  });
+
+  it("draws the limit at the constant: exactly at it passes and one byte more fails", async () => {
+    const atLimit = await runFfmpegWithProgress("fast", await cut("tail-at-limit.mkv", maximumMatroskaShortfallBytes));
+    expect(atLimit.status).toBe("pass");
+    expect(atLimit.warning).toContain(`${maximumMatroskaShortfallBytes} bytes shorter`);
+    const overLimit = await runFfmpegWithProgress("fast", await cut("tail-over-limit.mkv", maximumMatroskaShortfallBytes + 1));
+    expect(overLimit.status).toBe("fail");
+    expect(overLimit.output).toContain("File ended prematurely");
+  });
+
+  it("keeps failing a cut segment whose size is unknown", async () => {
+    expect(await readMatroskaTail(unknownSize)).toBeNull();
+    const result = await runFfmpegWithProgress("fast", unknownSize);
+    expect(result.status).toBe("fail");
+    expect(result.output).toContain("File ended prematurely");
+  });
+
+  it("gives a cut file in another container no allowance", async () => {
+    const mp4 = path.join(root, "tail-source.mp4");
+    execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24", "-t", "20", "-c:v", "mpeg4", "-q:v", "3", "-movflags", "+faststart", mp4]);
+    const content = await fs.readFile(mp4);
+    const filePath = await writeFile("tail-cut.mp4", content.subarray(0, content.length - maximumMatroskaShortfallBytes));
+    expect(await readMatroskaTail(filePath)).toBeNull();
+    const result = await runFfmpegWithProgress("fast", filePath);
+    expect(result.status).toBe("fail");
+    expect(result.warning).toBeUndefined();
   });
 });
 

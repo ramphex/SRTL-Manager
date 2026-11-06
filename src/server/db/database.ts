@@ -7,6 +7,8 @@ import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
+import { applyBackupMigration } from "./backupMigration";
+import { applyAccountsMigration } from "./accountsMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -28,7 +30,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 26;
+export const currentSchemaVersion = 29;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -860,6 +862,75 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // Stored Plex tokens and Jellyfin, Radarr and Sonarr API keys are sealed with the secret key.
         await encryptStoredSecrets(client, activeSecretBox(), nowIso());
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (26, 'encrypt_stored_credentials', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(27)) {
+      await client.query("BEGIN");
+      try {
+        await applyBackupMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (27, 'database_backups', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(28)) {
+      await client.query("BEGIN");
+      try {
+        await applyAccountsMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (28, 'accounts_and_roles', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(29)) {
+      await client.query("BEGIN");
+      try {
+        // A new table and one defaulted column; existing purges and held files are untouched.
+        await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS removed_links TEXT NOT NULL DEFAULT '[]'`);
+        await client.query(`CREATE TABLE IF NOT EXISTS re_requests (
+          id SERIAL PRIMARY KEY,
+          job_id INTEGER NOT NULL,
+          operation_id INTEGER NOT NULL,
+          section TEXT NOT NULL,
+          item_name TEXT NOT NULL,
+          file_names TEXT NOT NULL DEFAULT '[]',
+          was_linked BOOLEAN NOT NULL DEFAULT false,
+          display_name TEXT NOT NULL,
+          service TEXT,
+          instance_id TEXT,
+          instance_name TEXT,
+          arr_item_id INTEGER,
+          title TEXT,
+          episodes TEXT,
+          status TEXT NOT NULL,
+          message TEXT,
+          previous_monitored BOOLEAN,
+          command_id INTEGER,
+          attempts INTEGER NOT NULL DEFAULT 0,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL,
+          requested_at TEXT
+        )`);
+        await client.query(`DO $$ BEGIN
+          IF to_regclass('public.jobs') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 're_requests_job_fk') THEN
+            ALTER TABLE re_requests ADD CONSTRAINT re_requests_job_fk FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE;
+          END IF;
+          IF to_regclass('public.orphan_purge_operations') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 're_requests_operation_fk') THEN
+            ALTER TABLE re_requests ADD CONSTRAINT re_requests_operation_fk FOREIGN KEY (operation_id) REFERENCES orphan_purge_operations(id) ON DELETE CASCADE;
+          END IF;
+        END $$`);
+        await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS re_requests_operation_idx ON re_requests (operation_id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS re_requests_status_idx ON re_requests (status, instance_id, id)`);
+        await client.query(`CREATE INDEX IF NOT EXISTS re_requests_instance_requested_idx ON re_requests (instance_id, requested_at)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (29, 're_requests', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

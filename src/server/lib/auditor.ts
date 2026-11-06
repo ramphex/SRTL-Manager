@@ -9,6 +9,7 @@ import { describeInspectionFailure, inspectMediaContent, type MediaInspection } 
 export interface CommandResult {
   status: "pass" | "fail";
   output: string;
+  warning?: string;
 }
 
 export interface AuditCommandRunner {
@@ -22,7 +23,7 @@ export interface AuditLinkResult {
   linkPath: string;
   targetPath: string;
   sourcePath: string | null;
-  status: "pass" | "fail" | "source_issue";
+  status: "pass" | "warning" | "fail" | "source_issue";
   ffmpegStatus: "pass" | "fail";
   cmpStatus: "pass" | "fail" | "source_unknown" | "source_missing" | "source_error" | "skipped";
   message: string;
@@ -180,6 +181,7 @@ export async function auditMediaLink(
     };
   }
 
+  const withWarning = (message: string) => (ffmpeg.warning ? `${message}. ${ffmpeg.warning}` : message);
   if (cmpStatus === "source_missing" || cmpStatus === "source_error") {
     return {
       linkPath: link.linkPath,
@@ -188,7 +190,7 @@ export async function auditMediaLink(
       status: "source_issue",
       ffmpegStatus: "pass",
       cmpStatus,
-      message: cmpMessage
+      message: withWarning(cmpMessage)
     };
   }
 
@@ -196,9 +198,9 @@ export async function auditMediaLink(
     linkPath: link.linkPath,
     targetPath: link.targetPath,
     sourcePath,
-    status: "pass",
+    status: ffmpeg.warning ? "warning" : "pass",
     ffmpegStatus: "pass",
     cmpStatus,
-    message: cmpStatus === "pass" ? "Passed ffmpeg and byte compare" : cmpStatus === "skipped" ? "Passed ffmpeg; byte compare skipped" : "Passed ffmpeg; source unknown"
+    message: withWarning(cmpStatus === "pass" ? "Passed ffmpeg and byte compare" : cmpStatus === "skipped" ? "Passed ffmpeg; byte compare skipped" : "Passed ffmpeg; source unknown")
   };
 }

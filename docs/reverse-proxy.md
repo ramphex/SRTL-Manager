@@ -102,7 +102,7 @@ What each part does:
 
 - **`client_max_body_size 70m`** is the proxy's own ceiling. nginx defaults to 1 MB, which would break watch sync restores and very large copy or purge selections (SRTL accepts up to 4 MB for those, and 64 MB for a restore). SRTL enforces its own smaller limits on everything else.
 - **The event stream** needs buffering off and a long read timeout. Without them the page shows "reconnecting" every minute, because nginx closes an idle upstream after 60 seconds by default and buffers small events until they pile up. SRTL already sends `X-Accel-Buffering: no`, so buffering is usually off anyway; the block also sets the timeout and turns off gzip.
-- **`/api/health` and `/api/health/ready`** show worker state. SRTL already refuses them unless the request is a direct local one or comes from a signed-in admin, and blocking them at the proxy adds a second layer. `/api/health/live` is left alone: it returns only that the service is running. Docker's own health check talks to the container directly and is not affected.
+- **`/api/health` and `/api/health/ready`** show worker state. SRTL already refuses them unless the request is a direct local one or comes from a signed-in account, and blocking them at the proxy adds a second layer. `/api/health/live` is left alone: it returns only that the service is running. Docker's own health check talks to the container directly and is not affected.
 - **`/documentation`** is the OpenAPI page. It is off unless `SRTL_API_DOCS=true`; the block makes sure it stays off the internet even if someone turns it on.
 
 ### 3. Optional: an edge limit on sign-in
@@ -325,8 +325,8 @@ Traefik streams server-sent events without extra settings. Set `SRTL_TRUST_PROXY
 Work through this list in order. Each item is something that has gone wrong on real installs.
 
 **Create the account first**
-- [ ] Open SRTL on your LAN and finish first-run setup, so the administrator account exists before the address is public. Setup needs the one-time setup token from the API log (`docker compose logs api`), but finishing it first leaves nothing to guess.
-- [ ] Use a long, unique password for the SRTL administrator (at least 12 characters). Do not reuse your Authentik or media server password.
+- [ ] Open SRTL on your LAN and finish first-run setup, so the owner account exists before the address is public. Setup needs the one-time setup token from the API log (`docker compose logs api`), but finishing it first leaves nothing to guess.
+- [ ] Use a long, unique password for every SRTL account (at least 12 characters). Do not reuse your Authentik or media server password.
 
 **SRTL settings** (in `.env`, then `docker compose up -d`)
 - [ ] `SRTL_PUBLIC_ORIGIN=https://srtl.example.com` (secure cookies follow from it).
@@ -359,7 +359,7 @@ Work through this list in order. Each item is something that has gone wrong on r
 **Afterwards**
 - [ ] Treat database dumps and the `data` folder as secrets. Media server tokens and Radarr and Sonarr API keys are stored encrypted with `SRTL_SECRET_KEY`, so keep the key apart from the dumps, and keep both off shared storage.
 - [ ] Watch the SRTL [releases](https://github.com/ramphex/SRTL-Manager/releases) and update when a security fix ships.
-- [ ] Review account activity from time to time. Settings > User settings lists open sessions and a security activity log of sign-ins, failures, lockouts, account changes, removed media servers and stopped streams. `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, and stopped streams, with who, when and the item IDs.
+- [ ] Review account activity from time to time. Settings > User settings lists open sessions and a security activity log of sign-ins, failures, lockouts, account changes, removed media servers and stopped streams. `GET /api/system/action-audit` (signed in) lists copies, purges, discarded partial copies, removed servers and instances, stopped streams, and database backup settings changes and manual runs, with who, when and the item IDs.
 - [ ] Decide how long you keep proxy and SRTL logs. They contain client addresses, which are personal data.
 
 ## When something goes wrong
