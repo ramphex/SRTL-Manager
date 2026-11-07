@@ -7,12 +7,14 @@ import { createApp, type AppContext } from "../src/server/app";
 import { setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
-import { expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans } from "../src/server/jobs/orphanPurge";
+import { episodeKey, episodeKeys, expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans } from "../src/server/jobs/orphanPurge";
+import { configureExtraSymlinkFolders, extraSymlinkFolderProblems, parseExtraSymlinkFolders } from "../src/server/lib/extraSymlinkFolders";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import type { PathsSettings } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
+import { recordSymlinkScan } from "./scanFixtures";
 
 let app: AppContext;
 let database: TestDatabaseHandle;
@@ -65,6 +67,8 @@ async function mediaLink(section: string, itemName: string, fileName: string, ta
   return row!;
 }
 
+const completedSymlinkScan = (options: Parameters<typeof recordSymlinkScan>[1] = {}) => recordSymlinkScan(app.database.db, options);
+
 async function runJobs(): Promise<void> {
   const worker = new JobWorker(app.database.db, { workerId: "orphan-test", logger: quietLogger });
   while (await worker.runOnce()) {
@@ -87,9 +91,11 @@ beforeEach(async () => {
   app.app.log.level = "silent";
   await markOnboardingCompleteForExistingInstall(app.database.db);
   await persistSectionSettings(app.database.db, { sections: ["movies", "shows"], sectionTypes: { movies: "movies", shows: "shows" } });
+  await completedSymlinkScan();
 });
 
 afterEach(async () => {
+  configureExtraSymlinkFolders([]);
   await app?.app.close();
   await database?.cleanup();
   await fs.rm(root, { recursive: true, force: true });
@@ -124,6 +130,380 @@ describe("orphan review", () => {
     expect(local.staleWarning).toBeNull();
     const remote = await listOrphanReview(app.database.db, "remote", 7);
     expect(remote.items.find((item) => item.storageFileId === leftover.id)?.category).toBe("copy_leftover");
+  });
+});
+
+describe("symlink inventory freshness", () => {
+  const anHourAgo = () => new Date(Date.now() - 3_600_000);
+  const threeDaysAgo = () => new Date(Date.now() - 3 * 86_400_000);
+
+  async function setUpOrphan() {
+    await app.database.db.delete(schema.scanRuns);
+    const linked = await storageFile("local", "movies/Stale (2001)/Stale (2001).mkv");
+    await mediaLink("movies", "Stale (2001)", "Stale (2001).mkv", linked.filePath, threeDaysAgo().toISOString());
+    return storageFile("local", "movies/Gone (1999)/Gone (1999).mkv");
+  }
+
+  it("does not let a rescan of one title make the rest of its section look scanned", async () => {
+    const orphan = await setUpOrphan();
+    await completedSymlinkScan({ sections: ["movies"], startedAt: threeDaysAgo() });
+    const rescanned = await storageFile("local", "movies/Rescanned (2002)/Rescanned (2002).mkv");
+    await mediaLink("movies", "Rescanned (2002)", "Rescanned (2002).mkv", rescanned.filePath);
+    await completedSymlinkScan({ sections: ["movies"], startedAt: anHourAgo(), titleScopes: [{ section: "movies", itemName: "Rescanned (2002)" }] });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow(/last complete symlink scan of movies started more than 24 hours ago.*Run a full symlink scan/);
+    expect((await listOrphanReview(app.database.db, "local", 7)).staleWarning).toContain("A rescan of a single title does not count");
+  });
+
+  it("does not count scans that failed, were cancelled, or skipped symlinks", async () => {
+    const orphan = await setUpOrphan();
+    await completedSymlinkScan({ status: "failed", sections: ["movies"], startedAt: anHourAgo() });
+    await completedSymlinkScan({ status: "cancelled", sections: ["movies"], startedAt: anHourAgo() });
+    await completedSymlinkScan({ scanSymlinks: false, sections: ["movies"], startedAt: anHourAgo() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow(/No complete symlink scan has finished for movies/);
+  });
+
+  it("needs every section with links scanned, separately or together", async () => {
+    const orphan = await setUpOrphan();
+    const episode = await storageFile("local", "shows/Show (2001)/Season 01/Show (2001) - S01E01.mkv");
+    await mediaLink("shows", "Show (2001)", "Season 01/Show (2001) - S01E01.mkv", episode.filePath);
+    await completedSymlinkScan({ sections: ["movies"], startedAt: anHourAgo() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow(/No complete symlink scan has finished for shows/);
+    await completedSymlinkScan({ sections: ["shows"], startedAt: threeDaysAgo() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow(/of shows started more than 24 hours ago/);
+    await completedSymlinkScan({ sections: ["shows"], startedAt: anHourAgo() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).resolves.toEqual(expect.any(Number));
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    expect(review.staleWarning).toBeNull();
+    expect(Date.now() - Date.parse(review.symlinkInventoryAt!)).toBeLessThan(2 * 3_600_000);
+  });
+
+  it("judges a scan by when it started, since links made during it may not have been seen", async () => {
+    const orphan = await setUpOrphan();
+    await completedSymlinkScan({ sections: ["movies"], startedAt: new Date(Date.now() - 25 * 3_600_000), finishedAt: new Date() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow("more than 24 hours ago");
+  });
+
+  it("does not let a section with no links hold purges up, unless its folder holds something unscanned", async () => {
+    const orphan = await setUpOrphan();
+    await completedSymlinkScan({ sections: ["movies"], startedAt: anHourAgo() });
+    // The shows section has no links and no folder.
+    expect((await listOrphanReview(app.database.db, "local", 7)).staleWarning).toBeNull();
+    await fs.mkdir(path.join(paths.symlinkDir, "shows"), { recursive: true });
+    expect((await listOrphanReview(app.database.db, "local", 7)).staleWarning).toBeNull();
+    // A new section can be full of links nobody has scanned yet, and those files would look like orphans.
+    await fs.mkdir(path.join(paths.symlinkDir, "shows/Unscanned (2003)"));
+    await fs.symlink(orphan.filePath, path.join(paths.symlinkDir, "shows/Unscanned (2003)/link.mkv"));
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow(/No complete symlink scan has finished for shows/);
+    await completedSymlinkScan({ sections: ["shows"], startedAt: anHourAgo() });
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).resolves.toEqual(expect.any(Number));
+  });
+
+  it("ignores links left in a section that is no longer configured", async () => {
+    const orphan = await setUpOrphan();
+    await completedSymlinkScan({ sections: ["movies"], startedAt: anHourAgo() });
+    await mediaLink("archive", "Old (1980)", "Old (1980).mkv", path.join(paths.localDir, "archive/Old (1980)/Old (1980).mkv"), threeDaysAgo().toISOString());
+    await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).resolves.toEqual(expect.any(Number));
+  });
+});
+
+describe("episode keys", () => {
+  it("reads single and multi-episode names", () => {
+    expect(episodeKeys("Show - S01E02 [WEBDL-1080p].mkv")).toEqual(["s1e2"]);
+    expect(episodeKeys("Show - S01E01E02.mkv")).toEqual(["s1e1", "s1e2"]);
+    expect(episodeKeys("Show - s01e01-e03.mkv")).toEqual(["s1e1", "s1e2", "s1e3"]);
+    expect(episodeKeys("Show - S01E01-02.mkv")).toEqual(["s1e1", "s1e2"]);
+    expect(episodeKeys("Show - S01E01-1080p.mkv")).toEqual(["s1e1"]);
+    expect(episodeKeys("Show - S1941E38.mkv")).toEqual(["s1941e38"]);
+    expect(episodeKeys("Show - S01E01-E99.mkv")).toEqual(["s1e1"]);
+    expect(episodeKeys("Movie (2001) [Bluray-1080p].mkv")).toEqual([]);
+    expect(episodeKey("Show - S01E01E02.mkv")).toBe("s1e1");
+    expect(episodeKey("Movie (2001).mkv")).toBeNull();
+  });
+});
+
+describe("orphan review labels", () => {
+  async function libraryTitle(section: string, itemName: string, fileName = `${itemName}.mkv`) {
+    const file = await storageFile("local", `${section}/${itemName}/${fileName}`, { content: "x".repeat(1000) });
+    await mediaLink(section, itemName, fileName, file.filePath);
+    await app.database.db.update(schema.mediaLinks).set({ sizeBytes: 1000 }).where(eq(schema.mediaLinks.targetPath, file.filePath));
+    return file;
+  }
+  const findItem = (items: Awaited<ReturnType<typeof listOrphanReview>>["items"], id: number) => items.find((item) => item.storageFileId === id);
+
+  it("splits remote unlinked files by whether the release name looks like a library title, keeping the category", async () => {
+    await libraryTitle("movies", "Alpha Bravo (2020)");
+    const match = await storageFile("remote", "Alpha.Bravo.2020.1080p.WEB-DL.x264-GRP/Alpha.Bravo.2020.1080p.mkv");
+    const otherYear = await storageFile("remote", "Alpha.Bravo.1990.1080p.BluRay.x264-GRP/file.mkv");
+    const noMatch = await storageFile("remote", "Charlie.Delta.2015.720p.WEB-DL-GRP/file.mkv");
+    const lone = await storageFile("remote", "Alpha.Bravo.2020.2160p.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, match.id)).toMatchObject({ category: "unlinked", label: "title_in_library", matchedTitle: "Alpha Bravo (2020)", releaseName: "Alpha.Bravo.2020.1080p.WEB-DL.x264-GRP" });
+    expect(findItem(review.items, otherYear.id)).toMatchObject({ category: "unlinked", label: "no_title_match", matchedTitle: null });
+    expect(findItem(review.items, noMatch.id)).toMatchObject({ category: "unlinked", label: "no_title_match" });
+    expect(findItem(review.items, lone.id)).toMatchObject({ label: "title_in_library", releaseName: "Alpha.Bravo.2020.2160p" });
+    expect(review.summary).toEqual([expect.objectContaining({ category: "unlinked", count: 4 })]);
+    expect(review.labelSummary).toEqual([expect.objectContaining({ label: "title_in_library", count: 2 }), expect.objectContaining({ label: "no_title_match", count: 2 })]);
+  });
+
+  it("tells a release whose title is in the library apart when its episode is not linked, without changing what can be purged", async () => {
+    await libraryTitle("shows", "Lima (2016)", "Season 01/Lima (2016) - S01E01.mkv");
+    const linkedEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E01.mkv");
+    const unlinkedEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E02.mkv");
+    const partly = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E01E02.mkv");
+    const noEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.Extras.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, linkedEpisode.id)).toMatchObject({ category: "unlinked", label: "title_in_library", matchedTitle: "Lima (2016)", protectedReason: null });
+    expect(findItem(review.items, unlinkedEpisode.id)).toMatchObject({ category: "unlinked", label: "episode_not_linked", matchedTitle: "Lima (2016)", protectedReason: null });
+    expect(findItem(review.items, partly.id)).toMatchObject({ label: "episode_not_linked" });
+    expect(findItem(review.items, noEpisode.id)).toMatchObject({ label: "title_in_library" });
+    expect(review.labelSummary.find((entry) => entry.label === "episode_not_linked")).toMatchObject({ count: 2, purgeableCount: 2 });
+    await expect(app.jobs.startOrphanPurge("remote", [unlinkedEpisode.id], "delete")).resolves.toEqual(expect.any(Number));
+  });
+
+  it("checks every library title with the same name for an episode", async () => {
+    await libraryTitle("shows", "Mike (1999)", "Season 01/Mike (1999) - S01E01.mkv");
+    await libraryTitle("shows", "Mike (2015)", "Season 01/Mike (2015) - S01E02.mkv");
+    const inFirst = await storageFile("remote", "Mike.S01.1080p/Mike.S01E01.mkv");
+    const inSecond = await storageFile("remote", "Mike.S01.1080p/Mike.S01E02.mkv");
+    const inNeither = await storageFile("remote", "Mike.S01.1080p/Mike.S01E03.mkv");
+    // The year says which one it is, so the other title's episodes do not count.
+    const dated = await storageFile("remote", "Mike.2015.S01.1080p/Mike.2015.S01E01.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, inFirst.id)).toMatchObject({ label: "title_in_library", matchedTitle: "Mike (1999)" });
+    expect(findItem(review.items, inSecond.id)).toMatchObject({ label: "title_in_library" });
+    expect(findItem(review.items, inNeither.id)).toMatchObject({ label: "episode_not_linked" });
+    expect(findItem(review.items, dated.id)).toMatchObject({ label: "episode_not_linked", matchedTitle: "Mike (2015)" });
+  });
+
+  it("checks titles in different sections separately", async () => {
+    await persistSectionSettings(app.database.db, { sections: ["movies", "shows", "shows4k"], sectionTypes: { movies: "movies", shows: "shows", shows4k: "shows" } });
+    await recordSymlinkScan(app.database.db);
+    await libraryTitle("shows4k", "November (2017)", "Season 01/November (2017) - S01E04.mkv");
+    await libraryTitle("shows", "November (2017)", "Season 01/November (2017) - S01E05.mkv");
+    const inOne = await storageFile("remote", "November.2017.S01/November.2017.S01E04.mkv");
+    expect(findItem((await listOrphanReview(app.database.db, "remote", 7)).items, inOne.id)).toMatchObject({ label: "title_in_library" });
+  });
+
+  it("does not expect episodes from a title in a movies section", async () => {
+    await libraryTitle("movies", "Oscar Papa (2018)");
+    const file = await storageFile("remote", "Oscar.Papa.2018.1080p/Oscar.Papa.S01E01.mkv");
+    expect(findItem((await listOrphanReview(app.database.db, "remote", 7)).items, file.id)).toMatchObject({ label: "title_in_library" });
+  });
+
+  it("shows whether nothing in a release is linked or only part of it", async () => {
+    const linked = await storageFile("remote", "Pack.S01.1080p/Pack.S01E01.mkv");
+    await mediaLink("shows", "Pack (2010)", "Season 01/Pack.S01E01.mkv", linked.filePath);
+    const packed = await storageFile("remote", "Pack.S01.1080p/Pack.S01E02.mkv");
+    const packedTwo = await storageFile("remote", "Pack.S01.1080p/Pack.S01E03.mkv");
+    const whole = await storageFile("remote", "Other.S02.1080p/Other.S02E01.mkv");
+    const wholeTwo = await storageFile("remote", "Other.S02.1080p/Other.S02E02.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    for (const file of [packed, packedTwo]) expect(findItem(review.items, file.id)).toMatchObject({ releaseStatus: "partly_linked", releaseFileCount: 3, releaseLinkedCount: 1 });
+    for (const file of [whole, wholeTwo]) expect(findItem(review.items, file.id)).toMatchObject({ releaseStatus: "none_linked", releaseFileCount: 2, releaseLinkedCount: 0 });
+  });
+
+  it("does not treat files loose in a virtual folder as one release", async () => {
+    const linked = await storageFile("remote", "__all__/Echo.2001.mkv");
+    await mediaLink("movies", "Echo (2001)", "Echo (2001).mkv", linked.filePath);
+    const loose = await storageFile("remote", "__all__/Foxtrot.2002.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, loose.id)).toMatchObject({ releaseStatus: "none_linked", releaseName: "Foxtrot.2002", releaseFileCount: 1 });
+  });
+
+  it("compares a superseded file's size with the linked file, and flags only larger ones", async () => {
+    await libraryTitle("movies", "Golf (2011)");
+    const larger = await storageFile("local", "movies/Golf (2011)/Golf (2011) Larger.mkv", { content: "x".repeat(4000) });
+    const smaller = await storageFile("local", "movies/Golf (2011)/Golf (2011) Smaller.mkv", { content: "x".repeat(10) });
+    const same = await storageFile("local", "movies/Golf (2011)/Golf (2011) Same.mkv", { content: "x".repeat(1000) });
+    const elsewhere = await storageFile("local", "movies/Hotel (2012)/Hotel (2012).mkv");
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    expect(findItem(review.items, larger.id)).toMatchObject({ category: "superseded", linkedSizeBytes: 1000, sizeComparison: "larger" });
+    expect(findItem(review.items, smaller.id)).toMatchObject({ linkedSizeBytes: 1000, sizeComparison: "smaller" });
+    expect(findItem(review.items, same.id)).toMatchObject({ linkedSizeBytes: 1000, sizeComparison: "same" });
+    expect(findItem(review.items, elsewhere.id)).toMatchObject({ category: "not_in_library", linkedSizeBytes: null, sizeComparison: null });
+  });
+
+  it("uses the stored file's size when the link has none recorded", async () => {
+    const file = await libraryTitle("movies", "India (2013)");
+    await app.database.db.update(schema.mediaLinks).set({ sizeBytes: null, resolvedStorageFileId: file.id }).where(eq(schema.mediaLinks.targetPath, file.filePath));
+    const larger = await storageFile("local", "movies/India (2013)/India (2013) Larger.mkv", { content: "x".repeat(2000) });
+    expect(findItem((await listOrphanReview(app.database.db, "local", 7)).items, larger.id)).toMatchObject({ linkedSizeBytes: 1000, sizeComparison: "larger" });
+  });
+
+  it("only calls a multi-episode file superseded when every episode it holds is linked", async () => {
+    await libraryTitle("shows", "Juliet (2014)", "Season 01/Juliet (2014) - S01E01.mkv");
+    const partly = await storageFile("local", "shows/Juliet (2014)/Season 01/Juliet (2014) - S01E01E02.mkv");
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    // Deleting it would lose the only copy of episode 2.
+    expect(findItem(review.items, partly.id)).toMatchObject({ category: "not_in_library", label: "not_in_library", episodeCoverage: { linked: 1, total: 2 }, linkedSizeBytes: null });
+
+    await libraryTitle("shows", "Juliet (2014)", "Season 01/Juliet (2014) - S01E02.mkv");
+    const covered = await listOrphanReview(app.database.db, "local", 7);
+    expect(findItem(covered.items, partly.id)).toMatchObject({ category: "superseded", episodeCoverage: { linked: 2, total: 2 }, linkedSizeBytes: 2000 });
+  });
+
+  it("sees episodes held by a multi-episode link", async () => {
+    await libraryTitle("shows", "Kilo (2015)", "Season 01/Kilo (2015) - S01E01E02.mkv");
+    const single = await storageFile("local", "shows/Kilo (2015)/Season 01/Kilo (2015) - S01E02.mkv");
+    const other = await storageFile("local", "shows/Kilo (2015)/Season 01/Kilo (2015) - S01E03.mkv");
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    expect(findItem(review.items, single.id)).toMatchObject({ category: "superseded", episodeCoverage: null, linkedSizeBytes: 1000 });
+    expect(findItem(review.items, other.id)).toMatchObject({ category: "not_in_library" });
+  });
+});
+
+describe("extra symlink folders", () => {
+  let other: string;
+
+  beforeEach(async () => {
+    other = path.join(root, "other-tool");
+    await fs.mkdir(other);
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  async function pointer(name: string, target: string) {
+    const link = path.join(other, name);
+    await fs.mkdir(path.dirname(link), { recursive: true });
+    await fs.symlink(target, link);
+    return link;
+  }
+
+  it("changes nothing when none are configured", async () => {
+    const orphan = await storageFile("remote", "Some.Release.2019/file.mkv");
+    await pointer("ignored.mkv", orphan.filePath);
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.extraSymlinks).toEqual({ folders: [], linkCount: 0, unmatchedCount: 0, problems: [] });
+    expect(review.items[0]).toMatchObject({ protectedReason: null, extraLinkPath: null });
+    expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed" });
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("shows targeted files as still linked and refuses to queue them", async () => {
+    const target = await storageFile("remote", "Target.Release.2019/file.mkv");
+    const free = await storageFile("remote", "Free.Release.2018/file.mkv");
+    const link = await pointer("nested/deeper/still/further/file.mkv", target.filePath);
+    configureExtraSymlinkFolders([other]);
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.items.find((item) => item.storageFileId === target.id)).toMatchObject({ category: "unlinked", protectedReason: `Still linked from ${link}`, extraLinkPath: link, releaseStatus: "partly_linked", releaseFileCount: 1, releaseLinkedCount: 1 });
+    expect(review.items.find((item) => item.storageFileId === free.id)).toMatchObject({ protectedReason: null, extraLinkPath: null });
+    expect(review.extraSymlinks).toEqual({ folders: [other], linkCount: 1, unmatchedCount: 0, problems: [] });
+    await expect(app.jobs.startOrphanPurge("remote", [target.id], "delete")).rejects.toThrow("Still linked from");
+    await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
+  });
+
+  it("protects everything under a link to a release folder, and resolves relative links and links to links", async () => {
+    const inFolder = await storageFile("remote", "Whole.Release.2017/file.mkv");
+    const relative = await storageFile("remote", "Relative.Release.2016/file.mkv");
+    const viaLibrary = await storageFile("remote", "Library.Release.2015/file.mkv");
+    await pointer("whole", path.dirname(inFolder.filePath));
+    await pointer("relative.mkv", path.relative(other, relative.filePath));
+    const libraryLink = await mediaLink("movies", "Library (2015)", "Library (2015).mkv", viaLibrary.filePath);
+    await pointer("chained.mkv", libraryLink.linkPath);
+    await app.database.db.update(schema.mediaLinks).set({ missingSince: new Date().toISOString() }).where(eq(schema.mediaLinks.id, libraryLink.id));
+    configureExtraSymlinkFolders([other]);
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    for (const file of [inFolder, relative, viaLibrary]) expect(review.items.find((item) => item.storageFileId === file.id)?.extraLinkPath).toEqual(expect.any(String));
+  });
+
+  it("rechecks right before each delete and leaves the file when a link has appeared", async () => {
+    const target = await storageFile("remote", "Late.Release.2019/file.mkv");
+    const free = await storageFile("remote", "Free.Release.2018/file.mkv");
+    await pointer("placeholder.mkv", free.filePath.replace("Free", "Missing"));
+    configureExtraSymlinkFolders([other]);
+    const jobId = await app.jobs.startOrphanPurge("remote", [target.id, free.id], "delete");
+    await pointer("late.mkv", target.filePath);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ progress: expect.objectContaining({ deleted: 1, failed: 1 }) });
+    await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
+    await expect(fs.stat(free.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect((await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join()).toContain("it is still in use");
+  });
+
+  it("refuses when a configured folder cannot be read, is missing, or looks unmounted, rather than treating it as empty", async () => {
+    const orphan = await storageFile("remote", "Some.Release.2019/file.mkv");
+    const missing = path.join(root, "not-there");
+    configureExtraSymlinkFolders([missing]);
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.extraSymlinks.problems.join()).toContain(`${missing} could not be read (ENOENT)`);
+    await expect(app.jobs.startOrphanPurge("remote", [orphan.id], "delete")).rejects.toThrow("Purging is refused");
+
+    configureExtraSymlinkFolders([other]);
+    expect((await listOrphanReview(app.database.db, "remote", 7)).extraSymlinks.problems.join()).toContain("is empty");
+    await expect(app.jobs.startOrphanPurge("remote", [orphan.id], "delete")).rejects.toThrow("Purging is refused");
+
+    await pointer("placeholder.mkv", "/nowhere/file.mkv");
+    const jobId = await app.jobs.startOrphanPurge("remote", [orphan.id], "delete");
+    // The folder goes away after the job was queued.
+    await fs.rm(other, { recursive: true });
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    await expect(fs.stat(orphan.filePath)).resolves.toBeTruthy();
+    expect((await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join()).toContain("could not be read");
+  });
+
+  it("counts links it cannot match to storage, without blocking on them", async () => {
+    const orphan = await storageFile("remote", "Some.Release.2019/file.mkv");
+    await pointer("other-mount.mkv", "/mnt/elsewhere/Some.Release.2019/file.mkv");
+    configureExtraSymlinkFolders([other]);
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.extraSymlinks).toMatchObject({ linkCount: 1, unmatchedCount: 1, problems: [] });
+    expect(review.items.find((item) => item.storageFileId === orphan.id)?.protectedReason).toBeNull();
+  });
+
+  it("protects leftover folders a link points into, at review and at purge", async () => {
+    const dirPath = path.join(paths.remoteDir, "Subs.Only");
+    await fs.mkdir(dirPath);
+    await fs.writeFile(path.join(dirPath, "a.srt"), "subtitle");
+    await fs.utimes(path.join(dirPath, "a.srt"), oldTime, oldTime);
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [folder] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath: "Subs.Only", fileCount: 1, totalBytes: 8, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    await pointer("placeholder.mkv", "/nowhere/file.mkv");
+    configureExtraSymlinkFolders([other]);
+    const jobId = await app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id]);
+    const link = await pointer("subtitle.srt", path.join(dirPath, "a.srt"));
+    expect((await listOrphanReview(app.database.db, "remote", 7)).leftoverFolders[0]?.protectedReason).toContain("extra symlink folder");
+    await expect(app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id])).rejects.toThrow("extra symlink folder");
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    await expect(fs.stat(dirPath)).resolves.toBeTruthy();
+    expect((await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join()).toContain(link);
+  });
+
+  it("keeps a subtitle a link points at when the last video in its folder is purged", async () => {
+    const orphan = await storageFile("remote", "Subtitled.Release.2019/file.mkv");
+    const subtitle = path.join(path.dirname(orphan.filePath), "file.en.srt");
+    await fs.writeFile(subtitle, "subtitle");
+    await pointer("subtitle.srt", subtitle);
+    configureExtraSymlinkFolders([other]);
+    expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed" });
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(subtitle, "utf8")).resolves.toBe("subtitle");
+  });
+
+  it("never writes to the folder", async () => {
+    const orphan = await storageFile("remote", "Some.Release.2019/file.mkv");
+    await pointer("placeholder.mkv", "/nowhere/file.mkv");
+    await fs.chmod(other, 0o555);
+    configureExtraSymlinkFolders([other]);
+    expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed" });
+    await fs.chmod(other, 0o755);
+    expect(await fs.readdir(other)).toEqual(["placeholder.mkv"]);
+  });
+
+  it("parses the setting and refuses folders that overlap what SRTL manages", () => {
+    expect(parseExtraSymlinkFolders(undefined)).toEqual([]);
+    expect(parseExtraSymlinkFolders(" /one/ , ,/two,/one")).toEqual(["/one", "/two"]);
+    const managed = { symlinkDir: "/links", localDir: "/local", remoteDir: "/remote" };
+    const problems = (folder: string) => extraSymlinkFolderProblems([folder], managed, ["movies"]);
+    expect(problems("/other/links")).toEqual([]);
+    // Beside the library folders, a folder under the symlink root is left alone by scans.
+    expect(problems("/links/from-other-tool")).toEqual([]);
+    expect(problems("relative/links")[0]).toContain("absolute");
+    expect(problems("/links")[0]).toContain("same as, or contain");
+    expect(problems("/")[0]).toContain("same as, or contain");
+    expect(problems("/remote/inside")[0]).toContain("inside a storage root");
+    expect(problems("/links/movies/inside")[0]).toContain("inside a library folder");
   });
 });
 
@@ -226,7 +606,8 @@ describe("orphan purge", () => {
   });
 
   it("refuses to queue a purge when the symlink inventory is stale", async () => {
-    await app.database.db.update(schema.mediaLinks).set({ lastSeenAt: new Date(Date.now() - 2 * 86_400_000).toISOString() });
+    await app.database.db.delete(schema.scanRuns);
+    await completedSymlinkScan({ startedAt: new Date(Date.now() - 2 * 86_400_000) });
     const orphan = await storageFile("local", "movies/Gone (1999)/Gone (1999).mkv");
     await expect(app.jobs.startOrphanPurge("local", [orphan.id], "delete")).rejects.toThrow("more than 24 hours ago");
   });
@@ -236,7 +617,7 @@ describe("orphan purge", () => {
     const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
     const cookie = String(setup.headers["set-cookie"]);
     const review = await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } });
-    expect(review.json().items).toEqual([expect.objectContaining({ storageFileId: remote.id, category: "unlinked" })]);
+    expect(review.json().items).toEqual([expect.objectContaining({ storageFileId: remote.id, category: "unlinked", label: "no_title_match" })]);
     const queued = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", storageFileIds: [remote.id], mode: "delete" } });
     expect(queued.statusCode).toBe(200);
     // The purge is recorded with who asked, when, and which items, and the job's own log says so too.

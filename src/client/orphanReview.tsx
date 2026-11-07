@@ -3,22 +3,36 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { Archive, Check, LoaderCircle, RotateCcw, Trash2, TriangleAlert, X } from "lucide-react";
-import type { OrphanCategory, OrphanPurgeMode, OrphanReview, OrphanReviewItem, StorageRootType } from "../shared/types";
+import type { OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, useModalLifecycle } from "./appShared";
-import { purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, planPurgeAll } from "./orphanPurgePlan";
+import { filterOrphans, purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
 import { ReRequestActivity, ReRequestOption } from "./reRequest";
 
 const pageSize = 50;
 
-const orphanCategoryLabels: Record<OrphanCategory, { label: string; detail: string }> = {
-  superseded: { label: "Older or duplicate versions", detail: "Another file of the same movie or episode is linked, usually after an upgrade." },
+const nameMatchCaveat = "This compares names only and can be wrong: titles can share a name, and unusual release names are missed.";
+
+const orphanLabels: Record<OrphanReviewLabel, { label: string; detail: string }> = {
+  superseded: { label: "Other versions of linked titles", detail: "Another file of the same movie or episode is linked. This one may be older, a duplicate, or just different, so compare its size with the linked file. A larger file is not always a better one." },
   copy_leftover: { label: "Copy leftovers", detail: "SRTL already copied this file to the other storage location." },
   not_in_library: { label: "Not in library", detail: "No symlink exists for this title or episode anymore." },
   srtl_artifact: { label: "SRTL leftovers", detail: "Temporary, kept, or backup files that SRTL created." },
-  unlinked: { label: "Unlinked", detail: "No symlink points to this file. Remote files often belong to the provider's wider library." }
+  episode_not_linked: { label: "Title is in the library, episode is not linked", detail: `The release name looks like a title in the library, but no link for that title holds this episode. Not linked does not mean missing: a title that numbers its seasons differently lands here too. Deleting this could lose an episode someone wants, so review before deleting. ${nameMatchCaveat}` },
+  title_in_library: { label: "Title is in the library", detail: `No symlink points to this file, but its release name looks like a title in the library. ${nameMatchCaveat}` },
+  no_title_match: { label: "No title match", detail: `No symlink points to this file and its release name does not look like a title in the library. The title may still be in the library under another name, so review before deleting. ${nameMatchCaveat} Remote files often belong to the provider's wider library.` }
 };
+
+const sizeComparisonLabels = { larger: "Larger than the linked file", same: "Same size as the linked file", smaller: "Smaller than the linked file" };
+
+function ReleaseSummary({ item }: { item: OrphanReviewItem }) {
+  return (
+    <span className="orphan-path">
+      Release {item.releaseName}: {item.releaseStatus === "partly_linked" ? <strong>partly linked, {formatNumber(item.releaseLinkedCount)} of {formatNumber(item.releaseFileCount)} files in use</strong> : `no file linked (${formatNumber(item.releaseFileCount)} ${item.releaseFileCount === 1 ? "file" : "files"})`}
+    </span>
+  );
+}
 
 function fileName(item: OrphanReviewItem): string {
   return item.relativePath.split("/").at(-1) ?? item.relativePath;
@@ -31,7 +45,10 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const activeJobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
   const purgeRunning = (activeJobs.data ?? []).some((job) => job.type === "orphan_purge");
   const wasRunning = useRef(false);
-  const [category, setCategory] = useState<OrphanCategory | "all">("all");
+  const [label, setLabel] = useState<OrphanReviewLabel | "all">("all");
+  const [releaseFilter, setReleaseFilter] = useState<OrphanReleaseFilter>("all");
+  const [sizeFilter, setSizeFilter] = useState<OrphanSizeFilter>("all");
+  const [sort, setSort] = useState<OrphanSort>("path");
   const [search, setSearch] = useState("");
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
@@ -61,10 +78,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   });
 
   const items = useMemo(() => review.data?.items ?? [], [review.data]);
-  const filtered = useMemo(() => {
-    const needle = search.trim().toLowerCase();
-    return items.filter((item) => (category === "all" || item.category === category) && (!needle || item.relativePath.toLowerCase().includes(needle)));
-  }, [items, category, search]);
+  const filtered = useMemo(() => sortOrphans(filterOrphans(items, { label, release: releaseFilter, size: sizeFilter, search }), sort), [items, label, releaseFilter, sizeFilter, search, sort]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
@@ -74,7 +88,9 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const selectedBytes = selectedItems.reduce((total, item) => total + item.sizeBytes, 0) + selectedFolderItems.reduce((total, folder) => total + folder.totalBytes, 0);
   const selectedCount = selected.size + selectedFolders.size;
   const heldHere = (held.data ?? []).filter((file) => file.rootType === rootType);
-  const stale = Boolean(review.data?.staleWarning);
+  const extraSymlinks = review.data?.extraSymlinks;
+  // A purge is refused in either case, so nothing here should look like it could start one.
+  const stale = Boolean(review.data?.staleWarning || extraSymlinks?.problems.length);
   const busy = purge.isPending || restore.isPending;
   // Results land when the purge job finishes, not when it is queued, so refresh once it stops running.
   useEffect(() => {
@@ -109,15 +125,25 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
             <TriangleAlert size={14} /> {review.data.staleWarning}
           </p>
         ) : null}
+        {extraSymlinks?.problems.length ? (
+          <p className="panel-message action-error" role="alert">
+            <TriangleAlert size={14} /> {extraSymlinks.problems.join(" ")} Purging is blocked until these folders can be read.
+          </p>
+        ) : null}
         {review.data?.storageStaleWarning ? (
           <p className="panel-message storage-stale-warning">
             <TriangleAlert size={14} /> {review.data.storageStaleWarning}
           </p>
         ) : null}
+        {extraSymlinks?.unmatchedCount ? (
+          <p className="panel-message storage-stale-warning">
+            <TriangleAlert size={14} /> {formatNumber(extraSymlinks.unmatchedCount)} of {formatNumber(extraSymlinks.linkCount)} symlinks in extra symlink folders point outside both storage locations, so they protect nothing. If that tool sees storage under a different path than SRTL does, its links will not match.
+          </p>
+        ) : null}
         {review.data ? (
           <>
             <div className="orphan-categories" role="group" aria-label="Orphan categories">
-              <button type="button" className={category === "all" ? "orphan-category selected" : "orphan-category"} aria-pressed={category === "all"} onClick={() => { setCategory("all"); setPage(0); }}>
+              <button type="button" className={label === "all" ? "orphan-category selected" : "orphan-category"} aria-pressed={label === "all"} onClick={() => { setLabel("all"); setPage(0); }}>
                 <strong>All orphans</strong>
                 <small>
                   {files(items.length)}, {formatBytes(items.reduce((total, item) => total + item.sizeBytes, 0))}
@@ -125,18 +151,42 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                   {review.data.damagedCount ? `, ${formatNumber(review.data.damagedCount)} damaged` : ""}
                 </small>
               </button>
-              {review.data.summary.map((entry) => (
-                <button key={entry.category} type="button" className={category === entry.category ? "orphan-category selected" : "orphan-category"} aria-pressed={category === entry.category} title={orphanCategoryLabels[entry.category].detail} onClick={() => { setCategory(entry.category); setPage(0); }}>
-                  <strong>{orphanCategoryLabels[entry.category].label}</strong>
+              {review.data.labelSummary.map((entry) => (
+                <button key={entry.label} type="button" className={label === entry.label ? "orphan-category selected" : "orphan-category"} aria-pressed={label === entry.label} title={orphanLabels[entry.label].detail} onClick={() => { setLabel(entry.label); setPage(0); }}>
+                  <strong>{orphanLabels[entry.label].label}</strong>
                   <small>{files(entry.count)}, {formatBytes(entry.sizeBytes)}</small>
                 </button>
               ))}
             </div>
-            {category !== "all" ? <p className="muted">{orphanCategoryLabels[category].detail}</p> : null}
+            {label !== "all" ? <p className="muted">{orphanLabels[label].detail}</p> : null}
+            {label === "all" && review.data.labelSummary.some((entry) => entry.label === "title_in_library" || entry.label === "episode_not_linked" || entry.label === "no_title_match") ? <p className="muted">Labels about titles: {nameMatchCaveat} {orphanLabels.no_title_match.label} does not rule out a title that is in the library under another name, so review before deleting.</p> : null}
+            {sizeFilter === "larger" ? <p className="muted">A larger file is not always a better one, and a smaller one is not always worse. Check before deleting.</p> : null}
+            <div className="orphan-toolbar">
+              <select aria-label="Filter by release" value={releaseFilter} onChange={(event) => { setReleaseFilter(event.target.value as OrphanReleaseFilter); setPage(0); }}>
+                <option value="all">All releases</option>
+                <option value="none_linked">No file in the release is linked</option>
+                <option value="partly_linked">Release is partly linked</option>
+                <option value="extra_linked">Still linked from an extra folder</option>
+              </select>
+              <select aria-label="Filter by size against the linked file" value={sizeFilter} onChange={(event) => { setSizeFilter(event.target.value as OrphanSizeFilter); setPage(0); }}>
+                <option value="all">Any size</option>
+                <option value="larger">Larger than the linked file</option>
+                <option value="not_larger">Not larger than the linked file</option>
+              </select>
+              <select aria-label="Sort orphans" value={sort} onChange={(event) => { setSort(event.target.value as OrphanSort); setPage(0); }}>
+                <option value="path">Sort by path</option>
+                <option value="label">Sort by label</option>
+                <option value="release">Sort by release, partly linked first</option>
+                <option value="size_desc">Sort by size, largest first</option>
+                <option value="size_asc">Sort by size, smallest first</option>
+                <option value="linked_difference">Sort by size against the linked file</option>
+                <option value="modified">Sort by modified, newest first</option>
+              </select>
+            </div>
             <div className="orphan-toolbar">
               <input type="search" aria-label="Search orphan files" placeholder="Search files" value={search} onChange={(event) => { setSearch(event.target.value); setPage(0); }} />
               <button type="button" className="secondary" disabled={busy || stale || !filtered.some((item) => !item.protectedReason && !selected.has(item.storageFileId))} onClick={() => selectPurgeable(filtered)}>
-                Select all {category === "all" ? "" : orphanCategoryLabels[category].label.toLowerCase()} ({formatNumber(filtered.filter((item) => !item.protectedReason).length)})
+                Select all {label === "all" ? "" : orphanLabels[label].label.toLowerCase()} ({formatNumber(filtered.filter((item) => !item.protectedReason).length)})
               </button>
               <button type="button" className="secondary" disabled={busy || selectedCount === 0} onClick={() => { setSelected(new Set()); setSelectedFolders(new Set()); setConfirming(false); }}>
                 Clear selection
@@ -151,7 +201,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                   <tr>
                     <th aria-label="Select" />
                     <th>File</th>
-                    <th>Category</th>
+                    <th>Label</th>
                     <th>Size</th>
                     <th>Modified</th>
                   </tr>
@@ -168,9 +218,17 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                         {item.hollow ? <span className="orphan-protected">Hollow: almost none of this file is stored on disk</span> : null}
                         {item.integrity === "partial_hollow" ? <span className="orphan-protected">Damaged: {item.zeroSamples ?? "several"} of 24 sampled regions are zero-filled</span> : null}
                         {item.protectedReason ? <span className="orphan-protected">Protected: {item.protectedReason}</span> : null}
+                        {item.episodeCoverage && item.episodeCoverage.linked < item.episodeCoverage.total ? <span className="orphan-protected">Holds {formatNumber(item.episodeCoverage.total)} episodes, and only {formatNumber(item.episodeCoverage.linked)} of them {item.episodeCoverage.linked === 1 ? "has" : "have"} a linked file</span> : null}
+                        <ReleaseSummary item={item} />
                       </td>
-                      <td>{orphanCategoryLabels[item.category].label}</td>
-                      <td className="orphan-nowrap">{formatBytes(item.sizeBytes)}</td>
+                      <td>
+                        {orphanLabels[item.label].label}
+                        {item.matchedTitle ? <span className="orphan-path">Name looks like {item.matchedTitle}</span> : null}
+                      </td>
+                      <td className="orphan-nowrap">
+                        {formatBytes(item.sizeBytes)}
+                        {item.sizeComparison && item.linkedSizeBytes !== null ? <span className={`orphan-size-note ${item.sizeComparison === "larger" ? "orphan-protected" : "orphan-path"}`}>{sizeComparisonLabels[item.sizeComparison]} ({formatBytes(item.linkedSizeBytes)})</span> : null}
+                      </td>
                       <td className="orphan-nowrap">{formatDate(new Date(item.mtimeMs).toISOString())}</td>
                     </tr>
                   ))}
@@ -270,7 +328,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 </button>
               </div>
               <InfoTooltip label="About purge modes">
-                Hold moves files into a hidden .srtl-purged folder on the same storage, where they can be restored until they are permanently deleted after the holding period. Delete now removes them immediately with no undo. {rootType === "remote" ? "The remote mount may not support holding; files it refuses are reported and left in place." : ""} Every file is rechecked right before it is touched: still unlinked, unchanged, not part of a copy, and older than 24 hours. Subtitles, artwork, and empty folders are cleaned up with the last video in a folder.
+                Hold moves files into a hidden .srtl-purged folder on the same storage, where they can be restored until they are permanently deleted after the holding period. Delete now removes them immediately with no undo. {rootType === "remote" ? "The remote mount may not support holding; files it refuses are reported and left in place." : ""} Every file is rechecked right before it is touched: still unlinked, including from any extra symlink folders, unchanged, not part of a copy, and older than 24 hours. Subtitles, artwork, and empty folders are cleaned up with the last video in a folder.
               </InfoTooltip>
               <button type="button" disabled={busy || stale || selectedCount === 0} onClick={() => setConfirming(true)}>
                 <Trash2 size={16} /> Purge selected
@@ -409,7 +467,8 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { revi
   const protectedCount = review.items.filter((item) => item.protectedReason).length;
   const requiredPhrase = purgeConfirmationPhrase(rootType, plan.totalCount);
   const needsPhrase = purgeNeedsPhrase(rootType, mode, plan.totalCount);
-  const stale = Boolean(review.staleWarning);
+  const extraProblems = review.extraSymlinks.problems;
+  const stale = Boolean(review.staleWarning || extraProblems.length);
   const start = useMutation({
     mutationFn: async () => {
       const jobIds: number[] = [];
@@ -441,6 +500,11 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { revi
             <TriangleAlert size={14} /> {review.staleWarning} Purging is blocked until the symlink inventory is refreshed.
           </p>
         ) : null}
+        {extraProblems.length ? (
+          <p className="panel-message action-error" role="alert">
+            <TriangleAlert size={14} /> {extraProblems.join(" ")} Purging is blocked until these folders can be read.
+          </p>
+        ) : null}
         {review.storageStaleWarning ? (
           <p className="panel-message storage-stale-warning">
             <TriangleAlert size={14} /> {review.storageStaleWarning}
@@ -449,11 +513,11 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onDone }: { revi
         <p data-testid="purge-all-summary">
           <strong>{items(plan.totalCount)}</strong> on {rootLabel}, <strong>{formatBytes(plan.totalBytes)}</strong>. {protectedCount > 0 ? `${formatNumber(protectedCount)} protected ${protectedCount === 1 ? "file is" : "files are"} left alone. ` : ""}Every file is rechecked right before it is touched.
         </p>
-        <table className="orphan-purge-breakdown" aria-label="Purge breakdown by category">
+        <table className="orphan-purge-breakdown" aria-label="Purge breakdown by label">
           <tbody>
-            {plan.byCategory.map((entry) => (
-              <tr key={entry.category}>
-                <th scope="row">{orphanCategoryLabels[entry.category].label}</th>
+            {plan.byLabel.map((entry) => (
+              <tr key={entry.label}>
+                <th scope="row">{orphanLabels[entry.label].label}</th>
                 <td>{formatNumber(entry.count)}</td>
                 <td>{formatBytes(entry.sizeBytes)}</td>
               </tr>

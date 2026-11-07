@@ -48,6 +48,7 @@ import { getBackupState } from "./lib/backups";
 import { authenticateRadarrWebhook } from "./lib/radarr";
 import { authenticateSonarrWebhook } from "./lib/sonarr";
 import { registerSonarrRoutes, sonarrWebhookInstanceId } from "./routes/sonarrRoutes";
+import { configureExtraSymlinkFolders } from "./lib/extraSymlinkFolders";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
 import { isRestrictedRequest, loadSensitiveRoots, scrubIpAddresses, scrubText, scrubValue, type RestrictedViewRuntime } from "./lib/restrictedView";
 import { loadAndInstallSecretKey } from "./lib/secretBox";
@@ -91,6 +92,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   const config = loadConfig(overrides);
   const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
   configureOutboundPolicy(config.outboundPolicy);
+  configureExtraSymlinkFolders(config.extraSymlinkFolders);
   const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate, discardUnreadableCredentials: config.discardUnreadableCredentials });
   await reconcileOnboardingState(database.db);
   await reconcileEnvironmentPaths(database.db, config.paths, {

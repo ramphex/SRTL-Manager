@@ -4,6 +4,7 @@ export interface EnvSettings {
   SYMLINK_DIR?: string;
   SRTL_LOCATION_1_PATH?: string;
   SRTL_LOCATION_2_PATH?: string;
+  SRTL_EXTRA_SYMLINK_DIRS?: string;
   SRTL_DATA_DIR?: string;
   SRTL_BACKUP_DIR?: string;
   SRTL_PG_BIN_DIR?: string;
@@ -45,6 +46,7 @@ const supportedKeys = [
   "SYMLINK_DIR",
   "SRTL_LOCATION_1_PATH",
   "SRTL_LOCATION_2_PATH",
+  "SRTL_EXTRA_SYMLINK_DIRS",
   "SRTL_DATA_DIR",
   "SRTL_BACKUP_DIR",
   "SRTL_PG_BIN_DIR",

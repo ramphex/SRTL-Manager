@@ -7,7 +7,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 ## Highlights
 
 - Guided first-run account, path, section, policy, and initial-scan setup, protected by a one-time setup token. Session list, sign-out of other devices, and a security activity log in Settings. See [accounts and sessions](docs/accounts-and-sessions.md).
-- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus categorized orphan review and purge (including hollow files and folders with no video) with a restorable holding period. Damaged files can be deleted the same way, and any delete can optionally [ask Radarr or Sonarr to search for a new copy](docs/radarr.md#re-requesting-after-a-delete).
+- Symlink, local-root, remote-root, and orphan inventory with targeted title rescans, exact target checks, a daily scheduled scan, and unmounted-storage protection, plus [categorized orphan review and purge](docs/orphan-review.md) (including hollow files and folders with no video) with a restorable holding period. Damaged files can be deleted the same way, and any delete can optionally [ask Radarr or Sonarr to search for a new copy](docs/radarr.md#re-requesting-after-a-delete).
 - Per-location storage policies using editable friendly names, plus an Unassigned queue for newly discovered titles. Each folder can optionally give new titles a [default policy](docs/default-policy.md).
 - Fast and deep audits across local and remote targets.
 - Nightly verified database backups with retention, and a warning on every page if one fails or is overdue. See [database backups](docs/backups.md).
@@ -54,6 +54,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SYMLINK_DIR`: the existing absolute path containing the managed symlinks.
 - `SRTL_LOCATION_1_PATH` and `SRTL_LOCATION_2_PATH`: existing absolute storage paths. Their friendly names are set during onboarding and can be changed later in Settings > Library.
 - `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
+- `SRTL_EXTRA_SYMLINK_DIRS` (optional): folders of symlinks kept by other tools, checked before an orphan purge. Each also needs a read-only mount. See [Symlinks kept by other tools](docs/orphan-review.md#symlinks-kept-by-other-tools).
 - `SRTL_BACKUP_HOST_PATH`: the folder for scheduled database backups, outside your media roots and owned by `SRTL_UID`. Create it first, or Docker creates it as root and Settings > Backups will say it cannot be written. See [Database backups](docs/backups.md).
 - `SRTL_SECRET_KEY`: the key that encrypts saved Plex tokens and Jellyfin, Radarr and Sonarr API keys. Generate it once with `openssl rand -base64 32` and keep a copy with your backups. Compose will not start without it. See [Backup And Restore](#backup-and-restore).
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.

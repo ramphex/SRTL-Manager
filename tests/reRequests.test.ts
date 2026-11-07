@@ -14,6 +14,7 @@ import { listReRequests, parseEpisodeNumbers, previewReRequests, processReReques
 import { createSonarrInstance, saveSonarrSettings } from "../src/server/lib/sonarr";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import type { SonarrSeries } from "../src/server/lib/sonarrClient";
+import { recordSymlinkScan } from "./scanFixtures";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
 import { arrMockApiKey as apiKey, closeArrMocks, fakeRadarr, fakeSonarr, mockMovie as movie, type FakeRadarr, type FakeSonarr } from "./reRequestMocks";
@@ -91,6 +92,7 @@ beforeEach(async () => {
   app.app.log.level = "silent";
   await markOnboardingCompleteForExistingInstall(app.database.db);
   await persistSectionSettings(app.database.db, { sections: ["movies", "movies4k", "shows", "other"], sectionTypes: { movies: "movies", movies4k: "movies", shows: "shows", other: "movies" } });
+  await recordSymlinkScan(app.database.db);
 });
 
 afterEach(async () => {
