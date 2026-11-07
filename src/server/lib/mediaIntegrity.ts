@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { withFilesystemTimeout } from "./filesystemSafety";
+import { openFileWithTimeout, withFilesystemTimeout } from "./filesystemSafety";
 import { appendBoundedOutput, terminateChildProcess } from "./processSafety";
 
 const sampleBytes = 64 * 1024;
@@ -81,7 +81,7 @@ async function sampleZeroBlocksOpen(handle: fs.FileHandle, filePath: string, siz
 
 // Reads evenly spaced samples across the whole file; any read error rejects, and callers must treat that as "unknown".
 export async function sampleZeroBlocks(filePath: string, sizeBytes: number, signal?: AbortSignal): Promise<ZeroSampleResult> {
-  const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Zero sampling open for ${filePath}`, zeroSampleTimeoutMs);
+  const handle = await openFileWithTimeout(filePath, `Zero sampling open for ${filePath}`, zeroSampleTimeoutMs);
   try {
     return await sampleZeroBlocksOpen(handle, filePath, sizeBytes, signal);
   } finally {
@@ -288,7 +288,7 @@ export async function inspectMediaContent(
   }
   const suspect = needsZeroSampling(stat.size, allocated);
 
-  const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Media inspection open for ${filePath}`);
+  const handle = await openFileWithTimeout(filePath, `Media inspection open for ${filePath}`);
   try {
     const head = await withFilesystemTimeout(readSample(handle, 0, Math.min(sampleBytes, stat.size)), `Media inspection read for ${filePath}`);
     const tail = await withFilesystemTimeout(readSample(handle, Math.max(0, stat.size - sampleBytes), Math.min(sampleBytes, stat.size)), `Media inspection read for ${filePath}`);
@@ -398,7 +398,7 @@ export async function readMatroskaTail(filePath: string, signal?: AbortSignal): 
   let declaredEnd: number | null;
   let sizeBytes: number;
   try {
-    const handle = await withFilesystemTimeout(fs.open(filePath, "r"), `Media tail open for ${filePath}`);
+    const handle = await openFileWithTimeout(filePath, `Media tail open for ${filePath}`);
     try {
       sizeBytes = (await withFilesystemTimeout(handle.stat(), `Media tail stat for ${filePath}`)).size;
       declaredEnd = matroskaDeclaredEnd(await withFilesystemTimeout(readSample(handle, 0, matroskaHeadBytes), `Media tail read for ${filePath}`));

@@ -36,6 +36,17 @@ export async function withFilesystemTimeout<T>(operation: Promise<T>, descriptio
   }
 }
 
+export async function openFileWithTimeout(filePath: string, description: string, timeoutMs?: number): Promise<Awaited<ReturnType<typeof fs.open>>> {
+  const opening = fs.open(filePath, "r");
+  try {
+    return await withFilesystemTimeout(opening, description, timeoutMs);
+  } catch (error) {
+    // A stalled mount can finish the open after the deadline. Node stops the process if that handle is garbage collected still open.
+    void opening.then((handle) => handle.close()).catch(() => undefined);
+    throw error;
+  }
+}
+
 function abortError(): Error {
   return new Error("Job terminated");
 }
@@ -73,7 +84,7 @@ export async function assertReadableRegularFile(filePath: string, label: string,
     try {
       const stat = await withFilesystemTimeout(fs.stat(filePath), `${label} metadata check`, options.timeoutMs);
       if (!stat.isFile()) throw new Error(`${label} is not a regular file`);
-      fileHandle = await withFilesystemTimeout(fs.open(filePath, "r"), `${label} read check`, options.timeoutMs);
+      fileHandle = await openFileWithTimeout(filePath, `${label} read check`, options.timeoutMs);
       if (stat.size > 0) {
         const buffer = Buffer.allocUnsafe(1);
         const read = await withFilesystemTimeout(fileHandle.read(buffer, 0, 1, 0), `${label} first-byte read`, options.timeoutMs);
