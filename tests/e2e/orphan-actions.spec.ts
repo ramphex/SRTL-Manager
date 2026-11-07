@@ -7,7 +7,7 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: { stal
   const items = Array.from({ length: count }, (_, index) => ({
     storageFileId: index + 1, rootType, relativePath: `movies/Title ${index}/file.mkv`, filePath: `/${rootType}/movies/Title ${index}/file.mkv`, section: "movies", itemName: `Title ${index}`,
     sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false,
-    label: index % 2 ? "superseded" : index % 4 === 2 ? "title_in_library" : "no_title_match", matchedTitle: index % 4 === 2 ? `Title ${index} (2020)` : null,
+    label: index % 2 ? "superseded" : index % 8 === 6 ? "episode_not_linked" : index % 4 === 2 ? "title_in_library" : "no_title_match", matchedTitle: index % 4 === 2 ? `Title ${index} (2020)` : null,
     releaseName: `Title ${index}`, releaseStatus: index === 2 ? "partly_linked" : "none_linked", releaseFileCount: index === 2 ? 8 : 1, releaseLinkedCount: index === 2 ? 3 : 0,
     linkedSizeBytes: index % 2 ? 500_000 : null, sizeComparison: index % 2 ? "larger" : null, episodeCoverage: null, extraLinkPath: null
   }));
@@ -18,7 +18,7 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: { stal
   return {
     rootType, items,
     leftoverFolders: [{ folderId: 1, rootType, relativePath: "movies/Empty", dirPath: `/${rootType}/movies/Empty`, fileCount: 1, totalBytes: 10, newestMtimeMs: 0, protectedReason: null }],
-    summary: [], labelSummary: ["superseded", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
+    summary: [], labelSummary: ["superseded", "episode_not_linked", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
     staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null,
     extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, holdDays: 7
   };
@@ -118,10 +118,15 @@ test("the review filters and sorts by the new labels, and says a title match is 
   await fixture(page, { remoteCount: 8 });
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   await expect(page.getByText(/compares names only and can be wrong/)).toBeVisible();
-  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /Title is in the library/ }).click();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /^Title is in the library \d/ }).click();
   await expect(page.getByText(/compares names only and can be wrong/)).toBeVisible();
   await expect(page.getByText("Name looks like Title 2 (2020)")).toBeVisible();
-  await expect(page.getByRole("button", { name: /^Select all title is in the library \(2\)/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Select all title is in the library \(1\)/ })).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /episode is not linked/ }).click();
+  await expect(page.getByText(/Not linked does not mean missing/)).toBeVisible();
+  await expect(page.getByText("Name looks like Title 6 (2020)")).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /No title match/ }).click();
+  await expect(page.getByText(/may still be in the library under another name/)).toBeVisible();
   await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /All orphans/ }).click();
 
   await page.getByLabel("Filter by release").selectOption("partly_linked");

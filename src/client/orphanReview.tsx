@@ -19,8 +19,9 @@ const orphanLabels: Record<OrphanReviewLabel, { label: string; detail: string }>
   copy_leftover: { label: "Copy leftovers", detail: "SRTL already copied this file to the other storage location." },
   not_in_library: { label: "Not in library", detail: "No symlink exists for this title or episode anymore." },
   srtl_artifact: { label: "SRTL leftovers", detail: "Temporary, kept, or backup files that SRTL created." },
+  episode_not_linked: { label: "Title is in the library, episode is not linked", detail: `The release name looks like a title in the library, but no link for that title holds this episode. Not linked does not mean missing: a title that numbers its seasons differently lands here too. Deleting this could lose an episode someone wants, so review before deleting. ${nameMatchCaveat}` },
   title_in_library: { label: "Title is in the library", detail: `No symlink points to this file, but its release name looks like a title in the library. ${nameMatchCaveat}` },
-  no_title_match: { label: "No title match", detail: `No symlink points to this file and its release name does not look like a title in the library. ${nameMatchCaveat} Remote files often belong to the provider's wider library.` }
+  no_title_match: { label: "No title match", detail: `No symlink points to this file and its release name does not look like a title in the library. The title may still be in the library under another name, so review before deleting. ${nameMatchCaveat} Remote files often belong to the provider's wider library.` }
 };
 
 const sizeComparisonLabels = { larger: "Larger than the linked file", same: "Same size as the linked file", smaller: "Smaller than the linked file" };
@@ -158,7 +159,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
               ))}
             </div>
             {label !== "all" ? <p className="muted">{orphanLabels[label].detail}</p> : null}
-            {label === "all" && review.data.labelSummary.some((entry) => entry.label === "title_in_library" || entry.label === "no_title_match") ? <p className="muted">{orphanLabels.title_in_library.label} and {orphanLabels.no_title_match.label}: {nameMatchCaveat}</p> : null}
+            {label === "all" && review.data.labelSummary.some((entry) => entry.label === "title_in_library" || entry.label === "episode_not_linked" || entry.label === "no_title_match") ? <p className="muted">Labels about titles: {nameMatchCaveat} {orphanLabels.no_title_match.label} does not rule out a title that is in the library under another name, so review before deleting.</p> : null}
             {sizeFilter === "larger" ? <p className="muted">A larger file is not always a better one, and a smaller one is not always worse. Check before deleting.</p> : null}
             <div className="orphan-toolbar">
               <select aria-label="Filter by release" value={releaseFilter} onChange={(event) => { setReleaseFilter(event.target.value as OrphanReleaseFilter); setPage(0); }}>

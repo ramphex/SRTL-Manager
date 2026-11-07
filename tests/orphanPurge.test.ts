@@ -245,6 +245,51 @@ describe("orphan review labels", () => {
     expect(review.labelSummary).toEqual([expect.objectContaining({ label: "title_in_library", count: 2 }), expect.objectContaining({ label: "no_title_match", count: 2 })]);
   });
 
+  it("tells a release whose title is in the library apart when its episode is not linked, without changing what can be purged", async () => {
+    await libraryTitle("shows", "Lima (2016)", "Season 01/Lima (2016) - S01E01.mkv");
+    const linkedEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E01.mkv");
+    const unlinkedEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E02.mkv");
+    const partly = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.S01E01E02.mkv");
+    const noEpisode = await storageFile("remote", "Lima.2016.S01.1080p/Lima.2016.Extras.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, linkedEpisode.id)).toMatchObject({ category: "unlinked", label: "title_in_library", matchedTitle: "Lima (2016)", protectedReason: null });
+    expect(findItem(review.items, unlinkedEpisode.id)).toMatchObject({ category: "unlinked", label: "episode_not_linked", matchedTitle: "Lima (2016)", protectedReason: null });
+    expect(findItem(review.items, partly.id)).toMatchObject({ label: "episode_not_linked" });
+    expect(findItem(review.items, noEpisode.id)).toMatchObject({ label: "title_in_library" });
+    expect(review.labelSummary.find((entry) => entry.label === "episode_not_linked")).toMatchObject({ count: 2, purgeableCount: 2 });
+    await expect(app.jobs.startOrphanPurge("remote", [unlinkedEpisode.id], "delete")).resolves.toEqual(expect.any(Number));
+  });
+
+  it("checks every library title with the same name for an episode", async () => {
+    await libraryTitle("shows", "Mike (1999)", "Season 01/Mike (1999) - S01E01.mkv");
+    await libraryTitle("shows", "Mike (2015)", "Season 01/Mike (2015) - S01E02.mkv");
+    const inFirst = await storageFile("remote", "Mike.S01.1080p/Mike.S01E01.mkv");
+    const inSecond = await storageFile("remote", "Mike.S01.1080p/Mike.S01E02.mkv");
+    const inNeither = await storageFile("remote", "Mike.S01.1080p/Mike.S01E03.mkv");
+    // The year says which one it is, so the other title's episodes do not count.
+    const dated = await storageFile("remote", "Mike.2015.S01.1080p/Mike.2015.S01E01.mkv");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(findItem(review.items, inFirst.id)).toMatchObject({ label: "title_in_library", matchedTitle: "Mike (1999)" });
+    expect(findItem(review.items, inSecond.id)).toMatchObject({ label: "title_in_library" });
+    expect(findItem(review.items, inNeither.id)).toMatchObject({ label: "episode_not_linked" });
+    expect(findItem(review.items, dated.id)).toMatchObject({ label: "episode_not_linked", matchedTitle: "Mike (2015)" });
+  });
+
+  it("checks titles in different sections separately", async () => {
+    await persistSectionSettings(app.database.db, { sections: ["movies", "shows", "shows4k"], sectionTypes: { movies: "movies", shows: "shows", shows4k: "shows" } });
+    await recordSymlinkScan(app.database.db);
+    await libraryTitle("shows4k", "November (2017)", "Season 01/November (2017) - S01E04.mkv");
+    await libraryTitle("shows", "November (2017)", "Season 01/November (2017) - S01E05.mkv");
+    const inOne = await storageFile("remote", "November.2017.S01/November.2017.S01E04.mkv");
+    expect(findItem((await listOrphanReview(app.database.db, "remote", 7)).items, inOne.id)).toMatchObject({ label: "title_in_library" });
+  });
+
+  it("does not expect episodes from a title in a movies section", async () => {
+    await libraryTitle("movies", "Oscar Papa (2018)");
+    const file = await storageFile("remote", "Oscar.Papa.2018.1080p/Oscar.Papa.S01E01.mkv");
+    expect(findItem((await listOrphanReview(app.database.db, "remote", 7)).items, file.id)).toMatchObject({ label: "title_in_library" });
+  });
+
   it("shows whether nothing in a release is linked or only part of it", async () => {
     const linked = await storageFile("remote", "Pack.S01.1080p/Pack.S01E01.mkv");
     await mediaLink("shows", "Pack (2010)", "Season 01/Pack.S01E01.mkv", linked.filePath);

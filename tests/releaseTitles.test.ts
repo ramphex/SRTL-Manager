@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildTitleIndex, matchReleaseTitle, releaseKeyOf, releaseNameOf } from "../src/server/lib/releaseTitles";
+import { buildTitleIndex, matchReleaseTitle, matchReleaseTitles, releaseKeyOf, releaseNameOf } from "../src/server/lib/releaseTitles";
 
 const now = new Date("2026-06-01T00:00:00Z");
 const movie = (itemName: string) => ({ itemName, isShow: false });
@@ -65,6 +65,11 @@ describe("matchReleaseTitle", () => {
     expect(matches([show("Season Four")], "Season.Four.Season.2.1080p")).toBe("Season Four");
     expect(matches([show("We (2019)")], "We.S01E01.1080p")).toBeNull();
     expect(matches([show("Ox (2019)")], "Ox.S01E01.1080p")).toBeNull();
+    expect(matches([show("How")], "How.S01E01.1080p")).toBeNull();
+    expect(matches([show("Qor")], "Qor.S08E05.1080p.WEB-DL")).toBe("Qor");
+    // Three letters are only enough with a season tag, in a shows section.
+    expect(matches([show("Qor")], "Qor.1080p")).toBeNull();
+    expect(matches([movie("Qor (2001)")], "Qor.S08E05.1080p")).toBeNull();
     // A season tag cannot be a movie, and a movie release can be a show of another year.
     expect(matches([movie("Signal (1996)")], "Signal.S01E01.1080p")).toBeNull();
     expect(matches([show("Signal (2014)")], "Signal.1996.1080p")).toBeNull();
@@ -78,6 +83,66 @@ describe("matchReleaseTitle", () => {
     expect(matches([movie("Alpha Bravo (2020)")], "Alpha.Bravo.2020.Extended.Directors.Cut.1080p")).toBe("Alpha Bravo (2020)");
     expect(matches([movie("Alpha Bravo (2020)")], "Alpha.Bravo.WEB-DL.1080p")).toBe("Alpha Bravo (2020)");
     expect(matches([movie("Season Of Change (2001)")], "Season.Of.Change.2001.1080p")).toBe("Season Of Change (2001)");
+  });
+
+  it("matches a release that lost the title's ampersand", () => {
+    expect(matches([show("Nell & Otto")], "Nell..Otto.S01E01.1080p")).toBe("Nell & Otto");
+    expect(matches([show("Nell & Otto")], "Nell.and.Otto.S01E01.1080p")).toBe("Nell & Otto");
+    expect(matches([show("Nell & Otto")], "Nell.&.Otto.S01E01.1080p")).toBe("Nell & Otto");
+    expect(matches([movie("Nell & Otto (2001)")], "Nell.Otto.2001.1080p")).toBe("Nell & Otto (2001)");
+    // Only a title written with an ampersand gets this: "and" is a word in any other name.
+    expect(matches([show("Nell and Otto")], "Nell.Otto.S01E01")).toBeNull();
+    expect(matches([show("Nell & Otto")], "Nell.S01E01")).toBeNull();
+  });
+
+  it("matches a release whose apostrophe became a separator", () => {
+    expect(matches([show("Sam's Lab")], "Sam_s.Lab.S01E01.1080p")).toBe("Sam's Lab");
+    expect(matches([show("Sam's Lab")], "Sam.s.Lab.S01E01.1080p")).toBe("Sam's Lab");
+    expect(matches([show("Sams Lab")], "Sam_s_Lab_S01E01")).toBe("Sams Lab");
+    expect(matches([movie("Don't Stop Walking (2001)")], "Don_t.Stop.Walking.2001.1080p")).toBe("Don't Stop Walking (2001)");
+    // A real letter in a title is read as written first.
+    expect(matches([movie("Agent S (2001)")], "Agent.S.2001.1080p")).toBe("Agent S (2001)");
+    expect(matches([show("Agents Lab")], "Agent.S1.Lab.S01E01")).toBeNull();
+  });
+
+  it("matches a title with a country tag the release leaves out, preferring the name as written", () => {
+    const tagged = show("Show (US) (2005)");
+    expect(matches([tagged], "Show.2005.S01.1080p")).toBe("Show (US) (2005)");
+    expect(matches([tagged], "Show.S01.1080p")).toBe("Show (US) (2005)");
+    expect(matches([tagged], "Show.US.S01.1080p")).toBe("Show (US) (2005)");
+    expect(matches([tagged], "Show.US.2005.S01.1080p")).toBe("Show (US) (2005)");
+    expect(matches([tagged], "Show.1990.S01.1080p")).toBeNull();
+    expect(matches([tagged], "Show.UK.S01.1080p")).toBeNull();
+    expect(matches([show("Show (2005)")], "Show.US.2005.S01.1080p")).toBe("Show (2005)");
+
+    const both = [tagged, show("Show (2001)")];
+    // A year decides it, even for the tagged title.
+    expect(matches(both, "Show.2005.S01")).toBe("Show (US) (2005)");
+    expect(matches(both, "Show.2001.S01")).toBe("Show (2001)");
+    // With no year, the name as written comes first, and both still count.
+    const noYear = matchReleaseTitles(buildTitleIndex(both, now), "Show.S01", now);
+    expect(noYear.map((title) => title.itemName)).toEqual(["Show (2001)", "Show (US) (2005)"]);
+  });
+
+  it("matches initials written with or without dots", () => {
+    expect(matches([show("Days at the E.R.")], "Days.at.the.Er.S01E01")).toBe("Days at the E.R.");
+    expect(matches([show("Days at the E.R.")], "Days.at.the.E.R.S01E01")).toBe("Days at the E.R.");
+    expect(matches([movie("K.N.O.T. Rescue (2003)")], "KNOT.Rescue.2003.1080p")).toBe("K.N.O.T. Rescue (2003)");
+    // Ordinary abbreviations are left alone.
+    expect(matches([movie("Mr. Delta (1999)")], "M.R.Delta.1999.1080p")).toBeNull();
+    expect(matches([show("E.R.")], "Er.S01E01")).toBeNull();
+    expect(matches([show("E.R. (1994)")], "Er.1994.S01E01")).toBe("E.R. (1994)");
+  });
+
+  it("returns every title with the same name when nothing tells them apart", () => {
+    const shows = [show("Twin (1999)"), show("Twin (2015)")];
+    const titles = (release: string) => matchReleaseTitles(buildTitleIndex(shows, now), release, now).map((title) => title.itemName);
+    expect(titles("Twin.S01E01")).toEqual(["Twin (1999)", "Twin (2015)"]);
+    expect(titles("Twin.2015.S01E01")).toEqual(["Twin (2015)"]);
+    // The release's own year beats the year either side.
+    const adjacent = [movie("Alpha Bravo (2019)"), movie("Alpha Bravo (2020)")];
+    expect(matchReleaseTitles(buildTitleIndex(adjacent, now), "Alpha.Bravo.2020.1080p", now).map((title) => title.itemName)).toEqual(["Alpha Bravo (2020)"]);
+    expect(matchReleaseTitles(buildTitleIndex(adjacent, now), "Alpha.Bravo.2021.1080p", now).map((title) => title.itemName)).toEqual(["Alpha Bravo (2020)"]);
   });
 
   it("finds nothing in an empty library or an empty name", () => {

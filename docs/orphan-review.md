@@ -10,12 +10,17 @@ An orphan is a media file on a storage location with no library symlink pointing
 | Copy leftovers | SRTL already copied this file to the other storage location. |
 | Not in library | No symlink exists for this title or episode anymore. |
 | SRTL leftovers | Temporary, kept, or backup files that SRTL created. |
+| Title is in the library, episode is not linked | The release name looks like a title in the library, but no link for that title holds this episode. |
 | Title is in the library | No symlink points to this file, but its release name looks like a title in the library. |
-| No title match | No symlink points to this file, and its release name does not look like a title in the library. |
+| No title match | No symlink points to this file, and its release name does not look like a title in the library. The title may still be in the library under another name, so review before deleting. |
 
-**The last two are a name comparison and can be wrong.** SRTL compares the name of the folder the file arrived in, then the file's own name, with the library's title folders. The whole title has to match, never just part of it. When both sides have a year, the years must be within one of each other. A title with fewer than two meaningful words, such as `Lamp` or `The Lamp`, also needs a matching year, unless the release has a season tag and the title is in a shows folder. A release with a season tag never matches a title in a movies folder. Titles can share a name, and unusual release names are missed.
+**The last three are a name comparison and can be wrong.** SRTL compares the name of the folder the file arrived in, then the file's own name, with the library's title folders. The whole title has to match, never just part of it. When both sides have a year, the years must be within one of each other. A title with fewer than two meaningful words, such as `Lamp` or `The Lamp`, also needs a matching year, unless the release has a season tag and the title is in a shows folder. A release with a season tag never matches a title in a movies folder. Titles can share a name, and unusual release names are missed.
 
-The API keeps reporting these files with the `unlinked` category; the split is in the `label` field.
+A library title also matches a release that leaves out its `&`, the dots in its initials (`E.R.` and `Er`), or its country tag (`Show (US)` and `Show`), and a release that replaced an apostrophe with a separator (`Sam_s`). If the release names a different country, it does not match. When several titles could be the release, the name as written is shown first.
+
+**Not linked does not mean missing.** A file lands under **episode is not linked** when none of the titles it could be has a link holding that episode. A title that numbers its seasons differently lands here too, so compare before deleting.
+
+The API keeps reporting these files with the `unlinked` category; the split is in the `label` field. None of these labels changes what can be purged.
 
 Filters can narrow the list further:
 

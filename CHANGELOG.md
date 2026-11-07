@@ -12,7 +12,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Changed
 
 - Orphan purges now need a complete symlink scan of every library folder that started in the last 24 hours. Before, rescanning one title made its whole folder look scanned. Rescans of single titles and scans that failed or were cancelled no longer count, and the warning names the folders to scan. Folders with nothing in them do not hold purges up. Damaged file deletes follow the same rule.
-- The orphan review is easier to review by. Unlinked files are split into **Title is in the library** and **No title match**, a name comparison that the page says can be wrong. Each file shows whether its release is partly linked, and **Older or duplicate versions**, now **Other versions of linked titles**, shows how each file's size compares with the linked file and flags larger ones. The list can be filtered and sorted by all of these. The API keeps its existing fields, and adds `label` and the others beside them. See [Orphan review and purge](docs/orphan-review.md).
+- The orphan review is easier to review by. Unlinked files are split into **Title is in the library**, **Title is in the library, episode is not linked** and **No title match**, a name comparison that the page says can be wrong. Each file shows whether its release is partly linked, and **Older or duplicate versions**, now **Other versions of linked titles**, shows how each file's size compares with the linked file and flags larger ones. The list can be filtered and sorted by all of these. The API keeps its existing fields, and adds `label` and the others beside them. See [Orphan review and purge](docs/orphan-review.md).
 
 ### Fixed
 

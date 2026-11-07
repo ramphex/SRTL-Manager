@@ -602,7 +602,7 @@ export interface StorageFileRow {
 export type OrphanCategory = "superseded" | "copy_leftover" | "not_in_library" | "srtl_artifact" | "unlinked";
 
 // The category, with "unlinked" told apart by comparing the file's release name with the library's titles.
-export type OrphanReviewLabel = Exclude<OrphanCategory, "unlinked"> | "title_in_library" | "no_title_match";
+export type OrphanReviewLabel = Exclude<OrphanCategory, "unlinked"> | "title_in_library" | "episode_not_linked" | "no_title_match";
 
 export type OrphanReleaseStatus = "none_linked" | "partly_linked";
 

@@ -11,7 +11,7 @@ import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout
 import { removeExpectedSymlink } from "./symlinkCleanup";
 import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
-import { buildTitleIndex, matchReleaseTitle, releaseKeyOf, releaseNameOf, type TitleIndex } from "../lib/releaseTitles";
+import { buildTitleIndex, matchReleaseTitles, releaseKeyOf, releaseNameOf, type IndexedTitle, type TitleIndex } from "../lib/releaseTitles";
 import { completeSymlinkScanTimes, getInventoryScanTimestamps } from "../lib/scanner";
 import { unresolvedCopyReconciliation } from "./copyReconciliation";
 import { withResourceMutationGuard } from "./resourceMutationGuard";
@@ -114,7 +114,7 @@ async function libraryLinks(db: DbExecutor, settings: SectionSettings, now: numb
   const titles = new Set<string>();
   const episodes = new Map<string, LinkedFile[]>();
   const plainFiles = new Map<string, LinkedFile[]>();
-  const libraryTitles = new Map<string, { itemName: string; isShow: boolean | null }>();
+  const libraryTitles = new Map<string, { itemName: string; isShow: boolean | null; key: string }>();
   const add = (files: Map<string, LinkedFile[]>, key: string, file: LinkedFile) => {
     const entries = files.get(key);
     if (entries) entries.push(file);
@@ -126,7 +126,7 @@ async function libraryLinks(db: DbExecutor, settings: SectionSettings, now: numb
     titles.add(title);
     if (!libraryTitles.has(title)) {
       const type = settings.sectionTypes?.[link.section];
-      libraryTitles.set(title, { itemName: link.item_name, isShow: type === "shows" ? true : type === "movies" ? false : null });
+      libraryTitles.set(title, { itemName: link.item_name, isShow: type === "shows" ? true : type === "movies" ? false : null, key: title });
     }
     const file = { linkPath: link.link_path, sizeBytes: link.size_bytes === null ? null : Number(link.size_bytes) };
     const keys = episodeKeys(link.relative_path);
@@ -169,6 +169,13 @@ function linkedSizeOf(row: OrphanRow, keys: Pick<LibraryLinks, "episodes" | "pla
     counted.set(largest.linkPath, largest.sizeBytes!);
   }
   return counted.size > 0 ? [...counted.values()].reduce((total, size) => total + size, 0) : null;
+}
+
+// An episode counts as linked if any title the release could be holds it, since a name alone cannot say which one it is.
+function hasUnlinkedEpisode(row: OrphanRow, titles: IndexedTitle[], keys: Pick<LibraryLinks, "episodes">): boolean {
+  const showTitles = titles.filter((title) => title.isShow !== false);
+  if (showTitles.length === 0) return false;
+  return episodeKeys(row.relative_path).some((episode) => !showTitles.some((title) => keys.episodes.has(`${title.key}\0${episode}`)));
 }
 
 function compareSizes(sizeBytes: number, linkedSizeBytes: number | null): OrphanSizeComparison | null {
@@ -349,23 +356,26 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     unlinkedByRelease.set(releaseKeys[index]!, (unlinkedByRelease.get(releaseKeys[index]!) ?? 0) + 1);
   }
   // Packs repeat one release name many times, so each name is only compared once.
-  const titleMatches = new Map<string, string | null>();
-  const titleMatch = (name: string): string | null => {
-    let match = titleMatches.get(name);
-    if (match === undefined) {
-      match = matchReleaseTitle(library.titleIndex, name, new Date(now));
-      titleMatches.set(name, match);
+  const titleMatches = new Map<string, IndexedTitle[]>();
+  const titleMatch = (name: string): IndexedTitle[] => {
+    let matches = titleMatches.get(name);
+    if (!matches) {
+      matches = matchReleaseTitles(library.titleIndex, name, new Date(now));
+      titleMatches.set(name, matches);
     }
-    return match;
+    return matches;
   };
+  const noTitles: IndexedTitle[] = [];
   const items: OrphanReviewItem[] = rows.map((row, index) => {
     const category = classify(row, library);
     const sizeBytes = Number(row.size_bytes);
     const releaseKey = releaseKeys[index]!;
     const releaseName = releaseNameOf(releaseKey, row.relative_path);
     // A folder named after a hash still has a file name to go on.
-    const matchedTitle = category === "unlinked" ? (titleMatch(releaseName) ?? titleMatch(releaseNameOf(row.relative_path, row.relative_path))) : null;
-    const label: OrphanReviewLabel = category !== "unlinked" ? category : matchedTitle ? "title_in_library" : "no_title_match";
+    const folderTitles = category === "unlinked" ? titleMatch(releaseName) : noTitles;
+    const titles = category === "unlinked" && folderTitles.length === 0 ? titleMatch(releaseNameOf(row.relative_path, row.relative_path)) : folderTitles;
+    const matchedTitle = titles[0]?.itemName ?? null;
+    const label: OrphanReviewLabel = category !== "unlinked" ? category : !matchedTitle ? "no_title_match" : hasUnlinkedEpisode(row, titles, library) ? "episode_not_linked" : "title_in_library";
     const releaseLinkedCount = linkedByRelease.get(releaseKey)?.size ?? 0;
     const linkedSizeBytes = category === "superseded" ? linkedSizeOf(row, library) : null;
     return {
@@ -401,7 +411,7 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
   });
   const categories: OrphanCategory[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "unlinked"];
   const summary = categories.map((category) => ({ category, ...totalsFor(items.filter((item) => item.category === category)) })).filter((entry) => entry.count > 0);
-  const labels: OrphanReviewLabel[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "title_in_library", "no_title_match"];
+  const labels: OrphanReviewLabel[] = ["superseded", "copy_leftover", "not_in_library", "srtl_artifact", "episode_not_linked", "title_in_library", "no_title_match"];
   const labelSummary = labels.map((label) => ({ label, ...totalsFor(items.filter((item) => item.label === label)) })).filter((entry) => entry.count > 0);
   const hollowCount = items.filter((item) => item.hollow).length;
   const damagedCount = items.filter((item) => item.integrity === "partial_hollow").length;
