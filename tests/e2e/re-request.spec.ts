@@ -15,7 +15,7 @@ function damagedRow(id: number, name: string, extra: Record<string, unknown> = {
 }
 
 function orphanItem(id: number, name: string) {
-  return { storageFileId: id, rootType: "local", relativePath: `movies/${name}/${name}.mkv`, filePath: `/local/movies/${name}/${name}.mkv`, section: "movies", itemName: name, sizeBytes: 1_000_000, mtimeMs: 0, category: "not_in_library", protectedReason: null, hollow: false };
+  return { storageFileId: id, rootType: "local", relativePath: `movies/${name}/${name}.mkv`, filePath: `/local/movies/${name}/${name}.mkv`, section: "movies", itemName: name, sizeBytes: 1_000_000, mtimeMs: 0, category: "not_in_library", label: "not_in_library", matchedTitle: null, releaseName: name, releaseStatus: "none_linked", releaseFileCount: 1, releaseLinkedCount: 0, linkedSizeBytes: null, sizeComparison: null, episodeCoverage: null, extraLinkPath: null, protectedReason: null, hollow: false };
 }
 
 interface Options {
@@ -43,7 +43,7 @@ async function fixture(page: Page, options: Options = {}) {
     else if (url.pathname === "/api/inventory/summary") body = { totalLinks: 0, remoteLinks: 0, localLinks: 0, brokenLinks: 0, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 0, actionableLocalLinks: 0, assignedRemoteLinks: 0, unassignedRemoteLinks: 0, unassignedLocalLinks: 0, localFiles: 2, remoteFiles: 0, actionableRemoteFiles: 0, actionableLocalFiles: 0, assignedRemoteFiles: 0, unassignedRemoteFiles: 0, unassignedLocalFiles: 0, localOrphanFiles: 2, remoteOrphanFiles: 0, missingLinks: 0, missingLocalFiles: 0, missingRemoteFiles: 0 };
     else if (url.pathname === "/api/damaged-files") body = [damagedRow(1, "Alpha"), damagedRow(2, "Nobody", { linked: false, remoteCopyExists: true }), damagedRow(3, "Fresh", { protectedReason: "Modified in the last 24 hours" })];
     else if (url.pathname === "/api/damaged-files/delete") { posts.damaged.push(request.postDataJSON()); body = { jobId: 42 }; }
-    else if (url.pathname === "/api/orphans") body = { rootType: "local", items: [orphanItem(1, "Alpha"), orphanItem(2, "Nobody")], leftoverFolders: [], summary: [], hollowCount: 0, damagedCount: 0, symlinkInventoryAt: null, storageInventoryAt: null, staleWarning: null, storageStaleWarning: null, holdDays: 7 };
+    else if (url.pathname === "/api/orphans") body = { rootType: "local", items: [orphanItem(1, "Alpha"), orphanItem(2, "Nobody")], leftoverFolders: [], summary: [], labelSummary: [], hollowCount: 0, damagedCount: 0, symlinkInventoryAt: null, storageInventoryAt: null, staleWarning: null, storageStaleWarning: null, extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: [] }, holdDays: 7 };
     else if (url.pathname === "/api/orphans/purge") { posts.orphans.push(request.postDataJSON()); body = { jobId: 42 }; }
     else if (url.pathname === "/api/re-requests/preview") { posts.previews.push(request.postDataJSON()); body = preview; }
     else if (url.pathname === "/api/re-requests/retry") { posts.retries.push(request.postDataJSON()); failed = false; body = { retried: 1 }; }

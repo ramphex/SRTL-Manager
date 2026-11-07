@@ -21,7 +21,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, extraSymlinksForPurge, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -31,6 +31,7 @@ import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
+import { isCopySourceLink, planCopyRetry, type CopyRetryPlanning, type CopyRetryResult } from "./copyRetry";
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { discardPartialCopy, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
@@ -48,6 +49,7 @@ import type {
   CopyLocalConflictStrategy,
   CopyJobBehaviorSettings,
   CopyOptions,
+  CopyRetryPlan,
   InventorySummary,
   JobEventPage,
   JobEventRecord,
@@ -528,11 +530,9 @@ function filterAuditLinks(links: MediaLinkRow[], options: AuditOptions): MediaLi
 
 function filterCopyLinks(links: MediaLinkRow[], options: CopyOptions): MediaLinkRow[] {
   const requestedIds = options.linkIds === undefined ? null : new Set(options.linkIds);
-  const sourceKind = options.direction === "to_local" ? "remote" : "local";
-  const storagePolicy = options.direction === "to_local" ? "location_1" : "location_2";
   return links.filter((link) => {
     if (requestedIds && !requestedIds.has(link.id)) return false;
-    if (link.kind !== sourceKind || link.storagePolicy !== storagePolicy || !link.isMedia || link.missingSince) return false;
+    if (!isCopySourceLink(link, options.direction)) return false;
     if (options.section && link.section !== options.section) return false;
     if (options.itemName && link.itemName !== options.itemName) return false;
     if (options.relativePathPrefix && !relativePathMatchesPrefix(link.relativePath, options.relativePathPrefix)) return false;
@@ -2709,11 +2709,17 @@ export class JobRunner {
     });
   }
 
-  /** `keepRemoteSource` holds back the remote-delete setting for a copy started by someone who may not delete. */
-  async startCopy(input: CopyOptions, admission: { keepRemoteSource?: boolean } = {}): Promise<number> {
+  /**
+   * `keepRemoteSource` holds back the remote-delete setting for a copy started by someone who may not delete.
+   * `requireAllLinks` refuses the job if any requested link can no longer be copied, rather than queuing what is left, which may be nothing.
+   */
+  async startCopy(input: CopyOptions, admission: { keepRemoteSource?: boolean; requireAllLinks?: boolean } = {}): Promise<number> {
     const normalizedOptions = await normalizeCopyOptions(this.db, input);
     const links = await listMediaLinks(this.db, undefined, "current");
     const orderedSelectedLinks = orderedCopySelection(links, normalizedOptions);
+    if (admission.requireAllLinks && orderedSelectedLinks.length !== normalizedOptions.linkIds?.length) {
+      throw new AdmissionError("Copy selection changed while the job was being prepared. Review the current inventory and queue it again.");
+    }
     const claimedLinks = normalizedOptions.linkIds === undefined ? orderedSelectedLinks : filterCopySelectedLinks(links, normalizedOptions);
     const optionsWithResolvedLinks = { ...normalizedOptions, linkIds: orderedSelectedLinks.map((link) => link.id) };
     const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
@@ -2780,6 +2786,51 @@ export class JobRunner {
     return (await resolveCopyFailures(this.db, jobId)).list;
   }
 
+  /** Null for a job that is not a copy. */
+  async copyRetryPlan(jobId: number): Promise<CopyRetryPlan | null> {
+    return (await planCopyRetry(this.db, jobId))?.plan ?? null;
+  }
+
+  /**
+   * Queues a new copy of a finished job's failed items, leaving that job as it is. Anything that removes files
+   * has to be asked for: `replaceExisting` and `deleteRemoteSources` both default to off, and each only repeats
+   * what the original job was already doing. `authorize` sees the plan before anything is queued.
+   */
+  async retryFailedCopies(
+    jobId: number,
+    choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean },
+    authorize: (planning: CopyRetryPlanning) => void
+  ): Promise<CopyRetryResult | null> {
+    const planning = await planCopyRetry(this.db, jobId);
+    if (!planning) return null;
+    authorize(planning);
+    const { plan, linkIds, original } = planning;
+    if (plan.retryCount === 0) throw new ConflictError(plan.summary, { code: "nothing_to_retry" });
+    if (choices.replaceExisting && !plan.replaceOffered) throw new AdmissionError("This job did not replace existing files, so its retry cannot either.");
+    if (choices.deleteRemoteSources && !plan.deleteRemoteSourceOffered) throw new AdmissionError("Remote sources can only be deleted when the original job did and the setting is still on.");
+    const localConflictStrategy = original.localConflictStrategy === "replace" && !choices.replaceExisting ? "keep_both" : original.localConflictStrategy;
+    let retryJobId: number;
+    try {
+      retryJobId = await this.startCopy(
+        { ...original, linkIds, ...(localConflictStrategy ? { localConflictStrategy } : {}) },
+        { keepRemoteSource: !choices.deleteRemoteSources, requireAllLinks: true }
+      );
+    } catch (error) {
+      // Lost a race with another press: its job now holds these items, which says more than the claim conflict does.
+      const replanned = error instanceof AdmissionError ? await planCopyRetry(this.db, jobId) : null;
+      if (replanned?.plan.retryCount === 0) throw new ConflictError(replanned.plan.summary, { code: "nothing_to_retry" });
+      throw error;
+    }
+    return {
+      jobId: retryJobId,
+      linkIds,
+      plan,
+      direction: original.direction,
+      ...(localConflictStrategy ? { localConflictStrategy } : {}),
+      deleteRemoteSources: choices.deleteRemoteSources === true
+    };
+  }
+
   async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = [], reRequest = false): Promise<number> {
     const requested = [...new Set(storageFileIds)];
     const requestedFolders = [...new Set(folderIds)];
@@ -2792,8 +2843,11 @@ export class JobRunner {
     return this.enqueuePreparedJob("orphan_purge", async (transaction) => {
       const staleness = await symlinkInventoryStaleness(transaction);
       if (staleness.warning) throw new AdmissionError(staleness.warning);
-      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested) : { eligible: [], rejected: [] };
-      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders);
+      const extra = await extraSymlinksForPurge(transaction, paths).catch((error: unknown) => {
+        throw new AdmissionError(errorMessage(error));
+      });
+      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested, undefined, extra) : { eligible: [], rejected: [] };
+      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders, undefined, extra);
       const allRejected = [...rejected, ...folders.rejected];
       if (allRejected.length > 0) {
         throw new AdmissionError(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);

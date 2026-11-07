@@ -6,11 +6,14 @@ import { getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { publicErrorMessage } from "../errors";
 import type { ArrStoredSettings } from "./arrInstances";
+import { parseEpisodeNumbers } from "./episodeNumbers";
 import { isOnboardingComplete } from "./onboarding";
 import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { mapRadarrMovie, radarrClient, radarrStoredInstances } from "./radarr";
 import { mapSonarrSeries, sonarrClient, sonarrEpisodeLabel, sonarrStoredInstances } from "./sonarr";
 import type { SonarrEpisode, SonarrEpisodeFile } from "./sonarrClient";
+
+export { parseEpisodeNumbers };
 
 // The worker runs this pass every five seconds, so a pass may send one twelfth of a minute's allowance.
 export const reRequestPassMs = 5000;
@@ -46,17 +49,6 @@ function parseNames(raw: string): string[] {
   } catch {
     return [];
   }
-}
-
-// The season and episodes a Sonarr-style file name holds: S01E03, S01E03E04, S01E03-E04 and S01E03-04 all count.
-export function parseEpisodeNumbers(fileName: string): { season: number; episodes: number[] } | null {
-  const match = path.posix.basename(fileName).match(/\bs(\d{1,4})e(\d{1,4})((?:-?e\d{1,4}|-\d{1,4})*)\b/i);
-  if (!match) return null;
-  const numbers = [Number(match[2]), ...[...(match[3] ?? "").matchAll(/\d+/g)].map((entry) => Number(entry[0]))];
-  const first = Math.min(...numbers);
-  const last = Math.max(...numbers);
-  if (last - first >= 50) return null;
-  return { season: Number(match[1]), episodes: Array.from({ length: last - first + 1 }, (_, index) => first + index) };
 }
 
 function episodeKeysOf(fileNames: string[]): string[] {

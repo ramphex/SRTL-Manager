@@ -23,7 +23,7 @@ export interface ResolvedCopyFailures {
   failures: ResolvedCopyFailure[];
 }
 
-function parseRecord(raw: string): Record<string, unknown> | null {
+export function parseRecord(raw: string): Record<string, unknown> | null {
   try {
     const value: unknown = JSON.parse(raw);
     return value !== null && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
@@ -156,14 +156,19 @@ async function inspectSymlink(
   };
 }
 
-export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promise<ResolvedCopyFailures> {
-  const sourceJob = await db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).limit(1).then((rows) => rows[0]);
-  if (!sourceJob) throw new ConflictError("Copy job not found");
-  if (sourceJob.type !== "copy") throw new ConflictError("Failed symlinks can only be reviewed for copy jobs");
-  if (sourceJob.status === "queued" || sourceJob.status === "running") {
-    throw new ConflictError("Wait for the copy job to finish before reviewing failed symlinks");
-  }
+interface CopyFailureCandidate {
+  eventId: number;
+  message: string;
+  data: Record<string, unknown>;
+  selection: JobSelectionItemRow | null;
+  operation: CopyOperationRow | null;
+  mediaLinkId: number | null;
+  linkPath: string | null;
+  expectedTargetPath: string | null;
+}
 
+/** Which items a copy job's error events name. Reads only the database. */
+export async function copyFailureCandidates(db: DbExecutor, jobId: number): Promise<{ identified: Map<number, CopyFailureCandidate>; unidentified: CopyFailureCandidate[] }> {
   const eventRows = await db
     .select()
     .from(schema.jobEvents)
@@ -177,18 +182,8 @@ export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promis
   const operationByLinkId = new Map(operations.map((operation) => [operation.mediaLinkId, operation]));
   const operationByPath = new Map(operations.map((operation) => [path.resolve(operation.linkPath), operation]));
 
-  type Candidate = {
-    eventId: number;
-    message: string;
-    data: Record<string, unknown>;
-    selection: JobSelectionItemRow | null;
-    operation: CopyOperationRow | null;
-    mediaLinkId: number | null;
-    linkPath: string | null;
-    expectedTargetPath: string | null;
-  };
-  const identified = new Map<number, Candidate>();
-  const unidentified: Candidate[] = [];
+  const identified = new Map<number, CopyFailureCandidate>();
+  const unidentified: CopyFailureCandidate[] = [];
 
   for (const event of eventRows) {
     const data = parseRecord(event.data);
@@ -200,7 +195,7 @@ export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promis
     const selection = (eventLinkId ? selectionById.get(eventLinkId) : null) ?? (eventLinkPath ? selectionByPath.get(path.resolve(eventLinkPath)) : null) ?? null;
     const operation = eventOperation ?? (eventLinkId ? operationByLinkId.get(eventLinkId) : null) ?? (eventLinkPath ? operationByPath.get(path.resolve(eventLinkPath)) : null) ?? null;
     const mediaLinkId = eventLinkId ?? operation?.mediaLinkId ?? selection?.mediaLinkId ?? null;
-    const candidate: Candidate = {
+    const candidate: CopyFailureCandidate = {
       eventId: event.id,
       message: event.message,
       data,
@@ -214,7 +209,18 @@ export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promis
     if (mediaLinkId) identified.set(mediaLinkId, candidate);
     else unidentified.push(candidate);
   }
+  return { identified, unidentified };
+}
 
+export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promise<ResolvedCopyFailures> {
+  const sourceJob = await db.select().from(schema.jobs).where(eq(schema.jobs.id, jobId)).limit(1).then((rows) => rows[0]);
+  if (!sourceJob) throw new ConflictError("Copy job not found");
+  if (sourceJob.type !== "copy") throw new ConflictError("Failed symlinks can only be reviewed for copy jobs");
+  if (sourceJob.status === "queued" || sourceJob.status === "running") {
+    throw new ConflictError("Wait for the copy job to finish before reviewing failed symlinks");
+  }
+
+  const { identified, unidentified } = await copyFailureCandidates(db, jobId);
   const mediaLinkIds = [...identified.keys()];
   const currentRows = mediaLinkIds.length === 0 ? [] : await db.select().from(schema.mediaLinks).where(inArray(schema.mediaLinks.id, mediaLinkIds));
   const currentById = new Map(currentRows.map((row) => [row.id, currentLinkRow(row)]));

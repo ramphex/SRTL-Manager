@@ -255,7 +255,10 @@ async function compareFilesWithProgress(sourcePath: string, targetPath: string, 
   await emitByteProgress(reportProgress, progressState, bytesProcessed, totalBytes, true);
 
   const sourceFile = await fs.open(sourcePath, "r");
-  const targetFile = await fs.open(targetPath, "r");
+  const targetFile = await fs.open(targetPath, "r").catch(async (error: unknown) => {
+    await sourceFile.close().catch(() => undefined);
+    throw error;
+  });
   try {
     const chunkSize = 1024 * 1024;
     const sourceBuffer = Buffer.allocUnsafe(chunkSize);

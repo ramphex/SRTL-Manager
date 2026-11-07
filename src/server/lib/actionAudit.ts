@@ -20,6 +20,7 @@ import type { SecurityEventType } from "../../shared/auth";
 
 export type ActionAuditAction =
   | "copy.start"
+  | "copy.retry"
   | "copy.discard_partial"
   | "orphan.purge_hold"
   | "orphan.purge_delete"

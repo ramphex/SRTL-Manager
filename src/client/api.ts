@@ -9,6 +9,8 @@ import type {
   CopyConflictPreview,
   DamagedFileRow,
   CopyFailureList,
+  CopyRetryPlan,
+  CopyRetryStarted,
   CopyReconciliationState,
   InventorySummary,
   InventoryScanTimestamps,
@@ -234,6 +236,9 @@ export const api = {
   },
   job: (id: number) => request<JobRecord>(`/api/jobs/${id}`),
   copyFailures: (id: number) => request<CopyFailureList>(`/api/jobs/${id}/copy-failures`),
+  copyRetryPlan: (id: number) => request<CopyRetryPlan>(`/api/jobs/${id}/copy-retry`),
+  retryFailedCopies: (id: number, choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean } = {}) =>
+    request<CopyRetryStarted>(`/api/jobs/${id}/copy-retry`, { method: "POST", body: JSON.stringify(choices) }),
   removeFailedCopySymlinks: (id: number, mediaLinkIds: number[]) =>
     request<{ jobId: number }>(`/api/jobs/${id}/copy-failures/remove-symlinks`, {
       method: "POST",

@@ -20,7 +20,7 @@ import {
 } from "../lib/storagePolicies";
 import { getInventoryScanTimestamps, getInventorySummary, listMediaLinks, listMediaLinksByIds, listMediaLinksPage, listMediaLinkTree, listSectionSummaries, listStorageFileTree, listStorageFiles } from "../lib/scanner";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
-import type { InventorySummary, JobStatus, LinkKind, MediaLinkTreeKindFilter, ScanOptions, ScanRunRecord, StoragePolicyKind, StorageRootType } from "../../shared/types";
+import type { CopyOptions, InventorySummary, JobStatus, LinkKind, MediaLinkTreeKindFilter, ScanOptions, ScanRunRecord, StoragePolicyKind, StorageRootType } from "../../shared/types";
 
 const scanOptionsSchema = z
   .object({
@@ -167,7 +167,7 @@ async function listScanHistory(db: Db): Promise<ScanRunRecord[]> {
   return [...recordedRuns, ...legacyRuns].sort((a, b) => b.jobId - a.jobId).slice(0, 25);
 }
 
-function requireCopyPermissions(request: FastifyRequest, body: z.infer<typeof copyInputSchema>): void {
+export function requireCopyPermissions(request: FastifyRequest, body: Pick<CopyOptions, "direction" | "localConflictStrategy">): void {
   if (body.direction === "to_remote") requirePermission(request, "library.manage", "You can only copy titles to local storage.");
   // Replacing removes the file already at the destination.
   if (body.localConflictStrategy === "replace") requirePermission(request, "library.delete", "You can keep both files, but not replace the existing one.");

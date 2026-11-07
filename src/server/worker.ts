@@ -17,6 +17,7 @@ import { refreshBackupStatus } from "./lib/backups";
 import { reRequestPassMs, startReRequestWork } from "./lib/reRequests";
 import { expireHeldOrphans } from "./jobs/orphanPurge";
 import { runWatchSyncWork } from "./lib/watchSyncEngine";
+import { configureExtraSymlinkFolders } from "./lib/extraSymlinkFolders";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
 import { loadAndInstallSecretKey } from "./lib/secretBox";
 
@@ -27,6 +28,7 @@ const config = loadConfig();
 const secretKey = loadAndInstallSecretKey(secretKeyOptions(config.rootDir, config.dataDir));
 if (secretKey.source === "generated") console.warn(`Created the secret key for stored credentials at ${secretKey.path}. Back it up separately from database backups.`);
 configureOutboundPolicy(config.outboundPolicy);
+configureExtraSymlinkFolders(config.extraSymlinkFolders);
 const database = await openDatabase({ databaseUrl: config.databaseUrl, migrate: config.autoMigrate, discardUnreadableCredentials: config.discardUnreadableCredentials });
 const workerProcessLock = await database.pool.connect();
 let workerProcessLockAcquired = false;

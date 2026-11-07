@@ -343,6 +343,42 @@ export interface CopyFailureList {
   items: CopyFailureItem[];
 }
 
+export type CopyRetrySkipReason = "already_copied" | "link_gone" | "no_longer_eligible" | "needs_reconciliation" | "already_queued" | "unidentified";
+
+export interface CopyRetrySkip {
+  reason: CopyRetrySkipReason;
+  count: number;
+  /** The active jobs already holding these items, for `already_queued`. */
+  jobIds?: number[];
+}
+
+export interface CopyRetryPlan {
+  jobId: number;
+  direction: CopyDirection;
+  /** Every failed item in the job, whether or not it can be retried. */
+  totalFailed: number;
+  retryCount: number;
+  skippedCount: number;
+  skipped: CopyRetrySkip[];
+  /** Items the job never got to because it stopped early. They are not failures, so a retry leaves them out. */
+  notReachedCount: number;
+  /** The original job replaced existing local files. A retry keeps both unless asked to replace. */
+  replaceOffered: boolean;
+  /** The original job deleted remote sources and the setting is still on. A retry keeps them unless asked to delete. */
+  deleteRemoteSourceOffered: boolean;
+  /** Says what would be skipped and why, ready to show. */
+  summary: string;
+}
+
+export interface CopyRetryStarted {
+  jobId: number;
+  retried: number;
+  skipped: number;
+  summary: string;
+  localConflictStrategy?: CopyLocalConflictStrategy;
+  deleteRemoteSources: boolean;
+}
+
 export interface SymlinkCleanupOptions {
   sourceJobId: number;
   linkIds: number[];
@@ -565,6 +601,13 @@ export interface StorageFileRow {
 
 export type OrphanCategory = "superseded" | "copy_leftover" | "not_in_library" | "srtl_artifact" | "unlinked";
 
+// The category, with "unlinked" told apart by comparing the file's release name with the library's titles.
+export type OrphanReviewLabel = Exclude<OrphanCategory, "unlinked"> | "title_in_library" | "episode_not_linked" | "no_title_match";
+
+export type OrphanReleaseStatus = "none_linked" | "partly_linked";
+
+export type OrphanSizeComparison = "larger" | "same" | "smaller";
+
 export interface OrphanReviewItem {
   storageFileId: number;
   rootType: StorageRootType;
@@ -579,6 +622,21 @@ export interface OrphanReviewItem {
   hollow: boolean;
   integrity: StorageIntegrity;
   zeroSamples: number | null;
+  label: OrphanReviewLabel;
+  // The library title this file's release name appears to be; a name comparison, so it can be wrong.
+  matchedTitle: string | null;
+  // The folder the file arrived in, or the file name for a file with no folder of its own.
+  releaseName: string;
+  releaseStatus: OrphanReleaseStatus;
+  releaseFileCount: number;
+  releaseLinkedCount: number;
+  // The linked file or files a superseded file is compared with. Null when there is nothing to compare.
+  linkedSizeBytes: number | null;
+  sizeComparison: OrphanSizeComparison | null;
+  // For a multi-episode file: how many of its episodes have a linked file elsewhere.
+  episodeCoverage: { linked: number; total: number } | null;
+  // A symlink in an extra symlink folder that still points at this file.
+  extraLinkPath: string | null;
 }
 
 export interface OrphanLeftoverFolder {
@@ -598,6 +656,7 @@ export interface OrphanReview {
   // Folders whose whole subtree holds no video, such as leftover subtitles, artwork, samples, or empty folders.
   leftoverFolders: OrphanLeftoverFolder[];
   summary: Array<{ category: OrphanCategory; count: number; sizeBytes: number; purgeableCount: number }>;
+  labelSummary: Array<{ label: OrphanReviewLabel; count: number; sizeBytes: number; purgeableCount: number }>;
   hollowCount: number;
   // Partially hollow files: allocated, but with zero-filled gaps found by sampling.
   damagedCount: number;
@@ -606,6 +665,8 @@ export interface OrphanReview {
   staleWarning: string | null;
   // Informational only: purges re-check every file on disk.
   storageStaleWarning: string | null;
+  // Symlink folders kept by other tools. Any problem here blocks purging.
+  extraSymlinks: { folders: string[]; linkCount: number; unmatchedCount: number; problems: string[] };
   holdDays: number;
 }
 

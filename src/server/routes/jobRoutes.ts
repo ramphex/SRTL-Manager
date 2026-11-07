@@ -5,8 +5,9 @@ import type { JobRunner } from "../jobs/jobRunner";
 import { recordActionAudit } from "../lib/actionAudit";
 import { emptyEventPage, isRestrictedRequest, jobDetailsHidden, restrictedJob } from "../lib/restrictedView";
 import { requestHasPermission, requirePermission } from "../routeAccess";
+import { requireCopyPermissions } from "./libraryRoutes";
 import { jobStoppableWithoutDeleting } from "../../shared/permissions";
-import type { JobEventRecord } from "../../shared/types";
+import type { CopyRetryStarted, JobEventRecord } from "../../shared/types";
 
 export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db): void {
   // A restricted account sees that a settings job ran, but none of what its log says.
@@ -60,6 +61,53 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     if (!job) return reply.code(404).send({ error: "Copy job not found" });
     if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be removed for copy jobs" });
     return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds) };
+  });
+
+  app.get("/api/jobs/:id/copy-retry", async (request, reply) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const job = await jobs.getJob(params.id);
+    if (!job) return reply.code(404).send({ error: "Copy job not found" });
+    const plan = await jobs.copyRetryPlan(params.id);
+    if (!plan) return reply.code(400).send({ error: "Only copy jobs can be retried" });
+    return plan;
+  });
+
+  app.post("/api/jobs/:id/copy-retry", async (request, reply) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const body = z.object({ replaceExisting: z.boolean().optional(), deleteRemoteSources: z.boolean().optional() }).parse(request.body ?? {});
+    const job = await jobs.getJob(params.id);
+    if (!job) return reply.code(404).send({ error: "Copy job not found" });
+    const result = await jobs.retryFailedCopies(params.id, body, ({ original }) => {
+      // The strategy checked is the one this retry would use: without `replaceExisting`, it keeps both files.
+      requireCopyPermissions(request, { direction: original.direction, localConflictStrategy: body.replaceExisting ? "replace" : undefined });
+      if (body.deleteRemoteSources) requirePermission(request, "library.delete", "You can retry this copy, but not delete its remote sources.");
+    });
+    if (!result) return reply.code(400).send({ error: "Only copy jobs can be retried" });
+    const { plan } = result;
+    await recordActionAudit(db, request, {
+      action: "copy.retry",
+      summary: `Retried ${plan.retryCount} failed item${plan.retryCount === 1 ? "" : "s"} from copy job #${params.id}${result.localConflictStrategy === "replace" ? ", replacing existing local files" : ""}${result.deleteRemoteSources ? ", deleting remote sources" : ""}`,
+      jobId: result.jobId,
+      targets: {
+        jobId: result.jobId,
+        sourceJobId: params.id,
+        direction: result.direction,
+        linkIds: result.linkIds,
+        linkCount: result.linkIds.length,
+        skipped: plan.skipped,
+        ...(result.localConflictStrategy ? { localConflictStrategy: result.localConflictStrategy } : {}),
+        ...(result.deleteRemoteSources ? { deleteRemoteSources: true } : {})
+      }
+    });
+    const started: CopyRetryStarted = {
+      jobId: result.jobId,
+      retried: plan.retryCount,
+      skipped: plan.skippedCount,
+      summary: plan.summary,
+      ...(result.localConflictStrategy ? { localConflictStrategy: result.localConflictStrategy } : {}),
+      deleteRemoteSources: result.deleteRemoteSources
+    };
+    return started;
   });
 
   app.get("/api/job-reconciliation", async () => jobs.copyReconciliationState());

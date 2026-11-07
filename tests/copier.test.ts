@@ -70,6 +70,31 @@ describe("copy runner", () => {
     }
   });
 
+  it("closes the source file when the comparison cannot open the copy", async () => {
+    const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copy-compare-open-"));
+    const sourcePath = path.join(directory, "source.bin");
+    const targetPath = path.join(directory, "target.bin");
+    const realOpen = fs.open;
+    const opened: Awaited<ReturnType<typeof fs.open>>[] = [];
+    const open = vi.spyOn(fs, "open").mockImplementation(async (...args: Parameters<typeof fs.open>) => {
+      if (args[0] === targetPath) throw new Error("Input/output error");
+      const handle = await realOpen(...args);
+      opened.push(handle);
+      return handle;
+    });
+    try {
+      await fs.writeFile(sourcePath, "same bytes");
+      await fs.writeFile(targetPath, "same bytes");
+
+      await expect(defaultCopyRunner.runCmp(sourcePath, targetPath)).rejects.toThrow("Input/output error");
+      expect(opened).toHaveLength(1);
+      expect(opened[0]!.fd).toBe(-1);
+    } finally {
+      open.mockRestore();
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects destination parents that resolve outside the configured root", async () => {
     const directory = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-copier-escape-"));
     try {

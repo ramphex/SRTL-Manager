@@ -48,7 +48,7 @@ await esbuild({
   packages: "external",
   platform: "node",
   format: "esm",
-  target: "node24",
+  target: "node26",
   outdir: "dist/server",
   sourcemap: true,
   logLevel: "info"

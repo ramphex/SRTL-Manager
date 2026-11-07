@@ -3,20 +3,28 @@ import { expect, test, type Page } from "@playwright/test";
 const baseUrl = process.env.SRTL_E2E_BASE_URL;
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
 
-function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean } = {}) {
+function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean; extraProblem?: boolean } = {}) {
   const items = Array.from({ length: count }, (_, index) => ({
     storageFileId: index + 1, rootType, relativePath: `movies/Title ${index}/file.mkv`, filePath: `/${rootType}/movies/Title ${index}/file.mkv`, section: "movies", itemName: `Title ${index}`,
-    sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false
+    sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false,
+    label: index % 2 ? "superseded" : index % 8 === 6 ? "episode_not_linked" : index % 4 === 2 ? "title_in_library" : "no_title_match", matchedTitle: index % 4 === 2 ? `Title ${index} (2020)` : null,
+    releaseName: `Title ${index}`, releaseStatus: index === 2 ? "partly_linked" : "none_linked", releaseFileCount: index === 2 ? 8 : 1, releaseLinkedCount: index === 2 ? 3 : 0,
+    linkedSizeBytes: index % 2 ? 500_000 : null, sizeComparison: index % 2 ? "larger" : null, episodeCoverage: null, extraLinkPath: null
   }));
+  const labelTotals = (label: string) => {
+    const matching = items.filter((item) => item.label === label);
+    return { label, count: matching.length, sizeBytes: matching.reduce((total, item) => total + item.sizeBytes, 0), purgeableCount: matching.filter((item) => !item.protectedReason).length };
+  };
   return {
     rootType, items,
     leftoverFolders: [{ folderId: 1, rootType, relativePath: "movies/Empty", dirPath: `/${rootType}/movies/Empty`, fileCount: 1, totalBytes: 10, newestMtimeMs: 0, protectedReason: null }],
-    summary: [], hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
-    staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null, holdDays: 7
+    summary: [], labelSummary: ["superseded", "episode_not_linked", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
+    staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null,
+    extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, holdDays: 7
   };
 }
 
-async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean } = {}) {
+async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean; extraProblem?: boolean } = {}) {
   const purges: Array<{ rootType: string; storageFileIds: number[]; folderIds: number[]; mode: string }> = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -97,4 +105,40 @@ test("stale symlink scan disables purge all", async ({ page }) => {
   await fixture(page, { remoteCount: 6, stale: true });
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   await expect(page.getByRole("button", { name: "Purge all eligible" })).toBeDisabled();
+});
+
+test("an unreadable extra symlink folder blocks purging and says why", async ({ page }) => {
+  await fixture(page, { remoteCount: 6, extraProblem: true });
+  await page.goto(`${baseUrl}/library?view=remote-orphans`);
+  await expect(page.getByRole("alert").filter({ hasText: "could not be read" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Purge all eligible" })).toBeDisabled();
+});
+
+test("the review filters and sorts by the new labels, and says a title match is only a name match", async ({ page }) => {
+  await fixture(page, { remoteCount: 8 });
+  await page.goto(`${baseUrl}/library?view=remote-orphans`);
+  await expect(page.getByText(/compares names only and can be wrong/)).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /^Title is in the library \d/ }).click();
+  await expect(page.getByText(/compares names only and can be wrong/)).toBeVisible();
+  await expect(page.getByText("Name looks like Title 2 (2020)")).toBeVisible();
+  await expect(page.getByRole("button", { name: /^Select all title is in the library \(1\)/ })).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /episode is not linked/ }).click();
+  await expect(page.getByText(/Not linked does not mean missing/)).toBeVisible();
+  await expect(page.getByText("Name looks like Title 6 (2020)")).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /No title match/ }).click();
+  await expect(page.getByText(/may still be in the library under another name/)).toBeVisible();
+  await page.getByRole("group", { name: "Orphan categories" }).getByRole("button", { name: /All orphans/ }).click();
+
+  await page.getByLabel("Filter by release").selectOption("partly_linked");
+  await expect(page.getByText("partly linked, 3 of 8 files in use")).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(1);
+  await page.getByLabel("Filter by release").selectOption("all");
+
+  await page.getByLabel("Filter by size against the linked file").selectOption("larger");
+  await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(4);
+  await expect(page.getByText(/^Larger than the linked file \(/).first()).toBeVisible();
+  await expect(page.getByText(/A larger file is not always a better one/)).toBeVisible();
+
+  await page.getByLabel("Sort orphans").selectOption("size_desc");
+  await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(4);
 });

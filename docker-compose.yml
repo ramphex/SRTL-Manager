@@ -61,6 +61,8 @@ services:
     # networks:
     #   - default
     #   - proxy
+    # SRTL_EXTRA_SYMLINK_DIRS folders are mounted read-only in this service and the
+    # worker by a docker-compose.override.yml. See docs/orphan-review.md.
     volumes:
       - type: bind
         source: ${SYMLINK_DIR:?Set SYMLINK_DIR in .env}
