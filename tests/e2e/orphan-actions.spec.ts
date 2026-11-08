@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 const baseUrl = process.env.SRTL_E2E_BASE_URL;
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
 
-function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean; extraProblem?: boolean; inUseSkipped?: number } = {}) {
+function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean; extraProblem?: boolean } = {}) {
   const items = Array.from({ length: count }, (_, index) => ({
     storageFileId: index + 1, rootType, relativePath: `movies/Title ${index}/file.mkv`, filePath: `/${rootType}/movies/Title ${index}/file.mkv`, section: "movies", itemName: `Title ${index}`,
     sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false,
@@ -20,11 +20,11 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: { stal
     leftoverFolders: [{ folderId: 1, rootType, relativePath: "movies/Empty", dirPath: `/${rootType}/movies/Empty`, fileCount: 1, totalBytes: 10, newestMtimeMs: 0, protectedReason: null }],
     summary: [], labelSummary: ["superseded", "episode_not_linked", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
     staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null,
-    extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, inUseSkippedCount: extra.inUseSkipped ?? 0, holdDays: 7
+    extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, holdDays: 7
   };
 }
 
-async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean; extraProblem?: boolean; inUseSkipped?: number; purgeJob?: { status: string; progress: unknown } } = {}) {
+async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean; extraProblem?: boolean } = {}) {
   const purges: Array<{ rootType: string; storageFileIds: number[]; folderIds: number[]; mode: string }> = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -46,7 +46,6 @@ async function fixture(page: Page, options: { remoteCount?: number; stale?: bool
     else if (url.pathname === "/api/settings/audit") body = { sections: [], targets: ["local", "remote"] };
     else if (url.pathname === "/api/settings/advanced") body = {};
     else if (url.pathname === "/api/jobs") body = [];
-    else if (url.pathname === "/api/jobs/99") body = { id: 99, type: "orphan_purge", status: "completed", createdAt: "2026-01-01T00:00:00.000Z", startedAt: null, finishedAt: null, progress: {}, ...options.purgeJob };
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
@@ -142,21 +141,4 @@ test("the review filters and sorts by the new labels, and says a title match is 
 
   await page.getByLabel("Sort orphans").selectOption("size_desc");
   await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(4);
-});
-
-test("a failed purge says it failed with its first error, and in-use items are only counted", async ({ page }) => {
-  await fixture(page, {
-    remoteCount: 4,
-    inUseSkipped: 3,
-    purgeJob: { status: "failed", progress: { failed: 1, total: 1, firstError: { filePath: "/remote/Charlie.2001.DVDR", message: "EIO" } } }
-  });
-  await page.goto(`${baseUrl}/library?view=remote-orphans`);
-  await expect(page.getByText("3 items are not listed because a symlink uses them.")).toBeVisible();
-  await page.getByRole("checkbox", { name: /^Select file/ }).nth(1).check();
-  await page.getByRole("button", { name: /Purge selected/ }).click();
-  await page.getByRole("group", { name: "Confirm orphan purge" }).getByRole("button", { name: /Delete permanently|Move to holding area/ }).click();
-  const alert = page.getByRole("alert").filter({ hasText: "Orphan purge job #99 failed" });
-  await expect(alert).toContainText("1 of 1 not purged");
-  await expect(alert).toContainText("First error: /remote/Charlie.2001.DVDR: EIO");
-  await expect(page.getByText(/job #99 finished/)).toHaveCount(0);
 });

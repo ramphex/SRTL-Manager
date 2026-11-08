@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
+import type { HeldOrphanFile, OrphanCategory, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
 import { getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
@@ -268,7 +268,7 @@ function ancestorDirectories(paths: Iterable<string>): Set<string> {
   return ancestors;
 }
 
-type LeftoverFolderReview = LeftoverFolderRow & { protectedReason: string | null; inUse: boolean };
+type LeftoverFolderReview = LeftoverFolderRow & { protectedReason: string | null; inUse: OrphanInUseReason | null };
 
 async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<LeftoverFolderReview[]> {
   const rows = await db
@@ -292,7 +292,7 @@ async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, fol
   const extraDirectories = ancestorDirectories(extra?.targets.keys() ?? []);
   return rows.map((row) => {
     const protection = leftoverProtection(row, copyDirectories, linkedDirectories, linkedTargets, extraDirectories, extra, now);
-    return { ...row, protectedReason: protection?.reason ?? null, inUse: protection?.inUse ?? false };
+    return { ...row, protectedReason: protection?.reason ?? null, inUse: protection?.inUse ?? null };
   });
 }
 
@@ -304,13 +304,13 @@ function leftoverProtection(
   extraDirectories: Set<string>,
   extra: ExtraSymlinks | undefined,
   now: number
-): { reason: string; inUse: boolean } | null {
+): { reason: string; inUse: OrphanInUseReason | null } | null {
   const directory = path.resolve(row.dirPath);
-  if (copyDirectories.has(directory)) return { reason: "Part of an unfinished copy", inUse: false };
+  if (copyDirectories.has(directory)) return { reason: "Part of an unfinished copy", inUse: null };
   // Any link counts, whatever the file type it points at, and so does a link to this folder or one above it.
-  if (linkedDirectories.has(directory) || isCoveredByPath(linkedTargets, directory)) return { reason: "A symlink points into this folder", inUse: true };
-  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return { reason: "A symlink in an extra symlink folder points into this folder", inUse: true };
-  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return { reason: "Modified in the last 24 hours", inUse: false };
+  if (linkedDirectories.has(directory) || isCoveredByPath(linkedTargets, directory)) return { reason: "A symlink points into this folder", inUse: "library_link" };
+  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return { reason: "A symlink in an extra symlink folder points into this folder", inUse: "extra_link" };
+  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return { reason: "Modified in the last 24 hours", inUse: null };
   return null;
 }
 
@@ -460,9 +460,21 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     staleWarning: staleness.warning,
     storageStaleWarning: storageStaleness(storageInventory, now),
     extraSymlinks: { folders: extra.folders, linkCount: extra.linkCount, unmatchedCount: extra.unmatchedCount, problems: extra.problems },
-    inUseSkippedCount: rows.length - shownRows.length + folders.length - shownFolders.length,
+    skippedInUse: skippedInUseSummary(rows.length - shownRows.length, folders),
     holdDays
   };
+}
+
+// Library-linked files are never orphan rows, so every skipped file is held by an extra folder link.
+function skippedInUseSummary(extraLinkedFiles: number, folders: LeftoverFolderReview[]): OrphanSkippedInUse {
+  const byReason: Record<OrphanInUseReason, number> = { library_link: 0, extra_link: extraLinkedFiles };
+  let skippedFolders = 0;
+  for (const folder of folders) {
+    if (!folder.inUse) continue;
+    byReason[folder.inUse] += 1;
+    skippedFolders += 1;
+  }
+  return { total: extraLinkedFiles + skippedFolders, files: extraLinkedFiles, folders: skippedFolders, byReason };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.

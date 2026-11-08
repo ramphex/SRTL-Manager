@@ -11,7 +11,7 @@ import { deleteFolderFileByFile, episodeKey, episodeKeys, expireHeldOrphans, lis
 import { configureExtraSymlinkFolders, extraSymlinkFolderProblems, parseExtraSymlinkFolders } from "../src/server/lib/extraSymlinkFolders";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
-import type { PathsSettings } from "../src/shared/types";
+import type { JobRecord, OrphanPurgeJobProgress, OrphanReview, PathsSettings } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
 import { recordSymlinkScan } from "./scanFixtures";
@@ -401,7 +401,7 @@ describe("extra symlink folders", () => {
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(review.items.map((item) => item.storageFileId)).toEqual([free.id]);
     expect(review.items[0]).toMatchObject({ protectedReason: null, extraLinkPath: null });
-    expect(review.inUseSkippedCount).toBe(1);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 1, folders: 0, byReason: { library_link: 0, extra_link: 1 } });
     expect(review.extraSymlinks).toEqual({ folders: [other], linkCount: 1, unmatchedCount: 0, problems: [] });
     await expect(app.jobs.startOrphanPurge("remote", [target.id], "delete")).rejects.toThrow(`Still linked from ${link}`);
     await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
@@ -419,7 +419,7 @@ describe("extra symlink folders", () => {
     configureExtraSymlinkFolders([other]);
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(review.items).toEqual([]);
-    expect(review.inUseSkippedCount).toBe(3);
+    expect(review.skippedInUse).toEqual({ total: 3, files: 3, folders: 0, byReason: { library_link: 0, extra_link: 3 } });
     for (const file of [inFolder, relative, viaLibrary]) await expect(app.jobs.startOrphanPurge("remote", [file.id], "delete")).rejects.toThrow("Still linked from");
   });
 
@@ -481,7 +481,7 @@ describe("extra symlink folders", () => {
     const link = await pointer("subtitle.srt", path.join(dirPath, "a.srt"));
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(review.leftoverFolders).toEqual([]);
-    expect(review.inUseSkippedCount).toBe(1);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 0, extra_link: 1 } });
     await expect(app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id])).rejects.toThrow("extra symlink folder");
     await runJobs();
     expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
@@ -707,7 +707,7 @@ describe("folders with no video", () => {
       ["movies/Fresh (2026)", "Modified in the last 24 hours"],
       ["movies/Gone (1999)", null]
     ]);
-    expect(review.inUseSkippedCount).toBe(1);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 1, extra_link: 0 } });
     await expect(app.jobs.startOrphanPurge("local", [], "delete", [fresh.id])).rejects.toThrow("Modified in the last 24 hours");
     await expect(app.jobs.startOrphanPurge("local", [], "delete", [linked.id])).rejects.toThrow("A symlink points into this folder");
 
@@ -956,6 +956,42 @@ describe("folder deletes on a debrid mount", () => {
   });
 });
 
+describe("purge results over HTTP", () => {
+  it("returns a failed purge's status and first error, and the in-use count with the review", async () => {
+    const dirPath = path.join(paths.remoteDir, "Oscar.Papa.DVD");
+    await fs.mkdir(dirPath);
+    await fs.writeFile(path.join(dirPath, "info.nfo"), "nfo");
+    await fs.utimes(path.join(dirPath, "info.nfo"), oldTime, oldTime);
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [folder] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath: "Oscar.Papa.DVD", fileCount: 1, totalBytes: 3, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    const linked = await storageFile("remote", "Quebec.Romeo.2008/Quebec.Romeo.2008.mkv");
+    await fs.mkdir(path.join(path.dirname(linked.filePath), "Extras"));
+    await fs.utimes(path.join(path.dirname(linked.filePath), "Extras"), oldTime, oldTime);
+    await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath: path.join(path.dirname(linked.filePath), "Extras"), relativePath: "Quebec.Romeo.2008/Extras", fileCount: 0, totalBytes: 0, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() });
+    await plainLink("movies", "Quebec Romeo (2008)", "Quebec.Romeo.2008", path.dirname(linked.filePath));
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const cookie = String(setup.headers["set-cookie"]);
+
+    const review = (await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } })).json<OrphanReview>();
+    expect(review.items).toEqual([]);
+    expect(review.leftoverFolders.map((entry) => entry.folderId)).toEqual([folder!.id]);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 1, extra_link: 0 } });
+
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockRejectedValue(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+    let jobId: number;
+    try {
+      jobId = (await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", folderIds: [folder!.id], mode: "delete" } })).json<{ jobId: number }>().jobId;
+      await runJobs();
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+    const job = (await app.app.inject({ method: "GET", url: `/api/jobs/${jobId}`, headers: { cookie } })).json<JobRecord>();
+    expect(job.status).toBe("failed");
+    const progress = job.progress as OrphanPurgeJobProgress;
+    expect(progress).toMatchObject({ stage: "failed", failed: 1, total: 1, deleted: 0, firstError: { filePath: dirPath, message: expect.stringContaining("(EIO)") } });
+  });
+});
+
 describe("links to folders and to files that are not video", () => {
   async function leftover(relativePath: string, entries: string[]) {
     const dirPath = path.join(paths.remoteDir, relativePath);
@@ -978,7 +1014,7 @@ describe("links to folders and to files that are not video", () => {
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(review.items.map((item) => item.storageFileId)).toEqual([free.id]);
     expect(review.leftoverFolders).toEqual([]);
-    expect(review.inUseSkippedCount).toBe(1);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 1, extra_link: 0 } });
     await expect(app.jobs.startOrphanPurge("remote", [inside.id], "delete")).rejects.toThrow("no longer an orphan");
     await expect(app.jobs.startOrphanPurge("remote", [], "delete", [extras.id])).rejects.toThrow("A symlink points into this folder");
   });
@@ -1002,6 +1038,6 @@ describe("links to folders and to files that are not video", () => {
     await plainLink("movies", "Mike November (2007)", "Mike.November.2007.bin", path.join(folder.dirPath, "Mike.November.2007.bin"));
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(review.leftoverFolders).toEqual([]);
-    expect(review.inUseSkippedCount).toBe(1);
+    expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 1, extra_link: 0 } });
   });
 });

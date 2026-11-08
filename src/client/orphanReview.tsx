@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { Archive, Check, LoaderCircle, RotateCcw, Trash2, TriangleAlert, X } from "lucide-react";
-import type { JobRecord, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
+import type { OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, useModalLifecycle } from "./appShared";
@@ -31,38 +31,6 @@ function ReleaseSummary({ item }: { item: OrphanReviewItem }) {
     <span className="orphan-path">
       Release {item.releaseName}: {item.releaseStatus === "partly_linked" ? <strong>partly linked, {formatNumber(item.releaseLinkedCount)} of {formatNumber(item.releaseFileCount)} files in use</strong> : `no file linked (${formatNumber(item.releaseFileCount)} ${item.releaseFileCount === 1 ? "file" : "files"})`}
     </span>
-  );
-}
-
-type PurgeJobProgress = { message?: unknown; failed?: unknown; total?: unknown; firstError?: { filePath?: unknown; message?: unknown } };
-
-// What a finished purge job did, read from the job itself: a purge that failed must not read as finished.
-function purgeJobOutcome(job: Pick<JobRecord, "id" | "status" | "progress">): { tone: "success" | "error" | "progress"; text: string } {
-  const label = `Orphan purge job #${job.id}`;
-  if (job.status === "queued" || job.status === "running") return { tone: "progress", text: `${label} is running. This list refreshes when it finishes.` };
-  const progress = (job.progress && typeof job.progress === "object" ? job.progress : {}) as PurgeJobProgress;
-  const firstError = typeof progress.firstError?.message === "string" ? ` First error: ${typeof progress.firstError.filePath === "string" ? `${progress.firstError.filePath}: ` : ""}${progress.firstError.message}` : "";
-  const counts = typeof progress.failed === "number" && typeof progress.total === "number" ? ` ${formatNumber(progress.failed)} of ${formatNumber(progress.total)} not purged.` : "";
-  if (job.status === "failed") return { tone: "error", text: `${label} failed.${counts}${firstError}` };
-  if (job.status === "partially_failed") return { tone: "error", text: `${label} partially failed.${counts}${firstError}` };
-  if (job.status === "cancelled") return { tone: "error", text: `${label} was stopped. Completed work was kept.` };
-  return { tone: "success", text: `${label} finished.` };
-}
-
-function PurgeJobResult({ jobId }: { jobId: number }) {
-  const job = useQuery({
-    queryKey: ["jobs", "orphan-purge-result", jobId],
-    queryFn: () => api.job(jobId),
-    refetchInterval: (query) => (!query.state.data || query.state.data.status === "queued" || query.state.data.status === "running" ? 3000 : false)
-  });
-  const outcome = purgeJobOutcome(job.data ?? { id: jobId, status: "queued", progress: null });
-  return (
-    <p className={`panel-message ${outcome.tone === "error" ? "error" : outcome.tone === "success" ? "success" : "action-progress"}`} role={outcome.tone === "error" ? "alert" : "status"}>
-      {outcome.text}{" "}
-      <Link to="/logs" search={{ job: jobId }}>
-        Open the job log
-      </Link>
-    </p>
   );
 }
 
@@ -198,6 +166,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 <option value="all">All releases</option>
                 <option value="none_linked">No file in the release is linked</option>
                 <option value="partly_linked">Release is partly linked</option>
+                <option value="extra_linked">Still linked from an extra folder</option>
               </select>
               <select aria-label="Filter by size against the linked file" value={sizeFilter} onChange={(event) => { setSizeFilter(event.target.value as OrphanSizeFilter); setPage(0); }}>
                 <option value="all">Any size</option>
@@ -267,7 +236,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
               </table>
             </div>
             {filtered.length === 0 ? <p className="muted">{items.length ? "No matching orphans." : "No orphans on this storage."}</p> : null}
-            {review.data.inUseSkippedCount ? <p className="muted">{formatNumber(review.data.inUseSkippedCount)} {review.data.inUseSkippedCount === 1 ? "item is" : "items are"} not listed because a symlink uses {review.data.inUseSkippedCount === 1 ? "it" : "them"}.</p> : null}
             <div className="orphan-toolbar orphan-pagination">
               <span>
                 {formatNumber(selectedCount)} selected ({formatBytes(selectedBytes)})
@@ -381,7 +349,11 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 onCancel={() => setConfirming(false)}
               />
             ) : null}
-            {purge.data ? <PurgeJobResult jobId={purge.data.jobId} /> : null}
+            {purge.data ? (
+              <p className="panel-message success">
+                {purgeRunning ? `Orphan purge job #${purge.data.jobId} is running. This list refreshes when it finishes.` : `Orphan purge job #${purge.data.jobId} finished. See Recent Jobs for details.`}
+              </p>
+            ) : null}
             {purge.error ? <p className="panel-message error" role="alert">{purge.error.message}</p> : null}
           </>
         ) : null}

@@ -66,6 +66,7 @@ import type {
   ScanOptions,
   ScanTitleScope,
   StoragePolicyKind,
+  OrphanPurgeJobProgress,
   OrphanPurgeMode,
   StorageRootType,
   SymlinkCleanupOptions,
@@ -4236,8 +4237,14 @@ export class JobWorker {
     const damaged = jobOptions.source === "damaged";
     const name = damaged ? "Damaged file delete" : "Orphan purge";
     const noun = damaged ? "Damaged file" : "Orphan";
-    const setProgress = (stage: string, message: string) =>
-      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total, reRequest, ...(damaged ? { source: "damaged" } : {}) }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message, ...(firstError ? { firstError } : {}) });
+    const setProgress = (stage: OrphanPurgeJobProgress["stage"], message: string) => {
+      const progress: OrphanPurgeJobProgress = {
+        options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(damaged ? { source: "damaged" as const } : {}) },
+        current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message,
+        ...(firstError ? { firstError } : {})
+      };
+      return ctx.setProgress(progress);
+    };
 
     await setProgress("preparing", `Preparing ${name.toLowerCase()}`);
     await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest });
