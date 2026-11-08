@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4-beta.5] - 2026-11-07
+
 ### Added
 
 - Added `SRTL_EXTRA_SYMLINK_DIRS`, for folders of symlinks kept by other tools. Their targets show as still linked in the orphan review and purges refuse them, checking again right before each delete, and refusing altogether if a folder cannot be read. The folders need a read-only mount in the API and worker containers. See [Symlinks kept by other tools](docs/orphan-review.md#symlinks-kept-by-other-tools).
@@ -13,7 +15,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - The runtime is now Node.js 26, an LTS release. The container image uses the Node.js 26 bookworm-slim base and stays on the same Debian release and ffmpeg version.
 - Orphan purges now need a complete symlink scan of every library folder that started in the last 24 hours. Before, rescanning one title made its whole folder look scanned. Rescans of single titles and scans that failed or were cancelled no longer count, and the warning names the folders to scan. Folders with nothing in them do not hold purges up. Damaged file deletes follow the same rule.
-- The orphan review is easier to review by. Unlinked files are split into **Title is in the library**, **Title is in the library, episode is not linked** and **No title match**, a name comparison that the page says can be wrong. Each file shows whether its release is partly linked, and **Older or duplicate versions**, now **Other versions of linked titles**, shows how each file's size compares with the linked file and flags larger ones. The list can be filtered and sorted by all of these. The API keeps its existing fields, and adds `label` and the others beside them. See [Orphan review and purge](docs/orphan-review.md).
+- The orphan review is easier to judge. Unlinked files are split into **Title is in the library**, **Title is in the library, episode is not linked** and **No title match**, a name comparison that the page says can be wrong. Each file shows whether its release is partly linked, and **Older or duplicate versions**, now **Other versions of linked titles**, shows how each file's size compares with the linked file and flags larger ones. The list can be filtered and sorted by all of these. The API keeps its existing fields, and adds `label` and the others beside them. See [Orphan review and purge](docs/orphan-review.md).
 
 ### Fixed
 
