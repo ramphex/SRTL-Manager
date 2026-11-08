@@ -1,8 +1,8 @@
 # Orphan review and purge
 
-An orphan is a media file on a storage location with no library symlink pointing to it. **Library > Local orphans** and **Library > Remote orphans** list them for review, and you choose what to purge. Files changed in the last 24 hours or involved in an unfinished copy are protected. They are not listed: the header counts them, and **Show protected** lists them with the reason.
+An orphan is a media file on a storage location with no library symlink pointing to it. **Library > Local orphans** and **Library > Remote orphans** list them for review, and you choose what to purge. Files changed in the last 24 hours or involved in an unfinished copy are protected. They are not listed; the header only counts them.
 
-Video files, folders with no video and the holding area each have their own tab. Selecting anything brings up a bar at the bottom of the screen with the count and size, the choice between **Hold 7 days** (the default) and **Delete now**, the option to ask Radarr or Sonarr for a new copy, and **Purge selected**, which asks once more before anything happens. **Purge all eligible** in the header purges everything that can be purged, behind its own confirmation. If a purge job fails or partly fails, a red banner shows its first error and links to the job until you dismiss it.
+Video files, folders with no video and the holding area each have their own tab. Selecting anything brings up a bar at the bottom of the screen with the count and size, the choice between **Hold 7 days** and **Delete now**, the option to ask Radarr or Sonarr for a new copy, and **Purge selected**, which asks once more before anything happens. **Purge all eligible** in the header purges everything that can be purged, behind its own confirmation. Hold is the default on local storage. Remote storage cannot move files into the holding area, so Hold is turned off there and every purge deletes immediately. If a purge job fails or partly fails, a red banner shows its first error and links to the job until you dismiss it.
 
 ## Reading the labels
 
@@ -69,7 +69,7 @@ SRTL only scans its own symlink folder. If another tool, such as a download clie
 
 With that in place:
 
-- Files a link points to, or that sit under a folder a link points to, are protected as **Still linked from** that link. They are left out of the list, counted under **Show protected**, and refused if a purge asks for them. Folders with no video get the same protection.
+- Files a link points to, or that sit under a folder a link points to, are left out of the review and only counted. They are refused if a purge asks for them. Folders with no video get the same protection.
 - The folders are read again right before each file or folder is touched, so a link made after the purge was queued still stops it. Each purge step walks the whole of every folder, so very large folders slow large purges down.
 - SRTL only ever reads these folders. A folder cannot be, or contain, a symlink or storage root, or sit inside a storage root or a library folder, because SRTL changes files there.
 - If a folder is missing, unreadable, or empty, as an unmounted folder usually is, purging is refused and the review says why, rather than treating it as having no links. If a folder is meant to be empty, remove it from the setting.

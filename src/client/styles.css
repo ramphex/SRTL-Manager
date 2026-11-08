@@ -8044,8 +8044,6 @@ button.danger-button:hover:not(:disabled) {
 .orv-total-sep { color: var(--muted); }
 .orv-total-label { color: var(--muted-strong); font-size: 14px; }
 .orv-skipped { margin: 0; color: var(--muted); font-size: 13px; }
-.orv-link-button { display: inline; min-height: 0; padding: 0; border: 0; border-radius: 3px; background: transparent; color: var(--selected-accent); font-size: inherit; font-weight: 600; text-decoration: underline; text-underline-offset: 3px; }
-.orv-link-button:hover { background: transparent; color: var(--text-strong); }
 .orv-header-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .orv-header-actions button { font-size: 14px; }
 .orv-chevron { transition: transform 120ms ease; }
@@ -8054,9 +8052,6 @@ button.danger-button:hover:not(:disabled) {
 .orv-how-panel { border: 1px solid var(--border); border-radius: 8px; background: var(--bg-subtle); padding: 12px 16px; }
 .orv-how-panel ul { display: grid; gap: 6px; margin: 0; padding-left: 18px; color: var(--muted-strong); font-size: 13px; line-height: 1.5; }
 .orv-how-panel strong { color: var(--text-strong); }
-.orv-protected-list { display: grid; gap: 10px; border: 1px solid var(--border-soft); border-radius: 8px; padding: 10px 14px; font-size: 13px; }
-.orv-protected-list p { margin: 0 0 4px; color: var(--text-strong); font-weight: 600; }
-.orv-protected-list ul { margin: 0; padding-left: 18px; color: var(--muted-strong); overflow-wrap: anywhere; }
 
 /* Sections: underlined tabs, set apart from the label filters below them. */
 .settings-tabs.orv-views { margin-bottom: 0; }
@@ -8133,6 +8128,8 @@ button.danger-button:hover:not(:disabled) {
 .orv-mode-switch button { min-height: 32px; font-size: 13px; text-transform: none; }
 .segmented .selected:hover { background: var(--selected-bg); color: var(--selected-text); }
 .segmented .selected.orv-mode-delete, .segmented .selected.orv-mode-delete:hover { background: color-mix(in srgb, var(--bad) 20%, var(--surface)); border-color: color-mix(in srgb, var(--bad) 55%, var(--border)); box-shadow: none; color: var(--bad); }
+.orv-mode { display: grid; justify-items: start; gap: 4px; }
+.orv-mode-note { margin: 0; color: var(--muted-strong); font-size: 12px; }
 .orv-rerequest { display: inline-flex; align-items: center; gap: 2px; }
 .orv-rerequest label { display: inline-flex; align-items: center; gap: 8px; color: var(--text); font-size: 13px; font-weight: 600; }
 .orv-action-bar .info-tooltip-panel { top: auto; bottom: calc(100% + 8px); left: auto; right: 0; }

@@ -34,8 +34,18 @@ const sizeComparisonLabels = { larger: "Larger than the linked file", same: "Sam
 
 type OrphanView = "files" | "folders" | "held";
 
-// Fields another change adds to the review and purge job. Optional so the page works with or without them.
-type ReviewWithSkips = OrphanReview & { inUseSkippedCount?: number; skippedInUse?: number };
+// Mirrors OrphanSkippedInUse from the purge API change. Optional so the page works with or without it.
+interface SkippedInUse {
+  total: number;
+  files: number;
+  folders: number;
+  byReason: { library_link: number; extra_link: number };
+}
+type ReviewWithSkips = OrphanReview & { skippedInUse?: SkippedInUse };
+
+// Remote storage is a mount that cannot rename, so files cannot be moved into the holding area there.
+const cannotHoldReason = "This storage can't hold files, so deletes are immediate.";
+const canHoldOn = (rootType: StorageRootType) => rootType === "local";
 
 function fileName(path: string): string {
   return path.split("/").at(-1) ?? path;
@@ -140,6 +150,17 @@ interface PurgeJobView {
   firstError: string | null;
 }
 
+// The job records its first failure as { filePath, message }; older shapes used a plain string.
+function firstErrorText(value: unknown): string | null {
+  if (typeof value === "string" && value.trim()) return value;
+  const record = recordFromUnknown(value);
+  const message = typeof record?.message === "string" && record.message.trim() ? record.message : null;
+  if (!message) return null;
+  const path = typeof record?.filePath === "string" ? record.filePath : "";
+  const name = path ? fileName(path) : "";
+  return name && !message.includes(name) ? `${name}: ${message}` : message;
+}
+
 function purgeJobView(job: JobRecord): PurgeJobView {
   const progress = recordFromUnknown(job.progress) ?? {};
   const text = (value: unknown) => (typeof value === "string" && value.trim() ? value : null);
@@ -150,7 +171,7 @@ function purgeJobView(job: JobRecord): PurgeJobView {
     message: text(progress.message),
     failed: number(progress.failed),
     total: number(progress.total),
-    firstError: text(progress.firstError) ?? text(progress.error) ?? text(recordFromUnknown(progress.firstFailure)?.reason)
+    firstError: firstErrorText(progress.firstError) ?? text(progress.error)
   };
 }
 
@@ -276,13 +297,13 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const [page, setPage] = useState(0);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [selectedFolders, setSelectedFolders] = useState<Set<number>>(new Set());
-  // Hold is the safe default everywhere: a remote mount that refuses holds reports it and leaves the files alone.
-  const [mode, setMode] = useState<OrphanPurgeMode>("hold");
+  // Hold is the safe default where the storage can hold files; elsewhere every purge is a delete.
+  const canHold = canHoldOn(rootType);
+  const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
   const [reRequest, setReRequest] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [purgeAllOpen, setPurgeAllOpen] = useState(autoOpenPurgeAll);
   const [howOpen, setHowOpen] = useState(false);
-  const [showProtected, setShowProtected] = useState(false);
   const [selectedHeld, setSelectedHeld] = useState<Set<number>>(new Set());
   const [startedJobs, setStartedJobs] = useState<number[]>([]);
   const refresh = () => {
@@ -333,7 +354,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const selectedCount = selected.size + selectedFolders.size;
   const heldHere = (held.data ?? []).filter((file) => file.rootType === rootType);
   const extraSymlinks = data?.extraSymlinks;
-  const inUseSkipped = data?.inUseSkippedCount ?? data?.skippedInUse ?? 0;
+  const inUse = data?.skippedInUse;
   const totalBytes = items.reduce((total, item) => total + item.sizeBytes, 0);
   // A purge is refused in either case, so nothing here should look like it could start one.
   const stale = Boolean(data?.staleWarning || extraSymlinks?.problems.length);
@@ -349,12 +370,8 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const selectionLabel = [selected.size ? countText(selected.size, "file") : "", selectedFolders.size ? countText(selectedFolders.size, "folder") : ""].filter(Boolean).join(" and ");
   const resetPage = () => setPage(0);
 
-  const skippedParts = [inUseSkipped ? `${formatNumber(inUseSkipped)} in use by a symlink` : "", protectedItems.length ? `${formatNumber(protectedItems.length)} protected` : "", protectedFolderCount ? countText(protectedFolderCount, "protected folder") : ""].filter(Boolean);
-  const protectedReasons = useMemo(() => {
-    const groups = new Map<string, OrphanReviewItem[]>();
-    for (const item of protectedItems) groups.set(item.protectedReason!, [...(groups.get(item.protectedReason!) ?? []), item]);
-    return [...groups];
-  }, [protectedItems]);
+  const inUseSplit = inUse && inUse.byReason.library_link && inUse.byReason.extra_link ? ` (${formatNumber(inUse.byReason.library_link)} by library links, ${formatNumber(inUse.byReason.extra_link)} by extra symlink folders)` : inUse?.byReason.extra_link ? " by extra symlink folders" : "";
+  const skippedParts = [inUse?.total ? `${formatNumber(inUse.total)} in use${inUseSplit}` : "", protectedItems.length ? `${formatNumber(protectedItems.length)} protected` : "", protectedFolderCount ? countText(protectedFolderCount, "protected folder") : ""].filter(Boolean);
 
   return (
     <Panel title={`Review ${rootLabel} orphans`} icon={<Trash2 size={18} />} className="orv-panel">
@@ -408,14 +425,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                   {[data.hollowCount ? `${formatNumber(data.hollowCount)} hollow` : "", data.damagedCount ? `${formatNumber(data.damagedCount)} damaged` : ""].filter(Boolean).join(", ")}
                   {(data.hollowCount || data.damagedCount) && skippedParts.length ? " · " : ""}
                   {skippedParts.length ? `${skippedParts.join(", ")} not listed.` : ""}
-                  {protectedItems.length ? (
-                    <>
-                      {" "}
-                      <button type="button" className="orv-link-button" aria-expanded={showProtected} onClick={() => setShowProtected((value) => !value)}>
-                        {showProtected ? "Hide protected" : "Show protected"}
-                      </button>
-                    </>
-                  ) : null}
                 </p>
               </div>
               <div className="orv-header-actions">
@@ -437,7 +446,15 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                     <strong>Labels about titles:</strong> {nameMatchCaveat} {orphanLabels.no_title_match.short} does not rule out a title that is in the library under another name.
                   </li>
                   <li>
-                    <strong>Hold {data.holdDays} days</strong> moves files into a hidden .srtl-purged folder on the same storage, where they can be restored until the holding period ends. <strong>Delete now</strong> removes them with no undo.{rootType === "remote" ? " The remote mount may not support holding; files it refuses are reported and left in place." : ""}
+                    {canHold ? (
+                      <>
+                        <strong>Hold {data.holdDays} days</strong> moves files into a hidden .srtl-purged folder on the same storage, where they can be restored until the holding period ends. <strong>Delete now</strong> removes them with no undo.
+                      </>
+                    ) : (
+                      <>
+                        <strong>Deletes are immediate here.</strong> This storage can't move files into a holding area, so purged files are removed with no undo.
+                      </>
+                    )}
                   </li>
                   <li>
                     <strong>Safety checks:</strong> every file is rechecked right before it is touched: still unlinked, including from any extra symlink folders, unchanged, not part of a copy, and older than 24 hours. Subtitles, artwork, and empty folders go with the last video in a folder.
@@ -445,26 +462,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 </ul>
               </div>
             ) : null}
-            {showProtected && protectedReasons.length ? (
-              <div className="orv-protected-list" aria-label="Protected files">
-                {protectedReasons.map(([reason, list]) => (
-                  <div key={reason}>
-                    <p className="orv-protected-reason">
-                      {reason} <span className="orv-muted">({formatNumber(list.length)})</span>
-                    </p>
-                    <ul>
-                      {list.slice(0, 20).map((item) => (
-                        <li key={item.storageFileId} title={item.relativePath}>
-                          {fileName(item.relativePath)}
-                        </li>
-                      ))}
-                      {list.length > 20 ? <li className="orv-muted">and {formatNumber(list.length - 20)} more</li> : null}
-                    </ul>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
             <SettingsTabs
               label="Orphan review sections"
               idPrefix={`orv-${rootType}`}
@@ -507,7 +504,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                     <option value="all">All releases</option>
                     <option value="none_linked">No file in the release is linked</option>
                     <option value="partly_linked">Release is partly linked</option>
-                    <option value="extra_linked">Still linked from an extra folder</option>
                   </select>
                   <select aria-label="Filter by size against the linked file" value={sizeFilter} onChange={(event) => { setSizeFilter(event.target.value as OrphanSizeFilter); resetPage(); }}>
                     <option value="all">Any size</option>
@@ -774,13 +770,18 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                   </p>
                   <div className="orv-mode">
                     <div className="segmented orv-mode-switch" role="group" aria-label="Purge mode">
-                      <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={busy} onClick={() => { setMode("hold"); setConfirming(false); }}>
+                      <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={busy || !canHold} aria-describedby={canHold ? undefined : `orv-no-hold-${rootType}`} onClick={() => { setMode("hold"); setConfirming(false); }}>
                         <Archive size={14} /> Hold {data.holdDays} days
                       </button>
                       <button type="button" className={mode === "delete" ? "selected orv-mode-delete" : "orv-mode-delete"} aria-pressed={mode === "delete"} disabled={busy} onClick={() => { setMode("delete"); setConfirming(false); }}>
                         <Trash2 size={14} /> Delete now
                       </button>
                     </div>
+                    {canHold ? null : (
+                      <p className="orv-mode-note" id={`orv-no-hold-${rootType}`}>
+                        {cannotHoldReason}
+                      </p>
+                    )}
                   </div>
                   <span className="orv-rerequest">
                     <label>
@@ -851,7 +852,8 @@ function Pager({ page, pageCount, total, onPage }: { page: number; pageCount: nu
 function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone }: { review: OrphanReview; rootType: StorageRootType; rootLabel: string; onClose: () => void; onQueued: (jobIds: number[]) => void; onDone: () => void }) {
   const dialogRef = useModalLifecycle(true, onClose);
   const [includeFolders, setIncludeFolders] = useState(false);
-  const [mode, setMode] = useState<OrphanPurgeMode>("hold");
+  const canHold = canHoldOn(rootType);
+  const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
   const [phrase, setPhrase] = useState("");
   const [reRequest, setReRequest] = useState(false);
   const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
@@ -932,17 +934,15 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
           Also include leftover folders with no video ({formatNumber(eligibleFolders.length)})
         </label>
         <div className="segmented orv-mode-switch" role="group" aria-label="Purge mode">
-          <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("hold"); setPhrase(""); }}>
+          <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={!canHold || start.isPending || start.isSuccess} aria-describedby={canHold ? undefined : "purge-all-mode-note"} onClick={() => { setMode("hold"); setPhrase(""); }}>
             <Archive size={14} /> Hold {review.holdDays} days
           </button>
           <button type="button" className={mode === "delete" ? "selected orv-mode-delete" : "orv-mode-delete"} aria-pressed={mode === "delete"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("delete"); setPhrase(""); }}>
             <Trash2 size={14} /> Delete now
           </button>
         </div>
-        <p className="muted">
-          {mode === "hold"
-            ? `Files move to a hidden .srtl-purged folder and can be restored for ${review.holdDays} days.${rootType === "remote" ? " The remote mount may refuse holds; refused files are reported and left in place." : ""}`
-            : "Files are removed immediately. This cannot be undone."}
+        <p className="muted" id="purge-all-mode-note">
+          {mode === "hold" ? `Files move to a hidden .srtl-purged folder and can be restored for ${review.holdDays} days.` : `${canHold ? "" : `${cannotHoldReason} `}Files are removed immediately. This cannot be undone.`}
           {batches.length > 1 ? ` This will be queued as ${batches.length} purge jobs.` : ""}
         </p>
         <ReRequestOption storageFileIds={plan.fileIds} checked={reRequest} onChange={setReRequest} disabled={start.isPending || start.isSuccess} />

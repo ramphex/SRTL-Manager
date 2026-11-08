@@ -7,7 +7,7 @@ interface FixtureOptions {
   remoteCount?: number;
   stale?: boolean;
   extraProblem?: boolean;
-  inUseSkipped?: number;
+  inUseSkipped?: { library: number; extra: number };
   failedJob?: "progress" | "events";
   held?: boolean;
 }
@@ -30,7 +30,7 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: Fixtur
     summary: [], labelSummary: ["superseded", "episode_not_linked", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
     staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null,
     extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, holdDays: 7,
-    ...(extra.inUseSkipped === undefined ? {} : { inUseSkippedCount: extra.inUseSkipped })
+    ...(extra.inUseSkipped === undefined ? {} : { skippedInUse: { total: extra.inUseSkipped.library + extra.inUseSkipped.extra, files: extra.inUseSkipped.library + extra.inUseSkipped.extra, folders: 0, byReason: { library_link: extra.inUseSkipped.library, extra_link: extra.inUseSkipped.extra } } })
   };
 }
 
@@ -39,7 +39,7 @@ function failedPurgeJob(kind: "progress" | "events") {
   return {
     id: 97, type: "orphan_purge", status: "partially_failed", createdAt: "2026-11-08T09:00:00.000Z", startedAt: "2026-11-08T09:00:01.000Z", finishedAt: "2026-11-08T09:01:00.000Z",
     options: { rootType: "remote", mode: "delete" },
-    progress: kind === "progress" ? { ...progress, firstError: "file.mkv could not be deleted (EACCES)" } : progress
+    progress: kind === "progress" ? { ...progress, firstError: { filePath: "/remote/movies/Title 1/file.mkv", message: "could not be deleted (EACCES)" } } : progress
   };
 }
 
@@ -98,7 +98,10 @@ test("purge all eligible requires the typed phrase for large remote purges and s
   const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
   await expect(dialog.getByTestId("purge-all-summary")).toContainText("1,499 items");
   await expect(dialog.getByTestId("purge-all-summary")).toContainText("1 protected file is left alone");
-  const confirm = dialog.getByRole("button", { name: /^Hold [\d,]+ items/ });
+  // Remote storage cannot hold files, so the dialog starts on Delete now and says why.
+  await expect(dialog.getByRole("button", { name: /Hold 7 days/ })).toBeDisabled();
+  await expect(dialog.getByText(/can't hold files, so deletes are immediate/)).toBeVisible();
+  const confirm = dialog.getByRole("button", { name: /^Delete [\d,]+ items/ });
   await expect(confirm).toBeDisabled();
   await dialog.getByLabel("Confirmation phrase").fill("purge 1499 remote items");
   await expect(confirm).toBeEnabled();
@@ -108,18 +111,27 @@ test("purge all eligible requires the typed phrase for large remote purges and s
   await confirm.click();
   await expect(dialog.getByRole("link", { name: "#99" })).toBeVisible();
   expect(purges).toHaveLength(1);
-  expect(purges[0]).toMatchObject({ rootType: "remote", mode: "hold", folderIds: [1] });
+  expect(purges[0]).toMatchObject({ rootType: "remote", mode: "delete", folderIds: [1] });
   expect(purges[0]!.storageFileIds).toHaveLength(1499);
   expect(purges[0]!.storageFileIds).not.toContain(1);
 });
 
-test("remote delete needs the phrase even for a small purge, and a stale scan blocks purging", async ({ page }) => {
+test("local purge all starts on hold and only asks for the phrase on a large purge", async ({ page }) => {
+  await fixture(page);
+  await page.goto(`${baseUrl}/library?view=local-orphans`);
+  await page.getByRole("button", { name: "Purge all eligible" }).click();
+  const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
+  await expect(dialog.getByRole("button", { name: /Hold 7 days/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(dialog.getByLabel("Confirmation phrase")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /^Hold 3 items/ })).toBeEnabled();
+});
+
+test("remote delete needs the phrase even for a small purge", async ({ page }) => {
   await fixture(page, { remoteCount: 6 });
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   await page.getByRole("button", { name: "Purge all eligible" }).click();
   const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
-  await expect(dialog.getByLabel("Confirmation phrase")).toHaveCount(0);
-  await dialog.getByRole("button", { name: /Delete now/ }).click();
+  await expect(dialog.getByRole("button", { name: /Delete now/ })).toHaveAttribute("aria-pressed", "true");
   await expect(dialog.getByLabel("Confirmation phrase")).toBeVisible();
   await expect(dialog.getByRole("button", { name: /^Delete 5 items/ })).toBeDisabled();
 });
@@ -175,28 +187,34 @@ test("the review filters and sorts by the new labels, and says a title match is 
 });
 
 test("protected and in-use files are counted, not listed with checkboxes", async ({ page }) => {
-  await fixture(page, { remoteCount: 6, inUseSkipped: 12 });
+  await fixture(page, { remoteCount: 6, inUseSkipped: { library: 10, extra: 2 } });
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
-  await expect(page.getByText("12 in use by a symlink, 1 protected not listed.")).toBeVisible();
+  await expect(page.getByText("12 in use (10 by library links, 2 by extra symlink folders), 1 protected not listed.")).toBeVisible();
   await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(5);
   await expect(page.getByRole("checkbox", { name: /^Select file/, disabled: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Show protected" }).click();
-  await expect(page.getByLabel("Protected files")).toContainText("modified recently");
+  await expect(page.getByRole("button", { name: "Show protected" })).toHaveCount(0);
+  await expect(page.getByLabel("Filter by release").locator("option")).toHaveText(["All releases", "No file in the release is linked", "Release is partly linked"]);
 });
 
-test("selecting files brings up the action bar, with hold as the default and the re-request choice up front", async ({ page }) => {
+test("selecting files brings up the action bar, with the re-request choice up front and hold only where storage can hold", async ({ page }) => {
   const purges = await fixture(page, { remoteCount: 6 });
-  await page.goto(`${baseUrl}/library?view=remote-orphans`);
   const bar = page.getByRole("region", { name: "Selected orphans" });
+  await page.goto(`${baseUrl}/library?view=local-orphans`);
   await expect(bar).toHaveCount(0);
   await page.getByRole("checkbox", { name: /^Select file/ }).first().check();
-  await expect(bar).toContainText("1 file selected");
   await expect(bar.getByRole("button", { name: /Hold 7 days/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(bar.getByRole("button", { name: /Hold 7 days/ })).toBeEnabled();
+
+  await page.goto(`${baseUrl}/library?view=remote-orphans`);
+  await page.getByRole("checkbox", { name: /^Select file/ }).first().check();
+  await expect(bar).toContainText("1 file selected");
+  await expect(bar.getByRole("button", { name: /Hold 7 days/ })).toBeDisabled();
+  await expect(bar.getByRole("button", { name: /Delete now/ })).toHaveAttribute("aria-pressed", "true");
+  await expect(bar.getByText("This storage can't hold files, so deletes are immediate.")).toBeVisible();
   await expect(bar.getByRole("checkbox", { name: /search for a new copy/ })).not.toBeChecked();
   await page.getByRole("tab", { name: /Folders with no video/ }).click();
   await page.getByRole("checkbox", { name: "Select folder movies/Empty" }).check();
   await expect(bar).toContainText("1 file and 1 folder selected");
-  await bar.getByRole("button", { name: /Delete now/ }).click();
   await bar.getByRole("button", { name: "Purge selected" }).click();
   await page.getByRole("group", { name: "Confirm orphan purge" }).getByRole("button", { name: "Delete permanently" }).click();
   await expect.poll(() => purges.length).toBe(1);
@@ -209,7 +227,7 @@ test("a failed purge job shows a red banner with its first error, until dismisse
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   const alert = page.getByRole("alert").filter({ hasText: "Purge job #97" });
   await expect(alert).toContainText("Purge job #97 partly failed: 2 of 6 items not purged.");
-  await expect(alert).toContainText("First error: file.mkv could not be deleted (EACCES)");
+  await expect(alert).toContainText("First error: file.mkv: could not be deleted (EACCES)");
   await expect(page.getByText(/finished/)).toHaveCount(0);
   await alert.getByRole("button", { name: "Dismiss" }).click();
   await expect(alert).toHaveCount(0);
