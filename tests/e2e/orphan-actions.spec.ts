@@ -3,9 +3,9 @@ import { expect, test, type Page } from "@playwright/test";
 const baseUrl = process.env.SRTL_E2E_BASE_URL;
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
 
-function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean; extraProblem?: boolean } = {}) {
+function orphanReview(rootType: "local" | "remote", count: number, extra: { stale?: boolean; extraProblem?: boolean; paths?: string[] } = {}) {
   const items = Array.from({ length: count }, (_, index) => ({
-    storageFileId: index + 1, rootType, relativePath: `movies/Title ${index}/file.mkv`, filePath: `/${rootType}/movies/Title ${index}/file.mkv`, section: "movies", itemName: `Title ${index}`,
+    storageFileId: index + 1, rootType, relativePath: extra.paths?.[index] ?? `movies/Title ${index}/file.mkv`, filePath: `/${rootType}/${extra.paths?.[index] ?? `movies/Title ${index}/file.mkv`}`, section: "movies", itemName: `Title ${index}`,
     sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false,
     label: index % 2 ? "superseded" : index % 8 === 6 ? "episode_not_linked" : index % 4 === 2 ? "title_in_library" : "no_title_match", matchedTitle: index % 4 === 2 ? `Title ${index} (2020)` : null,
     releaseName: `Title ${index}`, releaseStatus: index === 2 ? "partly_linked" : "none_linked", releaseFileCount: index === 2 ? 8 : 1, releaseLinkedCount: index === 2 ? 3 : 0,
@@ -24,7 +24,7 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: { stal
   };
 }
 
-async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean; extraProblem?: boolean } = {}) {
+async function fixture(page: Page, options: { remoteCount?: number; stale?: boolean; extraProblem?: boolean; paths?: string[] } = {}) {
   const purges: Array<{ rootType: string; storageFileIds: number[]; folderIds: number[]; mode: string }> = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -141,4 +141,38 @@ test("the review filters and sorts by the new labels, and says a title match is 
 
   await page.getByLabel("Sort orphans").selectOption("size_desc");
   await expect(page.getByRole("checkbox", { name: /^Select file/ })).toHaveCount(4);
+});
+
+test("orphan search forgives punctuation, word order, apostrophes and small typos", async ({ page }) => {
+  const paths = [
+    "shows/Alpha.Bravo/Season 01/Alpha.Bravo.S01E02.1080p.mkv",
+    "shows/Alpha.Bravo/Season 01/Alpha.Bravo.S01E03.1080p.mkv",
+    "movies/Charlie's Lab (2019)/Charlie's Lab (2019).mkv",
+    "movies/Delta! Echo (2020)/Delta! Echo (2020).mkv",
+    "movies/Foxtrot Golf (2018)/Foxtrot.Golf.2018.mkv"
+  ];
+  await fixture(page, { remoteCount: paths.length, paths });
+  await page.goto(`${baseUrl}/library?view=remote-orphans`);
+  const search = page.getByLabel("Search orphan files");
+  // File rows only; the leftover folder has a row of its own.
+  const rows = page.getByLabel("Orphan files").locator("tbody tr").filter({ hasText: ".mkv" });
+  await expect(rows).toHaveCount(5);
+
+  const expectFiles = async (query: string, files: string[]) => {
+    await search.fill(query);
+    await expect(rows).toHaveCount(files.length);
+    for (const file of files) await expect(rows.filter({ hasText: file })).toHaveCount(1);
+  };
+  await expectFiles("Alpha Bravo", ["Alpha.Bravo.S01E02.1080p.mkv", "Alpha.Bravo.S01E03.1080p.mkv"]);
+  await expectFiles("bravo alpha s01e02", ["Alpha.Bravo.S01E02.1080p.mkv"]);
+  await expectFiles("Charlies Lab", ["Charlie's Lab (2019).mkv"]);
+  await expectFiles("charlie s lab", ["Charlie's Lab (2019).mkv"]);
+  await expectFiles("Delta Echo", ["Delta! Echo (2020).mkv"]);
+  await expectFiles("Foxtrto Glof", []);
+  await expectFiles("Foxtrto golf", ["Foxtrot.Golf.2018.mkv"]);
+  // Episode codes and years stay exact.
+  await expectFiles("Alpha S01E04", []);
+  await expectFiles("Charlies 2018", []);
+  await search.fill("");
+  await expect(rows).toHaveCount(5);
 });

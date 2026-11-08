@@ -20,6 +20,7 @@ import { NotAllowed } from "./notAllowed";
 import type { Permission } from "../shared/permissions";
 import { OrphanReviewPanel } from "./orphanReview";
 import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
+import { filterBySearch, pathTail } from "../shared/search";
 
 function stripLegacyScanSections(options: ScanOptions): ScanOptions {
   const { sections: _legacySections, ...nextOptions } = options;
@@ -2398,17 +2399,7 @@ function SymlinkBrowser({
 }
 
 function filterTreeNodes(nodes: MediaLinkTreeNode[], search: string): MediaLinkTreeNode[] {
-  const tokens = search
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (tokens.length === 0) return nodes;
-  return nodes.filter((node) => {
-    const link = node.link;
-    const haystack = [node.name, node.path, link?.itemName, link?.relativePath, link?.targetPath].filter(Boolean).join(" ").toLowerCase();
-    return tokens.every((token) => haystack.includes(token));
-  });
+  return filterBySearch(nodes, search, (node) => [node.name, node.path, node.link?.itemName, node.link?.relativePath, pathTail(node.link?.targetPath)]);
 }
 
 function SymlinkTreeRow({
@@ -2730,16 +2721,7 @@ function StorageFileStatus({ file, fallbackLinked }: { file: StorageFileRow | nu
 }
 
 function filterStoragePolicyItems(items: StoragePolicyTitle[], search: string, storageLocations: StorageLocationsSettings): StoragePolicyTitle[] {
-  const tokens = search
-    .trim()
-    .toLowerCase()
-    .split(/\s+/)
-    .filter(Boolean);
-  if (tokens.length === 0) return items;
-  return items.filter((item) => {
-    const haystack = [item.title, item.category, storagePolicyLabel(item.policy, storageLocations), ...item.sections].join(" ").toLowerCase();
-    return tokens.every((token) => haystack.includes(token));
-  });
+  return filterBySearch(items, search, (item) => [item.title, item.category, storagePolicyLabel(item.policy, storageLocations), ...item.sections]);
 }
 
 function StoragePoliciesPanel({

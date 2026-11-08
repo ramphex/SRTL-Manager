@@ -1,4 +1,5 @@
 import type { JobEventRecord, JobRecord, JobStatus, JobType } from "../shared/types";
+import { createSearchMatcher } from "../shared/search";
 
 export type JobStatusFilter = JobStatus | "all";
 export type JobTypeFilter = JobType | "all";
@@ -161,14 +162,14 @@ export function formatEventLevel(level: JobEventRecord["level"]): string {
 export function matchesJobFilters(job: JobRecord, filters: { search: string; status: JobStatusFilter; type: JobTypeFilter }): boolean {
   if (filters.status !== "all" && job.status !== filters.status) return false;
   if (filters.type !== "all" && job.type !== filters.type) return false;
-  const search = filters.search.trim().toLowerCase();
-  return !search || getJobSearchText(job).includes(search);
+  const matchesSearch = createSearchMatcher(filters.search);
+  return !matchesSearch || matchesSearch(getJobSearchText(job));
 }
 
 export function matchesEventFilters(event: JobEventRecord, filters: { search: string; level: EventLevelFilter }): boolean {
   if (filters.level !== "all" && event.level !== filters.level) return false;
-  const search = filters.search.trim().toLowerCase();
-  return !search || getEventSearchText(event).includes(search);
+  const matchesSearch = createSearchMatcher(filters.search);
+  return !matchesSearch || matchesSearch(getEventSearchText(event));
 }
 
 export function jobProgressChips(job: JobRecord, maxChips = 6): LogDataChip[] {
@@ -239,15 +240,13 @@ export function formatLogData(data: unknown): string {
 function getJobSearchText(job: JobRecord): string {
   return [job.id, job.type, formatJobType(job.type), job.status, job.createdAt, job.startedAt, job.finishedAt, JSON.stringify(job.progress)]
     .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+    .join(" ");
 }
 
 function getEventSearchText(event: JobEventRecord): string {
   return [event.id, event.level, formatEventLevel(event.level), event.message, event.timestamp, JSON.stringify(event.data)]
     .filter(Boolean)
-    .join(" ")
-    .toLowerCase();
+    .join(" ");
 }
 
 function dataChipsFromRecord(record: Record<string, unknown>, maxChips: number, ignoredKeys: Set<string>, allowedKeys: Set<string> | null = null): LogDataChip[] {

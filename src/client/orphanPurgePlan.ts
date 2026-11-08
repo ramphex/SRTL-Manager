@@ -1,4 +1,5 @@
 import type { OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReleaseStatus, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
+import { createSearchMatcher } from "../shared/search";
 
 const purgeJobIdLimit = 50_000;
 const purgeConfirmationThreshold = 1_000;
@@ -74,13 +75,13 @@ export interface OrphanFilters {
 }
 
 export function filterOrphans(items: OrphanReviewItem[], filters: OrphanFilters): OrphanReviewItem[] {
-  const needle = filters.search.trim().toLowerCase();
+  const matchesSearch = createSearchMatcher(filters.search);
   return items.filter((item) => {
     if (filters.label !== "all" && item.label !== filters.label) return false;
     if (filters.release === "extra_linked" ? !item.extraLinkPath : filters.release !== "all" && item.releaseStatus !== filters.release) return false;
     if (filters.size === "larger" && item.sizeComparison !== "larger") return false;
     if (filters.size === "not_larger" && (item.sizeComparison === null || item.sizeComparison === "larger")) return false;
-    return !needle || item.relativePath.toLowerCase().includes(needle);
+    return !matchesSearch || matchesSearch(item.relativePath);
   });
 }
 

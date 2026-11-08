@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Search is forgiving everywhere: the orphan review, **Search work** on the dashboard, **Search current folder**, the storage policy title filter, **Logs**, and the Radarr and Sonarr title lists. Case, accents and punctuation no longer matter, so `Alpha Bravo` finds `Alpha.Bravo` and `Charlies Lab` finds `Charlie's Lab`. Words can come in any order, and longer words can have a typo: one in words of 5 to 8 letters, two in longer ones. Short words, episode codes such as `S01E02` and years still have to match exactly. An empty search shows the same list as before. The upgrade adds a search column to the symlink table (migration 30), which takes a few seconds on a large library.
+
 ## [0.1.4-beta.5] - 2026-11-07
 
 ### Added
