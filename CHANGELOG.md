@@ -8,6 +8,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 - Disc formats count as video: DVD rips (`.vob`, `.ifo`, `.bup`), disc images (`.iso`, `.img`) and other containers such as `.divx`, `.rmvb`, `.ogm`, `.ogv`, `.asf`, `.f4v`, `.m2v` and `.evo`. DVD rip folders no longer show as folders with no video, and links to these files count as media links.
 - The orphan review API leaves out anything a symlink uses, files and folders alike, instead of listing it as protected. It returns `skippedInUse`, with how many files and folders were left out and whether a library link or an extra symlink folder link holds them. This includes targets of symlinks in extra symlink folders. Purges still refuse these items.
+- Search is forgiving everywhere: the orphan review, **Search work** on the dashboard, **Search current folder**, the storage policy title filter, **Logs**, and the Radarr and Sonarr title lists. Case, accents and punctuation no longer matter, so `Alpha Bravo` finds `Alpha.Bravo` and `Charlies Lab` finds `Charlie's Lab`. Words can come in any order, and longer words can have a typo: one in words of 5 to 8 letters, two in longer ones. Short words, episode codes such as `S01E02` and years still have to match exactly. An empty search shows the same list as before. The upgrade adds a search column to the symlink table (migration 30), which takes a few seconds on a large library.
 
 ### Fixed
 

@@ -9,6 +9,7 @@ import { applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
 import { applyBackupMigration } from "./backupMigration";
 import { applyAccountsMigration } from "./accountsMigration";
+import { applySearchTextMigration } from "./searchTextMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -30,7 +31,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 29;
+export const currentSchemaVersion = 30;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -931,6 +932,18 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`CREATE INDEX IF NOT EXISTS re_requests_status_idx ON re_requests (status, instance_id, id)`);
         await client.query(`CREATE INDEX IF NOT EXISTS re_requests_instance_requested_idx ON re_requests (instance_id, requested_at)`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (29, 're_requests', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(30)) {
+      await client.query("BEGIN");
+      try {
+        // One generated column; Postgres fills it for existing rows and keeps it current on every write.
+        await applySearchTextMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (30, 'media_link_search_text', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
