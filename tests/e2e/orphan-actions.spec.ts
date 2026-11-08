@@ -188,7 +188,9 @@ test("the review filters and sorts by the new labels, and says a title match is 
 });
 
 test("orphan search forgives punctuation, word order, apostrophes and small typos", async ({ page }) => {
+  // The fixture protects the first file, and protected files aren't listed.
   const paths = [
+    "movies/Zulu (2001)/Zulu.2001.mkv",
     "shows/Alpha.Bravo/Season 01/Alpha.Bravo.S01E02.1080p.mkv",
     "shows/Alpha.Bravo/Season 01/Alpha.Bravo.S01E03.1080p.mkv",
     "movies/Charlie's Lab (2019)/Charlie's Lab (2019).mkv",
