@@ -102,11 +102,15 @@ test("orphan purges carry the same choice, in both the confirmation and purge al
   const posts = await fixture(page);
   await page.goto(`${baseUrl}/library?view=local-orphans`);
   await page.getByRole("checkbox", { name: "Select Alpha.mkv" }).check();
-  await page.getByRole("button", { name: "Purge selected" }).click();
+  // The choice sits in the selection bar, visible before anything is confirmed, and off by default.
+  const bar = page.getByRole("region", { name: "Selected orphans" });
+  const option = bar.getByRole("checkbox", { name: /search for a new copy/ });
+  await expect(option).not.toBeChecked();
+  await option.check();
+  expect(posts.previews).toEqual([]);
+  await bar.getByRole("button", { name: "Purge selected" }).click();
   const confirm = page.getByRole("group", { name: "Confirm orphan purge" });
-  await expect(confirm.getByRole("checkbox", { name: /search for a new copy/ })).not.toBeChecked();
-  await confirm.getByRole("checkbox", { name: /search for a new copy/ }).check();
-  await expect(page.getByTestId("re-request-preview")).toContainText("1 in Radarr 4K");
+  await expect(confirm.getByTestId("re-request-preview")).toContainText("1 in Radarr 4K");
   await confirm.getByRole("button", { name: "Move to holding area" }).click();
   await expect.poll(() => posts.orphans.length).toBe(1);
   expect(posts.orphans[0]).toMatchObject({ storageFileIds: [1], mode: "hold", reRequest: true });

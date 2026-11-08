@@ -1,6 +1,8 @@
 # Orphan review and purge
 
-An orphan is a media file on a storage location with no library symlink pointing to it. **Library > Local orphans** and **Library > Remote orphans** list them for review, and you choose what to purge. Files changed in the last 24 hours or involved in an unfinished copy are protected and cannot be selected.
+An orphan is a media file on a storage location with no library symlink pointing to it. **Library > Local orphans** and **Library > Remote orphans** list them for review, and you choose what to purge. Files changed in the last 24 hours or involved in an unfinished copy are protected. They are not listed; the header only counts them.
+
+Video files, folders with no video and the holding area each have their own tab. Selecting anything brings up a bar at the bottom of the screen with the count and size, the choice between **Hold 7 days** and **Delete now**, the option to ask Radarr or Sonarr for a new copy, and **Purge selected**, which asks once more before anything happens. **Purge all eligible** in the header purges everything that can be purged, behind its own confirmation. Hold is the default on local storage. Remote storage cannot move files into the holding area, so Hold is turned off there and every purge deletes immediately. If a purge job fails or partly fails, a red banner shows its first error and links to the job until you dismiss it.
 
 Media files include disc formats such as DVD rips (`.vob`, `.ifo`, `.bup`) and disc images (`.iso`, `.img`), as well as video containers.
 

@@ -1625,9 +1625,9 @@ export function Page({
   );
 }
 
-export function Panel({ title, icon, actions, children }: { title: string; icon: ReactNode; actions?: ReactNode; children: ReactNode }) {
+export function Panel({ title, icon, actions, className, children }: { title: string; icon: ReactNode; actions?: ReactNode; className?: string; children: ReactNode }) {
   return (
-    <section className="panel">
+    <section className={className ? `panel ${className}` : "panel"}>
       <div className="panel-title">
         {icon}
         <h2>{title}</h2>

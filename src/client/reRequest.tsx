@@ -43,25 +43,34 @@ function PreviewSummary({ preview }: { preview: ReRequestPreview }) {
   );
 }
 
-/** The per-delete choice. Off until someone ticks it, and it says which files it cannot help before anything is deleted. */
-export function ReRequestOption({ storageFileIds, checked, onChange, disabled = false }: { storageFileIds: number[]; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
+export const reRequestOptionLabel = "Also ask Radarr or Sonarr to search for a new copy";
+export const reRequestExplanation = "After a file is deleted, SRTL clears it from Radarr or Sonarr, monitors that movie or those episodes, and asks for a search. Searches are paced. Tags are not changed, and a failed search never undoes the delete.";
+
+/** Which of these files Radarr or Sonarr can re-request, looked up only once the option is on. */
+export function ReRequestPreviewCheck({ storageFileIds, enabled }: { storageFileIds: number[]; enabled: boolean }) {
   const ids = storageFileIds.slice(0, previewIdLimit);
   const preview = useQuery({
     queryKey: ["re-request-preview", ids],
     queryFn: () => api.previewReRequests(ids),
-    enabled: checked && ids.length > 0,
+    enabled: enabled && ids.length > 0,
     staleTime: 15_000
   });
+  if (!enabled || ids.length === 0) return null;
+  if (preview.isLoading) return <p className="muted">Checking which files can be re-requested...</p>;
+  if (preview.error) return <p className="panel-message error" role="alert">{preview.error.message}</p>;
+  return preview.data ? <PreviewSummary preview={preview.data} /> : null;
+}
+
+/** The per-delete choice. Off until someone ticks it, and it says which files it cannot help before anything is deleted. */
+export function ReRequestOption({ storageFileIds, checked, onChange, disabled = false }: { storageFileIds: number[]; checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean }) {
   return (
     <div className="re-request-option">
       <label className="checkbox-row">
-        <input type="checkbox" checked={checked} disabled={disabled || ids.length === 0} onChange={(event) => onChange(event.target.checked)} />
-        <span>Also ask Radarr or Sonarr to search for a new copy</span>
+        <input type="checkbox" checked={checked} disabled={disabled || storageFileIds.length === 0} onChange={(event) => onChange(event.target.checked)} />
+        <span>{reRequestOptionLabel}</span>
       </label>
-      <p className="muted">After a file is deleted, SRTL clears it from Radarr or Sonarr, monitors that movie or those episodes, and asks for a search. Searches are paced. Tags are not changed, and a failed search never undoes the delete.</p>
-      {checked && preview.isLoading ? <p className="muted">Checking which files can be re-requested...</p> : null}
-      {checked && preview.error ? <p className="panel-message error" role="alert">{preview.error.message}</p> : null}
-      {checked && preview.data ? <PreviewSummary preview={preview.data} /> : null}
+      <p className="muted">{reRequestExplanation}</p>
+      <ReRequestPreviewCheck storageFileIds={storageFileIds} enabled={checked} />
     </div>
   );
 }
