@@ -4228,13 +4228,16 @@ export class JobWorker {
     let alreadyMissing = count("already_missing");
     let failed = count("failed");
     let current = held + deleted + alreadyMissing + failed;
+    // The first failure is kept in the progress, so the review can say what went wrong without opening the log.
+    const earlierFailure = operations.find((operation) => operation.stage === "failed" && operation.errorMessage);
+    let firstError: { filePath: string; message: string } | null = earlierFailure ? { filePath: earlierFailure.filePath, message: earlierFailure.errorMessage! } : null;
     const total = operations.length;
     const reRequest = jobOptions.reRequest === true;
     const damaged = jobOptions.source === "damaged";
     const name = damaged ? "Damaged file delete" : "Orphan purge";
     const noun = damaged ? "Damaged file" : "Orphan";
     const setProgress = (stage: string, message: string) =>
-      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total, reRequest, ...(damaged ? { source: "damaged" } : {}) }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message });
+      ctx.setProgress({ options: { rootType: operations[0]!.rootType, mode: operations[0]!.mode, total, reRequest, ...(damaged ? { source: "damaged" } : {}) }, current, total, held, deleted, alreadyMissing, failed, remaining: Math.max(0, total - current), stage, message, ...(firstError ? { firstError } : {}) });
 
     await setProgress("preparing", `Preparing ${name.toLowerCase()}`);
     await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest });
@@ -4286,6 +4289,7 @@ export class JobWorker {
         current += 1;
         failed += 1;
         const message = errorMessage(error);
+        firstError ??= { filePath: operation.filePath, message };
         await ctx.withLeaseDb((leaseDb) =>
           leaseDb
             .update(schema.orphanPurgeOperations)

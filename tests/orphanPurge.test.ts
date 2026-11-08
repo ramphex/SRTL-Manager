@@ -2,12 +2,12 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
-import { episodeKey, episodeKeys, expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans } from "../src/server/jobs/orphanPurge";
+import { deleteFolderFileByFile, episodeKey, episodeKeys, expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans, type FolderDeleteFs } from "../src/server/jobs/orphanPurge";
 import { configureExtraSymlinkFolders, extraSymlinkFolderProblems, parseExtraSymlinkFolders } from "../src/server/lib/extraSymlinkFolders";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
@@ -63,6 +63,20 @@ async function mediaLink(section: string, itemName: string, fileName: string, ta
   const [row] = await app.database.db
     .insert(schema.mediaLinks)
     .values({ section, itemName, relativePath, linkPath, targetPath, kind: targetPath.startsWith(paths.localDir) ? "local" : "remote", targetExists: true, isMedia: true, storagePolicy: "unassigned", lastSeenAt, updatedAt: lastSeenAt })
+    .returning();
+  return row!;
+}
+
+// A library link to a folder or to a file SRTL does not treat as video, as a scan records it.
+async function plainLink(section: string, itemName: string, name: string, targetPath: string) {
+  const relativePath = `${itemName}/${name}`;
+  const linkPath = path.join(paths.symlinkDir, section, relativePath);
+  await fs.mkdir(path.dirname(linkPath), { recursive: true });
+  await fs.symlink(targetPath, linkPath);
+  const timestamp = new Date().toISOString();
+  const [row] = await app.database.db
+    .insert(schema.mediaLinks)
+    .values({ section, itemName, relativePath, linkPath, targetPath, kind: "non_media", targetExists: true, isMedia: false, storagePolicy: "unassigned", lastSeenAt: timestamp, updatedAt: timestamp })
     .returning();
   return row!;
 }
@@ -379,16 +393,17 @@ describe("extra symlink folders", () => {
     await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("shows targeted files as still linked and refuses to queue them", async () => {
+  it("leaves targeted files out of the review, counting them, and refuses to queue them", async () => {
     const target = await storageFile("remote", "Target.Release.2019/file.mkv");
     const free = await storageFile("remote", "Free.Release.2018/file.mkv");
     const link = await pointer("nested/deeper/still/further/file.mkv", target.filePath);
     configureExtraSymlinkFolders([other]);
     const review = await listOrphanReview(app.database.db, "remote", 7);
-    expect(review.items.find((item) => item.storageFileId === target.id)).toMatchObject({ category: "unlinked", protectedReason: `Still linked from ${link}`, extraLinkPath: link, releaseStatus: "partly_linked", releaseFileCount: 1, releaseLinkedCount: 1 });
-    expect(review.items.find((item) => item.storageFileId === free.id)).toMatchObject({ protectedReason: null, extraLinkPath: null });
+    expect(review.items.map((item) => item.storageFileId)).toEqual([free.id]);
+    expect(review.items[0]).toMatchObject({ protectedReason: null, extraLinkPath: null });
+    expect(review.inUseSkippedCount).toBe(1);
     expect(review.extraSymlinks).toEqual({ folders: [other], linkCount: 1, unmatchedCount: 0, problems: [] });
-    await expect(app.jobs.startOrphanPurge("remote", [target.id], "delete")).rejects.toThrow("Still linked from");
+    await expect(app.jobs.startOrphanPurge("remote", [target.id], "delete")).rejects.toThrow(`Still linked from ${link}`);
     await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
   });
 
@@ -403,7 +418,9 @@ describe("extra symlink folders", () => {
     await app.database.db.update(schema.mediaLinks).set({ missingSince: new Date().toISOString() }).where(eq(schema.mediaLinks.id, libraryLink.id));
     configureExtraSymlinkFolders([other]);
     const review = await listOrphanReview(app.database.db, "remote", 7);
-    for (const file of [inFolder, relative, viaLibrary]) expect(review.items.find((item) => item.storageFileId === file.id)?.extraLinkPath).toEqual(expect.any(String));
+    expect(review.items).toEqual([]);
+    expect(review.inUseSkippedCount).toBe(3);
+    for (const file of [inFolder, relative, viaLibrary]) await expect(app.jobs.startOrphanPurge("remote", [file.id], "delete")).rejects.toThrow("Still linked from");
   });
 
   it("rechecks right before each delete and leaves the file when a link has appeared", async () => {
@@ -462,7 +479,9 @@ describe("extra symlink folders", () => {
     configureExtraSymlinkFolders([other]);
     const jobId = await app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id]);
     const link = await pointer("subtitle.srt", path.join(dirPath, "a.srt"));
-    expect((await listOrphanReview(app.database.db, "remote", 7)).leftoverFolders[0]?.protectedReason).toContain("extra symlink folder");
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.leftoverFolders).toEqual([]);
+    expect(review.inUseSkippedCount).toBe(1);
     await expect(app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id])).rejects.toThrow("extra symlink folder");
     await runJobs();
     expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
@@ -683,11 +702,12 @@ describe("folders with no video", () => {
     const orphan = await storageFile("local", "movies/Orphan (1998)/Orphan (1998).mkv");
 
     const review = await listOrphanReview(app.database.db, "local", 7);
+    // A folder a link uses is never purged, so it is only counted.
     expect(review.leftoverFolders.map((folder) => [folder.relativePath, folder.protectedReason])).toEqual([
       ["movies/Fresh (2026)", "Modified in the last 24 hours"],
-      ["movies/Gone (1999)", null],
-      ["movies/Linked (2002)", "A symlink points into this folder"]
+      ["movies/Gone (1999)", null]
     ]);
+    expect(review.inUseSkippedCount).toBe(1);
     await expect(app.jobs.startOrphanPurge("local", [], "delete", [fresh.id])).rejects.toThrow("Modified in the last 24 hours");
     await expect(app.jobs.startOrphanPurge("local", [], "delete", [linked.id])).rejects.toThrow("A symlink points into this folder");
 
@@ -813,5 +833,175 @@ describe("remote source deletion after copy", () => {
     await expect(fs.stat(removed.sourcePath)).rejects.toMatchObject({ code: "ENOENT" });
     await expect(fs.readFile(path.join(paths.localDir, "movies", "Removed Movie (2011)", "Removed Movie (2011).mkv"), "utf8")).resolves.toContain("remote bytes");
     expect((await app.jobs.listEvents(removedJob)).map((event) => event.message)).toContain("Deleted remote source after verified copy");
+  });
+});
+
+// Behaves like a debrid FUSE mount: rmdir on a torrent folder that still holds files fails with EIO,
+// unlinking a file works, and the torrent folder disappears by itself once its last file is gone.
+function debridFs(torrentRoot: string, files: string[]) {
+  const remaining = new Set(files);
+  let rootGone = false;
+  const calls: string[] = [];
+  const fail = (code: string, target: string) => Object.assign(new Error(`${code}: ${target}`), { code });
+  const ops: FolderDeleteFs = {
+    unlink: (async (target: string) => {
+      calls.push(`unlink ${target}`);
+      if (rootGone || !remaining.delete(target)) throw fail("ENOENT", target);
+      if (remaining.size === 0) rootGone = true;
+    }) as FolderDeleteFs["unlink"],
+    rmdir: (async (target: string) => {
+      calls.push(`rmdir ${target}`);
+      if (rootGone) throw fail("ENOENT", target);
+      throw fail("EIO", target);
+    }) as FolderDeleteFs["rmdir"]
+  };
+  return { ops, calls, remaining, isGone: () => rootGone, torrentRoot };
+}
+
+describe("folder deletes on a debrid mount", () => {
+  const torrent = "/remote/Alpha.Bravo.S01.DVD";
+  const files = [`${torrent}/Extras/notes.txt`, `${torrent}/info.nfo`, `${torrent}/cover.jpg`];
+  const contents = { files, directories: [`${torrent}/Extras`, torrent] };
+
+  it("unlinks each file, then counts folders the mount already removed as gone", async () => {
+    const mount = debridFs(torrent, files);
+    await deleteFolderFileByFile(torrent, contents, mount.ops);
+    expect(mount.isGone()).toBe(true);
+    expect(mount.calls).toEqual([...files.map((file) => `unlink ${file}`), `rmdir ${torrent}/Extras`, `rmdir ${torrent}`]);
+  });
+
+  it("says how far it got when a file cannot be deleted, and leaves the folder", async () => {
+    const mount = debridFs(torrent, files);
+    const refusing: FolderDeleteFs = {
+      ...mount.ops,
+      unlink: (async (target: string) => {
+        if (target === files[1]) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+        return mount.ops.unlink(target);
+      }) as FolderDeleteFs["unlink"]
+    };
+    await expect(deleteFolderFileByFile(torrent, contents, refusing)).rejects.toThrow(`Deleted 1 of 3 files in ${torrent}, then ${files[1]} could not be deleted (EACCES); the folder was left in place`);
+    expect(mount.isGone()).toBe(false);
+    expect(mount.calls.some((call) => call.startsWith("rmdir"))).toBe(false);
+  });
+
+  it("reports a folder that stays after its files are gone", async () => {
+    const stubborn: FolderDeleteFs = {
+      unlink: (async () => undefined) as FolderDeleteFs["unlink"],
+      rmdir: (async (target: string) => {
+        throw Object.assign(new Error(`EIO: ${target}`), { code: "EIO" });
+      }) as FolderDeleteFs["rmdir"]
+    };
+    await expect(deleteFolderFileByFile(torrent, contents, stubborn)).rejects.toThrow(`Deleted all 3 files in ${torrent}, but folder ${torrent}/Extras could not be removed (EIO)`);
+  });
+
+  it("purges a leftover folder through the job when the mount refuses rmdir on it", async () => {
+    const dirPath = path.join(paths.remoteDir, "Charlie.2001.DVDR");
+    const entries = ["Charlie.nfo", "Extras/sample.txt"];
+    for (const entry of entries) {
+      await fs.mkdir(path.dirname(path.join(dirPath, entry)), { recursive: true });
+      await fs.writeFile(path.join(dirPath, entry), entry);
+      await fs.utimes(path.join(dirPath, entry), oldTime, oldTime);
+    }
+    await fs.utimes(path.join(dirPath, "Extras"), oldTime, oldTime);
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [folder] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath: "Charlie.2001.DVDR", fileCount: 2, totalBytes: 20, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    const realUnlink = fs.unlink.bind(fs);
+    const realRm = fs.rm.bind(fs);
+    const realReaddir = fs.readdir.bind(fs);
+    // A recursive rm tries rmdir first on these mounts, so it fails like rmdir does.
+    const rmSpy = vi.spyOn(fs, "rm").mockRejectedValue(Object.assign(new Error("EIO: i/o error, rmdir"), { code: "EIO" }));
+    const rmdirSpy = vi.spyOn(fs, "rmdir").mockImplementation((async (target: string) => {
+      await fs.lstat(target);
+      throw Object.assign(new Error(`EIO: i/o error, rmdir '${target}'`), { code: "EIO" });
+    }) as typeof fs.rmdir);
+    // The torrent goes away by itself once its last file is unlinked.
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation((async (target: string) => {
+      await realUnlink(target);
+      const left = await realReaddir(dirPath, { recursive: true, withFileTypes: true });
+      if (!left.some((entry) => entry.isFile())) await realRm(dirPath, { recursive: true });
+    }) as typeof fs.unlink);
+    try {
+      const jobId = await app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id]);
+      await runJobs();
+      expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ deleted: 1, failed: 0 }) });
+      await expect(fs.stat(dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+      expect(unlinkSpy).toHaveBeenCalledTimes(2);
+      expect(rmSpy).not.toHaveBeenCalled();
+    } finally {
+      rmSpy.mockRestore();
+      rmdirSpy.mockRestore();
+      unlinkSpy.mockRestore();
+    }
+  });
+
+  it("reports a failed folder purge with its first error in the job progress", async () => {
+    const dirPath = path.join(paths.remoteDir, "Echo.Foxtrot.DVD");
+    await fs.mkdir(dirPath);
+    await fs.writeFile(path.join(dirPath, "info.nfo"), "nfo");
+    await fs.utimes(path.join(dirPath, "info.nfo"), oldTime, oldTime);
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [folder] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath: "Echo.Foxtrot.DVD", fileCount: 1, totalBytes: 3, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockRejectedValue(Object.assign(new Error("EIO: i/o error"), { code: "EIO" }));
+    try {
+      const jobId = await app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id]);
+      await runJobs();
+      expect(await app.jobs.getJob(jobId)).toMatchObject({
+        status: "failed",
+        progress: expect.objectContaining({ failed: 1, firstError: { filePath: dirPath, message: expect.stringContaining("Nothing in this folder was deleted") } })
+      });
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+    await expect(fs.stat(path.join(dirPath, "info.nfo"))).resolves.toBeTruthy();
+  });
+});
+
+describe("links to folders and to files that are not video", () => {
+  async function leftover(relativePath: string, entries: string[]) {
+    const dirPath = path.join(paths.remoteDir, relativePath);
+    for (const entry of entries) {
+      await fs.mkdir(path.dirname(path.join(dirPath, entry)), { recursive: true });
+      await fs.writeFile(path.join(dirPath, entry), entry);
+      await fs.utimes(path.join(dirPath, entry), oldTime, oldTime);
+    }
+    await fs.mkdir(dirPath, { recursive: true });
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [row] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath, fileCount: entries.length, totalBytes: 1, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    return row!;
+  }
+
+  it("treats everything under a library link to a folder as in use, in the review and at purge", async () => {
+    const inside = await storageFile("remote", "Golf.Hotel.2004/Golf.Hotel.2004.mkv");
+    const free = await storageFile("remote", "India.Juliet.2005/India.Juliet.2005.mkv");
+    const extras = await leftover("Golf.Hotel.2004/Extras", ["notes.txt"]);
+    await plainLink("movies", "Golf Hotel (2004)", "Golf.Hotel.2004", path.dirname(inside.filePath));
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.items.map((item) => item.storageFileId)).toEqual([free.id]);
+    expect(review.leftoverFolders).toEqual([]);
+    expect(review.inUseSkippedCount).toBe(1);
+    await expect(app.jobs.startOrphanPurge("remote", [inside.id], "delete")).rejects.toThrow("no longer an orphan");
+    await expect(app.jobs.startOrphanPurge("remote", [], "delete", [extras.id])).rejects.toThrow("A symlink points into this folder");
+  });
+
+  it("rechecks for a folder link right before a delete", async () => {
+    const orphan = await storageFile("remote", "Kilo.Lima.2006/Kilo.Lima.2006.mkv");
+    const folder = await leftover("Kilo.Lima.2006/Subs", ["a.srt"]);
+    const jobId = await app.jobs.startOrphanPurge("remote", [orphan.id], "delete", [folder.id]);
+    await plainLink("movies", "Kilo Lima (2006)", "Kilo.Lima.2006", path.dirname(orphan.filePath));
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed", progress: expect.objectContaining({ failed: 2 }) });
+    await expect(fs.stat(orphan.filePath)).resolves.toBeTruthy();
+    await expect(fs.stat(folder.dirPath)).resolves.toBeTruthy();
+    const events = (await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join();
+    expect(events).toContain("points to a folder holding this file");
+    expect(events).toContain("points to this folder or one above it");
+  });
+
+  it("counts a link to a file that is not video as use of its folder", async () => {
+    const folder = await leftover("Mike.November.2007", ["Mike.November.2007.bin", "info.nfo"]);
+    await plainLink("movies", "Mike November (2007)", "Mike.November.2007.bin", path.join(folder.dirPath, "Mike.November.2007.bin"));
+    const review = await listOrphanReview(app.database.db, "remote", 7);
+    expect(review.leftoverFolders).toEqual([]);
+    expect(review.inUseSkippedCount).toBe(1);
   });
 });

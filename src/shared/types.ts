@@ -667,6 +667,8 @@ export interface OrphanReview {
   storageStaleWarning: string | null;
   // Symlink folders kept by other tools. Any problem here blocks purging.
   extraSymlinks: { folders: string[]; linkCount: number; unmatchedCount: number; problems: string[] };
+  // Files and folders left out of the lists because a symlink uses them, so SRTL would never purge them.
+  inUseSkippedCount: number;
   holdDays: number;
 }
 

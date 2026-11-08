@@ -2,6 +2,10 @@
 
 An orphan is a media file on a storage location with no library symlink pointing to it. **Library > Local orphans** and **Library > Remote orphans** list them for review, and you choose what to purge. Files changed in the last 24 hours or involved in an unfinished copy are protected and cannot be selected.
 
+Media files include disc formats such as DVD rips (`.vob`, `.ifo`, `.bup`) and disc images (`.iso`, `.img`), as well as video containers.
+
+Anything a symlink uses is never purged, so it is left out of both lists, and a muted line says how many were skipped. Any link counts, whatever the type of file it points at, and a link to a folder covers everything inside it.
+
 ## Reading the labels
 
 | Label | What it means |
@@ -35,6 +39,10 @@ The list is only as good as the symlink inventory, so a purge needs a **complete
 
 Every file is checked again right before it is touched. See [the README](../README.md) for the holding area.
 
+When a purge job fails or partly fails, the review says so with the first error. Open the job log for the rest.
+
+Folders with no video are deleted one file at a time, then the folders that held them. Some remote mounts refuse to remove a folder that still has files but remove it themselves once its last file goes, and a folder that is already gone counts as removed. If a file cannot be deleted, the job says how many were deleted before it stopped, and the folder is left in place.
+
 ## Symlinks kept by other tools
 
 SRTL only scans its own symlink folder. If another tool, such as a download client, keeps its own folder of symlinks pointing at files on your storage, SRTL cannot see those links and would list their targets as orphans. Name those folders so they are checked too:
@@ -67,7 +75,7 @@ SRTL only scans its own symlink folder. If another tool, such as a download clie
 
 With that in place:
 
-- Files a link points to, or that sit under a folder a link points to, are listed as **Protected: Still linked from** that link. They stay listed as orphans, cannot be selected, and are refused if a purge asks for them. Folders with no video get the same protection.
+- Files a link points to, or that sit under a folder a link points to, are left out of the review and counted in the skipped line, like files a library link uses. They are refused if a purge asks for them. Folders with no video get the same protection.
 - The folders are read again right before each file or folder is touched, so a link made after the purge was queued still stops it. Each purge step walks the whole of every folder, so very large folders slow large purges down.
 - SRTL only ever reads these folders. A folder cannot be, or contain, a symlink or storage root, or sit inside a storage root or a library folder, because SRTL changes files there.
 - If a folder is missing, unreadable, or empty, as an unmounted folder usually is, purging is refused and the review says why, rather than treating it as having no links. If a folder is meant to be empty, remove it from the setting.

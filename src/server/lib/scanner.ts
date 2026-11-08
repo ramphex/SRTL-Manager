@@ -10,7 +10,7 @@ import { inferSectionContentType } from "../../shared/sections";
 import { canonicalTitleKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
 import { applyDefaultPoliciesToNewTitles, type DefaultPolicyTitle } from "./defaultPolicy";
-import { holdingFolderName, isMediaFile, isPathInside, safeRelativePath } from "./media";
+import { holdingFolderName, isCoveredByPath, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 import { effectiveIntegrity } from "./mediaIntegrity";
@@ -890,10 +890,11 @@ function storageFileFromTargetedLink(link: ClassifiedLink, paths: PathsSettings)
 }
 
 export function summarizeInventory(links: ClassifiedLink[], storageFiles: ClassifiedStorageFile[]): InventorySummary {
-  const linkedTargets = new Set(links.filter((link) => link.targetExists && link.isMedia).map((link) => link.targetPath));
+  // Any link counts as use, whatever its file type, and a link to a folder covers what is inside it.
+  const linkedTargets = new Set(links.filter((link) => link.targetExists).map((link) => path.resolve(link.targetPath)));
   const localFiles = storageFiles.filter((file) => file.rootType === "local");
   const remoteFiles = storageFiles.filter((file) => file.rootType === "remote");
-  const unlinkedFiles = storageFiles.filter((file) => !linkedTargets.has(file.filePath));
+  const unlinkedFiles = storageFiles.filter((file) => !isCoveredByPath(linkedTargets, file.filePath));
   const unlinkedLocalFiles = unlinkedFiles.filter((file) => file.rootType === "local");
   const unlinkedRemoteFiles = unlinkedFiles.filter((file) => file.rootType === "remote");
   return {
