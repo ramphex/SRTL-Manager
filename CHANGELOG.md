@@ -4,6 +4,56 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-11-09
+
+Everything from 0.1.4-beta.1 to 0.1.4-beta.7. The beta sections below have the full detail.
+
+### Added
+
+- Radarr and Sonarr integrations, for any number of instances each: policy tags that follow SRTL storage policies, copy monitoring, size and runtime checks before copies, and optional webhooks that rescan only the affected title.
+- Orphan review and purge for both storage locations. It lists every video nothing in the library links to, and folders left with no video. Labels say whether the title is in the library, whether its release is partly linked, and how its size compares with the linked file. Purges hold files in a restorable area or delete them, and recheck every file right before touching it. A purge job has a status window with live progress and its failures.
+- Damaged file detection: hollow and partially hollow local files, with a **Library > Damaged files** view that can delete them.
+- Optional re-requests: an orphan purge or damaged file delete can ask Radarr or Sonarr to search for a new copy.
+- Accounts and roles: one owner plus admins and moderators, each with their own password, sessions and display preferences.
+- Scheduled, verified database backups with **Back up now**.
+- **Now Playing**: live Plex and Jellyfin streams with host load, and **Settings > Media servers** for shared Plex and Jellyfin connections.
+- **Watch sync**: watched state and resume positions between Plex and Jellyfin per user pair.
+- **Retry failed** for copy jobs, a daily full inventory scan, a default storage policy for new titles, `SRTL_EXTRA_SYMLINK_DIRS` for symlink folders kept by other tools, and **Discard partial copy** for interrupted copies.
+
+### Changed
+
+- The runtime is Node.js 26 LTS.
+- Copies and audits check media much more strictly: source checks before every copy, and truncated or damaged files fail validation. An MKV missing only its last few KB is accepted with a warning.
+- Search is forgiving everywhere: case, punctuation, word order and small typos no longer matter.
+- The orphan review page is redesigned, and secondary buttons stand out from text across the app.
+- Disc formats such as `.vob`, `.iso` and `.img` count as video, and a link to any file counts as use. Remote orphans are deleted immediately, since debrid FUSE mounts can't hold files.
+- Purges need a complete symlink scan from the last 24 hours, and no longer ask for a typed confirmation phrase.
+- Webhook events are batched per title, symlink scans are faster on large libraries, and Recent Jobs groups repeated jobs for the same title.
+
+### Fixed
+
+- Scans stop with a clear message when a storage root is unmounted or unreadable, instead of marking everything on it missing.
+- Deleting folders on a debrid FUSE mount works, one file at a time, and a failed purge is shown as failed with its first error.
+- Files opened for a read check are always closed, which Node.js 26 requires.
+
+### Security
+
+- Every API route needs a signed-in account with the right role, first-run setup needs a one-time token, and sign-in has backoff and lockouts.
+- Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are encrypted at rest with `SRTL_SECRET_KEY`.
+- Outbound connections are limited to allowed addresses, reverse-proxy headers are trusted only from listed proxies, and error responses no longer leak internals.
+- Dependencies and the container base image are updated to clear the known critical and high advisories.
+
+### Upgrade notes
+
+Upgrading from 0.1.3 applies database migrations up to 30 automatically. **Back up the database first**: migrations can't be undone by going back to an older image. Then check:
+
+- **Docker installs must set `SRTL_SECRET_KEY`** (`openssl rand -base64 32`), and keep a copy apart from database backups.
+- **Set `SRTL_BACKUP_HOST_PATH`** to a folder owned by `SRTL_UID`, outside your media roots, for scheduled backups.
+- **`SRTL_TRUST_PROXY=true` is refused.** List your proxy's addresses instead, or `loopback`.
+- **Plex, Jellyfin, Radarr or Sonarr on a loopback address** need `SRTL_OUTBOUND_ALLOW_CIDRS=private,public,loopback`.
+- **Installs outside Docker** need Node.js 26 and the PostgreSQL 17 client tools.
+- New passwords need at least 12 characters, and the API docs are off unless `SRTL_API_DOCS=true`.
+
 ## [0.1.4-beta.7] - 2026-11-09
 
 ### Added
