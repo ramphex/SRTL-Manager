@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4-beta.7] - 2026-11-09
+
 ### Added
 
 - Orphan purge and damaged file delete jobs have a status window, like scans, copies and audits. Open it with the magnifier button in **Recent Jobs** or **View purge status** in **Logs**. It shows live progress with a progress bar, the file being worked on, deleted, held, already missing, failed and remaining counts, the rate and time left, and the first error. Failed items are listed with their reasons and held files with how long they are held, 100 at a time with **Load more**, and **Open holding area** goes to the restore list. **Logs** also shows the purge progress panel for the selected job. New API: `GET /api/jobs/:id/purge-items?outcome=failed|held&offset=&limit=` (up to 500 per page).
