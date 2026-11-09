@@ -92,7 +92,7 @@ test("dashboard orphan counts open the matching review", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Review Home NAS orphans" })).toBeVisible();
 });
 
-test("purge all eligible requires the typed phrase for large remote purges and skips protected files", async ({ page }) => {
+test("purge all eligible confirms with one click, without a typed phrase, and skips protected files", async ({ page }) => {
   const purges = await fixture(page);
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   await page.getByRole("button", { name: "Purge all eligible" }).click();
@@ -102,13 +102,11 @@ test("purge all eligible requires the typed phrase for large remote purges and s
   // Remote storage cannot hold files, so the dialog starts on Delete now and says why.
   await expect(dialog.getByRole("button", { name: /Hold 7 days/ })).toBeDisabled();
   await expect(dialog.getByText(/can't hold files, so deletes are immediate/)).toBeVisible();
+  await expect(dialog.getByLabel("Confirmation phrase")).toHaveCount(0);
   const confirm = dialog.getByRole("button", { name: /^Delete [\d,]+ items/ });
-  await expect(confirm).toBeDisabled();
-  await dialog.getByLabel("Confirmation phrase").fill("purge 1499 remote items");
   await expect(confirm).toBeEnabled();
   await dialog.getByLabel(/Also include leftover folders/).check();
-  await expect(confirm).toBeDisabled();
-  await dialog.getByLabel("Confirmation phrase").fill("purge 1500 remote items");
+  await expect(confirm).toBeEnabled();
   await confirm.click();
   await expect(dialog.getByRole("link", { name: "#99" })).toBeVisible();
   expect(purges).toHaveLength(1);
@@ -117,7 +115,7 @@ test("purge all eligible requires the typed phrase for large remote purges and s
   expect(purges[0]!.storageFileIds).not.toContain(1);
 });
 
-test("local purge all starts on hold and only asks for the phrase on a large purge", async ({ page }) => {
+test("local purge all starts on hold", async ({ page }) => {
   await fixture(page);
   await page.goto(`${baseUrl}/library?view=local-orphans`);
   await page.getByRole("button", { name: "Purge all eligible" }).click();
@@ -127,14 +125,14 @@ test("local purge all starts on hold and only asks for the phrase on a large pur
   await expect(dialog.getByRole("button", { name: /^Hold 3 items/ })).toBeEnabled();
 });
 
-test("remote delete needs the phrase even for a small purge", async ({ page }) => {
+test("remote delete is ready to confirm without a typed phrase", async ({ page }) => {
   await fixture(page, { remoteCount: 6 });
   await page.goto(`${baseUrl}/library?view=remote-orphans`);
   await page.getByRole("button", { name: "Purge all eligible" }).click();
   const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
   await expect(dialog.getByRole("button", { name: /Delete now/ })).toHaveAttribute("aria-pressed", "true");
-  await expect(dialog.getByLabel("Confirmation phrase")).toBeVisible();
-  await expect(dialog.getByRole("button", { name: /^Delete 5 items/ })).toBeDisabled();
+  await expect(dialog.getByLabel("Confirmation phrase")).toHaveCount(0);
+  await expect(dialog.getByRole("button", { name: /^Delete 5 items/ })).toBeEnabled();
 });
 
 test("stale symlink scan disables purge all", async ({ page }) => {

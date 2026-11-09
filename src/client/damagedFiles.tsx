@@ -9,7 +9,6 @@ import { useDamagedFiles } from "./damagedFilesQuery";
 import type { DamagedFileRow, OrphanPurgeMode } from "../shared/types";
 import { StatusPill } from "./App";
 import { formatBytes, formatDate, formatNumber } from "./appShared";
-import { purgeConfirmationPhrase, purgeNeedsPhrase } from "./orphanPurgePlan";
 import { ReRequestActivity, ReRequestOption } from "./reRequest";
 
 export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
@@ -131,14 +130,11 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
   const holdDays = normalizeAdvancedSettings(advanced.data).cleanup.holdDays;
   const [mode, setMode] = useState<OrphanPurgeMode>("hold");
   const [reRequest, setReRequest] = useState(false);
-  const [phrase, setPhrase] = useState("");
   const count = rows.length;
   const bytes = rows.reduce((total, row) => total + row.sizeBytes, 0);
   const files = `${formatNumber(count)} ${count === 1 ? "file" : "files"}`;
   const linked = rows.filter((row) => row.linked).length;
   const withRemote = rows.filter((row) => row.remoteCopyExists).length;
-  const needsPhrase = purgeNeedsPhrase("local", mode, count);
-  const requiredPhrase = purgeConfirmationPhrase("local", count);
   return (
     <div className="orphan-confirmation damaged-confirmation" role="group" aria-label="Confirm damaged file delete">
       <div className="segmented" role="group" aria-label="Delete mode">
@@ -157,16 +153,8 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
         {withRemote > 0 ? ` ${formatNumber(withRemote)} ${withRemote === 1 ? "has" : "have"} a remote copy, which is not touched and not linked automatically.` : ""}
       </p>
       <ReRequestOption storageFileIds={rows.map((row) => row.storageFileId)} checked={reRequest} onChange={setReRequest} disabled={pending} />
-      {needsPhrase ? (
-        <label className="orphan-phrase">
-          <span>
-            Type <code>{requiredPhrase}</code> to confirm
-          </span>
-          <input type="text" value={phrase} autoComplete="off" spellCheck={false} aria-label="Confirmation phrase" disabled={pending} onChange={(event) => setPhrase(event.target.value)} />
-        </label>
-      ) : null}
       <div className="orphan-toolbar">
-        <button type="button" disabled={pending || (needsPhrase && phrase.trim() !== requiredPhrase)} onClick={() => onConfirm({ mode, reRequest })}>
+        <button type="button" disabled={pending} onClick={() => onConfirm({ mode, reRequest })}>
           {pending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {mode === "hold" ? "Move to holding area" : "Delete permanently"}
         </button>
         <button type="button" className="secondary" disabled={pending} onClick={onCancel}>

@@ -1,8 +1,7 @@
-import type { OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReleaseStatus, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
+import type { OrphanCategory, OrphanLeftoverFolder, OrphanReleaseStatus, OrphanReview, OrphanReviewItem, OrphanReviewLabel } from "../shared/types";
 import { createSearchMatcher } from "../shared/search";
 
 const purgeJobIdLimit = 50_000;
-const purgeConfirmationThreshold = 1_000;
 
 export interface PurgeAllPlan {
   fileIds: number[];
@@ -40,14 +39,6 @@ export function planPurgeAll(review: Pick<OrphanReview, "items" | "leftoverFolde
     byLabel: [...labels].map(([label, entry]) => ({ label, ...entry })),
     folderBytes
   };
-}
-
-export function purgeConfirmationPhrase(rootType: StorageRootType, count: number): string {
-  return `purge ${count} ${rootType} ${count === 1 ? "item" : "items"}`;
-}
-
-export function purgeNeedsPhrase(rootType: StorageRootType, mode: OrphanPurgeMode, count: number): boolean {
-  return count > purgeConfirmationThreshold || (rootType === "remote" && mode === "delete");
 }
 
 /** Split a plan into jobs that respect the server's per-request ID limit; folders ride with the first batch. */

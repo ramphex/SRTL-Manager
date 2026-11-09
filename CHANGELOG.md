@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Purging all eligible orphans and deleting damaged files no longer ask you to type a confirmation phrase. The dialog still shows the count, size and mode, and the purge starts only when you press its button.
+
 ## [0.1.4-beta.6] - 2026-11-09
 
 ### Changed

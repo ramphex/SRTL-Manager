@@ -8263,11 +8263,6 @@ button.danger-button:hover:not(:disabled) {
   text-align: right;
 }
 
-.orphan-phrase {
-  display: grid;
-  gap: 6px;
-}
-
 .orphan-purge-all-dialog .checkbox-row {
   align-items: center;
   display: flex;
