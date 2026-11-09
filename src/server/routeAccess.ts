@@ -154,6 +154,7 @@ const routeTable: readonly RouteEntry[] = [
   { methods: ["GET"], url: "/api/jobs/:id/events/page", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/copy-failures", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/copy-retry", permission: "library.view" },
+  { methods: ["GET"], url: "/api/jobs/:id/purge-items", permission: "library.view" },
   { methods: ["POST"], url: "/api/jobs/:id/terminate", permission: "jobs.run", libraryLock: "exempt" },
   { methods: ["POST"], url: "/api/jobs/:id/cancel", permission: "jobs.run", libraryLock: "exempt" },
   { methods: ["GET"], url: "/api/job-reconciliation", permission: "library.view" },

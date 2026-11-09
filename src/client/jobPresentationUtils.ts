@@ -629,3 +629,143 @@ export function copyRetryStartedMessage(started: CopyRetryStarted): string {
   const items = `${started.retried} failed item${started.retried === 1 ? "" : "s"}`;
   return [`Job #${started.jobId} is retrying ${items}.`, started.summary].filter(Boolean).join(" ");
 }
+
+export type OrphanPurgeStatusPrompt = {
+  key: string;
+  title: string;
+  description: string;
+  jobId: number;
+};
+
+export type OrphanPurgeProgressView = {
+  rootType: "local" | "remote";
+  mode: "hold" | "delete";
+  damaged: boolean;
+  reRequest: boolean;
+  current: number;
+  total: number;
+  deleted: number;
+  held: number;
+  alreadyMissing: number;
+  failed: number;
+  remaining: number;
+  stage: string;
+  message: string | null;
+  firstError: { filePath: string; message: string } | null;
+};
+
+function orphanPurgeOptions(job: JobRecord | null): Record<string, unknown> | null {
+  return recordFromUnknown(job?.options) ?? recordFromUnknown(recordFromUnknown(job?.progress)?.options);
+}
+
+export function orphanPurgeProgressFromJob(job: JobRecord | null): OrphanPurgeProgressView {
+  const progress = recordFromUnknown(job?.progress);
+  const options = orphanPurgeOptions(job);
+  const total = finiteNumberFromUnknown(progress?.total) || finiteNumberFromUnknown(options?.total);
+  const current = Math.min(finiteNumberFromUnknown(progress?.current), total || Number.POSITIVE_INFINITY);
+  const firstErrorRecord = recordFromUnknown(progress?.firstError);
+  const firstError =
+    firstErrorRecord && typeof firstErrorRecord.filePath === "string" && typeof firstErrorRecord.message === "string"
+      ? { filePath: firstErrorRecord.filePath, message: firstErrorRecord.message }
+      : null;
+  const remainingValue = finiteNullableNumberFromUnknown(progress?.remaining);
+  return {
+    rootType: options?.rootType === "remote" ? "remote" : "local",
+    mode: options?.mode === "hold" ? "hold" : "delete",
+    damaged: options?.source === "damaged",
+    reRequest: options?.reRequest === true,
+    current,
+    total,
+    deleted: finiteNumberFromUnknown(progress?.deleted),
+    held: finiteNumberFromUnknown(progress?.held),
+    alreadyMissing: finiteNumberFromUnknown(progress?.alreadyMissing),
+    failed: finiteNumberFromUnknown(progress?.failed),
+    remaining: remainingValue ?? Math.max(0, total - current),
+    stage: typeof progress?.stage === "string" ? progress.stage : job?.status ?? "waiting",
+    message: typeof progress?.message === "string" && progress.message.trim() ? progress.message : null,
+    firstError
+  };
+}
+
+/** "19,981 remote orphans, deleted", as the jobs table and the status window describe a purge. */
+export function orphanPurgeScopeText(job: JobRecord): string {
+  const progress = orphanPurgeProgressFromJob(job);
+  const total = finiteNumberFromUnknown(orphanPurgeOptions(job)?.total) || progress.total;
+  const kind = progress.damaged ? "damaged file" : "orphan";
+  const how = progress.mode === "hold" ? "held for restore" : "deleted";
+  return `${total === 1 ? `1 ${progress.rootType} ${kind}` : `${formatNumber(total)} ${progress.rootType} ${kind}s`}, ${how}${progress.reRequest ? ", re-requested" : ""}`;
+}
+
+export function orphanPurgeStatusPromptFromJob(job: JobRecord): OrphanPurgeStatusPrompt {
+  const progress = orphanPurgeProgressFromJob(job);
+  return {
+    key: `orphan-purge-job-${job.id}`,
+    title: progress.damaged ? "Damaged file delete" : "Orphan purge",
+    description: orphanPurgeScopeText(job),
+    jobId: job.id
+  };
+}
+
+export function orphanPurgeStageLabel(progress: OrphanPurgeProgressView, status?: JobStatus | null): string {
+  if (status === "queued" || progress.stage === "queued") return "Queued";
+  switch (progress.stage) {
+    case "preparing":
+      return "Preparing";
+    case "purging":
+      return progress.mode === "hold" ? "Moving files to the holding area" : "Deleting files";
+    case "cancelled":
+      return "Stopped";
+    case "failed":
+      return "Failed";
+    case "partially_failed":
+      return "Partially failed";
+    case "completed":
+      return "Finished";
+    default:
+      return status === "running" ? "Running" : status === "completed" ? "Finished" : "Waiting";
+  }
+}
+
+export function orphanPurgeProgressPercent(job: JobRecord | null, progress: OrphanPurgeProgressView): number {
+  if (job?.status === "completed") return 100;
+  if (progress.total <= 0) return 0;
+  const percent = Math.floor((progress.current / progress.total) * 100);
+  // A running job never shows 100% until it has actually finished.
+  return Math.max(0, Math.min(job?.status === "running" || job?.status === "queued" ? 99 : 100, percent));
+}
+
+/** The file the job says it is working on; the job writes "Checking <file name>" before each item. */
+export function orphanPurgeCurrentFile(progress: OrphanPurgeProgressView): string | null {
+  const match = progress.message?.match(/^Checking (.+)$/);
+  return match?.[1]?.trim() || null;
+}
+
+function orphanPurgeItemsPerMs(job: JobRecord | null, progress: OrphanPurgeProgressView, now: number): number | null {
+  const startedAt = Date.parse(job?.startedAt ?? "");
+  const endedAt = job?.finishedAt ? Date.parse(job.finishedAt) : now;
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt <= startedAt || progress.current <= 0) return null;
+  return progress.current / (endedAt - startedAt);
+}
+
+/** Items handled per second or minute since the job started. */
+export function orphanPurgeRateLabel(job: JobRecord | null, progress: OrphanPurgeProgressView, now = Date.now()): string {
+  const perMs = orphanPurgeItemsPerMs(job, progress, now);
+  if (perMs == null) return "-";
+  const perSecond = perMs * 1000;
+  if (perSecond >= 1) return `${formatNumber(Math.round(perSecond * 10) / 10)} / s`;
+  return `${formatNumber(Math.round(perSecond * 600) / 10)} / min`;
+}
+
+export function orphanPurgeRemainingLabel(job: JobRecord | null, progress: OrphanPurgeProgressView, now = Date.now()): string {
+  if (!job || job.status === "queued") return "-";
+  if (job.status !== "running") return "Done";
+  if (progress.remaining <= 0) return progress.total > 0 ? "Finishing" : "-";
+  const perMs = orphanPurgeItemsPerMs(job, progress, now);
+  if (perMs == null || perMs <= 0) return "Estimating";
+  return formatDurationMs(progress.remaining / perMs);
+}
+
+/** The library view that lists a purge's held files, in the orphan review's holding area tab. */
+export function orphanPurgeHoldingAreaView(rootType: "local" | "remote"): "local-orphans" | "remote-orphans" {
+  return rootType === "remote" ? "remote-orphans" : "local-orphans";
+}

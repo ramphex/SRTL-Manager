@@ -1671,9 +1671,10 @@ const libraryViews = ["overview", "links", "local", "remote", "local-orphans", "
 const libraryRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/library",
-  validateSearch: (search: Record<string, unknown>): { view?: (typeof libraryViews)[number]; purge?: boolean } => ({
+  validateSearch: (search: Record<string, unknown>): { view?: (typeof libraryViews)[number]; purge?: boolean; held?: boolean } => ({
     ...(libraryViews.find((view) => view === search.view) ? { view: libraryViews.find((view) => view === search.view)! } : {}),
-    ...(search.purge === true || search.purge === "1" ? { purge: true } : {})
+    ...(search.purge === true || search.purge === "1" ? { purge: true } : {}),
+    ...(search.held === true || search.held === "1" ? { held: true } : {})
   }),
   component: LibraryPage
 });

@@ -11,7 +11,7 @@ import { deleteFolderFileByFile, episodeKey, episodeKeys, expireHeldOrphans, lis
 import { configureExtraSymlinkFolders, extraSymlinkFolderProblems, parseExtraSymlinkFolders } from "../src/server/lib/extraSymlinkFolders";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
-import type { JobRecord, OrphanPurgeJobProgress, OrphanReview, PathsSettings } from "../src/shared/types";
+import type { JobRecord, OrphanPurgeItemPage, OrphanPurgeJobProgress, OrphanReview, PathsSettings } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
 import { recordSymlinkScan } from "./scanFixtures";
@@ -658,6 +658,50 @@ describe("orphan purge", () => {
     await expect(fs.stat(remote.filePath)).rejects.toMatchObject({ code: "ENOENT" });
     const [row] = await app.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, remote.id));
     expect(row!.missingSince).not.toBeNull();
+  });
+});
+
+describe("purge job items over HTTP", () => {
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  it("pages through a purge's failed and held items with their reasons", async () => {
+    const held = await storageFile("local", "movies/Alpha Bravo (2001)/Alpha.Bravo.2001.mkv");
+    const alsoHeld = await storageFile("local", "movies/Charlie Delta (2002)/Charlie.Delta.2002.mkv");
+    const relinked = await storageFile("local", "movies/Echo Foxtrot (2003)/Echo.Foxtrot.2003.mkv");
+    const jobId = await app.jobs.startOrphanPurge("local", [held.id, alsoHeld.id, relinked.id], "hold");
+    await mediaLink("movies", "Echo Foxtrot (2003)", "Echo.Foxtrot.2003.mkv", relinked.filePath);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "partially_failed" });
+    const scanJobId = (await app.database.db.insert(schema.jobs).values({ type: "scan", status: "completed", createdAt: new Date().toISOString(), progress: "{}" }).returning())[0]!.id;
+
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const cookie = String(setup.headers["set-cookie"]);
+    const get = (url: string) => app.app.inject({ method: "GET", url, headers: { cookie } });
+
+    const failed = (await get(`/api/jobs/${jobId}/purge-items?outcome=failed`)).json<OrphanPurgeItemPage>();
+    expect(failed).toMatchObject({ jobId, outcome: "failed", total: 1, offset: 0, hasMore: false });
+    expect(failed.items).toEqual([expect.objectContaining({ filePath: relinked.filePath, stage: "failed", targetKind: "file", rootType: "local", heldPath: null, errorMessage: expect.stringContaining("no longer an orphan") })]);
+
+    const firstHeld = (await get(`/api/jobs/${jobId}/purge-items?outcome=held&limit=1`)).json<OrphanPurgeItemPage>();
+    expect(firstHeld).toMatchObject({ total: 2, offset: 0, limit: 1, hasMore: true });
+    expect(firstHeld.items).toEqual([expect.objectContaining({ filePath: held.filePath, stage: "held", heldPath: expect.any(String), purgeAfter: expect.any(String), errorMessage: null })]);
+    const secondHeld = (await get(`/api/jobs/${jobId}/purge-items?outcome=held&offset=1&limit=1`)).json<OrphanPurgeItemPage>();
+    expect(secondHeld).toMatchObject({ total: 2, offset: 1, hasMore: false });
+    expect(secondHeld.items.map((item) => item.filePath)).toEqual([alsoHeld.filePath]);
+
+    // A restored file stays in the job's held list, marked as restored.
+    const [entry] = await listHeldOrphans(app.database.db);
+    await restoreHeldOrphans(app.database.db, paths, [entry!.operationId]);
+    const afterRestore = (await get(`/api/jobs/${jobId}/purge-items?outcome=held`)).json<OrphanPurgeItemPage>();
+    expect(afterRestore.items.map((item) => item.stage).sort()).toEqual(["held", "restored"]);
+
+    expect((await get(`/api/jobs/${scanJobId}/purge-items`)).statusCode).toBe(400);
+    expect((await get(`/api/jobs/999999/purge-items`)).statusCode).toBe(404);
+    expect((await get(`/api/jobs/${jobId}/purge-items?outcome=deleted`)).statusCode).toBe(400);
+    expect((await get(`/api/jobs/${jobId}/purge-items?limit=501`)).statusCode).toBe(400);
   });
 });
 

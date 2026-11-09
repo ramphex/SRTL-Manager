@@ -281,14 +281,14 @@ function PurgeJobStatus({ rootType, startedHere, purgeRunning }: { rootType: Sto
 
 // --- Page --------------------------------------------------------------------
 
-export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = false }: { rootType: StorageRootType; rootLabel: string; autoOpenPurgeAll?: boolean }) {
+export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = false, openHeld = false }: { rootType: StorageRootType; rootLabel: string; autoOpenPurgeAll?: boolean; openHeld?: boolean }) {
   const queryClient = useQueryClient();
   const review = useQuery({ queryKey: ["orphan-review", rootType], queryFn: () => api.orphanReview(rootType) });
   const held = useQuery({ queryKey: ["held-orphans"], queryFn: api.heldOrphans });
   const activeJobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
   const purgeRunning = (activeJobs.data ?? []).some((job) => job.type === "orphan_purge");
   const wasRunning = useRef(false);
-  const [view, setView] = useState<OrphanView>("files");
+  const [view, setView] = useState<OrphanView>(openHeld ? "held" : "files");
   const [label, setLabel] = useState<OrphanReviewLabel | "all">("all");
   const [releaseFilter, setReleaseFilter] = useState<OrphanReleaseFilter>("all");
   const [sizeFilter, setSizeFilter] = useState<OrphanSizeFilter>("all");

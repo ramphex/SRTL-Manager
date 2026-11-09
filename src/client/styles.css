@@ -8634,3 +8634,12 @@ button.danger-button:hover:not(:disabled) {
 .account-role-owner {
   font-weight: 700;
 }
+
+.purge-item .purge-item-reason {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.purge-first-error {
+  overflow-wrap: anywhere;
+}

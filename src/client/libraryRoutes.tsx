@@ -12,14 +12,14 @@ import { inferSectionContentType } from "../shared/sections";
 import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyKind, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
-import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
+import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, OrphanPurgeStatusDialog, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { DamageIntegrityPill, DamagedFilesPanel } from "./damagedFiles";
 import { useDamagedFiles } from "./damagedFilesQuery";
 import { useAccess } from "./access";
 import { NotAllowed } from "./notAllowed";
 import type { Permission } from "../shared/permissions";
 import { OrphanReviewPanel } from "./orphanReview";
-import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, scanStatusPromptFromJob } from "./jobPresentationUtils";
+import { auditStatusPromptFromJob, copyPromptFromJob, copyPromptKey, formatAuditScope, formatScanScope, orphanPurgeStatusPromptFromJob, scanStatusPromptFromJob, type OrphanPurgeStatusPrompt } from "./jobPresentationUtils";
 import { filterBySearch, pathTail } from "../shared/search";
 
 function stripLegacyScanSections(options: ScanOptions): ScanOptions {
@@ -83,6 +83,7 @@ export function DashboardPage() {
   const [selectedRemoteWork, setSelectedRemoteWork] = useState<SectionWorkSelection | null>(null);
   const [auditPrompt, setAuditPrompt] = useState<AuditPrompt | null>(null);
   const [auditStatusPrompt, setAuditStatusPrompt] = useState<AuditStatusPrompt | null>(null);
+  const [purgeStatusPrompt, setPurgeStatusPrompt] = useState<OrphanPurgeStatusPrompt | null>(null);
   const [copyPrompt, setCopyPrompt] = useState<CopyPrompt | null>(null);
   const [scanStatusPrompt, setScanStatusPrompt] = useState<ScanStatusPrompt | null>(null);
   const [scanBatchStatusPrompt, setScanBatchStatusPrompt] = useState<ScanBatchStatusPrompt | null>(null);
@@ -682,6 +683,7 @@ export function DashboardPage() {
           onScanJobSelect={(job) => setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections))}
           onAuditJobSelect={(job) => setAuditStatusPrompt(auditStatusPromptFromJob(job, availableScanSections))}
           onCopyJobSelect={(job) => setCopyPrompt(copyPromptFromJob(job, availableScanSections, storageLocations))}
+          onPurgeJobSelect={(job) => setPurgeStatusPrompt(orphanPurgeStatusPromptFromJob(job))}
         />
       </div>
       <AuditDialog prompt={auditPrompt} onClose={() => setAuditPrompt(null)} />
@@ -697,6 +699,7 @@ export function DashboardPage() {
         }}
       />
       <ScanStatusDialog prompt={scanStatusPrompt} onClose={() => setScanStatusPrompt(null)} />
+      <OrphanPurgeStatusDialog prompt={purgeStatusPrompt} onClose={() => setPurgeStatusPrompt(null)} />
     </Page>
   );
 }
@@ -1857,7 +1860,7 @@ function AllowedLibraryPage() {
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
-  const routeSearch = useSearch({ strict: false }) as { view?: LibraryView; purge?: boolean };
+  const routeSearch = useSearch({ strict: false }) as { view?: LibraryView; purge?: boolean; held?: boolean };
   const [view, setView] = useState<LibraryView>(routeSearch.view ?? "overview");
   const [kind, setKind] = useState<SymlinkKindFilter>("all");
   const [selectedSection, setSelectedSection] = useState<string | null>(null);
@@ -2082,7 +2085,7 @@ function AllowedLibraryPage() {
         />
       ) : (
         <>
-        {orphanOnly ? <OrphanReviewPanel key={storageRoot} rootType={storageRoot} rootLabel={storageRoot === "local" ? localName : remoteName} autoOpenPurgeAll={Boolean(routeSearch.purge) && routeSearch.view === view} /> : null}
+        {orphanOnly ? <OrphanReviewPanel key={storageRoot} rootType={storageRoot} rootLabel={storageRoot === "local" ? localName : remoteName} autoOpenPurgeAll={Boolean(routeSearch.purge) && routeSearch.view === view} openHeld={Boolean(routeSearch.held) && routeSearch.view === view} /> : null}
         <StorageFileBrowser
           rootType={storageRoot}
           orphanOnly={orphanOnly}

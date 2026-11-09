@@ -47,6 +47,8 @@ import type {
   StorageRootType,
   UserPreferences,
   HeldOrphanFile,
+  OrphanPurgeItemOutcome,
+  OrphanPurgeItemPage,
   OrphanPurgeMode,
   OrphanReview
 } from "../shared/types";
@@ -236,6 +238,8 @@ export const api = {
   },
   job: (id: number) => request<JobRecord>(`/api/jobs/${id}`),
   copyFailures: (id: number) => request<CopyFailureList>(`/api/jobs/${id}/copy-failures`),
+  purgeJobItems: (id: number, input: { outcome: OrphanPurgeItemOutcome; offset?: number; limit?: number }) =>
+    request<OrphanPurgeItemPage>(`/api/jobs/${id}/purge-items?outcome=${input.outcome}&offset=${input.offset ?? 0}&limit=${input.limit ?? 100}`),
   copyRetryPlan: (id: number) => request<CopyRetryPlan>(`/api/jobs/${id}/copy-retry`),
   retryFailedCopies: (id: number, choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean } = {}) =>
     request<CopyRetryStarted>(`/api/jobs/${id}/copy-retry`, { method: "POST", body: JSON.stringify(choices) }),
