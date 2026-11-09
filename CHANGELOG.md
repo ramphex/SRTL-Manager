@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.4-beta.6] - 2026-11-09
+
 ### Changed
 
 - Disc formats count as video: DVD rips (`.vob`, `.ifo`, `.bup`), disc images (`.iso`, `.img`) and other containers such as `.divx`, `.rmvb`, `.ogm`, `.ogv`, `.asf`, `.f4v`, `.m2v` and `.evo`. DVD rip folders no longer show as folders with no video, and links to these files count as media links.
