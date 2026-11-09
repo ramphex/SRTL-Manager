@@ -700,6 +700,32 @@ export interface OrphanPurgeJobProgress {
 
 export type OrphanPurgeMode = "hold" | "delete";
 
+/** Which of a purge job's items to list: the ones that failed, or the ones moved to the holding area. */
+export type OrphanPurgeItemOutcome = "failed" | "held";
+
+export interface OrphanPurgeItem {
+  operationId: number;
+  targetKind: "file" | "folder";
+  rootType: StorageRootType;
+  filePath: string;
+  sizeBytes: number;
+  stage: "planned" | "held" | "deleted" | "already_missing" | "failed" | "restored" | "expired";
+  errorMessage: string | null;
+  heldPath: string | null;
+  purgeAfter: string | null;
+  completedAt: string | null;
+}
+
+export interface OrphanPurgeItemPage {
+  jobId: number;
+  outcome: OrphanPurgeItemOutcome;
+  items: OrphanPurgeItem[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+}
+
 export interface HeldOrphanFile {
   operationId: number;
   jobId: number;

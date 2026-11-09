@@ -7,7 +7,7 @@ import type { JobRecord, OrphanPurgeMode, OrphanReview, OrphanReviewItem, Orphan
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, recordFromUnknown, useModalLifecycle } from "./appShared";
-import { filterOrphans, purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
+import { filterOrphans, purgeBatches, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
 import { ReRequestActivity, ReRequestOption, ReRequestPreviewCheck, reRequestExplanation, reRequestOptionLabel } from "./reRequest";
 import { SettingsTabs } from "./settingsTabs";
 
@@ -281,14 +281,14 @@ function PurgeJobStatus({ rootType, startedHere, purgeRunning }: { rootType: Sto
 
 // --- Page --------------------------------------------------------------------
 
-export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = false }: { rootType: StorageRootType; rootLabel: string; autoOpenPurgeAll?: boolean }) {
+export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = false, openHeld = false }: { rootType: StorageRootType; rootLabel: string; autoOpenPurgeAll?: boolean; openHeld?: boolean }) {
   const queryClient = useQueryClient();
   const review = useQuery({ queryKey: ["orphan-review", rootType], queryFn: () => api.orphanReview(rootType) });
   const held = useQuery({ queryKey: ["held-orphans"], queryFn: api.heldOrphans });
   const activeJobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
   const purgeRunning = (activeJobs.data ?? []).some((job) => job.type === "orphan_purge");
   const wasRunning = useRef(false);
-  const [view, setView] = useState<OrphanView>("files");
+  const [view, setView] = useState<OrphanView>(openHeld ? "held" : "files");
   const [label, setLabel] = useState<OrphanReviewLabel | "all">("all");
   const [releaseFilter, setReleaseFilter] = useState<OrphanReleaseFilter>("all");
   const [sizeFilter, setSizeFilter] = useState<OrphanSizeFilter>("all");
@@ -854,14 +854,11 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
   const [includeFolders, setIncludeFolders] = useState(false);
   const canHold = canHoldOn(rootType);
   const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
-  const [phrase, setPhrase] = useState("");
   const [reRequest, setReRequest] = useState(false);
   const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
   const batches = useMemo(() => purgeBatches(plan), [plan]);
   const eligibleFolders = review.leftoverFolders.filter((folder) => !folder.protectedReason);
   const protectedCount = review.items.filter((item) => item.protectedReason).length;
-  const requiredPhrase = purgeConfirmationPhrase(rootType, plan.totalCount);
-  const needsPhrase = purgeNeedsPhrase(rootType, mode, plan.totalCount);
   const extraProblems = review.extraSymlinks.problems;
   const stale = Boolean(review.staleWarning || extraProblems.length);
   const start = useMutation({
@@ -876,7 +873,7 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
     onSuccess: onQueued,
     onSettled: onDone
   });
-  const ready = !stale && plan.totalCount > 0 && (!needsPhrase || phrase.trim() === requiredPhrase) && !start.isPending && !start.isSuccess;
+  const ready = !stale && plan.totalCount > 0 && !start.isPending && !start.isSuccess;
   const items = (count: number) => countText(count, "item");
 
   return (
@@ -930,14 +927,14 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
           </tbody>
         </table>
         <label className="checkbox-row">
-          <input type="checkbox" checked={includeFolders} disabled={eligibleFolders.length === 0 || start.isPending || start.isSuccess} onChange={(event) => { setIncludeFolders(event.target.checked); setPhrase(""); }} />
+          <input type="checkbox" checked={includeFolders} disabled={eligibleFolders.length === 0 || start.isPending || start.isSuccess} onChange={(event) => { setIncludeFolders(event.target.checked) }} />
           Also include leftover folders with no video ({formatNumber(eligibleFolders.length)})
         </label>
         <div className="segmented orv-mode-switch" role="group" aria-label="Purge mode">
-          <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={!canHold || start.isPending || start.isSuccess} aria-describedby={canHold ? undefined : "purge-all-mode-note"} onClick={() => { setMode("hold"); setPhrase(""); }}>
+          <button type="button" className={mode === "hold" ? "selected" : ""} aria-pressed={mode === "hold"} disabled={!canHold || start.isPending || start.isSuccess} aria-describedby={canHold ? undefined : "purge-all-mode-note"} onClick={() => { setMode("hold") }}>
             <Archive size={14} /> Hold {review.holdDays} days
           </button>
-          <button type="button" className={mode === "delete" ? "selected orv-mode-delete" : "orv-mode-delete"} aria-pressed={mode === "delete"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("delete"); setPhrase(""); }}>
+          <button type="button" className={mode === "delete" ? "selected orv-mode-delete" : "orv-mode-delete"} aria-pressed={mode === "delete"} disabled={start.isPending || start.isSuccess} onClick={() => { setMode("delete") }}>
             <Trash2 size={14} /> Delete now
           </button>
         </div>
@@ -946,14 +943,6 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
           {batches.length > 1 ? ` This will be queued as ${batches.length} purge jobs.` : ""}
         </p>
         <ReRequestOption storageFileIds={plan.fileIds} checked={reRequest} onChange={setReRequest} disabled={start.isPending || start.isSuccess} />
-        {needsPhrase ? (
-          <label className="orphan-phrase">
-            <span>
-              Type <code>{requiredPhrase}</code> to confirm
-            </span>
-            <input type="text" value={phrase} autoComplete="off" spellCheck={false} aria-label="Confirmation phrase" disabled={start.isPending || start.isSuccess} onChange={(event) => setPhrase(event.target.value)} />
-          </label>
-        ) : null}
         {start.isSuccess ? (
           <p className="panel-message success" role="status">
             Queued {start.data.length === 1 ? "purge job" : "purge jobs"}{" "}

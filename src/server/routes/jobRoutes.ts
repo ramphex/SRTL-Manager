@@ -6,6 +6,7 @@ import { recordActionAudit } from "../lib/actionAudit";
 import { emptyEventPage, isRestrictedRequest, jobDetailsHidden, restrictedJob } from "../lib/restrictedView";
 import { requestHasPermission, requirePermission } from "../routeAccess";
 import { requireCopyPermissions } from "./libraryRoutes";
+import { listPurgeJobItems } from "../jobs/orphanPurge";
 import { jobStoppableWithoutDeleting } from "../../shared/permissions";
 import type { CopyRetryStarted, JobEventRecord } from "../../shared/types";
 
@@ -52,6 +53,21 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     if (!job) return reply.code(404).send({ error: "Copy job not found" });
     if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be reviewed for copy jobs" });
     return jobs.copyFailures(params.id);
+  });
+
+  app.get("/api/jobs/:id/purge-items", async (request, reply) => {
+    const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
+    const query = z
+      .object({
+        outcome: z.enum(["failed", "held"]).default("failed"),
+        offset: z.coerce.number().int().min(0).default(0),
+        limit: z.coerce.number().int().min(1).max(500).default(100)
+      })
+      .parse(request.query);
+    const job = await jobs.getJob(params.id);
+    if (!job) return reply.code(404).send({ error: "Purge job not found" });
+    if (job.type !== "orphan_purge") return reply.code(400).send({ error: "Purge items can only be listed for purge jobs" });
+    return listPurgeJobItems(db, params.id, query.outcome, query.offset, query.limit);
   });
 
   app.post("/api/jobs/:id/copy-failures/remove-symlinks", async (request, reply) => {

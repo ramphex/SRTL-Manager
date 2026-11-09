@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCategory, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
+import type { HeldOrphanFile, OrphanCategory, OrphanPurgeItem, OrphanPurgeItemOutcome, OrphanPurgeItemPage, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
 import { getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
@@ -1046,4 +1046,38 @@ export async function operationsForJob(db: DbExecutor, jobId: number): Promise<P
 
 export async function operationsByIds(db: DbExecutor, ids: number[]): Promise<PurgeOperation[]> {
   return ids.length ? db.select().from(schema.orphanPurgeOperations).where(inArray(schema.orphanPurgeOperations.id, ids)) : [];
+}
+
+const purgeItemStages: Record<OrphanPurgeItemOutcome, string[]> = {
+  failed: ["failed"],
+  // Held files stay in this list after they are restored or their holding period ends, with their current stage.
+  held: ["held", "restored", "expired"]
+};
+
+/** One page of a purge job's items with the given outcome, oldest first. */
+export async function listPurgeJobItems(db: DbExecutor, jobId: number, outcome: OrphanPurgeItemOutcome, offset: number, limit: number): Promise<OrphanPurgeItemPage> {
+  const where = and(eq(schema.orphanPurgeOperations.jobId, jobId), inArray(schema.orphanPurgeOperations.stage, purgeItemStages[outcome]));
+  const [countRow] = await db.select({ count: sql<number>`count(*)::int` }).from(schema.orphanPurgeOperations).where(where);
+  const rows = await db.select().from(schema.orphanPurgeOperations).where(where).orderBy(schema.orphanPurgeOperations.id).offset(offset).limit(limit);
+  const total = Number(countRow?.count ?? 0);
+  return {
+    jobId,
+    outcome,
+    items: rows.map((row) => ({
+      operationId: row.id,
+      targetKind: row.targetKind === "folder" ? "folder" : "file",
+      rootType: row.rootType as StorageRootType,
+      filePath: row.filePath,
+      sizeBytes: Number(row.sizeBytes),
+      stage: row.stage as OrphanPurgeItem["stage"],
+      errorMessage: row.errorMessage,
+      heldPath: row.heldPath,
+      purgeAfter: row.purgeAfter,
+      completedAt: row.completedAt
+    })),
+    total,
+    offset,
+    limit,
+    hasMore: offset + rows.length < total
+  };
 }

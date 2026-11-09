@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { copyCompletedItemSummaries, copyFailedItemSummaries, copyWorkTotalFromJob, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
+import { copyCompletedItemSummaries, copyFailedItemSummaries, copyWorkTotalFromJob, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, orphanPurgeStatusPromptFromJob, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
 import type { JobEventRecord, JobRecord, MediaLinkRow } from "../src/shared/types";
 
 function event(id: number, message: string, data: unknown, level: JobEventRecord["level"] = "error"): JobEventRecord {
@@ -259,5 +259,82 @@ describe("copy completion summaries", () => {
         outcome: "Copied and symlinked"
       }
     ]);
+  });
+});
+
+describe("orphan purge job presentation", () => {
+  const startedAt = "2026-11-09T02:00:00.000Z";
+  function purgeJob(status: JobRecord["status"], progress: Record<string, unknown>, finishedAt: string | null = null): JobRecord {
+    return { id: 1932, type: "orphan_purge", status, createdAt: startedAt, startedAt, finishedAt, progress };
+  }
+  const options = { rootType: "remote", mode: "delete", total: 19_981, reRequest: false };
+
+  it("reads the counts, stage, first error and current file from the job's progress", () => {
+    const job = purgeJob("running", {
+      options,
+      current: 4_000,
+      total: 19_981,
+      held: 0,
+      deleted: 3_990,
+      alreadyMissing: 7,
+      failed: 3,
+      remaining: 15_981,
+      stage: "purging",
+      message: "Checking Alpha.Bravo.S01E02.mkv",
+      firstError: { filePath: "/remote/Alpha.Bravo/Alpha.Bravo.S01E01.mkv", message: "EIO: i/o error" }
+    });
+    const progress = orphanPurgeProgressFromJob(job);
+    expect(progress).toMatchObject({ rootType: "remote", mode: "delete", damaged: false, current: 4_000, total: 19_981, deleted: 3_990, alreadyMissing: 7, failed: 3, remaining: 15_981, stage: "purging" });
+    expect(progress.firstError).toEqual({ filePath: "/remote/Alpha.Bravo/Alpha.Bravo.S01E01.mkv", message: "EIO: i/o error" });
+    expect(orphanPurgeCurrentFile(progress)).toBe("Alpha.Bravo.S01E02.mkv");
+    expect(orphanPurgeStageLabel(progress, job.status)).toBe("Deleting files");
+    expect(orphanPurgeProgressPercent(job, progress)).toBe(20);
+    expect(orphanPurgeScopeText(job)).toBe(`${(19_981).toLocaleString()} remote orphans, deleted`);
+    expect(orphanPurgeStatusPromptFromJob(job)).toMatchObject({ key: "orphan-purge-job-1932", title: "Orphan purge", jobId: 1932 });
+  });
+
+  it("works out the rate and time left from the start time, and says when it cannot", () => {
+    const progress = { options, current: 600, total: 1_800, held: 0, deleted: 600, alreadyMissing: 0, failed: 0, remaining: 1_200, stage: "purging", message: "600 of 1800 processed" };
+    const job = purgeJob("running", progress);
+    const tenMinutesIn = Date.parse(startedAt) + 10 * 60_000;
+    const view = orphanPurgeProgressFromJob(job);
+    expect(orphanPurgeCurrentFile(view)).toBeNull();
+    expect(orphanPurgeRateLabel(job, view, tenMinutesIn)).toBe("1 / s");
+    expect(orphanPurgeRemainingLabel(job, view, tenMinutesIn)).toBe("20m");
+    const slow = orphanPurgeProgressFromJob(purgeJob("running", { ...progress, current: 30, remaining: 1_770 }));
+    expect(orphanPurgeRateLabel(job, slow, tenMinutesIn)).toBe("3 / min");
+    const notStarted = orphanPurgeProgressFromJob(purgeJob("running", { ...progress, current: 0, remaining: 1_800 }));
+    expect(orphanPurgeRateLabel(job, notStarted, tenMinutesIn)).toBe("-");
+    expect(orphanPurgeRemainingLabel(job, notStarted, tenMinutesIn)).toBe("Estimating");
+    expect(orphanPurgeRemainingLabel(purgeJob("queued", progress), view, tenMinutesIn)).toBe("-");
+  });
+
+  it("never shows 100% before the job ends, and labels finished, held and damaged-file jobs", () => {
+    const almost = purgeJob("running", { options, current: 19_980, total: 19_981, remaining: 1, stage: "purging", message: "" });
+    expect(orphanPurgeProgressPercent(almost, orphanPurgeProgressFromJob(almost))).toBe(99);
+    const partial = purgeJob("partially_failed", { options, current: 10, total: 10, deleted: 8, failed: 2, remaining: 0, stage: "partially_failed", message: "Orphan purge partially failed: 2 of 10 files were not purged" }, "2026-11-09T02:05:00.000Z");
+    const partialView = orphanPurgeProgressFromJob(partial);
+    expect(orphanPurgeStageLabel(partialView, partial.status)).toBe("Partially failed");
+    expect(orphanPurgeProgressPercent(partial, partialView)).toBe(100);
+    expect(orphanPurgeRemainingLabel(partial, partialView)).toBe("Done");
+    expect(orphanPurgeRateLabel(partial, partialView)).toBe("2 / min");
+
+    const held = purgeJob("running", { options: { rootType: "local", mode: "hold", total: 1, reRequest: true, source: "damaged" }, current: 0, total: 1, stage: "preparing", message: "Preparing damaged file delete" });
+    const heldView = orphanPurgeProgressFromJob(held);
+    expect(orphanPurgeStageLabel(heldView, held.status)).toBe("Preparing");
+    expect(orphanPurgeStageLabel({ ...heldView, stage: "purging" }, "running")).toBe("Moving files to the holding area");
+    expect(orphanPurgeScopeText(held)).toBe("1 local damaged file, held for restore, re-requested");
+    expect(orphanPurgeStatusPromptFromJob(held).title).toBe("Damaged file delete");
+    expect(orphanPurgeHoldingAreaView(heldView.rootType)).toBe("local-orphans");
+    expect(orphanPurgeHoldingAreaView("remote")).toBe("remote-orphans");
+  });
+
+  it("copes with a queued job that has no progress yet", () => {
+    const queued: JobRecord = { id: 7, type: "orphan_purge", status: "queued", createdAt: startedAt, startedAt: null, finishedAt: null, options: { ...options, total: 3 }, progress: {} };
+    const view = orphanPurgeProgressFromJob(queued);
+    expect(view).toMatchObject({ total: 3, current: 0, remaining: 3, firstError: null, message: null });
+    expect(orphanPurgeStageLabel(view, queued.status)).toBe("Queued");
+    expect(orphanPurgeProgressPercent(queued, view)).toBe(0);
+    expect(orphanPurgeRateLabel(queued, view)).toBe("-");
   });
 });

@@ -20,8 +20,8 @@ import { jobEventCountLabel } from "./jobEvents";
 import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
 import { auditModeOptions, AuditStatusPrompt, settingsSections, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
-import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, CopyRetryAction, JobScope, LogEventRow, ScanStatusDialog } from "./jobPresentation";
-import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, scanStatusPromptFromRun } from "./jobPresentationUtils";
+import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, CopyRetryAction, JobScope, LogEventRow, OrphanPurgeProgressPanel, OrphanPurgeStatusDialog, ScanStatusDialog } from "./jobPresentation";
+import { AuditScopeDisplayOptions, auditStatusPromptFromRun, countEventsByLevel, countJobsByStatus, countJobsByType, formatFolderScope, formatTitleScanScope, jobDurationLabel, orphanPurgeStatusPromptFromJob, scanStatusPromptFromRun, type OrphanPurgeStatusPrompt } from "./jobPresentationUtils";
 
 const logsRouteApi = getRouteApi("/logs");
 
@@ -1253,6 +1253,7 @@ export function LogsPage() {
   const [statusFilter, setStatusFilter] = useState<JobStatusFilter>("all");
   const [typeFilter, setTypeFilter] = useState<JobTypeFilter>("all");
   const [levelFilter, setLevelFilter] = useState<EventLevelFilter>("all");
+  const [purgeStatusPrompt, setPurgeStatusPrompt] = useState<OrphanPurgeStatusPrompt | null>(null);
   const jobRows = useMemo(() => {
     const rows = jobs.data ?? [];
     if (!linkedJob.data || rows.some((job) => job.id === linkedJob.data.id)) return rows;
@@ -1352,6 +1353,12 @@ export function LogsPage() {
           >
             {effectiveJob ? <SelectedLogJobSummary job={effectiveJob} sections={sectionRows} timeFormat={timeFormat} /> : <p className="panel-message">No job selected.</p>}
             {effectiveJob ? <CopyRetryAction key={effectiveJob.id} job={effectiveJob} /> : null}
+            {effectiveJob?.type === "orphan_purge" ? (
+              <button type="button" className="secondary" onClick={() => setPurgeStatusPrompt(orphanPurgeStatusPromptFromJob(effectiveJob))}>
+                <Search size={15} />
+                View purge status
+              </button>
+            ) : null}
             {effectiveJob ? (
               <div className="log-toolbar event-toolbar">
                 <label className="log-search">
@@ -1396,6 +1403,7 @@ export function LogsPage() {
           </Panel>
         </div>
       </div>
+      <OrphanPurgeStatusDialog prompt={purgeStatusPrompt} onClose={() => setPurgeStatusPrompt(null)} />
     </Page>
   );
 }
@@ -1538,6 +1546,7 @@ function SelectedLogJobSummary({ job, sections, timeFormat }: { job: JobRecord; 
       {job.type === "scan" ? <ScanProgressPanel job={job} compact /> : null}
       {job.type === "audit" ? <AuditProgressPanel job={job} compact /> : null}
       {job.type === "copy" ? <CopyProgressPanel job={job} compact /> : null}
+      {job.type === "orphan_purge" ? <OrphanPurgeProgressPanel key={job.id} job={job} compact /> : null}
       <LogChipList chips={jobProgressChips(job)} />
     </div>
   );

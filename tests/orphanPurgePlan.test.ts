@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrphanLeftoverFolder, OrphanReviewItem } from "../src/shared/types";
-import { filterOrphans, planPurgeAll, purgeBatches, purgeConfirmationPhrase, purgeNeedsPhrase, sortOrphans } from "../src/client/orphanPurgePlan";
+import { filterOrphans, planPurgeAll, purgeBatches, sortOrphans } from "../src/client/orphanPurgePlan";
 
 function item(id: number, patch: Partial<OrphanReviewItem> = {}): OrphanReviewItem {
   return { storageFileId: id, rootType: "remote", relativePath: `m/${id}.mkv`, filePath: `/r/m/${id}.mkv`, section: "movies", itemName: "m", sizeBytes: 100, mtimeMs: 0, category: "superseded", protectedReason: null, hollow: false, integrity: "ok", zeroSamples: null, label: patch.category === "unlinked" ? "no_title_match" : (patch.category ?? "superseded"), matchedTitle: null, releaseName: "m", releaseStatus: "none_linked", releaseFileCount: 1, releaseLinkedCount: 0, linkedSizeBytes: null, sizeComparison: null, episodeCoverage: null, extraLinkPath: null, ...patch };
@@ -27,17 +27,6 @@ describe("planPurgeAll", () => {
     expect(plan.folderIds).toEqual([10]);
     expect(plan.totalCount).toBe(3);
     expect(plan.totalBytes).toBe(450);
-  });
-});
-
-describe("purge confirmation", () => {
-  it("requires the phrase for remote deletes and any purge over 1,000 items", () => {
-    expect(purgeNeedsPhrase("remote", "delete", 5)).toBe(true);
-    expect(purgeNeedsPhrase("remote", "hold", 1000)).toBe(false);
-    expect(purgeNeedsPhrase("remote", "hold", 1001)).toBe(true);
-    expect(purgeNeedsPhrase("local", "hold", 5)).toBe(false);
-    expect(purgeNeedsPhrase("local", "hold", 1001)).toBe(true);
-    expect(purgeConfirmationPhrase("remote", 19854)).toBe("purge 19854 remote items");
   });
 });
 

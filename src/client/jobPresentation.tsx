@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode }
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, RotateCcw, Search, Trash2, TriangleAlert, X } from "lucide-react";
+import { Activity, Archive, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, RotateCcw, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogData, jobProgressChips } from "./logDisplay";
@@ -10,11 +10,11 @@ import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./j
 import { jobEventCountLabel } from "./jobEvents";
 import { groupAdjacentJobs } from "./jobGrouping";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type TimeFormatPreference } from "../shared/types";
+import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { useAccess } from "./access";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyRetryStartedMessage, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyRetryStartedMessage, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle, type OrphanPurgeStatusPrompt } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -1460,6 +1460,253 @@ export function AuditProgressPanel({
   );
 }
 
+export function OrphanPurgeProgressPanel({
+  job,
+  pendingJobId,
+  compact = false
+}: {
+  job: JobRecord | null;
+  pendingJobId?: number | null;
+  compact?: boolean;
+}) {
+  const progress = orphanPurgeProgressFromJob(job);
+  const statusLabel = orphanPurgeStageLabel(progress, job?.status);
+  const percent = orphanPurgeProgressPercent(job, progress);
+  const active = job?.status === "queued" || job?.status === "running";
+  // The job writes the file it is on, then "N of M processed" once it is done, so the last file seen is kept.
+  const reportedFile = orphanPurgeCurrentFile(progress);
+  const [lastFile, setLastFile] = useState<string | null>(reportedFile);
+  useEffect(() => {
+    if (reportedFile) setLastFile(reportedFile);
+  }, [reportedFile]);
+  const currentFile = active ? reportedFile ?? lastFile : null;
+  const countLabel = progress.total > 0 ? `${formatNumber(progress.current)} / ${formatNumber(progress.total)}` : pendingJobId ? "Waiting for purge progress" : "Not started";
+  const detail = currentFile && progress.message === `Checking ${currentFile}` ? (progress.mode === "hold" ? "Moving to the holding area" : "Deleting") : progress.message ?? (active ? "Waiting for worker progress." : "No progress recorded.");
+  const unit = progress.damaged ? "Damaged files" : "Orphans";
+  return (
+    <div className={`audit-progress-panel copy-progress-panel mobile-progress-panel${compact ? " compact" : ""}`} role="group" aria-label="Purge progress">
+      <div className="audit-progress-header copy-progress-header">
+        <span>
+          <strong>{statusLabel}</strong>
+          {job ? <StatusPill value={job.status} /> : null}
+          {!job && pendingJobId ? <span className="copy-progress-job-id">Job #{pendingJobId}</span> : null}
+        </span>
+        <small>{countLabel}</small>
+      </div>
+      <div className="copy-progress-bars">
+        <div className="copy-progress-meter">
+          <div className="copy-progress-meter-header">
+            <span>{unit} processed</span>
+            <strong>{percent}%</strong>
+          </div>
+          <div className="audit-progress-track copy-progress-track" role="progressbar" aria-label="Purge progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={percent}>
+            <span style={{ width: `${percent}%` }} />
+          </div>
+        </div>
+      </div>
+      <div className="copy-current-file">
+        <File size={15} />
+        <span>
+          <strong>{currentFile ?? (active ? "Waiting for the next file" : statusLabel)}</strong>
+          <small>{detail}</small>
+        </span>
+      </div>
+      <div className="audit-progress-stats copy-progress-stats mobile-progress-stats">
+        <span>
+          <strong>{formatNumber(progress.deleted)}</strong>
+          Deleted
+        </span>
+        <span>
+          <strong>{formatNumber(progress.held)}</strong>
+          Held
+        </span>
+        <span>
+          <strong>{formatNumber(progress.alreadyMissing)}</strong>
+          Already missing
+        </span>
+        <span className={progress.failed > 0 ? "copy-progress-stat-bad" : undefined}>
+          <strong>{formatNumber(progress.failed)}</strong>
+          Failed
+        </span>
+        <span>
+          <strong>{formatNumber(progress.remaining)}</strong>
+          Left to do
+        </span>
+        <span>
+          <strong>{orphanPurgeRateLabel(job, progress)}</strong>
+          Rate
+        </span>
+        <span>
+          <strong>{copyElapsedLabel(job)}</strong>
+          Running
+        </span>
+        <span>
+          <strong>{orphanPurgeRemainingLabel(job, progress)}</strong>
+          Time remaining
+        </span>
+      </div>
+      {progress.firstError ? (
+        <p className="panel-message action-error purge-first-error">
+          <strong>First error:</strong> <span title={progress.firstError.filePath}>{basenameFromPath(progress.firstError.filePath) ?? progress.firstError.filePath}</span>: {progress.firstError.message}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function purgeItemStageText(item: OrphanPurgeItem, timeFormat: TimeFormatPreference): string {
+  if (item.stage === "held") return item.purgeAfter ? `Held until ${formatDate(item.purgeAfter, timeFormat)}` : "Held";
+  if (item.stage === "restored") return "Restored from the holding area";
+  if (item.stage === "expired") return "Holding period ended, deleted";
+  return item.errorMessage ?? "No reason recorded";
+}
+
+function OrphanPurgeItemsSection({
+  jobId,
+  outcome,
+  count,
+  active,
+  rootType
+}: {
+  jobId: number;
+  outcome: OrphanPurgeItemOutcome;
+  count: number;
+  active: boolean;
+  rootType: "local" | "remote";
+}) {
+  const { timeFormat } = useUserPreferences();
+  const { can } = useAccess();
+  const items = useInfiniteQuery({
+    queryKey: ["purge-job-items", jobId, outcome],
+    queryFn: ({ pageParam }) => api.purgeJobItems(jobId, { outcome, offset: pageParam, limit: 100 }),
+    initialPageParam: 0,
+    getNextPageParam: (page) => (page.hasMore ? page.offset + page.items.length : undefined),
+    enabled: count > 0,
+    refetchInterval: active ? 2500 : false
+  });
+  if (count <= 0) return null;
+  const rows = items.data?.pages.flatMap((page) => page.items) ?? [];
+  const total = items.data?.pages[0]?.total ?? count;
+  const failed = outcome === "failed";
+  const label = failed ? "Failed items" : "Held items";
+  return (
+    <section className="audit-result-summary purge-items" aria-label={label}>
+      <div className="audit-dialog-section-title">
+        <span className="audit-dialog-section-label">
+          {failed ? <TriangleAlert size={15} /> : <Archive size={15} />}
+          <span>{label}</span>
+        </span>
+        <span className="job-events-heading-actions">
+          <small>{rows.length < total ? `${formatNumber(rows.length)} of ${formatNumber(total)}` : formatNumber(total)}</small>
+          {!failed && can("library.delete") ? (
+            <Link to="/library" search={{ view: orphanPurgeHoldingAreaView(rootType), held: true }} className="secondary job-events-full-link">
+              <Archive size={13} />
+              Open holding area
+            </Link>
+          ) : null}
+        </span>
+      </div>
+      {items.isLoading ? <p className="panel-message">Loading {label.toLowerCase()}...</p> : null}
+      {items.error ? <p className="panel-message action-error">{items.error.message}</p> : null}
+      {rows.length > 0 ? (
+        <div className="audit-result-list" role="list" aria-label={label}>
+          {rows.map((item) => (
+            <article className="audit-result-item purge-item" role="listitem" key={item.operationId}>
+              <div>
+                <strong title={item.filePath}>{basenameFromPath(item.filePath) ?? item.filePath}{item.targetKind === "folder" ? " (folder)" : ""}</strong>
+                <small className="purge-item-path" title={item.filePath}>{item.filePath}</small>
+                <small className={failed ? "purge-item-reason" : undefined}>{purgeItemStageText(item, timeFormat)}</small>
+              </div>
+              {failed ? <StatusPill value="Failed" /> : <span className={`pill ${item.stage === "held" ? "pill-info" : "pill-cancelled"}`}>{item.stage === "held" ? "Held" : item.stage === "restored" ? "Restored" : "Deleted"}</span>}
+            </article>
+          ))}
+        </div>
+      ) : null}
+      {items.hasNextPage ? (
+        <button className="secondary" type="button" disabled={items.isFetchingNextPage} onClick={() => void items.fetchNextPage()}>
+          {items.isFetchingNextPage ? "Loading more..." : `Load more ${failed ? "failed" : "held"} items`}
+        </button>
+      ) : null}
+    </section>
+  );
+}
+
+export function OrphanPurgeStatusDialog({
+  prompt,
+  onClose
+}: {
+  prompt: OrphanPurgeStatusPrompt | null;
+  onClose: () => void;
+}) {
+  const { timeFormat } = useUserPreferences();
+  const jobId = prompt?.jobId ?? null;
+  const [terminatePrompt, setTerminatePrompt] = useState<JobRecord | null>(null);
+  const terminateJob = useTerminateJobMutation(() => setTerminatePrompt(null));
+  const jobQuery = useQuery({
+    queryKey: ["job", jobId],
+    queryFn: () => api.job(jobId!),
+    enabled: Boolean(prompt),
+    refetchInterval: (query: { state: { data?: JobRecord } }) => {
+      const status = query.state.data?.status;
+      return status === "queued" || status === "running" || !status ? 1000 : false;
+    }
+  });
+  const currentJob = jobQuery.data ?? null;
+  const jobActive = currentJob ? currentJob.status === "queued" || currentJob.status === "running" : Boolean(jobId);
+  // A purge logs one event per file, so only the newest page is loaded here; the full log is one click away.
+  const events = useJobEventTimeline({ jobId, enabled: Boolean(prompt && jobId), refetchInterval: jobActive ? 1000 : false });
+  const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
+
+  if (!prompt) return null;
+
+  const progress = orphanPurgeProgressFromJob(currentJob);
+  const displayedEvents = [...events.events].reverse();
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section ref={dialogRef} className="audit-dialog copy-dialog" role="dialog" aria-modal="true" aria-labelledby="purge-status-dialog-title" tabIndex={-1}>
+        <div className="audit-dialog-header">
+          <div className="audit-dialog-title-block">
+            <h2 id="purge-status-dialog-title">{prompt.title}</h2>
+            <p>{`Job #${prompt.jobId} - ${currentJob ? orphanPurgeScopeText(currentJob) : prompt.description}`}</p>
+            <JobStatusTerminateAction job={currentJob} isTerminating={terminateJob.isPending} onTerminate={setTerminatePrompt} />
+          </div>
+          <JobStatusHeaderActions closeLabel="Close purge status window" onClose={onClose} />
+        </div>
+
+        {jobQuery.error ? <p className="panel-message action-error">{jobQuery.error.message}</p> : null}
+
+        <OrphanPurgeProgressPanel key={jobId ?? 0} job={currentJob} pendingJobId={jobId} />
+
+        {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="failed" count={progress.failed} active={jobActive} rootType={progress.rootType} /> : null}
+        {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="held" count={progress.held} active={jobActive} rootType={progress.rootType} /> : null}
+
+        <div className="audit-dialog-events">
+          <JobEventsHeader label="Purge events" jobId={jobId} loaded={events.events.length} total={events.total} loading={events.isLoading} loadingOlder={events.isFetchingNextPage} />
+          {jobId && events.isLoading ? <p className="panel-message">Loading purge events...</p> : null}
+          {events.error ? <p className="panel-message action-error">{events.error.message}</p> : null}
+          {jobId && !events.isLoading && !events.error && displayedEvents.length === 0 ? <p className="panel-message">No events yet.</p> : null}
+          {jobActive ? <p className="panel-message">Closing this window leaves the purge running in the background.</p> : null}
+          {displayedEvents.length > 0 ? (
+            <div className="events audit-dialog-event-list">
+              {displayedEvents.map((event) => (
+                <LogEventRow key={event.id} event={event} timeFormat={timeFormat} job={currentJob} />
+              ))}
+            </div>
+          ) : null}
+        </div>
+        <TerminateJobDialog
+          job={terminatePrompt}
+          error={terminateJob.error?.message}
+          isPending={terminateJob.isPending}
+          onClose={() => !terminateJob.isPending && setTerminatePrompt(null)}
+          onConfirm={(targetJobId) => terminateJob.mutate(targetJobId)}
+        />
+      </section>
+    </div>
+  );
+}
+
 export function JobScope({
   job,
   sections,
@@ -1528,14 +1775,9 @@ export function JobScope({
   }
 
   if (job.type === "orphan_purge") {
-    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
-    const total = finiteNumberFromUnknown(options?.total);
-    const where = options?.rootType === "remote" ? "remote" : "local";
-    const how = options?.mode === "hold" ? "held for restore" : "deleted";
-    const kind = options?.source === "damaged" ? "damaged file" : "orphan";
     return (
       <span className="job-scope-cell">
-        <span>{total === 1 ? `1 ${where} ${kind}` : `${formatNumber(total)} ${where} ${kind}s`}, {how}{options?.reRequest === true ? ", re-requested" : ""}</span>
+        <span>{orphanPurgeScopeText(job)}</span>
       </span>
     );
   }
@@ -1921,13 +2163,15 @@ export function JobsTable({
   sections,
   onScanJobSelect,
   onAuditJobSelect,
-  onCopyJobSelect
+  onCopyJobSelect,
+  onPurgeJobSelect
 }: {
   jobs: JobRecord[];
   sections: Array<{ section: string; title?: string | null }>;
   onScanJobSelect?: (job: JobRecord) => void;
   onAuditJobSelect?: (job: JobRecord) => void;
   onCopyJobSelect?: (job: JobRecord) => void;
+  onPurgeJobSelect?: (job: JobRecord) => void;
 }) {
   const { canStopJob } = useAccess();
   const preferences = useUserPreferences();
@@ -1966,8 +2210,9 @@ export function JobsTable({
     const canViewScanJob = job.type === "scan" && Boolean(onScanJobSelect);
     const canViewAuditJob = job.type === "audit" && Boolean(onAuditJobSelect);
     const canViewCopyJob = job.type === "copy" && Boolean(onCopyJobSelect);
+    const canViewPurgeJob = job.type === "orphan_purge" && Boolean(onPurgeJobSelect);
     const canTerminate = canTerminateJob(job) && canStopJob(job);
-    const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canTerminate;
+    const hasActions = canViewScanJob || canViewAuditJob || canViewCopyJob || canViewPurgeJob || canTerminate;
     return (
       <tr key={job.id} className={`mobile-card-row${className ? ` ${className}` : ""}`}>
         <td className="mobile-card-primary" data-label="ID">#{job.id}</td>
@@ -1995,6 +2240,11 @@ export function JobsTable({
             {canViewCopyJob && onCopyJobSelect ? (
               <button type="button" className="icon-button" title={`View copy progress for job #${job.id}`} aria-label={`View copy progress for job #${job.id}`} onClick={() => onCopyJobSelect(job)}>
                 <Activity size={15} />
+              </button>
+            ) : null}
+            {canViewPurgeJob && onPurgeJobSelect ? (
+              <button type="button" className="icon-button" title={`View purge status for job #${job.id}`} aria-label={`View purge status for job #${job.id}`} onClick={() => onPurgeJobSelect(job)}>
+                <Search size={15} />
               </button>
             ) : null}
             <CopyRetryAction job={job} compact />
