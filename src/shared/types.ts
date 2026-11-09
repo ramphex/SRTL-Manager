@@ -667,7 +667,35 @@ export interface OrphanReview {
   storageStaleWarning: string | null;
   // Symlink folders kept by other tools. Any problem here blocks purging.
   extraSymlinks: { folders: string[]; linkCount: number; unmatchedCount: number; problems: string[] };
+  // Files and folders left out of `items` and `leftoverFolders` because a symlink uses them, so SRTL would never purge them.
+  skippedInUse: OrphanSkippedInUse;
   holdDays: number;
+}
+
+/** Why an in-use item was left out of the review: a link in the library folders, or one in an extra symlink folder. */
+export type OrphanInUseReason = "library_link" | "extra_link";
+
+export interface OrphanSkippedInUse {
+  total: number;
+  files: number;
+  folders: number;
+  byReason: Record<OrphanInUseReason, number>;
+}
+
+/** The progress an orphan purge or damaged file delete job records. Read it from `JobRecord.progress`; `JobRecord.status` says whether it failed. */
+export interface OrphanPurgeJobProgress {
+  options: { rootType: StorageRootType; mode: OrphanPurgeMode; total: number; reRequest: boolean; source?: "damaged" };
+  current: number;
+  total: number;
+  held: number;
+  deleted: number;
+  alreadyMissing: number;
+  failed: number;
+  remaining: number;
+  stage: "preparing" | "purging" | "cancelled" | "failed" | "partially_failed" | "completed";
+  message: string;
+  // The first item that was not purged and why. Absent when nothing failed.
+  firstError?: { filePath: string; message: string };
 }
 
 export type OrphanPurgeMode = "hold" | "delete";

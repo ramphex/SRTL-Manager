@@ -5531,6 +5531,48 @@ describe("api app", () => {
     });
   });
 
+  it("searches media link pages forgivingly, in the usual newest-first order", async () => {
+    const cookie = await createAdminSession();
+    await insertMediaLink("Alpha Bravo", "remote", "shows", path.join("Alpha Bravo", "Season 01", "Alpha.Bravo.S01E02.1080p.mkv"));
+    await insertMediaLink("Alpha Bravo", "remote", "shows", path.join("Alpha Bravo", "Season 01", "Alpha.Bravo.S01E03.1080p.mkv"));
+    await insertMediaLink("Charlie's Lab (2019)", "remote", "movies");
+    await insertMediaLink("Delta! Echo (2020)", "remote", "movies");
+    await insertMediaLink("Café Lighthouse (2018)", "remote", "movies");
+    const search = async (query: string, limit = 10) => {
+      const response = await ctx.app.inject({ method: "GET", url: `/api/media-links/page?search=${encodeURIComponent(query)}&limit=${limit}&offset=0`, headers: { cookie } });
+      expect(response.statusCode).toBe(200);
+      return response.json<{ total: number; hasMore: boolean; rows: Array<{ itemName: string; relativePath: string }> }>();
+    };
+    const names = async (query: string) => (await search(query)).rows.map((row) => path.basename(row.relativePath));
+
+    expect(await names("Alpha Bravo")).toEqual(["Alpha.Bravo.S01E03.1080p.mkv", "Alpha.Bravo.S01E02.1080p.mkv"]);
+    expect(await names("bravo alpha s01e02")).toEqual(["Alpha.Bravo.S01E02.1080p.mkv"]);
+    expect(await names("Alpah Bravo S01E02")).toEqual(["Alpha.Bravo.S01E02.1080p.mkv"]);
+    expect(await names("Alpha S01E04")).toEqual([]);
+    expect(await names("Charlies Lab")).toEqual(["charlie-s-lab-2019-.mkv"]);
+    expect(await names("charlie s lab")).toEqual(["charlie-s-lab-2019-.mkv"]);
+    expect(await names("Delta Echo")).toEqual(["delta-echo-2020-.mkv"]);
+    expect(await names("cafe lihgthuose")).toEqual(["caf-lighthouse-2018-.mkv"]);
+    expect(await names("Charlies 2018")).toEqual([]);
+    // The storage root shared by every target is not searched, so a near miss on it does not match everything.
+    expect(await names("remote")).toEqual([]);
+
+    const paged = await search("alpah", 1);
+    expect(paged).toMatchObject({ total: 2, hasMore: true, rows: [{ relativePath: path.join("Alpha Bravo", "Season 01", "Alpha.Bravo.S01E03.1080p.mkv") }] });
+    const second = await ctx.app.inject({ method: "GET", url: "/api/media-links/page?search=alpah&limit=1&offset=1", headers: { cookie } });
+    expect(second.json()).toMatchObject({ total: 2, hasMore: false, rows: [{ relativePath: path.join("Alpha Bravo", "Season 01", "Alpha.Bravo.S01E02.1080p.mkv") }] });
+
+    const all = await ctx.app.inject({ method: "GET", url: "/api/media-links/page?limit=10&offset=0", headers: { cookie } });
+    expect(all.json()).toMatchObject({ total: 5 });
+  });
+
+  it("keeps the search column current when a link is renamed or repointed", async () => {
+    const id = await insertMediaLink("Golf Hotel", "remote", "movies");
+    await ctx.database.pool.query("update media_links set item_name = 'Hotel India', relative_path = 'Hotel India/Hotel.India.2021.mkv', target_path = '/srv/remote/Hotel.India.2021/Hotel.India.2021.mkv' where id = $1", [id]);
+    const row = (await ctx.database.pool.query<{ search_text: string }>("select search_text from media_links where id = $1", [id])).rows[0];
+    expect(row?.search_text).toBe("hotel india hotel india hotel india 2021 mkv hotel india 2021 hotel india 2021 mkv");
+  });
+
   it("returns media links as nested section trees", async () => {
     const cookie = await createAdminSession();
     await ensureSection("shows");

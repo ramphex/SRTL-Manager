@@ -1421,6 +1421,34 @@ describe("scanner", () => {
     }
   });
 
+  it("treats DVD rips and disc images as video, and counts a link to a folder as use of what is inside", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    const write = async (relativePath: string) => {
+      await fs.mkdir(path.dirname(path.join(tmpDir, relativePath)), { recursive: true });
+      await fs.writeFile(path.join(tmpDir, relativePath), "x");
+    };
+    await fs.mkdir(path.join(localDir, "movies"), { recursive: true });
+    await write("remote/Charlie.2001.DVDR/VIDEO_TS/VTS_01_1.VOB");
+    await write("remote/Charlie.2001.DVDR/VIDEO_TS/VTS_01_0.IFO");
+    await write("remote/Charlie.2001.DVDR/VIDEO_TS/VTS_01_0.BUP");
+    await write("remote/Delta.2002.Disc/Delta.2002.img");
+    await write("remote/Echo.2003/Echo.2003.mkv");
+    await fs.mkdir(path.join(symlinkDir, "movies", "Delta (2002)"), { recursive: true });
+    await fs.symlink(path.join(remoteDir, "Delta.2002.Disc", "Delta.2002.img"), path.join(symlinkDir, "movies", "Delta (2002)", "Delta (2002).img"));
+    await fs.mkdir(path.join(symlinkDir, "movies", "Echo (2003)"), { recursive: true });
+    await fs.symlink(path.join(remoteDir, "Echo.2003"), path.join(symlinkDir, "movies", "Echo (2003)", "Echo.2003"));
+
+    const scan = await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: true });
+    expect(scan.leftoverFolders).toEqual([]);
+    expect(scan.storageFiles.map((file) => path.basename(file.filePath)).sort()).toEqual(["Delta.2002.img", "Echo.2003.mkv", "VTS_01_0.BUP", "VTS_01_0.IFO", "VTS_01_1.VOB"]);
+    expect(scan.links.find((link) => link.linkPath.endsWith("Delta (2002).img"))).toMatchObject({ isMedia: true, kind: "remote" });
+    // The folder link stays a non-media link, but the file inside it is not an orphan.
+    expect(scan.links.find((link) => link.linkPath.endsWith("Echo.2003"))).toMatchObject({ isMedia: false, kind: "non_media" });
+    expect(scan.inventory).toMatchObject({ remoteFiles: 5, remoteOrphanFiles: 3 });
+  });
+
   it("walks the whole remote root during section-scoped remote scans", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");

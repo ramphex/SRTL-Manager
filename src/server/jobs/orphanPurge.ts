@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCategory, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
+import type { HeldOrphanFile, OrphanCategory, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
 import { getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
@@ -9,7 +9,7 @@ import { parseEpisodeNumbers } from "../lib/episodeNumbers";
 import { extraLinkCovering, extraLinkTouchingFolder, extraSymlinkFolders, extraSymlinkRefusal, readExtraSymlinks, type ExtraSymlinks } from "../lib/extraSymlinkFolders";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { removeExpectedSymlink } from "./symlinkCleanup";
-import { holdingFolderName, isMediaFile, isPathInside } from "../lib/media";
+import { holdingFolderName, isCoveredByPath, isMediaFile, isPathInside, pathAndAncestors } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
 import { buildTitleIndex, matchReleaseTitles, releaseKeyOf, releaseNameOf, type IndexedTitle, type TitleIndex } from "../lib/releaseTitles";
 import { completeSymlinkScanTimes, getInventoryScanTimestamps } from "../lib/scanner";
@@ -62,14 +62,24 @@ export function episodeKey(relativePath: string): string | null {
   return episodeKeys(relativePath)[0] ?? null;
 }
 
+function fsErrorText(error: unknown): string {
+  return errorCode(error) ?? (error instanceof Error ? error.message : String(error));
+}
+
 function errorCode(error: unknown): string | null {
   return error !== null && typeof error === "object" && "code" in error && typeof error.code === "string" ? error.code : null;
+}
+
+// Every live link target, whatever its file type. A link to a folder, or to a file SRTL does not treat as video, still means it is in use.
+async function liveLinkTargets(db: DbExecutor): Promise<Set<string>> {
+  const rows = (await db.execute<{ target_path: string }>(sql`select distinct target_path from media_links where missing_since is null`)).rows;
+  return new Set(rows.map((row) => path.resolve(row.target_path)));
 }
 
 async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFileIds?: number[], includeLinked = false): Promise<OrphanRow[]> {
   const idFilter = storageFileIds ? sql`and sf.id in (select jsonb_array_elements_text(${JSON.stringify(storageFileIds)}::jsonb)::integer)` : sql``;
   // Set-based joins keep this to one pass over each table; per-row subqueries with OR took minutes on real libraries.
-  return (
+  const rows = (
     await db.execute<OrphanRow>(sql`
       with committed_sources as (
         select distinct source_path as path from copy_operations where stage = 'committed'
@@ -90,6 +100,10 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
       order by sf.relative_path
     `)
   ).rows;
+  if (includeLinked || rows.length === 0) return rows;
+  // A link to a folder above the file is not an exact match, so it is checked here, one lookup per folder level.
+  const targets = await liveLinkTargets(db);
+  return rows.filter((row) => !isCoveredByPath(targets, row.file_path));
 }
 
 type LinkedFile = { linkPath: string; sizeBytes: number | null };
@@ -254,7 +268,9 @@ function ancestorDirectories(paths: Iterable<string>): Set<string> {
   return ancestors;
 }
 
-async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<Array<LeftoverFolderRow & { protectedReason: string | null }>> {
+type LeftoverFolderReview = LeftoverFolderRow & { protectedReason: string | null; inUse: OrphanInUseReason | null };
+
+async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<LeftoverFolderReview[]> {
   const rows = await db
     .select()
     .from(schema.storageLeftoverFolders)
@@ -271,17 +287,30 @@ async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, fol
     `)
   ).rows.map((row) => row.path);
   const linkedDirectories = ancestorDirectories(linkTargets.map((link) => link.targetPath));
+  const linkedTargets = new Set(linkTargets.map((link) => path.resolve(link.targetPath)));
   const copyDirectories = ancestorDirectories(copyPaths);
   const extraDirectories = ancestorDirectories(extra?.targets.keys() ?? []);
-  return rows.map((row) => ({ ...row, protectedReason: leftoverProtectedReason(row, copyDirectories, linkedDirectories, extraDirectories, extra, now) }));
+  return rows.map((row) => {
+    const protection = leftoverProtection(row, copyDirectories, linkedDirectories, linkedTargets, extraDirectories, extra, now);
+    return { ...row, protectedReason: protection?.reason ?? null, inUse: protection?.inUse ?? null };
+  });
 }
 
-function leftoverProtectedReason(row: LeftoverFolderRow, copyDirectories: Set<string>, linkedDirectories: Set<string>, extraDirectories: Set<string>, extra: ExtraSymlinks | undefined, now: number): string | null {
+function leftoverProtection(
+  row: LeftoverFolderRow,
+  copyDirectories: Set<string>,
+  linkedDirectories: Set<string>,
+  linkedTargets: Set<string>,
+  extraDirectories: Set<string>,
+  extra: ExtraSymlinks | undefined,
+  now: number
+): { reason: string; inUse: OrphanInUseReason | null } | null {
   const directory = path.resolve(row.dirPath);
-  if (copyDirectories.has(directory)) return "Part of an unfinished copy";
-  if (linkedDirectories.has(directory)) return "A symlink points into this folder";
-  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return "A symlink in an extra symlink folder points into this folder";
-  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return "Modified in the last 24 hours";
+  if (copyDirectories.has(directory)) return { reason: "Part of an unfinished copy", inUse: null };
+  // Any link counts, whatever the file type it points at, and so does a link to this folder or one above it.
+  if (linkedDirectories.has(directory) || isCoveredByPath(linkedTargets, directory)) return { reason: "A symlink points into this folder", inUse: "library_link" };
+  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return { reason: "A symlink in an extra symlink folder points into this folder", inUse: "extra_link" };
+  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return { reason: "Modified in the last 24 hours", inUse: null };
   return null;
 }
 
@@ -328,7 +357,9 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     storageInventoryAt(db, rootType),
     leftoverFolderRows(db, rootType, undefined, now, extra)
   ]);
-  const leftoverFolders: OrphanLeftoverFolder[] = folders.map((folder) => ({
+  // What a symlink uses is never purged, so it is left out of the lists and only counted.
+  const shownFolders = folders.filter((folder) => !folder.inUse);
+  const leftoverFolders: OrphanLeftoverFolder[] = shownFolders.map((folder) => ({
     folderId: folder.id,
     rootType,
     relativePath: folder.relativePath,
@@ -366,7 +397,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     return matches;
   };
   const noTitles: IndexedTitle[] = [];
-  const items: OrphanReviewItem[] = rows.map((row, index) => {
+  const shownRows = rows.flatMap((row, index) => (extraLinkCovering(extra, row.file_path) ? [] : [{ row, index }]));
+  const items: OrphanReviewItem[] = shownRows.map(({ row, index }) => {
     const category = classify(row, library);
     const sizeBytes = Number(row.size_bytes);
     const releaseKey = releaseKeys[index]!;
@@ -428,8 +460,21 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     staleWarning: staleness.warning,
     storageStaleWarning: storageStaleness(storageInventory, now),
     extraSymlinks: { folders: extra.folders, linkCount: extra.linkCount, unmatchedCount: extra.unmatchedCount, problems: extra.problems },
+    skippedInUse: skippedInUseSummary(rows.length - shownRows.length, folders),
     holdDays
   };
+}
+
+// Library-linked files are never orphan rows, so every skipped file is held by an extra folder link.
+function skippedInUseSummary(extraLinkedFiles: number, folders: LeftoverFolderReview[]): OrphanSkippedInUse {
+  const byReason: Record<OrphanInUseReason, number> = { library_link: 0, extra_link: extraLinkedFiles };
+  let skippedFolders = 0;
+  for (const folder of folders) {
+    if (!folder.inUse) continue;
+    byReason[folder.inUse] += 1;
+    skippedFolders += 1;
+  }
+  return { total: extraLinkedFiles + skippedFolders, files: extraLinkedFiles, folders: skippedFolders, byReason };
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.
@@ -546,21 +591,60 @@ function holdingAreaError(error: unknown, heldPath: string | null): unknown {
   return error;
 }
 
+type FolderContents = { files: string[]; directories: string[] };
+
 // Re-walks a folder right before it is purged; anything that could be someone's media stops the purge.
-async function assertFolderStillLeftover(directory: string, now: number): Promise<void> {
+// Returns what it saw, deepest folders first, so a delete only ever touches files this walk checked.
+async function assertFolderStillLeftover(directory: string, now: number, contents: FolderContents = { files: [], directories: [] }): Promise<FolderContents> {
   const stat = await withFilesystemTimeout(fs.lstat(directory), `Inspection of ${directory}`);
   if (now - stat.mtimeMs < purgeGraceMs) throw new Error(`${directory} was modified in the last 24 hours`);
   const entries = await withFilesystemTimeout(fs.readdir(directory, { withFileTypes: true }), `Reading ${directory}`);
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      await assertFolderStillLeftover(entryPath, now);
+      await assertFolderStillLeftover(entryPath, now, contents);
     } else if (entry.isFile()) {
       if (isMediaFile(entry.name)) throw new Error(`Folder now contains a video (${entryPath}); nothing was purged`);
       const fileStat = await withFilesystemTimeout(fs.lstat(entryPath), `Inspection of ${entryPath}`);
       if (now - fileStat.mtimeMs < purgeGraceMs) throw new Error(`${entryPath} was modified in the last 24 hours`);
+      contents.files.push(entryPath);
     } else {
       throw new Error(`Folder contains a symlink or special file (${entryPath}); nothing was purged`);
+    }
+  }
+  contents.directories.push(directory);
+  return contents;
+}
+
+/** The filesystem calls a folder delete needs; tests swap in a fake that behaves like a debrid mount. */
+export type FolderDeleteFs = Pick<typeof fs, "unlink" | "rmdir">;
+
+/**
+ * Deletes the files a re-walk checked one at a time, then the folders that held them, deepest first.
+ * Debrid FUSE mounts refuse rmdir on a folder that still has files (EIO), which is all a recursive rm tries,
+ * but they allow unlinking files and drop the folder themselves once its last file goes. So a folder that is
+ * already gone counts as removed. A failure says how far the delete got.
+ */
+export async function deleteFolderFileByFile(directory: string, contents: FolderContents, ops: FolderDeleteFs = fs): Promise<void> {
+  let deleted = 0;
+  for (const filePath of contents.files) {
+    try {
+      await withFilesystemTimeout(ops.unlink(filePath), `Deleting ${filePath}`);
+    } catch (error) {
+      if (errorCode(error) !== "ENOENT") {
+        const progress = deleted > 0 ? `Deleted ${deleted} of ${contents.files.length} files in ${directory}, then` : "Nothing in this folder was deleted:";
+        throw new Error(`${progress} ${filePath} could not be deleted (${fsErrorText(error)}); the folder was left in place`, { cause: error });
+      }
+    }
+    deleted += 1;
+  }
+  for (const folder of contents.directories) {
+    try {
+      await withFilesystemTimeout(ops.rmdir(folder), `Removing folder ${folder}`);
+    } catch (error) {
+      if (errorCode(error) === "ENOENT") continue;
+      const files = contents.files.length === 1 ? "the 1 file" : `all ${contents.files.length} files`;
+      throw new Error(`Deleted ${files} in ${directory}, but folder ${folder} could not be removed (${fsErrorText(error)})`, { cause: error });
     }
   }
 }
@@ -585,6 +669,8 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
     `)
   ).rows[0];
   if (linked) throw new Error("A symlink points into this folder; nothing was purged");
+  const folderLink = await linkToFolderAbove(db, directory);
+  if (folderLink) throw new Error(`Symlink ${folderLink} points to this folder or one above it; nothing was purged`);
   const activeCopy = (
     await db.execute<{ id: number }>(sql`
       select copy_operations.id
@@ -605,7 +691,7 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
   }
   if (!stat.isDirectory()) throw new Error("Path is no longer a folder; nothing was purged");
   await assertExistingPathInside(root, directory, "Leftover folder");
-  await assertFolderStillLeftover(directory, now);
+  const contents = await assertFolderStillLeftover(directory, now);
   const extraLink = extraLinkTouchingFolder(await extraSymlinksForPurge(db, paths), directory);
   if (extraLink) throw new Error(`Symlink ${extraLink} points into this folder; nothing was purged`);
 
@@ -616,7 +702,7 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
       await fs.mkdir(path.dirname(heldPath), { recursive: true });
       await withFilesystemTimeout(fs.rename(directory, heldPath), `Moving ${directory} to the holding area`);
     } else {
-      await withFilesystemTimeout(fs.rm(directory, { recursive: true }), `Deleting ${directory}`);
+      await deleteFolderFileByFile(directory, contents);
     }
   } catch (error) {
     throw holdingAreaError(error, heldPath);
@@ -645,6 +731,8 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
     `)
   ).rows[0];
   if (linked) throw new Error("A symlink now points to this file; it is no longer an orphan");
+  const folderLink = await linkToFolderAbove(db, path.dirname(operation.filePath));
+  if (folderLink) throw new Error(`Symlink ${folderLink} points to a folder holding this file; it is still in use`);
   if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
 
   let stat: Awaited<ReturnType<typeof fs.lstat>>;
@@ -684,6 +772,18 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase, extraSymlinks).catch(() => []);
   await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
   return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: [], linkErrors: [] };
+}
+
+// A library link to this folder or any folder above it.
+async function linkToFolderAbove(db: DbExecutor, directory: string): Promise<string | null> {
+  const row = (
+    await db.execute<{ link_path: string }>(sql`
+      select link_path from media_links
+      where missing_since is null and target_path in (select jsonb_array_elements_text(${JSON.stringify(pathAndAncestors(directory))}::jsonb))
+      limit 1
+    `)
+  ).rows[0];
+  return row?.link_path ?? null;
 }
 
 async function hasUnfinishedCopy(db: DbExecutor, filePath: string): Promise<boolean> {

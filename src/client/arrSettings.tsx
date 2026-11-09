@@ -10,6 +10,7 @@ import { formatDate, storagePolicyLabel, useStorageLocations, type ScanStatusPro
 import { CopyButton } from "./copyButton";
 import { ScanStatusDialog } from "./jobPresentation";
 import { SettingsTabs } from "./settingsTabs";
+import { filterBySearch } from "../shared/search";
 
 // The Radarr and Sonarr settings pages share this UI; the service supplies its API calls and the wording that differs.
 // Styles use the radarr-* classes for both.
@@ -588,7 +589,8 @@ function ArrPolicies({ state, disabled, hasUnsavedChanges }: { state: ArrUiState
   const busy = disabled || refresh.isPending || reconcile.isPending;
   const tagsConfigured = Boolean(state.settings.localTag && state.settings.remoteTag);
   const titles = service.titles(state);
-  const filtered = titles.filter((movie) => movie.title.toLowerCase().includes(search.toLowerCase()) && (filter === "all" || movie.status === filter));
+  // Titles whose words all appear as typed come first, then any that only matched with a typo.
+  const filtered = filterBySearch(titles.filter((movie) => filter === "all" || movie.status === filter), search, (movie) => [movie.title], { rankExactFirst: true });
   const pageCount = Math.max(1, Math.ceil(filtered.length / 25));
   const currentPage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(currentPage * 25, (currentPage + 1) * 25);

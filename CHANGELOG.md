@@ -4,6 +4,20 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Disc formats count as video: DVD rips (`.vob`, `.ifo`, `.bup`), disc images (`.iso`, `.img`) and other containers such as `.divx`, `.rmvb`, `.ogm`, `.ogv`, `.asf`, `.f4v`, `.m2v` and `.evo`. DVD rip folders no longer show as folders with no video, and links to these files count as media links.
+- The orphan review API leaves out anything a symlink uses, files and folders alike, instead of listing it as protected. It returns `skippedInUse`, with how many files and folders were left out and whether a library link or an extra symlink folder link holds them. This includes targets of symlinks in extra symlink folders. Purges still refuse these items.
+- Search is forgiving everywhere: the orphan review, **Search work** on the dashboard, **Search current folder**, the storage policy title filter, **Logs**, and the Radarr and Sonarr title lists. Case, accents and punctuation no longer matter, so `Alpha Bravo` finds `Alpha.Bravo` and `Charlies Lab` finds `Charlie's Lab`. Words can come in any order, and longer words can have a typo: one in words of 5 to 8 letters, two in longer ones. Short words, episode codes such as `S01E02` and years still have to match exactly. An empty search shows the same list as before. The upgrade adds a search column to the symlink table (migration 30), which takes a few seconds on a large library.
+- The orphan review page is redesigned so it can be read at a glance. A header gives the total that can be purged, with **How this works** and a separate **Purge all eligible** button. Video files, folders with no video and the holding area are separate tabs. Labels are coloured filter chips with counts, and their explanations sit behind an info button. Each row shows the file name first, with its folder and release state on one muted line, a label chip, and the size with an arrow against the linked file. Once anything is selected, a bar stays at the bottom of the screen with the count and size, **Hold 7 days** or **Delete now**, the Radarr or Sonarr re-request choice, **Clear** and **Purge selected**. Hold is the default on local storage. On remote storage, which cannot move files into the holding area, Hold is turned off with the reason and purges delete immediately. Protected and in-use files are counted instead of listed with checkboxes that could not be ticked. A purge job that fails or partly fails now shows a red banner with its first error, where it used to say it had finished.
+- Secondary buttons now stand out from text and input fields across the app: they are raised, semibold and have their own background and border. Segmented controls show unselected options flat, so the selected one is clearer.
+
+### Fixed
+
+- Deleting folders with no video on a debrid FUSE mount failed with EIO and deleted nothing, because the mount refuses to remove a folder that still holds files. Folders are now deleted one file at a time, then the folders that held them, and a folder the mount already removed counts as gone. Only files the check right before the delete saw are touched, each with its own time limit. If one fails, the job says how many files went before it stopped.
+- A link to any file, not only video, and a link to a folder now count as use when deciding orphans and folders with no video. Files under a linked folder are no longer listed as orphans, and purges check for a link to the folder or one above it right before each delete. The dashboard's orphan counts and the storage tree still only count exact links, so they can include files under a linked folder.
+- An orphan purge job now records its first error, the file and the reason, in its progress beside the failed count, so a failed or partly failed purge can be shown as one without reading the log. The progress shape is the shared `OrphanPurgeJobProgress` type.
+
 ## [0.1.4-beta.5] - 2026-11-07
 
 ### Added
