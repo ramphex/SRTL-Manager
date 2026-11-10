@@ -17,6 +17,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Orphan and damaged file purges check each file and folder by its real path immediately before moving or deleting it, including each file of a folder delete and the subtitles and artwork cleaned up after the last video in a folder.
 - Release builds verify and test the code in a separate job with a read-only token, so the job that publishes images never runs npm install scripts. Checkouts no longer keep the token, the unused OIDC permission is gone, and stable and beta images are scanned before their version tag is pushed.
 - `@fastify/static` is updated to 10.1.10, which resolves the moderate `glob` and `minimatch` advisories in the runtime dependencies.
+- Plex sign-in and user discovery no longer save tokens if the server's address or token changes while they are running.
 
 ## [0.1.4] - 2026-11-09
 

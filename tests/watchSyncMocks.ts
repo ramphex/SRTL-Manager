@@ -41,9 +41,14 @@ export class MockMediaServers {
   jellyfin = new Map<string, MockJellyfin>();
   writes: MockWrite[] = [];
   requests: string[] = [];
+  // Runs before each request is answered, with its method and path, so a test can change things mid-request.
+  beforeReply: ((request: string) => Promise<void> | void) | undefined;
 
   async start(): Promise<void> {
-    this.app.all("/*", (request, reply) => this.handle(request, reply));
+    this.app.all("/*", async (request, reply) => {
+      await this.beforeReply?.(`${request.method} ${new URL(request.url, "http://mock").pathname}`);
+      return this.handle(request, reply);
+    });
     await this.app.listen({ host: "127.0.0.1", port: 0 });
     const address = this.app.server.address();
     if (!address || typeof address === "string") throw new Error("mock server did not bind");

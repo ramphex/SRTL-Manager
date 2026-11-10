@@ -20,7 +20,7 @@ import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { publicErrorMessage } from "../errors";
 import { JellyfinClient } from "./jellyfinClient";
-import { findMediaServer, getMediaServer, loadMediaServers, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
+import { findMediaServer, getMediaServer, loadMediaServers, lockMediaServerConnection, MediaServerChanged, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
 import { WatchSyncError } from "./watchSyncHttp";
 import { sealSecret, secretPurposes } from "./secretBox";
@@ -154,9 +154,13 @@ function plexUserKind(user: { home: boolean; restricted: boolean }): WatchSyncUs
   return user.home ? "home" : "friend";
 }
 
-async function saveUsers(db: Db, serverId: string, users: Array<Omit<UserRow, "serverId" | "updatedAt">>): Promise<void> {
+// Saves what discovery found with the server's address and token. If either changed meanwhile, nothing is saved,
+// so tokens found at one address never follow the server to another.
+async function saveUsers(db: Db, server: StoredServer, users: Array<Omit<UserRow, "serverId" | "updatedAt">>): Promise<void> {
+  const serverId = server.id;
   const timestamp = nowIso();
   await db.transaction(async (transaction) => {
+    await lockMediaServerConnection(transaction, server, "The server's address or token changed while users were being discovered. Discover users again.");
     for (const user of users) {
       // Plex access tokens are stored sealed with the secret key.
       const values = { ...user, accessToken: user.accessToken ? sealSecret(user.accessToken, secretPurposes.watchSyncUserToken) : null, serverId, updatedAt: timestamp };
@@ -207,7 +211,7 @@ async function discoverPlex(db: Db, server: StoredServer, identifier: string): P
       note: token ? null : "No server access token. Share at least one library on this server with this user in Plex, then discover users again."
     });
   }
-  await saveUsers(db, server.id, users);
+  await saveUsers(db, server, users);
   return { machineIdentifier, version, accountName: account.title, accountId: account.id };
 }
 
@@ -216,7 +220,7 @@ async function discoverJellyfin(db: Db, server: StoredServer, identifier: string
   const client = new JellyfinClient(server.url, server.token, identifier);
   const info = await client.systemInfo();
   const users = await client.users();
-  await saveUsers(db, server.id, users.map((user) => ({
+  await saveUsers(db, server, users.map((user) => ({
     externalId: user.id, name: user.name, username: null, kind: "user" as const, accountId: null, accessToken: null,
     available: !user.disabled, note: user.disabled ? "Disabled in Jellyfin." : null
   })));
@@ -231,7 +235,8 @@ export async function discoverWatchSyncUsers(db: Db, serverId: string): Promise<
     const details = server.kind === "plex" ? await discoverPlex(db, server, identifier) : await discoverJellyfin(db, server, identifier);
     await recordMediaServerStatus(db, server.id, null, details, server.token);
   } catch (error) {
-    await recordServerStatus(db, server.id, publicErrorMessage(error, "Connection failed."));
+    // A connection that changed meanwhile has not been tried yet, so this error is not its status.
+    if (!(error instanceof MediaServerChanged)) await recordServerStatus(db, server.id, publicErrorMessage(error, "Connection failed."));
     throw error;
   }
   return getWatchSyncState(db);

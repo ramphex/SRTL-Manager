@@ -9,7 +9,7 @@ import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { plexEndpoints, xmlElements } from "../src/server/lib/plexClient";
-import { addMediaServer, checkPlexSignIn, startPlexSignIn } from "../src/server/lib/mediaServers";
+import { addMediaServer, checkPlexSignIn, getMediaServer, startPlexSignIn, updateMediaServer } from "../src/server/lib/mediaServers";
 import {
   approveWatchSyncPair,
   createWatchSyncPair,
@@ -234,6 +234,28 @@ describe("watch sync user pairing", () => {
     expect(stored[0]?.accessToken).not.toContain("tok-kids");
     expect(openSecret(stored[0]!.accessToken, secretPurposes.watchSyncUserToken)).toBe("tok-kids");
     expect(mock.pinPolls).toBe(2);
+  });
+
+  it("saves no users or tokens when the server's address or token changes during discovery", async () => {
+    const db = app.database.db;
+    const original = { name: "Home Plex", url: `${mock.base}/pms`, token: mock.ownerToken, prefixMappings: [] };
+    const plexId = (await addMediaServer(db, "plex", original)).id;
+    const users = () => db.select().from(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.serverId, plexId));
+    for (const change of [{ url: `${mock.base}/moved`, token: "" }, { url: `${mock.base}/pms`, token: "tok-bob" }]) {
+      mock.beforeReply = async (request) => {
+        if (!request.endsWith("/shared_servers")) return;
+        mock.beforeReply = undefined;
+        await updateMediaServer(db, plexId, { ...original, ...change });
+      };
+      await expect(discoverWatchSyncUsers(db, plexId)).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining("Discover users again") });
+      expect(await users()).toEqual([]);
+      // The new connection has not been tried, so it carries no error from the old one.
+      expect((await getMediaServer(db, plexId)).lastError).toBeNull();
+      await updateMediaServer(db, plexId, original);
+    }
+    mock.beforeReply = undefined;
+    await discoverWatchSyncUsers(db, plexId);
+    expect((await users()).filter((user) => user.accessToken)).toHaveLength(4);
   });
 
   it("reads plex.tv XML with escaped attributes", () => {
