@@ -447,12 +447,16 @@ describe("managing accounts", () => {
     expect(wrong.statusCode).toBe(unknown.statusCode);
   });
 
-  it("applies sign-in lockouts to every account", async () => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      expect((await signIn(harness.app, roleUsers.moderator, "not-the-password-1")).statusCode).toBe(401);
+  it("applies sign-in lockouts to every account, without locking it out from other addresses", async () => {
+    const addresses = Array.from({ length: 11 }, () => nextAddress());
+    for (const address of addresses) {
+      const failed = await harness.app.app.inject({ method: "POST", url: "/api/auth/login", remoteAddress: address, payload: { username: roleUsers.moderator, password: "not-the-password-1" } });
+      expect(failed.statusCode).toBe(401);
     }
-    const locked = await signIn(harness.app, roleUsers.moderator, finalPassword(roleUsers.moderator));
+    const locked = await harness.app.app.inject({ method: "POST", url: "/api/auth/login", remoteAddress: addresses.at(-1)!, payload: { username: roleUsers.moderator, password: finalPassword(roleUsers.moderator) } });
     expect(locked.statusCode).toBe(429);
+    expect(locked.json()).toMatchObject({ code: "sign_in_locked" });
+    expect((await signIn(harness.app, roleUsers.moderator, finalPassword(roleUsers.moderator))).statusCode).toBe(200);
   });
 
   it("writes every account change to the security activity and action audit, naming who did it", async () => {
