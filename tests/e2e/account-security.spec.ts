@@ -214,3 +214,50 @@ test("user settings show a read-only security activity log", async ({ page }) =>
   await expect(activity.getByRole("button")).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
+
+test("signing out forgets the previous account's data before someone else signs in", async ({ page }) => {
+  const accounts = { alex: { id: 1, username: "alex_03", device: "Firefox on macOS" }, sam: { id: 2, username: "sam_04", device: "Chrome on Windows" } };
+  let current: (typeof accounts)["alex"] | null = accounts.alex;
+  let releaseSessions: () => void = () => undefined;
+  let sessionsHeld: Promise<void> = Promise.resolve();
+  await page.route("**/api/**", async (route) => {
+    const request = route.request();
+    const url = new URL(request.url());
+    let body: unknown = [];
+    if (url.pathname === "/api/auth/me") body = current ? { setupRequired: false, authenticated: true, user: { id: current.id, username: current.username, role: "owner", mustChangePassword: false } } : { setupRequired: false, authenticated: false, user: null };
+    else if (url.pathname === "/api/auth/logout") { current = null; body = { ok: true }; }
+    else if (url.pathname === "/api/auth/login") { current = accounts.sam; body = { ok: true }; }
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Archive", path: "/remote" }] };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/sections") body = { sections: ["movies"], sectionTitles: {}, sectionTypes: { movies: "movies" } };
+    else if (url.pathname === "/api/auth/security-events") body = { retentionDays: 90, hasMore: false, events: [] };
+    else if (url.pathname === "/api/system/version") {
+      const release = { latestVersion: "0.1.4-beta.3", updateAvailable: false, status: "up_to_date", releaseUrl: null };
+      body = { currentVersion: "0.1.4-beta.3", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
+    } else if (url.pathname === "/api/auth/sessions") {
+      const owner = current ?? accounts.alex;
+      await sessionsHeld;
+      body = { idleTimeoutHours: 12, maxAgeDays: 14, sessions: [{ id: owner.id * 10, current: true, createdAt: "2026-11-02T08:00:00.000Z", lastSeenAt: "2026-11-02T09:30:00.000Z", expiresAt: "2026-11-02T21:30:00.000Z", ip: "192.0.2.10", device: owner.device }] };
+    }
+    await route.fulfill({ status: 200, json: body });
+  });
+  await page.goto(`${baseUrl}/settings/user`);
+  const sessions = page.getByRole("region", { name: "Signed-in sessions" });
+  await expect(sessions).toContainText(accounts.alex.device);
+
+  await page.getByRole("button", { name: "Sign out", exact: true }).click();
+  await expect(page.locator(".auth-header .brand h1")).toHaveText("Sign in");
+
+  // The next account's sessions are held back, so anything shown meanwhile could only come from the old cache.
+  sessionsHeld = new Promise<void>((resolve) => { releaseSessions = resolve; });
+  await page.getByLabel("Username").fill(accounts.sam.username);
+  await page.getByLabel("Password").fill("fixture-password-123");
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page.getByLabel(`Signed in as ${accounts.sam.username}, Owner`)).toBeVisible();
+  await expect(page.getByText(accounts.alex.device)).toHaveCount(0);
+  releaseSessions();
+  await expect(sessions).toContainText(accounts.sam.device);
+  await expect(page.getByText(accounts.alex.device)).toHaveCount(0);
+});
