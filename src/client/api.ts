@@ -27,7 +27,7 @@ import type {
   CopyOptions,
   PartialCopyDiscardPreview,
   PartialCopyDiscardRequest,
-  PartialCopyDiscardResult,
+  PartialCopyDiscardQueued,
   PathsSettings,
   PathConfigurationState,
   ScanRunRecord,
@@ -175,7 +175,7 @@ export const api = {
   recheckCopyReconciliation: () => request<CopyReconciliationState>("/api/job-reconciliation/recheck", { method: "POST" }),
   previewPartialCopyDiscard: (operationId: number) => request<PartialCopyDiscardPreview>(`/api/job-reconciliation/${operationId}/discard-partial-copy`),
   discardPartialCopy: (operationId: number, body: PartialCopyDiscardRequest) =>
-    request<PartialCopyDiscardResult>(`/api/job-reconciliation/${operationId}/discard-partial-copy`, { method: "POST", body: JSON.stringify(body) }),
+    request<PartialCopyDiscardQueued>(`/api/job-reconciliation/${operationId}/discard-partial-copy`, { method: "POST", body: JSON.stringify(body) }),
   mediaLinks: (kind?: string) => request<MediaLinkRow[]>(`/api/media-links${kind ? `?kind=${kind}` : ""}`),
   mediaLinksByIds,
   mediaLinksPage: (params: { kind?: LinkKind; section?: string; storagePolicy?: StoragePolicyKind; relativePathPrefix?: string; search?: string; limit: number; offset: number }) => {
@@ -206,7 +206,7 @@ export const api = {
   retryReRequests: (ids: number[] | "all_failed") => request<{ retried: number }>("/api/re-requests/retry", { method: "POST", body: JSON.stringify({ ids }) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>
-    request<{ restored: number; errors: string[] }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),
+    request<{ jobId: number }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),
   storageFileTree: (params: { rootType: StorageRootType; prefix?: string; orphan?: boolean }) => {
     const search = new URLSearchParams({ rootType: params.rootType });
     if (params.prefix) search.set("prefix", params.prefix);

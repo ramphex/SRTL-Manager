@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restore** in the orphan holding area and **Discard partial copy** work in the standard Docker setup, where storage is mounted read-only into the API. Both now run in the worker as jobs, with progress, a log and an entry in the action record, and the page follows the job until it finishes. Each item is checked again when the job runs.
+
 ### Security
 
 - Sign-in lockouts are tied to the username and the client together, so failed attempts from one address can no longer lock the real user out from another. A per-username guard slows clients that keep failing on a name under attack without refusing a client that has not failed. IPv6 clients are counted per /64 network.

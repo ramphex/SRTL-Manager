@@ -1,11 +1,10 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
-import type { PathsSettings } from "../../shared/types";
 import { getJsonSetting, type Db } from "../db/database";
 import { recordActionAudit } from "../lib/actionAudit";
 import type { JobRunner } from "../jobs/jobRunner";
-import { listHeldOrphans, listOrphanReview, restoreHeldOrphans } from "../jobs/orphanPurge";
+import { listHeldOrphans, listOrphanReview } from "../jobs/orphanPurge";
 
 const rootTypeSchema = z.enum(["local", "remote"]);
 
@@ -41,7 +40,15 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
 
   app.post("/api/orphans/held/restore", async (request) => {
     const body = z.object({ operationIds: z.array(z.number().int().positive()).min(1).max(5_000) }).parse(request.body);
-    const paths = await getJsonSetting<PathsSettings>(db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
-    return restoreHeldOrphans(db, paths, [...new Set(body.operationIds)], (error, operationId) => request.log.warn({ err: error, operationId }, "Held file restore failed"));
+    const operationIds = [...new Set(body.operationIds)];
+    // The API cannot write to storage; the worker restores the files as a job.
+    const jobId = await jobs.startHeldRestore(operationIds);
+    await recordActionAudit(db, request, {
+      action: "orphan.restore",
+      summary: `Restored ${operationIds.length} held file(s) from the holding area`,
+      jobId,
+      targets: { jobId, operationIds }
+    });
+    return { jobId };
   });
 }

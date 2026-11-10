@@ -138,15 +138,16 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
   app.post("/api/job-reconciliation/:id/discard-partial-copy", async (request) => {
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
     const body = z.object({ tempPath: z.string().min(1), tempSizeBytes: z.number().int().min(0) }).parse(request.body);
-    const result = await jobs.discardPartialCopy(params.id, body);
+    // The API cannot write to storage; the worker discards the file as a job.
+    const queued = await jobs.startPartialCopyDiscard(params.id, body);
     // The temporary file's path is deliberately not recorded; the operation ID identifies it.
     await recordActionAudit(db, request, {
       action: "copy.discard_partial",
-      summary: "Discarded a partial copy left by an interrupted job",
-      jobId: result.jobId,
-      targets: { operationId: params.id, jobId: result.jobId, tempSizeBytes: body.tempSizeBytes }
+      summary: `Queued discarding a partial copy left by interrupted job #${queued.copyJobId}`,
+      jobId: queued.jobId,
+      targets: { operationId: params.id, jobId: queued.jobId, copyJobId: queued.copyJobId, tempSizeBytes: body.tempSizeBytes }
     });
-    return result;
+    return { jobId: queued.jobId, operationId: queued.operationId };
   });
 
   app.post("/api/jobs/:id/terminate", terminateJob);

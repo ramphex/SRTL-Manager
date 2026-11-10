@@ -28,7 +28,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "path_migration" | "watch_sync" | "backup";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "orphan_restore" | "partial_copy_discard" | "path_migration" | "watch_sync" | "backup";
 
 export type AuditMode = "fast" | "deep";
 
@@ -700,6 +700,20 @@ export interface OrphanPurgeJobProgress {
 
 export type OrphanPurgeMode = "hold" | "delete";
 
+/** Progress of a job that restores held orphans from the holding area. */
+export interface OrphanRestoreJobProgress {
+  options: { total: number };
+  current: number;
+  total: number;
+  restored: number;
+  failed: number;
+  remaining: number;
+  stage: "queued" | "restoring" | "cancelled" | "failed" | "partially_failed" | "completed";
+  message: string;
+  // The first held file that was not restored and why. Absent when nothing failed.
+  firstError?: { filePath: string | null; message: string };
+}
+
 /** Which of a purge job's items to list: the ones that failed, or the ones moved to the holding area. */
 export type OrphanPurgeItemOutcome = "failed" | "held";
 
@@ -834,6 +848,20 @@ export interface PartialCopyDiscardPreview {
 export interface PartialCopyDiscardRequest {
   tempPath: string;
   tempSizeBytes: number;
+}
+
+/** Progress of a job that discards one interrupted copy's temporary file. */
+export interface PartialCopyDiscardJobProgress {
+  options: { operationId: number; copyJobId: number };
+  stage: "queued" | "discarding" | "failed" | "completed";
+  message: string;
+  removedBytes?: number;
+}
+
+/** The answer to a discard request: the job that will do it. */
+export interface PartialCopyDiscardQueued {
+  operationId: number;
+  jobId: number;
 }
 
 export interface PartialCopyDiscardResult {

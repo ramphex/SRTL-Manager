@@ -938,49 +938,66 @@ async function restoreRemovedLinks(db: DbExecutor, symlinkDir: string, links: Re
   }
 }
 
+/**
+ * Puts one held file (or folder) back. The caller holds the locks: a restore
+ * job's resource claims, or {@link restoreHeldOrphans}' mutation guard.
+ */
+export async function restoreHeldOrphan(transaction: DbExecutor, paths: PathsSettings, operationId: number): Promise<RestoredOrphan> {
+  const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).for("update").limit(1))[0];
+  if (!operation || operation.stage !== "held" || !operation.heldPath) throw new ConflictError(`Held file #${operationId} is not available to restore`);
+  const root = rootPathFor(paths, operation.rootType as StorageRootType);
+  const holdRoot = path.join(root, holdingFolderName);
+  if (!root || !isPathInside(holdRoot, operation.heldPath!) || !isPathInside(root, operation.filePath) || isPathInside(holdRoot, operation.filePath)) {
+    throw new ConflictError(`Held file #${operationId} is outside its storage root.`);
+  }
+  try {
+    // Checks the holding area folder by folder, creates the way back inside the root, and never replaces anything.
+    await moveOutOfHoldingArea(root, operation.heldPath!, operation.filePath, `Held file #${operationId}`);
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") throw new ConflictError(`A file now exists where held file #${operationId} came from; restore it manually.`, { detail: operation.filePath });
+    if (errorCode(error) === "EUNSAFEPATH") throw new ConflictError(`Held file #${operationId} could not be restored safely: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+  for (const extra of parseExtras(operation.extras)) {
+    if (!extra.to || !isPathInside(holdRoot, extra.to) || !isPathInside(root, extra.from) || isPathInside(holdRoot, extra.from)) continue;
+    // A sidecar that cannot go back safely, or whose place is taken, stays in the holding area.
+    await moveOutOfHoldingArea(root, extra.to, extra.from, "Sidecar").catch(() => undefined);
+  }
+  await removeEmptyHoldingFolders(root, path.dirname(operation.heldPath!));
+  await restoreRemovedLinks(transaction, paths.symlinkDir, parseRemovedLinks(operation.removedLinks));
+  const timestamp = nowIso();
+  // A restored folder is found again by the next storage scan.
+  if (operation.targetKind !== "folder") {
+    await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
+  }
+  await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
+  // The file is back, so nothing should go looking for another copy of it.
+  await transaction
+    .update(schema.reRequests)
+    .set({ status: "skipped", message: "The file was restored, so nothing was requested.", updatedAt: timestamp })
+    .where(and(eq(schema.reRequests.operationId, operation.id), inArray(schema.reRequests.status, ["queued", "pending", "failed"])));
+  return { operationId: operation.id, filePath: operation.filePath, rootType: operation.rootType as StorageRootType, targetKind: operation.targetKind };
+}
+
+export interface RestoredOrphan {
+  operationId: number;
+  filePath: string;
+  rootType: StorageRootType;
+  targetKind: string;
+}
+
+/** Restores held files one at a time, each under the mutation guard. The API queues a restore job instead; this is for callers already in the worker. */
 export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operationIds: number[], onError?: (error: unknown, operationId: number) => void): Promise<{ restored: number; errors: string[] }> {
   let restored = 0;
   const errors: string[] = [];
   for (const operationId of operationIds) {
     try {
       await withResourceMutationGuard(db, async (transaction) => {
-        const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).for("update").limit(1))[0];
+        const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).limit(1))[0];
         if (!operation || operation.stage !== "held" || !operation.heldPath) throw new ConflictError(`Held file #${operationId} is not available to restore`);
         return {
           resources: [{ resourceType: "path", resourceKey: path.resolve(operation.filePath) }],
-          mutate: async () => {
-            const root = rootPathFor(paths, operation.rootType as StorageRootType);
-            const holdRoot = path.join(root, holdingFolderName);
-            if (!root || !isPathInside(holdRoot, operation.heldPath!) || !isPathInside(root, operation.filePath) || isPathInside(holdRoot, operation.filePath)) {
-              throw new ConflictError(`Held file #${operationId} is outside its storage root.`);
-            }
-            try {
-              // Checks the holding area folder by folder, creates the way back inside the root, and never replaces anything.
-              await moveOutOfHoldingArea(root, operation.heldPath!, operation.filePath, `Held file #${operationId}`);
-            } catch (error) {
-              if (errorCode(error) === "EEXIST") throw new ConflictError(`A file now exists where held file #${operationId} came from; restore it manually.`, { detail: operation.filePath });
-              if (errorCode(error) === "EUNSAFEPATH") throw new ConflictError(`Held file #${operationId} could not be restored safely: ${error instanceof Error ? error.message : String(error)}`);
-              throw error;
-            }
-            for (const extra of parseExtras(operation.extras)) {
-              if (!extra.to || !isPathInside(holdRoot, extra.to) || !isPathInside(root, extra.from) || isPathInside(holdRoot, extra.from)) continue;
-              // A sidecar that cannot go back safely, or whose place is taken, stays in the holding area.
-              await moveOutOfHoldingArea(root, extra.to, extra.from, "Sidecar").catch(() => undefined);
-            }
-            await removeEmptyHoldingFolders(root, path.dirname(operation.heldPath!));
-            await restoreRemovedLinks(transaction, paths.symlinkDir, parseRemovedLinks(operation.removedLinks));
-            const timestamp = nowIso();
-            // A restored folder is found again by the next storage scan.
-            if (operation.targetKind !== "folder") {
-              await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
-            }
-            await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
-            // The file is back, so nothing should go looking for another copy of it.
-            await transaction
-              .update(schema.reRequests)
-              .set({ status: "skipped", message: "The file was restored, so nothing was requested.", updatedAt: timestamp })
-              .where(and(eq(schema.reRequests.operationId, operation.id), inArray(schema.reRequests.status, ["queued", "pending", "failed"])));
-          }
+          mutate: () => restoreHeldOrphan(transaction, paths, operationId)
         };
       });
       restored += 1;

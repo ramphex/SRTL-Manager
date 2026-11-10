@@ -1782,6 +1782,29 @@ export function JobScope({
     );
   }
 
+  if (job.type === "orphan_restore") {
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
+    const total = finiteNumberFromUnknown(options?.total);
+    return (
+      <span className="job-scope-cell">
+        <span>{total === 1 ? "1 held file" : `${formatNumber(total)} held files`}</span>
+        <small>From the holding area</small>
+      </span>
+    );
+  }
+
+  if (job.type === "partial_copy_discard") {
+    const options = recordFromUnknown(job.options) ?? recordFromUnknown(recordFromUnknown(job.progress)?.options);
+    const operationId = finiteNumberFromUnknown(options?.operationId);
+    const copyJobId = finiteNumberFromUnknown(options?.copyJobId);
+    return (
+      <span className="job-scope-cell">
+        <span>{operationId > 0 ? `Copy operation #${operationId}` : "Copy operation"}</span>
+        <small>{copyJobId > 0 ? `Left by copy job #${copyJobId}` : "Interrupted copy"}</small>
+      </span>
+    );
+  }
+
   if (job.type === "symlink_cleanup") {
     const progress = recordFromUnknown(job.progress);
     const options = recordFromUnknown(job.options) ?? recordFromUnknown(progress?.options) ?? progress;

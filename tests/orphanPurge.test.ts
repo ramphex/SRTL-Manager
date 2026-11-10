@@ -1211,3 +1211,61 @@ describe("holding area safety", () => {
     await expect(fs.readFile(outsideFile, "utf8")).resolves.toBe("keep me");
   });
 });
+
+describe("restoring held files through the worker", () => {
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  async function adminCookie(): Promise<string> {
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "alex_03", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    return String(setup.headers["set-cookie"]);
+  }
+
+  it("queues a restore job that the worker runs, with progress, events and an audit record", async () => {
+    const orphan = await storageFile("local", "movies/India (2009)/India (2009).mkv");
+    const subtitle = path.join(paths.localDir, "movies/India (2009)/India (2009).en.srt");
+    await fs.writeFile(subtitle, "1\n00:00:01,000 --> 00:00:02,000\nhi\n");
+    expect(await purge("local", [orphan.id], "hold")).toMatchObject({ status: "completed" });
+    const [held] = await listHeldOrphans(app.database.db);
+    const cookie = await adminCookie();
+
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId, held!.operationId] } });
+    expect(queued.statusCode).toBe(200);
+    const { jobId } = queued.json<{ jobId: number }>();
+    // Nothing moves until the worker runs the job.
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ type: "orphan_restore", status: "queued", progress: { stage: "queued", total: 1 } });
+    const trail = (await app.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; targets: Record<string, unknown> }>>();
+    expect(trail).toEqual([expect.objectContaining({ action: "orphan.restore", targets: { jobId, operationIds: [held!.operationId] } })]);
+
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: { stage: "completed", restored: 1, failed: 0, total: 1 } });
+    await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toContain("bytes of");
+    await expect(fs.stat(subtitle)).resolves.toBeTruthy();
+    expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toEqual(expect.arrayContaining(["Restore started", "Held file restored", "Restore finished"]));
+    expect(await listHeldOrphans(app.database.db)).toEqual([]);
+
+    // Restoring it again is refused up front.
+    const again = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId] } });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toContain("not available to restore");
+  });
+
+  it("reports a restore that could not finish, with the first error", async () => {
+    const orphan = await storageFile("local", "movies/Juliett (2010)/Juliett (2010).mkv");
+    expect(await purge("local", [orphan.id], "hold")).toMatchObject({ status: "completed" });
+    const [held] = await listHeldOrphans(app.database.db);
+    const cookie = await adminCookie();
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId] } });
+    // Something takes the file's place after the restore was queued.
+    await fs.mkdir(path.dirname(orphan.filePath), { recursive: true });
+    await fs.writeFile(orphan.filePath, "a new copy");
+    await runJobs();
+    const job = await app.jobs.getJob(queued.json<{ jobId: number }>().jobId);
+    expect(job).toMatchObject({ status: "failed", progress: { stage: "failed", restored: 0, failed: 1, firstError: { filePath: orphan.filePath, message: expect.stringContaining("A file now exists") } } });
+    await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toBe("a new copy");
+    expect(await listHeldOrphans(app.database.db)).toHaveLength(1);
+  });
+});

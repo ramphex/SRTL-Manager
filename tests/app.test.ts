@@ -2306,10 +2306,22 @@ describe("api app", () => {
       payload: { tempPath, tempSizeBytes }
     });
     expect(discard.statusCode).toBe(200);
-    expect(discard.json()).toMatchObject({ operationId, jobId, removedTempPath: tempPath, removedBytes: tempSizeBytes, state: { unresolvedCount: 0 } });
+    // The API only queues it: storage is read-only in the API container, so the worker deletes the file.
+    const { jobId: discardJobId } = discard.json<{ jobId: number; operationId: number }>();
+    expect(discard.json()).toEqual({ jobId: discardJobId, operationId });
+    expect(discardJobId).not.toBe(jobId);
+    await expect(fs.lstat(tempPath)).resolves.toBeTruthy();
+    await expect(ctx.jobs.getJob(discardJobId)).resolves.toMatchObject({ type: "partial_copy_discard", status: "queued" });
+    await expect(runQueuedJob(discardJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: { stage: "completed", removedBytes: tempSizeBytes, options: { operationId, copyJobId: jobId } }
+    });
+    const discardJobEvents = await ctx.database.db.select().from(schema.jobEvents).where(eq(schema.jobEvents.jobId, discardJobId));
+    expect(discardJobEvents.map((event) => event.message)).toEqual(expect.arrayContaining(["Discarding partial copy", "Partial copy discarded"]));
+    await expect(ctx.jobs.copyReconciliationState()).resolves.toMatchObject({ unresolvedCount: 0 });
     const discardTrail = (await ctx.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; actor: { username: string }; targets: Record<string, unknown> }>>();
     expect(discardTrail).toEqual([
-      expect.objectContaining({ action: "copy.discard_partial", actor: { userId: expect.any(Number), username: "admin" }, targets: { operationId, jobId, tempSizeBytes } })
+      expect.objectContaining({ action: "copy.discard_partial", actor: { userId: expect.any(Number), username: "admin" }, targets: { operationId, jobId: discardJobId, copyJobId: jobId, tempSizeBytes } })
     ]);
     // The temporary file's path is not copied into the trail.
     expect(JSON.stringify(discardTrail)).not.toContain(tempPath);
@@ -2342,6 +2354,21 @@ describe("api app", () => {
     const retriedJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [fixture.id] });
     await expect(ctx.jobs.getJob(retriedJobId)).resolves.toMatchObject({ status: "queued" });
     await expect(ctx.jobs.terminate(retriedJobId)).resolves.toBe(true);
+  });
+
+  it("checks a queued discard again when it runs, and leaves a file that changed in the meantime", async () => {
+    const cookie = await createAdminSession();
+    const { operationId, tempPath, tempSizeBytes } = await insertInterruptedPartialCopy("Changed Before Discard");
+    const discard = await ctx.app.inject({ method: "POST", url: `/api/job-reconciliation/${operationId}/discard-partial-copy`, headers: { cookie }, payload: { tempPath, tempSizeBytes } });
+    expect(discard.statusCode).toBe(200);
+    // A second discard of the same entry waits for nobody: it is refused while the first is queued.
+    const second = await ctx.app.inject({ method: "POST", url: `/api/job-reconciliation/${operationId}/discard-partial-copy`, headers: { cookie }, payload: { tempPath, tempSizeBytes } });
+    expect(second.statusCode).toBe(409);
+    await fs.appendFile(tempPath, "more bytes");
+    const job = await runQueuedJob(discard.json<{ jobId: number }>().jobId);
+    expect(job).toMatchObject({ status: "failed", progress: { stage: "failed" } });
+    await expect(fs.lstat(tempPath)).resolves.toBeTruthy();
+    await expect(first(ctx.database.db.select().from(schema.copyOperations).where(eq(schema.copyOperations.id, operationId)).limit(1))).resolves.toMatchObject({ stage: "reconciliation_required" });
   });
 
   it("returns 404 when discarding a partial copy for an unknown operation", async () => {
