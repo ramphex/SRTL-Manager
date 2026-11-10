@@ -4,6 +4,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.2] - 2026-11-10
+
 Purges check that every delete happened, and remote scans no longer count files a remote mount lists but cannot open. Database migration 32 adds two columns to purge items.
 
 ### Fixed
@@ -18,6 +20,10 @@ Purges check that every delete happened, and remote scans no longer count files 
 - The purge status window and job summary count files deleted after another copy appeared, files that keep coming back, files that came back at the recheck, and files deleted but still listed, each with its own list.
 - The orphan review marks files that came back after a purge, with the job number.
 - **Recheck deleted remote files after** (2 minutes by default) and **Look for another copy after a remote delete** (off by default) under **Settings > Advanced > Cleanup**. Either can be turned off.
+
+### Changed
+
+- Release and security workflows use `docker/login-action` 4.7.0 and CodeQL 4.39.1.
 
 ## [0.1.5-beta.1] - 2026-11-10
 
