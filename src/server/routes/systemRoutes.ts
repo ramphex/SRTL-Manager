@@ -1,4 +1,5 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
+import { clientBucket } from "../clientAddress";
 import packageJson from "../../../package.json";
 import type { AppReleaseChannel, AppReleaseInfo, AppVersionInfo, AppVersionStatus } from "../../shared/types";
 
@@ -206,17 +207,18 @@ async function readReleaseCheck(forceRefresh: boolean): Promise<GithubReleaseChe
     return githubReleaseCache.value;
   }
 
-  if (!forceRefresh && githubReleaseCheckInFlight) {
+  // A refresh asked for while a check is running waits for that check instead of starting another.
+  if (githubReleaseCheckInFlight) {
     return githubReleaseCheckInFlight;
   }
 
   const request = fetchReleases().then(cacheReleaseCheck);
-  if (!forceRefresh) githubReleaseCheckInFlight = request;
+  githubReleaseCheckInFlight = request;
 
   try {
     return await request;
   } finally {
-    if (!forceRefresh) githubReleaseCheckInFlight = null;
+    if (githubReleaseCheckInFlight === request) githubReleaseCheckInFlight = null;
   }
 }
 
@@ -260,8 +262,16 @@ function warmReleaseCheck(app: FastifyInstance): void {
     });
 }
 
+// Each account may force a fresh GitHub check a few times a minute; reading the cached result is never limited.
+const forcedRefreshRateLimit = {
+  max: 10,
+  timeWindow: "1 minute",
+  keyGenerator: (request: FastifyRequest) => request.adminSession ? `user:${request.adminSession.userId}` : `client:${clientBucket(request.ip)}`,
+  allowList: (request: FastifyRequest) => !readRefreshQuery(request.query)
+};
+
 export function registerSystemRoutes(app: FastifyInstance): void {
-  app.get("/api/system/version", async (request): Promise<AppVersionInfo> => {
+  app.get("/api/system/version", { config: { rateLimit: forcedRefreshRateLimit } }, async (request): Promise<AppVersionInfo> => {
     const currentVersion = packageJson.version;
     const forceRefresh = readRefreshQuery(request.query);
 
