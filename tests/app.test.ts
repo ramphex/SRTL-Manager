@@ -2361,9 +2361,10 @@ describe("api app", () => {
     const { operationId, tempPath, tempSizeBytes } = await insertInterruptedPartialCopy("Changed Before Discard");
     const discard = await ctx.app.inject({ method: "POST", url: `/api/job-reconciliation/${operationId}/discard-partial-copy`, headers: { cookie }, payload: { tempPath, tempSizeBytes } });
     expect(discard.statusCode).toBe(200);
-    // A second discard of the same entry waits for nobody: it is refused while the first is queued.
+    // A second discard of the same entry is refused while the first is queued.
     const second = await ctx.app.inject({ method: "POST", url: `/api/job-reconciliation/${operationId}/discard-partial-copy`, headers: { cookie }, payload: { tempPath, tempSizeBytes } });
     expect(second.statusCode).toBe(409);
+    expect(second.json().error).toContain("already being discarded");
     await fs.appendFile(tempPath, "more bytes");
     const job = await runQueuedJob(discard.json<{ jobId: number }>().jobId);
     expect(job).toMatchObject({ status: "failed", progress: { stage: "failed" } });

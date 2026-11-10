@@ -2547,6 +2547,14 @@ export class JobRunner {
   async startPartialCopyDiscard(operationId: number, request: PartialCopyDiscardRequest): Promise<PartialCopyDiscardQueued & { copyJobId: number }> {
     let copyJobId = 0;
     const jobId = await this.enqueuePreparedJob("partial_copy_discard", async (transaction) => {
+      const pending = await dbGet<{ jobId: number }>(transaction, sql`
+        SELECT claim.job_id AS "jobId"
+        FROM job_resource_claims AS claim
+        JOIN jobs ON jobs.id = claim.job_id
+        WHERE claim.resource_type = 'copy_discard' AND claim.resource_key = ${String(operationId)} AND jobs.status IN ('queued', 'running')
+        LIMIT 1
+      `);
+      if (pending) throw new PartialCopyDiscardError(`Partial copy for operation #${operationId} is already being discarded by job #${pending.jobId}.`, 409);
       const preview = await previewPartialCopyDiscard(transaction, operationId);
       if (!preview.eligible || !preview.tempPath || preview.tempSizeBytes == null) {
         throw new PartialCopyDiscardError(`Partial copy for operation #${operationId} was not discarded: ${preview.blockers.join(" ")} Leave it for manual handling.`, 409);
