@@ -39,9 +39,11 @@ export const defaultCleanupSettings: CleanupSettings = {
   // A remote mount can bring a deleted file back by itself. Two minutes covers several of its refresh cycles
   // (30 seconds by default on the usual mount), so a file that comes back is caught by the purge that deleted it.
   purgeRecheckSeconds: 120,
-  // Some remote mounts show another copy of a release at the same path as soon as the last file of its folder is
-  // deleted. A few seconds is enough for that, and is paid once per remote folder whose last video a purge deletes.
-  purgeSettleSeconds: 3
+  // Every remote delete is looked at again straight away, which catches a mount that shows another copy at the same
+  // path as part of the delete. This extra wait is only for a mount that does it some seconds later. It is paid once
+  // per remote folder whose last video a purge deletes (about 8 hours for 10,000 folders at 3 seconds), so it is off
+  // by default; the recheck after the purge still reports any such copy as came back.
+  purgeSettleSeconds: 0
 };
 
 export const maxPurgeRecheckSeconds = 3600;

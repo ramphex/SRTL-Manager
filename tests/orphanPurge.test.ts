@@ -1395,6 +1395,7 @@ describe("deletes that storage does not carry out", () => {
   });
 
   it("deletes another copy that appears at the same path, with the checks a first delete has except the inventory match", async () => {
+    await setSetting(app.database.db, "advancedSettings", { cleanup: { purgeSettleSeconds: 3 } });
     const orphan = await storageFile("remote", "Sierra.Tango.2004/Sierra.Tango.2004.mkv");
     let settles = 0;
     settleWait = async (ms) => {
@@ -1419,6 +1420,7 @@ describe("deletes that storage does not carry out", () => {
   });
 
   it("stops after three deletes when another copy keeps appearing, and leaves the last one", async () => {
+    await setSetting(app.database.db, "advancedSettings", { cleanup: { purgeSettleSeconds: 3 } });
     const orphan = await storageFile("remote", "Uniform.Victor.2005/Uniform.Victor.2005.mkv");
     let copies = 0;
     settleWait = async () => {
@@ -1445,6 +1447,7 @@ describe("deletes that storage does not carry out", () => {
   });
 
   it("leaves another copy that is new, or that a link now points to", async () => {
+    await setSetting(app.database.db, "advancedSettings", { cleanup: { purgeSettleSeconds: 3 } });
     const fresh = await storageFile("remote", "Whiskey.Xray.2006/Whiskey.Xray.2006.mkv");
     settleWait = async () => {
       await fs.mkdir(path.dirname(fresh.filePath), { recursive: true });
@@ -1468,6 +1471,7 @@ describe("deletes that storage does not carry out", () => {
   });
 
   it("deletes another copy of a folder's files, and stops after three deletes", async () => {
+    await setSetting(app.database.db, "advancedSettings", { cleanup: { purgeSettleSeconds: 3 } });
     const make = async (name: string) => {
       const dirPath = path.join(paths.remoteDir, name);
       await fs.mkdir(dirPath, { recursive: true });
@@ -1502,8 +1506,7 @@ describe("deletes that storage does not carry out", () => {
     expect(await app.jobs.getJob(keepsJob)).toMatchObject({ status: "failed", progress: expect.objectContaining({ keepsComingBack: 1, deleted: 0 }) });
   });
 
-  it("does not look for another copy when that is turned off", async () => {
-    await setSetting(app.database.db, "advancedSettings", { cleanup: { purgeSettleSeconds: 0 } });
+  it("does not wait to look for another copy unless that is turned on", async () => {
     const orphan = await storageFile("remote", "Echo.Golf.2008/Echo.Golf.2008.mkv");
     let settles = 0;
     settleWait = async () => {
@@ -1511,6 +1514,33 @@ describe("deletes that storage does not carry out", () => {
     };
     expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed" });
     expect(settles).toBe(0);
+  });
+
+  it("deletes another copy that storage shows as part of the delete, without the extra wait", async () => {
+    const orphan = await storageFile("remote", "Foxtrot.India.2009/Foxtrot.India.2009.mkv");
+    let settles = 0;
+    settleWait = async () => {
+      settles += 1;
+    };
+    const realUnlink = fs.unlink.bind(fs);
+    let unlinks = 0;
+    // Like a mount that serves another download with the same folder name as soon as the last file goes.
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation(async (target) => {
+      await realUnlink(target);
+      unlinks += 1;
+      if (unlinks === 1 && path.resolve(String(target)) === path.resolve(orphan.filePath)) {
+        await fs.writeFile(orphan.filePath, "another copy of the release");
+        await fs.utimes(orphan.filePath, oldTime, oldTime);
+      }
+    });
+    try {
+      expect(await purge("remote", [orphan.id], "delete")).toMatchObject({ status: "completed", progress: expect.objectContaining({ deleted: 1, resurfacedDeleted: 1 }) });
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+    expect(settles).toBe(0);
+    expect(unlinks).toBe(2);
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("does not count a path the recheck finds only listed as back", async () => {

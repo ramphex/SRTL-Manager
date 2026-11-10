@@ -1070,7 +1070,7 @@ function AdvancedSettingsPanel() {
                   </option>
                 ))}
               </select>
-              <small>Some remote mounts show another copy at the same path once a folder&apos;s last video is deleted. The purge waits this long, then deletes such a copy too, up to 3 deletes in all. Paid once per remote folder.</small>
+              <small>Every remote delete is checked straight away, and another copy found at the same path is deleted too, up to 3 deletes in all. This adds a wait for mounts that show such a copy only some seconds later. It is paid once per remote folder a purge empties, so it slows large purges a lot.</small>
             </label>
             <label className="advanced-toggle">
               <input

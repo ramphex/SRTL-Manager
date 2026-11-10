@@ -546,7 +546,7 @@ describe("api app", () => {
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
-      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 3 }
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
     const saveAdvancedSettings = await ctx.app.inject({
@@ -563,7 +563,7 @@ describe("api app", () => {
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
       audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false },
-      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 3 }
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
     const disableCopyVerification = await ctx.app.inject({
@@ -580,7 +580,7 @@ describe("api app", () => {
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
-      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 3 }
+      cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
     const recheckOff = await ctx.app.inject({
@@ -590,7 +590,7 @@ describe("api app", () => {
       payload: { cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 0 } }
     });
     expect(recheckOff.statusCode).toBe(200);
-    expect(recheckOff.json().cleanup).toEqual({ holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 0, purgeSettleSeconds: 3 });
+    expect(recheckOff.json().cleanup).toEqual({ holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 0, purgeSettleSeconds: 0 });
     const recheckTooLong = await ctx.app.inject({
       method: "PUT",
       url: "/api/settings/advanced",
