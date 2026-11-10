@@ -33,14 +33,112 @@ const locationPart = /^[gG]eo[A-Z_]|[a-z0-9](?:City|Region|Country|CountryCode|L
 const pathKey = /(path|dir|directory|root)$/i;
 // Case matters: `socketIp` and `client_ip` are addresses, `skip` and `zip` are not.
 const addressKey = /(?:^ips?|[a-z0-9]Ips?|_ips?|[A-Za-z0-9]IPs?|[aA]ddress(?:es)?)$/;
-const addressPattern = /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
-const hostPortPattern = /(?:\b\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]|\blocalhost|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/gi;
+// What follows `scheme://` in a URL, and a bracketed IPv6 address with a port. Both are read once from where they start.
+const urlRest = /[^\s"'<>]+/y;
+const bracketedHostPort = /\[[0-9a-f:]+\]:\d{2,5}\b/iy;
 // `>` is left out of what may come before a path, so that `<remote>/Movies` stays as it is.
 // Each is checked with isIPv6, so clock times, MAC addresses and `std::string` stay as they are.
 const ipv6Candidate = /(?<![\w.%])[0-9a-f]*:[0-9a-f:.]*(?:%[\w.-]+)?/gi;
 // Not part of a longer dotted name, so `Movie.1.2.3.4.mkv` and `DDP5.1.2.0` stay as they are.
 const ipv4Pattern = /(?<![A-Za-z0-9.])(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)(?![A-Za-z0-9]|\.[A-Za-z0-9])/g;
 const absolutePathPattern = /(^|[\s"'`(=,:{[])(\/(?!api\/(?!\.\.))[^\s"'`<>,;:)\]]+(?:\/[^\s"'`<>,;:)\]]+)+)/g;
+
+const isDigit = (code: number) => code >= 48 && code <= 57;
+const isLetter = (code: number) => (code >= 65 && code <= 90) || (code >= 97 && code <= 122);
+const isWordChar = (code: number) => isDigit(code) || isLetter(code) || code === 95;
+const isHostChar = (code: number) => isDigit(code) || isLetter(code) || code === 45 || code === 46;
+const isSchemeChar = (code: number) => isHostChar(code) || code === 43;
+
+// A regular expression's \b: a word character on one side only.
+function wordBoundary(text: string, at: number): boolean {
+  return isWordChar(text.charCodeAt(at)) !== (at > 0 && isWordChar(text.charCodeAt(at - 1)));
+}
+
+function runEnd(text: string, from: number, inRun: (code: number) => boolean): number {
+  let end = from;
+  while (end < text.length && inRun(text.charCodeAt(end))) end += 1;
+  return end;
+}
+
+/*
+ * URLs (`scheme://…`) and `host:port` addresses are found by reading each run of name characters once. Written as
+ * the regular expressions they replace, /\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi and
+ * /(?:\b\d{1,3}(?:\.\d{1,3}){3}|\[[0-9a-f:]+\]|\blocalhost|\b[a-z0-9-]+(?:\.[a-z0-9-]+)+):\d{2,5}\b/gi, a long dotted name
+ * with no `://` or port after it was read again from every word in it, which took seconds. Both find exactly what
+ * those expressions found: the earliest start wins, and the search goes on after the end of each match.
+ */
+function replaceUrls(text: string): string {
+  let result = "";
+  let copied = 0;
+  let schemeEnd = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    if (!isLetter(text.charCodeAt(at)) || !wordBoundary(text, at)) continue;
+    // Every start in a run of scheme characters shares the run's end, so a run without `://` after it is skipped whole.
+    if (at >= schemeEnd) schemeEnd = runEnd(text, at, isSchemeChar);
+    urlRest.lastIndex = schemeEnd + 3;
+    if (!text.startsWith("://", schemeEnd) || !urlRest.test(text)) {
+      at = schemeEnd - 1;
+      continue;
+    }
+    result += `${text.slice(copied, at)}<address>`;
+    copied = urlRest.lastIndex;
+    at = copied - 1;
+  }
+  return copied ? result + text.slice(copied) : text;
+}
+
+// The end of `:port` (2 to 5 digits, then no word character) at `colon`, or -1.
+function portEnd(text: string, colon: number): number {
+  if (text.charCodeAt(colon) !== 58) return -1;
+  let end = colon + 1;
+  while (end < text.length && end <= colon + 6 && isDigit(text.charCodeAt(end))) end += 1;
+  const digits = end - colon - 1;
+  return digits >= 2 && digits <= 5 && !(end < text.length && isWordChar(text.charCodeAt(end))) ? end : -1;
+}
+
+// IPv4 addresses, bracketed IPv6 addresses, `localhost` and dotted names, each followed by a port.
+function replaceHostPorts(text: string): string {
+  let result = "";
+  let copied = 0;
+  // The run of name characters from where it was last read: its end, the port after it, its last dot, the first
+  // place after its last `..`, and whether it ends with a dot.
+  let end = 0;
+  let port = -1;
+  let lastDot = -1;
+  let afterDoubleDot = 0;
+  let endsWithDot = false;
+  for (let at = 0; at < text.length; at += 1) {
+    const code = text.charCodeAt(at);
+    let matchEnd = -1;
+    if (code === 91) {
+      bracketedHostPort.lastIndex = at;
+      if (bracketedHostPort.test(text)) matchEnd = bracketedHostPort.lastIndex;
+    } else if (isHostChar(code)) {
+      if (at >= end) {
+        lastDot = -1;
+        afterDoubleDot = at;
+        for (end = at; end < text.length && isHostChar(text.charCodeAt(end)); end += 1) {
+          if (text.charCodeAt(end) !== 46) continue;
+          if (lastDot >= 0 && lastDot === end - 1) afterDoubleDot = end + 1;
+          lastDot = end;
+        }
+        port = portEnd(text, end);
+        endsWithDot = lastDot >= 0 && lastDot === end - 1;
+      }
+      if (port >= 0 && code !== 46 && wordBoundary(text, at)) {
+        // Dot-separated labels from here to the port; IPv4 addresses are among them.
+        if (!endsWithDot && at >= afterDoubleDot && lastDot > at) matchEnd = port;
+        else if (end - at === 9 && text.slice(at, end).toLowerCase() === "localhost") matchEnd = port;
+      }
+    }
+    if (matchEnd < 0) continue;
+    result += `${text.slice(copied, at)}<address>`;
+    copied = matchEnd;
+    at = matchEnd - 1;
+    end = 0;
+  }
+  return copied ? result + text.slice(copied) : text;
+}
 
 function baseName(value: string): string {
   return value.split(/[?#]/, 1)[0]!.replace(/\/+$/, "").split("/").pop() ?? "";
@@ -87,7 +185,7 @@ export function scrubText(text: string, roots: readonly SensitiveRoot[]): string
   if (!text.includes("/") && !text.includes(":") && !text.includes(".")) return text;
   let result = text;
   for (const root of roots) result = replaceRoot(result, root);
-  return replaceIpAddresses(result.replace(addressPattern, "<address>").replace(hostPortPattern, "<address>"))
+  return replaceIpAddresses(replaceHostPorts(replaceUrls(result)))
     .replace(absolutePathPattern, (_match, before: string, found: string) => `${before}…/${baseName(found)}`);
 }
 

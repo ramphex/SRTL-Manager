@@ -21,7 +21,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, extraSymlinksForPurge, operationsForJob, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, extraSymlinksForPurge, operationsForJob, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -33,7 +33,7 @@ import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
 import { isCopySourceLink, planCopyRetry, type CopyRetryPlanning, type CopyRetryResult } from "./copyRetry";
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
-import { discardPartialCopy, previewPartialCopyDiscard } from "./partialCopyDiscard";
+import { discardPartialCopy, PartialCopyDiscardError, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
 import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
 import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
@@ -57,7 +57,9 @@ import type {
   CopyReconciliationState,
   PartialCopyDiscardPreview,
   PartialCopyDiscardRequest,
-  PartialCopyDiscardResult,
+  PartialCopyDiscardJobProgress,
+  PartialCopyDiscardQueued,
+  OrphanRestoreJobProgress,
   CopyFailureList,
   JobSelectionSummary,
   JobStatus,
@@ -614,6 +616,15 @@ function sectionResourceClaims(sections: Iterable<string>, access: ResourceClaim
     resourceKey: section,
     access
   }));
+}
+
+function parseRemovedLinkPaths(raw: string): string[] {
+  try {
+    const value: unknown = JSON.parse(raw);
+    return Array.isArray(value) ? value.flatMap((entry) => (entry && typeof entry === "object" && typeof (entry as { linkPath?: unknown }).linkPath === "string" ? [(entry as { linkPath: string }).linkPath] : [])) : [];
+  } catch {
+    return [];
+  }
 }
 
 function inventoryScopeResourceClaims(
@@ -2528,8 +2539,88 @@ export class JobRunner {
     return previewPartialCopyDiscard(this.db, operationId);
   }
 
-  async discardPartialCopy(operationId: number, request: PartialCopyDiscardRequest): Promise<PartialCopyDiscardResult> {
-    return discardPartialCopy(this.db, operationId, request);
+  /**
+   * Queues the discard for the worker, which has write access to storage. It
+   * is checked here against the reviewed file and checked again by the job
+   * right before the delete.
+   */
+  async startPartialCopyDiscard(operationId: number, request: PartialCopyDiscardRequest): Promise<PartialCopyDiscardQueued & { copyJobId: number }> {
+    let copyJobId = 0;
+    const jobId = await this.enqueuePreparedJob("partial_copy_discard", async (transaction) => {
+      const pending = await dbGet<{ jobId: number }>(transaction, sql`
+        SELECT claim.job_id AS "jobId"
+        FROM job_resource_claims AS claim
+        JOIN jobs ON jobs.id = claim.job_id
+        WHERE claim.resource_type = 'copy_discard' AND claim.resource_key = ${String(operationId)} AND jobs.status IN ('queued', 'running')
+        LIMIT 1
+      `);
+      if (pending) throw new PartialCopyDiscardError(`Partial copy for operation #${operationId} is already being discarded by job #${pending.jobId}.`, 409);
+      const preview = await previewPartialCopyDiscard(transaction, operationId);
+      if (!preview.eligible || !preview.tempPath || preview.tempSizeBytes == null) {
+        throw new PartialCopyDiscardError(`Partial copy for operation #${operationId} was not discarded: ${preview.blockers.join(" ")} Leave it for manual handling.`, 409);
+      }
+      if (path.resolve(request.tempPath) !== path.resolve(preview.tempPath) || request.tempSizeBytes !== preview.tempSizeBytes) {
+        throw new PartialCopyDiscardError(`Partial copy for operation #${operationId} was not discarded: the temporary file changed since it was reviewed. Review it again before discarding.`, 409);
+      }
+      copyJobId = preview.jobId;
+      const options = { operationId, copyJobId: preview.jobId, tempPath: preview.tempPath, tempSizeBytes: preview.tempSizeBytes };
+      const progress: PartialCopyDiscardJobProgress = { options: { operationId, copyJobId: preview.jobId }, stage: "queued", message: `Waiting to discard the partial copy for operation #${operationId}` };
+      return {
+        progress,
+        options,
+        exclusive: false,
+        // Only another discard of the same entry conflicts: the open reconciliation already keeps other jobs off this media.
+        claims: [{ resourceType: "copy_discard", resourceKey: String(operationId), access: "exclusive" }]
+      };
+    });
+    return { jobId, operationId, copyJobId };
+  }
+
+  /** Queues a restore of held orphans for the worker, which has write access to storage. */
+  async startHeldRestore(operationIds: number[]): Promise<number> {
+    const requested = [...new Set(operationIds)];
+    if (requested.length === 0 || requested.some((id) => !Number.isInteger(id) || id < 1)) throw new AdmissionError("Choose at least one held file to restore");
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    return this.enqueuePreparedJob("orphan_restore", async (transaction) => {
+      const rows = await transaction.select().from(schema.orphanPurgeOperations).where(inArray(schema.orphanPurgeOperations.id, requested));
+      const found = new Map(rows.map((row) => [row.id, row]));
+      const unavailable = requested.filter((id) => {
+        const row = found.get(id);
+        return !row || row.stage !== "held" || !row.heldPath;
+      });
+      if (unavailable.length > 0) {
+        throw new ConflictError(`${unavailable.length === 1 ? "Held file" : "Held files"} #${unavailable.slice(0, 5).join(", #")}${unavailable.length > 5 ? ` and ${unavailable.length - 5} more` : ""} ${unavailable.length === 1 ? "is" : "are"} not available to restore. Refresh the list and try again.`);
+      }
+      const claims: ResourceClaim[] = [];
+      for (const row of rows) {
+        const rootType = row.rootType as StorageRootType;
+        const root = rootPathFor(paths, rootType);
+        if (!root) throw new AdmissionError("Storage path settings are incomplete");
+        claims.push(...inventoryScopeResourceClaims(rootType, [path.relative(root, row.filePath).split(path.sep)[0] ?? ""], "shared"));
+      }
+      const pathClaim = async (root: string | null, target: string, label: string) =>
+        managedPathResourceClaims(root, target, label, "exclusive", true).catch((error: unknown) => {
+          throw new AdmissionError(errorMessage(error));
+        });
+      for (let offset = 0; offset < rows.length; offset += 16) {
+        const batch = rows.slice(offset, offset + 16);
+        const batchClaims = await Promise.all(
+          batch.flatMap((row) => {
+            const root = rootPathFor(paths, row.rootType as StorageRootType);
+            const links = parseRemovedLinkPaths(row.removedLinks);
+            return [
+              pathClaim(root, row.filePath, "Restore claim"),
+              pathClaim(root, row.heldPath!, "Holding area claim"),
+              ...links.map((linkPath) => pathClaim(paths.symlinkDir, linkPath, "Restored symlink claim"))
+            ];
+          })
+        );
+        claims.push(...batchClaims.flat());
+      }
+      const total = requested.length;
+      const progress: OrphanRestoreJobProgress = { options: { total }, current: 0, total, restored: 0, failed: 0, remaining: total, stage: "queued", message: "Waiting to restore held files" };
+      return { progress, options: { total, operationIds: requested }, exclusive: false, claims: normalizeResourceClaims(claims) };
+    });
   }
 
   async listEvents(jobId: number, afterId = 0, limit = 100): Promise<JobEventRecord[]> {
@@ -3386,7 +3477,7 @@ export class JobWorker {
   private limitForType(type: JobRecord["type"]): number {
     if (type === "scan") return this.concurrency.maxRunningScans;
     if (type === "audit") return this.concurrency.maxRunningAudits;
-    if (type === "copy" || type === "symlink_cleanup" || type === "orphan_purge") return this.concurrency.maxRunningCopies;
+    if (type === "copy" || type === "symlink_cleanup" || type === "orphan_purge" || type === "orphan_restore") return this.concurrency.maxRunningCopies;
     if (type === "backup") return 1;
     return this.concurrency.maxRunningJobs;
   }
@@ -3665,6 +3756,14 @@ export class JobWorker {
     }
     if (job.type === "orphan_purge") {
       await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; source?: string }>(job) ?? {});
+      return;
+    }
+    if (job.type === "orphan_restore") {
+      await this.runOrphanRestoreJob(ctx, jobProgressOptions<{ operationIds?: unknown }>(job) ?? {});
+      return;
+    }
+    if (job.type === "partial_copy_discard") {
+      await this.runPartialCopyDiscardJob(ctx, jobProgressOptions<Record<string, unknown>>(job) ?? {});
       return;
     }
     if (job.type === "watch_sync") {
@@ -4327,6 +4426,87 @@ export class JobWorker {
     }
     await setProgress("completed", `${name} finished: ${summary || "nothing to do"}`);
     await ctx.event("info", `${name} finished`, { held, deleted, alreadyMissing, failed, total });
+  }
+
+  private async runOrphanRestoreJob(ctx: JobContext, jobOptions: { operationIds?: unknown }): Promise<void> {
+    const ids = Array.isArray(jobOptions.operationIds) ? jobOptions.operationIds.filter((id): id is number => Number.isInteger(id) && Number(id) > 0) : [];
+    if (ids.length === 0) throw new Error("Restore job has no held files");
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    const total = ids.length;
+    let current = 0;
+    let restored = 0;
+    let failed = 0;
+    let firstError: OrphanRestoreJobProgress["firstError"] | null = null;
+    const setProgress = (stage: OrphanRestoreJobProgress["stage"], message: string) => {
+      const progress: OrphanRestoreJobProgress = { options: { total }, current, total, restored, failed, remaining: Math.max(0, total - current), stage, message, ...(firstError ? { firstError } : {}) };
+      return ctx.setProgress(progress);
+    };
+    await setProgress("restoring", "Restoring held files");
+    await ctx.event("info", "Restore started", { total });
+    for (const operationId of ids) {
+      if (await ctx.isCancelled()) break;
+      let filePath: string | null = null;
+      try {
+        const outcome = await ctx.withLeaseDb(async (leaseDb) => {
+          const journal = await first(leaseDb.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).limit(1));
+          filePath = journal?.filePath ?? null;
+          // A job that is picked up again after a restart skips what it already restored.
+          if (journal?.stage === "restored") return "already" as const;
+          await restoreHeldOrphan(leaseDb, paths, operationId);
+          return "restored" as const;
+        });
+        current += 1;
+        restored += 1;
+        await ctx.event("info", outcome === "already" ? "Held file was already restored" : "Held file restored", { operationId, filePath });
+      } catch (error: unknown) {
+        if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+        current += 1;
+        failed += 1;
+        const message = errorMessage(error);
+        firstError ??= { filePath, message };
+        await ctx.event("error", "Held file was not restored", { operationId, filePath, reason: message });
+      }
+      await setProgress("restoring", `${current} of ${total} processed`);
+    }
+    if (await ctx.isCancelled()) {
+      await setProgress("cancelled", "Restore stopped; files already restored stay restored");
+      await ctx.event("warn", "Restore stopped; files already restored stay restored", { restored, failed, total });
+      return;
+    }
+    if (failed > 0) {
+      const partial = restored > 0;
+      const message = `Restore ${partial ? "partially failed" : "failed"}: ${failed} of ${total} held files were not restored`;
+      await setProgress(partial ? "partially_failed" : "failed", message);
+      await ctx.event(partial ? "warn" : "error", message, { restored, failed, total });
+      if (partial) throw new PartialJobFailureError(message);
+      throw new Error(message);
+    }
+    await setProgress("completed", `Restored ${restored} held ${restored === 1 ? "file" : "files"}`);
+    await ctx.event("info", "Restore finished", { restored, total });
+  }
+
+  private async runPartialCopyDiscardJob(ctx: JobContext, jobOptions: Record<string, unknown>): Promise<void> {
+    const operationId = Number(jobOptions.operationId);
+    const copyJobId = Number(jobOptions.copyJobId);
+    const tempPath = typeof jobOptions.tempPath === "string" ? jobOptions.tempPath : "";
+    const tempSizeBytes = Number(jobOptions.tempSizeBytes);
+    if (!Number.isInteger(operationId) || operationId < 1 || !tempPath || !Number.isInteger(tempSizeBytes)) throw new Error("Discard job is missing its copy operation");
+    const setProgress = (stage: PartialCopyDiscardJobProgress["stage"], message: string, removedBytes?: number) =>
+      ctx.setProgress({ options: { operationId, copyJobId }, stage, message, ...(removedBytes === undefined ? {} : { removedBytes }) } satisfies PartialCopyDiscardJobProgress);
+    await setProgress("discarding", `Discarding the partial copy for operation #${operationId}`);
+    await ctx.event("info", "Discarding partial copy", { operationId, copyJobId });
+    await ctx.assertLease();
+    try {
+      // Takes the scheduler lock itself and checks the journal, the symlink and the file again right before the delete.
+      const result = await discardPartialCopy(this.db, operationId, { tempPath, tempSizeBytes });
+      await setProgress("completed", `Discarded the partial copy for operation #${operationId}`, result.removedBytes);
+      await ctx.event("info", "Partial copy discarded", { operationId, copyJobId: result.jobId, removedTempPath: result.removedTempPath, removedBytes: result.removedBytes });
+    } catch (error: unknown) {
+      const message = errorMessage(error);
+      await setProgress("failed", message);
+      await ctx.event("error", "Partial copy was not discarded", { operationId, reason: message });
+      throw error;
+    }
   }
 
   private async runSymlinkCleanupJob(options: SymlinkCleanupOptions, ctx: JobContext): Promise<void> {

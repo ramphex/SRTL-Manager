@@ -4,6 +4,24 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- **Restore** in the orphan holding area and **Discard partial copy** work in the standard Docker setup, where storage is mounted read-only into the API. Both now run in the worker as jobs, with progress, a log and an entry in the action record, and the page follows the job until it finishes. Each item is checked again when the job runs.
+
+### Security
+
+- Sign-in lockouts are tied to the username and the client together, so failed attempts from one address can no longer lock the real user out from another. A per-username guard slows clients that keep failing on a name under attack without refusing a client that has not failed. IPv6 clients are counted per /64 network.
+- Every sign-in attempt is counted before its password is checked and refunded only if it succeeds, so parallel attempts cannot get past the limit, and a successful sign-in no longer clears failures that other attempts caused. A full lockout table drops unlocked entries first.
+- At most two password checks run at once. Further sign-ins get 429 with `Retry-After` instead of piling up memory-heavy checks.
+- The orphan holding area is checked folder by folder right before every move, restore and delete in it. A symlink or a folder that does not belong to SRTL anywhere on the way stops the change, so the end of a holding period can no longer delete anything outside the storage root. A restore never replaces a file that has appeared in the meantime.
+- Orphan and damaged file purges check each file and folder by its real path immediately before moving or deleting it, including each file of a folder delete and the subtitles and artwork cleaned up after the last video in a folder.
+- Release builds verify and test the code in a separate job with a read-only token, so the job that publishes images never runs npm install scripts. Checkouts no longer keep the token, the unused OIDC permission is gone, and stable and beta images are scanned before their version tag is pushed.
+- `@fastify/static` is updated to 10.1.10, which resolves the moderate `glob` and `minimatch` advisories in the runtime dependencies.
+- Forced update checks share a check already in progress and are limited per account.
+- Now Playing shortens very long names reported by media servers, and hiding addresses for restricted accounts stays fast on long text.
+- Signing out, or a different account signing in, clears everything the app had cached for the previous account.
+- Plex sign-in and user discovery no longer save tokens if the server's address or token changes while they are running.
+
 ## [0.1.4] - 2026-11-09
 
 Everything from 0.1.4-beta.1 to 0.1.4-beta.7. The beta sections below have the full detail.

@@ -8,6 +8,7 @@ import { ConflictError, publicErrorMessage } from "../errors";
 import { parseEpisodeNumbers } from "../lib/episodeNumbers";
 import { extraLinkCovering, extraLinkTouchingFolder, extraSymlinkFolders, extraSymlinkRefusal, readExtraSymlinks, type ExtraSymlinks } from "../lib/extraSymlinkFolders";
 import { assertExistingPathInside, assertPathParentInside, withFilesystemTimeout } from "../lib/filesystemSafety";
+import { assertStillInside, deleteHoldingEntry, moveIntoHoldingArea, moveOutOfHoldingArea, removeEmptyHoldingFolders } from "../lib/holdingArea";
 import { removeExpectedSymlink } from "./symlinkCleanup";
 import { holdingFolderName, isCoveredByPath, isMediaFile, isPathInside, pathAndAncestors } from "../lib/media";
 import { effectiveIntegrity } from "../lib/mediaIntegrity";
@@ -543,13 +544,24 @@ async function findLiveSymlinkTo(directory: string, target: string, depth = 3): 
   return null;
 }
 
-async function moveOrRemove(from: string, to: string | null): Promise<void> {
-  if (to) {
-    await fs.mkdir(path.dirname(to), { recursive: true });
-    await withFilesystemTimeout(fs.rename(from, to), `Moving ${from} to the holding area`);
-  } else {
-    await withFilesystemTimeout(fs.unlink(from), `Deleting ${from}`);
-  }
+type Stat = import("node:fs").Stats;
+
+// Checks the file right before it is touched: still a regular file, still inside the root, and, for the file the
+// purge is about, unchanged since it was inventoried. The holding area is checked folder by folder on the way in.
+async function moveOrRemove(root: string, from: string, to: string | null, expect?: (stat: Stat) => void): Promise<void> {
+  const stat = await assertStillInside(root, from, "file", from);
+  expect?.(stat);
+  if (to) await moveIntoHoldingArea(root, from, to);
+  else await withFilesystemTimeout(fs.unlink(from), `Deleting ${from}`);
+}
+
+function unchangedSince(operation: PurgeOperation, now: number, action: string): (stat: Stat) => void {
+  return (stat) => {
+    if (stat.size !== Number(operation.sizeBytes) || Math.trunc(stat.mtimeMs) !== Number(operation.mtimeMs)) {
+      throw new Error(`File changed after it was inventoried; rescan before ${action}`);
+    }
+    if (now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
+  };
 }
 
 // When the last video in a folder is purged, its subtitles, artwork, and metadata go with it, then empty folders.
@@ -559,6 +571,8 @@ async function cleanFolderAfterPurge(root: string, stopAt: string, directory: st
   while (isPathInside(stopAt, current) && path.resolve(current) !== path.resolve(stopAt)) {
     // A link from another tool can point at a subtitle here, which is still in use with the video gone.
     if (extra && extraLinkTouchingFolder(extra, current)) break;
+    // Checked by real path, not by name, right before it is read and again before it is removed.
+    if (!(await assertStillInside(root, current, "folder", current).then(() => true, () => false))) break;
     const entries = await withFilesystemTimeout(fs.readdir(current, { withFileTypes: true }), `Reading ${current}`).catch(() => null);
     if (!entries) break;
     if (entries.some((entry) => entry.isDirectory() || (entry.isFile() && isMediaFile(entry.name)) || (!entry.isFile() && !entry.isDirectory()))) break;
@@ -566,9 +580,15 @@ async function cleanFolderAfterPurge(root: string, stopAt: string, directory: st
     for (const entry of entries) {
       const from = path.join(current, entry.name);
       const to = holdBase ? path.join(holdBase, path.relative(root, from)) : null;
-      await moveOrRemove(from, to);
+      // Whatever was moved before a failure is still recorded, so it can be restored or expired.
+      try {
+        await moveOrRemove(root, from, to);
+      } catch {
+        return extras;
+      }
       extras.push({ from, to });
     }
+    if (!(await assertStillInside(root, current, "folder", current).then(() => true, () => false))) break;
     await fs.rmdir(current).catch(() => undefined);
     current = path.dirname(current);
   }
@@ -619,16 +639,21 @@ async function assertFolderStillLeftover(directory: string, now: number, content
 /** The filesystem calls a folder delete needs; tests swap in a fake that behaves like a debrid mount. */
 export type FolderDeleteFs = Pick<typeof fs, "unlink" | "rmdir">;
 
+/** Runs right before each unlink or rmdir of a folder delete; throws to stop it. */
+export type FolderDeleteCheck = (target: string, kind: "file" | "folder") => Promise<void>;
+
 /**
  * Deletes the files a re-walk checked one at a time, then the folders that held them, deepest first.
  * Debrid FUSE mounts refuse rmdir on a folder that still has files (EIO), which is all a recursive rm tries,
  * but they allow unlinking files and drop the folder themselves once its last file goes. So a folder that is
  * already gone counts as removed. A failure says how far the delete got.
  */
-export async function deleteFolderFileByFile(directory: string, contents: FolderContents, ops: FolderDeleteFs = fs): Promise<void> {
+export async function deleteFolderFileByFile(directory: string, contents: FolderContents, ops: FolderDeleteFs = fs, check?: FolderDeleteCheck): Promise<void> {
   let deleted = 0;
   for (const filePath of contents.files) {
     try {
+      // The list was collected earlier, so each file is checked again right before it goes.
+      await check?.(filePath, "file");
       await withFilesystemTimeout(ops.unlink(filePath), `Deleting ${filePath}`);
     } catch (error) {
       if (errorCode(error) !== "ENOENT") {
@@ -640,6 +665,7 @@ export async function deleteFolderFileByFile(directory: string, contents: Folder
   }
   for (const folder of contents.directories) {
     try {
+      await check?.(folder, "folder");
       await withFilesystemTimeout(ops.rmdir(folder), `Removing folder ${folder}`);
     } catch (error) {
       if (errorCode(error) === "ENOENT") continue;
@@ -697,12 +723,15 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
 
   const heldPath = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`, path.relative(root, directory)) : null;
   try {
+    // The walks above take time, so the folder is checked again right before it is moved or deleted.
+    await assertStillInside(root, directory, "folder", "Leftover folder");
     if (heldPath) {
-      await assertPathParentInside(root, heldPath, "Holding area").catch(() => undefined);
-      await fs.mkdir(path.dirname(heldPath), { recursive: true });
-      await withFilesystemTimeout(fs.rename(directory, heldPath), `Moving ${directory} to the holding area`);
+      await moveIntoHoldingArea(root, directory, heldPath);
     } else {
-      await deleteFolderFileByFile(directory, contents);
+      await deleteFolderFileByFile(directory, contents, fs, async (target, kind) => {
+        const stat = await assertStillInside(root, target, kind, target);
+        if (kind === "file" && now - stat.mtimeMs < purgeGraceMs) throw new Error(`${target} was modified in the last 24 hours`);
+      });
     }
   } catch (error) {
     throw holdingAreaError(error, heldPath);
@@ -762,9 +791,9 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
   const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
-  if (heldPath) await assertPathParentInside(root, heldPath, "Holding area").catch(() => undefined);
   try {
-    await moveOrRemove(operation.filePath, heldPath);
+    // Checked again right before the move or delete: the symlink walks above take time.
+    await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "purging"));
   } catch (error) {
     throw holdingAreaError(error, heldPath);
   }
@@ -849,9 +878,8 @@ async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
   const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
-  if (heldPath) await assertPathParentInside(root, heldPath, "Holding area").catch(() => undefined);
   try {
-    await moveOrRemove(operation.filePath, heldPath);
+    await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "deleting"));
   } catch (error) {
     throw holdingAreaError(error, heldPath);
   }
@@ -910,44 +938,66 @@ async function restoreRemovedLinks(db: DbExecutor, symlinkDir: string, links: Re
   }
 }
 
+/**
+ * Puts one held file (or folder) back. The caller holds the locks: a restore
+ * job's resource claims, or {@link restoreHeldOrphans}' mutation guard.
+ */
+export async function restoreHeldOrphan(transaction: DbExecutor, paths: PathsSettings, operationId: number): Promise<RestoredOrphan> {
+  const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).for("update").limit(1))[0];
+  if (!operation || operation.stage !== "held" || !operation.heldPath) throw new ConflictError(`Held file #${operationId} is not available to restore`);
+  const root = rootPathFor(paths, operation.rootType as StorageRootType);
+  const holdRoot = path.join(root, holdingFolderName);
+  if (!root || !isPathInside(holdRoot, operation.heldPath!) || !isPathInside(root, operation.filePath) || isPathInside(holdRoot, operation.filePath)) {
+    throw new ConflictError(`Held file #${operationId} is outside its storage root.`);
+  }
+  try {
+    // Checks the holding area folder by folder, creates the way back inside the root, and never replaces anything.
+    await moveOutOfHoldingArea(root, operation.heldPath!, operation.filePath, `Held file #${operationId}`);
+  } catch (error) {
+    if (errorCode(error) === "EEXIST") throw new ConflictError(`A file now exists where held file #${operationId} came from; restore it manually.`, { detail: operation.filePath });
+    if (errorCode(error) === "EUNSAFEPATH") throw new ConflictError(`Held file #${operationId} could not be restored safely: ${error instanceof Error ? error.message : String(error)}`);
+    throw error;
+  }
+  for (const extra of parseExtras(operation.extras)) {
+    if (!extra.to || !isPathInside(holdRoot, extra.to) || !isPathInside(root, extra.from) || isPathInside(holdRoot, extra.from)) continue;
+    // A sidecar that cannot go back safely, or whose place is taken, stays in the holding area.
+    await moveOutOfHoldingArea(root, extra.to, extra.from, "Sidecar").catch(() => undefined);
+  }
+  await removeEmptyHoldingFolders(root, path.dirname(operation.heldPath!));
+  await restoreRemovedLinks(transaction, paths.symlinkDir, parseRemovedLinks(operation.removedLinks));
+  const timestamp = nowIso();
+  // A restored folder is found again by the next storage scan.
+  if (operation.targetKind !== "folder") {
+    await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
+  }
+  await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
+  // The file is back, so nothing should go looking for another copy of it.
+  await transaction
+    .update(schema.reRequests)
+    .set({ status: "skipped", message: "The file was restored, so nothing was requested.", updatedAt: timestamp })
+    .where(and(eq(schema.reRequests.operationId, operation.id), inArray(schema.reRequests.status, ["queued", "pending", "failed"])));
+  return { operationId: operation.id, filePath: operation.filePath, rootType: operation.rootType as StorageRootType, targetKind: operation.targetKind };
+}
+
+export interface RestoredOrphan {
+  operationId: number;
+  filePath: string;
+  rootType: StorageRootType;
+  targetKind: string;
+}
+
+/** Restores held files one at a time, each under the mutation guard. The API queues a restore job instead; this is for callers already in the worker. */
 export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operationIds: number[], onError?: (error: unknown, operationId: number) => void): Promise<{ restored: number; errors: string[] }> {
   let restored = 0;
   const errors: string[] = [];
   for (const operationId of operationIds) {
     try {
       await withResourceMutationGuard(db, async (transaction) => {
-        const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).for("update").limit(1))[0];
+        const operation = (await transaction.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.id, operationId)).limit(1))[0];
         if (!operation || operation.stage !== "held" || !operation.heldPath) throw new ConflictError(`Held file #${operationId} is not available to restore`);
         return {
           resources: [{ resourceType: "path", resourceKey: path.resolve(operation.filePath) }],
-          mutate: async () => {
-            const root = rootPathFor(paths, operation.rootType as StorageRootType);
-            if (!isPathInside(root, operation.heldPath!) || !isPathInside(root, operation.filePath)) throw new ConflictError(`Held file #${operationId} is outside its storage root.`);
-            const occupied = await fs.lstat(operation.filePath).then(() => true, () => false);
-            if (occupied) throw new ConflictError(`A file now exists where held file #${operationId} came from; restore it manually.`, { detail: operation.filePath });
-            await fs.mkdir(path.dirname(operation.filePath), { recursive: true });
-            await fs.rename(operation.heldPath!, operation.filePath);
-            for (const extra of parseExtras(operation.extras)) {
-              if (!extra.to) continue;
-              const occupiedExtra = await fs.lstat(extra.from).then(() => true, () => false);
-              if (!occupiedExtra) await fs.rename(extra.to, extra.from).catch(() => undefined);
-            }
-            const holdRoot = path.join(root, holdingFolderName);
-            await removeEmptyHoldingFolders(path.dirname(operation.heldPath!), holdRoot);
-            await fs.rmdir(holdRoot).catch(() => undefined);
-            await restoreRemovedLinks(transaction, paths.symlinkDir, parseRemovedLinks(operation.removedLinks));
-            const timestamp = nowIso();
-            // A restored folder is found again by the next storage scan.
-            if (operation.targetKind !== "folder") {
-              await transaction.update(schema.storageFiles).set({ missingSince: null, updatedAt: timestamp }).where(eq(schema.storageFiles.id, operation.storageFileId));
-            }
-            await transaction.update(schema.orphanPurgeOperations).set({ stage: "restored", updatedAt: timestamp }).where(eq(schema.orphanPurgeOperations.id, operation.id));
-            // The file is back, so nothing should go looking for another copy of it.
-            await transaction
-              .update(schema.reRequests)
-              .set({ status: "skipped", message: "The file was restored, so nothing was requested.", updatedAt: timestamp })
-              .where(and(eq(schema.reRequests.operationId, operation.id), inArray(schema.reRequests.status, ["queued", "pending", "failed"])));
-          }
+          mutate: () => restoreHeldOrphan(transaction, paths, operationId)
         };
       });
       restored += 1;
@@ -959,17 +1009,9 @@ export async function restoreHeldOrphans(db: Db, paths: PathsSettings, operation
   return { restored, errors };
 }
 
-async function removeEmptyHoldingFolders(directory: string, stopAt: string): Promise<void> {
-  let current = directory;
-  while (isPathInside(stopAt, current) && path.resolve(current) !== path.resolve(stopAt)) {
-    const removed = await fs.rmdir(current).then(() => true, () => false);
-    if (!removed) return;
-    current = path.dirname(current);
-  }
-}
-
 // Permanently deletes held files whose retention ended. Runs during worker maintenance.
-export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date.now()): Promise<number> {
+// Every path is checked folder by folder right before the delete; an operation with any unsafe path is left for a person to look at.
+export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date.now(), onError?: (error: unknown, operationId: number) => void): Promise<number> {
   const due = await db
     .select()
     .from(schema.orphanPurgeOperations)
@@ -980,18 +1022,16 @@ export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date
     const holdRoot = path.join(root, holdingFolderName);
     const targets = [operation.heldPath, ...parseExtras(operation.extras).map((extra) => extra.to)].filter((value): value is string => Boolean(value));
     if (!root || targets.some((target) => !isPathInside(holdRoot, target))) continue;
-    for (const target of targets) {
-      if (operation.targetKind === "folder") {
-        await fs.rm(target, { recursive: true, force: true });
-      } else {
-        await fs.unlink(target).catch((error: unknown) => {
-          if (errorCode(error) !== "ENOENT") throw error;
-        });
+    try {
+      for (const target of targets) {
+        await deleteHoldingEntry(root, target, operation.targetKind === "folder");
+        await removeEmptyHoldingFolders(root, path.dirname(target));
       }
-      await removeEmptyHoldingFolders(path.dirname(target), holdRoot);
+    } catch (error) {
+      onError?.(error, operation.id);
+      continue;
     }
     await db.update(schema.orphanPurgeOperations).set({ stage: "expired", updatedAt: nowIso() }).where(eq(schema.orphanPurgeOperations.id, operation.id));
-    await fs.rmdir(holdRoot).catch(() => undefined);
     expired += 1;
   }
   return expired;

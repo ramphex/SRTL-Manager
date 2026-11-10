@@ -17,7 +17,8 @@ import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters
 import { normalizeAuditTargets } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 import { jobEventCountLabel } from "./jobEvents";
-import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
+import { jobFinished, useQueuedJob } from "./queuedJob";
+import { type AuditMode, type AuditRunRecord, type AdvancedSettings, type CopyReconciliationRecord, type JobRecord, type PartialCopyDiscardJobProgress, type PartialCopyDiscardQueued, type CopyMediaValidationMode, type CopyVerificationProfile, type PathsSettings, type ScanOptions, type ScanRunRecord, type StorageLocationKey, type StorageLocationsSettings, type SymlinkScanSchedulingMode, type TimeFormatPreference, type UserPreferences } from "../shared/types";
 import { LogChipList, Page, Panel, ScanProgressPanel, SectionDraftList, StatusPill } from "./App";
 import { auditModeOptions, AuditStatusPrompt, settingsSections, copyPipelineLabels, copyProfileOptions, createEmptySectionDraft, defaultStorageLocations, defaultUserPreferences, formatBytes, formatDate, formatDuration, formatNumber, inventoryAssignedRemoteCount, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, mediaValidationOptions, ScanStatusPrompt, SectionDraft, sectionDraftsToSettings, sectionSettingsToDrafts, SettingsView, storageLocationName, timeFormatOptions, useJobEventTimeline, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditProgressPanel, AuditStatusDialog, CopyProgressPanel, CopyRetryAction, JobScope, LogEventRow, OrphanPurgeProgressPanel, OrphanPurgeStatusDialog, ScanStatusDialog } from "./jobPresentation";
@@ -617,7 +618,7 @@ function PartialCopyDiscardDialog({
 }: {
   operation: CopyReconciliationRecord | null;
   onClose: () => void;
-  onDiscarded: (message: string) => void;
+  onDiscarded: (queued: PartialCopyDiscardQueued) => void;
 }) {
   const queryClient = useQueryClient();
   const preview = useQuery({
@@ -634,9 +635,8 @@ function PartialCopyDiscardDialog({
       return api.discardPartialCopy(operation.id, { tempPath: data.tempPath, tempSizeBytes: data.tempSizeBytes });
     },
     onSuccess: (result) => {
-      queryClient.setQueryData(["copy-reconciliation"], result.state);
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
-      onDiscarded(`Discarded ${formatBytes(result.removedBytes)} partial copy for operation #${result.operationId} and closed it.`);
+      onDiscarded(result);
     },
     onError: () => {
       void preview.refetch();
@@ -703,7 +703,7 @@ function PartialCopyDiscardDialog({
             <TriangleAlert size={18} />
             <div>
               <strong>This cannot be undone.</strong>
-              <span>The server re-checks the symlink, journal and temporary file again before deleting anything and refuses if they changed.</span>
+              <span>The worker re-checks the symlink, journal and temporary file again right before deleting anything and refuses if they changed.</span>
             </div>
           </div>
         ) : null}
@@ -714,11 +714,26 @@ function PartialCopyDiscardDialog({
           </button>
           <button type="button" className="danger-button" onClick={() => discard.mutate()} disabled={!data?.eligible || discard.isPending || preview.isFetching}>
             <Trash2 size={16} />
-            {discard.isPending ? "Discarding..." : "Discard partial copy"}
+            {discard.isPending ? "Queuing..." : "Discard partial copy"}
           </button>
         </div>
       </section>
     </div>
+  );
+}
+
+function PartialCopyDiscardJobStatus({ queued, job }: { queued: PartialCopyDiscardQueued; job: JobRecord | null }) {
+  const progress = (job?.progress ?? null) as Partial<PartialCopyDiscardJobProgress> | null;
+  if (!job || !jobFinished(job)) {
+    return <p className="panel-message" role="status">Discarding the partial copy for operation #{queued.operationId} in job #{queued.jobId}...</p>;
+  }
+  if (job.status === "completed") {
+    return <p className="panel-message success">Discarded {formatBytes(progress?.removedBytes ?? 0)} partial copy for operation #{queued.operationId} and closed it.</p>;
+  }
+  return (
+    <p className="panel-message action-error" role="alert">
+      Partial copy for operation #{queued.operationId} was not discarded (job #{queued.jobId}): {progress?.message ?? job.status}
+    </p>
   );
 }
 
@@ -729,7 +744,11 @@ function AdvancedSettingsPanel() {
   const [draft, setDraft] = useState<AdvancedSettings>(defaultAdvancedSettings);
   const [message, setMessage] = useState<string | null>(null);
   const [discardOperation, setDiscardOperation] = useState<CopyReconciliationRecord | null>(null);
-  const [discardMessage, setDiscardMessage] = useState<string | null>(null);
+  const [discardQueued, setDiscardQueued] = useState<PartialCopyDiscardQueued | null>(null);
+  const discardJob = useQueuedJob(discardQueued?.jobId ?? null, () => {
+    void queryClient.invalidateQueries({ queryKey: ["copy-reconciliation"] });
+    void queryClient.invalidateQueries({ queryKey: ["jobs"] });
+  });
   const savedAdvancedSettings = normalizeAdvancedSettings(settings.data ?? defaultAdvancedSettings);
   const savedCopyProfileLabel = copyProfileOptions.find((option) => option.value === savedAdvancedSettings.copy.profile)?.label ?? savedAdvancedSettings.copy.profile;
   const savedAuditModeLabel = auditModeOptions.find((option) => option.value === savedAdvancedSettings.audit.defaultMode)?.label ?? savedAdvancedSettings.audit.defaultMode;
@@ -1039,7 +1058,7 @@ function AdvancedSettingsPanel() {
             </span>
           </div>
           {reconciliation.error ? <p className="panel-message action-error">{reconciliation.error.message}</p> : null}
-          {discardMessage ? <p className="panel-message success">{discardMessage}</p> : null}
+          {discardQueued ? <PartialCopyDiscardJobStatus queued={discardQueued} job={discardJob.data ?? null} /> : null}
           {recheckReconciliation.data?.resolvedNow ? (
             <p className="panel-message success">Resolved {formatNumber(recheckReconciliation.data.resolvedNow)} stale copy journal {recheckReconciliation.data.resolvedNow === 1 ? "entry" : "entries"}.</p>
           ) : null}
@@ -1049,7 +1068,7 @@ function AdvancedSettingsPanel() {
                 <li key={operation.id}>
                   <strong>Operation #{operation.id} / job #{operation.jobId}</strong>
                   <span>{operation.errorMessage ?? "Filesystem state is still uncertain."}</span>
-                  <button type="button" className="secondary settings-reconciliation-action" onClick={() => { setDiscardMessage(null); setDiscardOperation(operation); }}>
+                  <button type="button" className="secondary settings-reconciliation-action" onClick={() => { setDiscardQueued(null); setDiscardOperation(operation); }}>
                     <Trash2 size={14} />
                     Discard partial copy
                   </button>
@@ -1067,9 +1086,9 @@ function AdvancedSettingsPanel() {
           <PartialCopyDiscardDialog
             operation={discardOperation}
             onClose={() => setDiscardOperation(null)}
-            onDiscarded={(text) => {
+            onDiscarded={(queued) => {
               setDiscardOperation(null);
-              setDiscardMessage(text);
+              setDiscardQueued(queued);
             }}
           />
         </section>
@@ -1425,6 +1444,8 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "copy", label: "Copies" },
   { value: "symlink_cleanup", label: "Symlink cleanups" },
   { value: "orphan_purge", label: "Orphan purges" },
+  { value: "orphan_restore", label: "Held file restores" },
+  { value: "partial_copy_discard", label: "Partial copy discards" },
   { value: "path_migration", label: "Path migrations" },
   { value: "watch_sync", label: "Watch sync" },
   { value: "backup", label: "Database backups" },

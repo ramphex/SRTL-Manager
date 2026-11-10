@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { clampKbps, jellyfinPlayMethod, parseJellyfinSession, parsePlexSession, plexPlayMethod, resolutionLabel, summarizeStreams } from "../src/server/lib/nowPlaying/classify";
+import { clampKbps, jellyfinPlayMethod, maxReportedTextLength, parseJellyfinSession, parsePlexSession, plexPlayMethod, resolutionLabel, summarizeStreams } from "../src/server/lib/nowPlaying/classify";
 import {
   jellyfinAudioOnlyTranscode,
   jellyfinDirectPlay,
@@ -136,6 +136,22 @@ describe("Jellyfin classification", () => {
     expect(parsed.remoteControl).toBe(false);
     expect(parsed.stream).toMatchObject({ playMethod: "directStream", videoDecision: "copy", audioDecision: "copy", output: { container: "mp4", bitrateKbps: 54_000 } });
     expect(parsed.stream.transcode?.reasons).toEqual(["Container not supported"]);
+  });
+
+  it("cuts names and labels to a fixed length but keeps ids and paths whole", () => {
+    const long = "Alpha.Bravo.".repeat(5000);
+    const session = jellyfinDirectPlay();
+    const item = session.NowPlayingItem as Record<string, unknown>;
+    const parsed = parseJellyfinSession({ ...session, DeviceName: long, Client: long, UserName: long, NowPlayingItem: { ...item, Name: long, Path: `/media/${long}.mkv` } }, now)!;
+    expect(parsed.stream.player.name).toBe(long.slice(0, maxReportedTextLength));
+    expect(parsed.stream.player.product).toHaveLength(maxReportedTextLength);
+    expect(parsed.stream.user.name).toHaveLength(maxReportedTextLength);
+    expect(parsed.stream.title).toHaveLength(maxReportedTextLength);
+    expect(parsed.filePath).toBe(`/media/${long}.mkv`);
+    expect(parsed.sessionKey).toBe("jf-session-1");
+    // Never cut between the two halves of one character.
+    const emoji = parseJellyfinSession({ ...session, DeviceName: `${"x".repeat(maxReportedTextLength - 1)}😀 Living Room` }, now)!;
+    expect(emoji.stream.player.name).toBe("x".repeat(maxReportedTextLength - 1));
   });
 
   it("ignores sessions with nothing playing, even when TranscodingInfo lingers", () => {

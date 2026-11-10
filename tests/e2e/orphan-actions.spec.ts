@@ -60,7 +60,8 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     else if (url.pathname === "/api/orphans") body = url.searchParams.get("rootType") === "local" ? orphanReview("local", 4, options) : orphanReview("remote", options.remoteCount ?? 1500, options);
     else if (url.pathname === "/api/orphans/purge") { purges.push(request.postDataJSON()); body = { jobId: 99 }; }
     else if (url.pathname === "/api/orphans/held") body = options.held ? [{ operationId: 5, jobId: 40, rootType: "remote", filePath: "/remote/shows/Alpha Bravo/Alpha.Bravo.S01E02.mkv", heldPath: "/remote/.srtl-purged/x", sizeBytes: 1_000_000, heldAt: "2026-11-05T10:00:00.000Z", purgeAfter: "2026-11-12T10:00:00.000Z" }] : [];
-    else if (url.pathname === "/api/orphans/held/restore") { restores.push(request.postDataJSON()); body = { restored: 1, errors: [] }; }
+    else if (url.pathname === "/api/orphans/held/restore") { restores.push(request.postDataJSON()); body = { jobId: 98 }; }
+    else if (url.pathname === "/api/jobs/98") body = { id: 98, type: "orphan_restore", status: "completed", createdAt: "2026-11-08T09:00:00.000Z", startedAt: "2026-11-08T09:00:01.000Z", finishedAt: "2026-11-08T09:00:02.000Z", options: { total: 1 }, progress: { options: { total: 1 }, current: 1, total: 1, restored: 1, failed: 0, remaining: 0, stage: "completed", message: "Restored 1 held file" } };
     else if (url.pathname === "/api/jobs/97/events") body = [{ id: 3, jobId: 97, timestamp: "2026-11-08T09:00:30.000Z", level: "error", message: "Orphan was not purged", data: { filePath: "/remote/x", reason: "Charlie (2001) could not be deleted (EIO)" } }];
     else if (url.pathname === "/api/re-requests") body = { items: [], counts: { queued: 0, pending: 0, requested: 0, failed: 0, unmatched: 0, skipped: 0 }, perMinute: 6 };
     else if (url.pathname === "/api/settings/sections") body = { sections: ["movies"], sectionTitles: { movies: "Movies" }, sectionTypes: { movies: "movies" } };
@@ -287,4 +288,6 @@ test("held files have their own tab with a restore button", async ({ page }) => 
   await restore.click();
   await expect.poll(() => purges.restores.length).toBe(1);
   expect(purges.restores[0]).toEqual({ operationIds: [5] });
+  // The worker restores the files as a job; the page follows it to the end.
+  await expect(page.getByText("Restored 1 file. Rescan to relink them if needed.")).toBeVisible();
 });

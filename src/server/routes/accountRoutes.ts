@@ -93,7 +93,7 @@ export function registerAccountRoutes(app: FastifyInstance, db: Db, options: Acc
     const { temporaryPassword } = z.object({ temporaryPassword: temporaryPasswordSchema }).parse(request.body);
     const change = await resetAccountPassword(db, actorId(request), id, temporaryPassword);
     // Whoever was locked out can sign in with the new password straight away.
-    options.throttle.usernames.reset(LoginThrottle.usernameKey(change.username));
+    options.throttle.clearUsername(change.username);
     await recordActionAudit(db, request, {
       action: "account.password_reset",
       summary: `Reset the password of "${change.username}"`,

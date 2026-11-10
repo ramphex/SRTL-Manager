@@ -9,6 +9,7 @@ import { currentScryptParameters, hashPassword, hashToken, passwordHashing, pass
 import type { AppConfig } from "../src/server/config";
 import * as schema from "../src/server/db/schema";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { clientBucket } from "../src/server/clientAddress";
 import { FailureThrottle, LoginThrottle, usernameThrottlePolicy } from "../src/server/loginThrottle";
 import { pruneSecurityEvents } from "../src/server/securityEvents";
 import { legacyCookieGraceMs, sessionCookieSettings } from "../src/server/sessionAccess";
@@ -298,24 +299,63 @@ describe("authentication and sessions", () => {
       expect(verify.mock.calls[0]?.[1]).toBe(admin?.passwordHash);
     });
 
-    it("locks a username after repeated failures from any address, whether or not it exists", async () => {
+    it("locks a username for the client that failed, whether or not it exists, and lets the owner in from elsewhere", async () => {
       const app = await startApp();
       await setupAdmin(app);
       for (const username of ["alex_03", "nobody"]) {
         const statuses: number[] = [];
+        // Different addresses in one IPv6 /64 count as one client.
         for (let attempt = 1; attempt <= 5; attempt += 1) {
-          statuses.push((await login(app, { username, password: `wrong-password-${attempt}`, remoteAddress: `203.0.113.${attempt}` })).statusCode);
+          statuses.push((await login(app, { username, password: `wrong-password-${attempt}`, remoteAddress: `2001:db8:${username.length}::${attempt}` })).statusCode);
         }
         expect(statuses).toEqual([401, 401, 401, 401, 401]);
-        const locked = await login(app, { username, remoteAddress: "203.0.113.99" });
+        const locked = await login(app, { username, password: "wrong-password-6", remoteAddress: `2001:db8:${username.length}::99` });
         expect(locked.statusCode, username).toBe(429);
-        expect(locked.json()).toMatchObject({ error: "Too many sign-in attempts. Try again later.", code: "sign_in_locked" });
         expect(Number(locked.headers["retry-after"])).toBeGreaterThan(0);
       }
+      // The attacker locked the name from one network; the owner signs in from another.
+      expect((await login(app, { remoteAddress: "192.0.2.10" })).statusCode).toBe(200);
       const recorded = await events(app);
       expect(recorded.filter((event) => event === "login_failed")).toHaveLength(10);
       expect(recorded.filter((event) => event === "login_locked")).toHaveLength(2);
-      expect(recorded).not.toContain("login_succeeded");
+      expect(recorded.filter((event) => event === "login_succeeded")).toHaveLength(1);
+    });
+
+    it("answers a client that keeps guessing a name under attack with the lockout code", async () => {
+      const app = await startApp();
+      await setupAdmin(app);
+      for (let client = 1; client <= 11; client += 1) {
+        expect((await login(app, { password: `wrong-password-${client}`, remoteAddress: `198.51.100.${client}` })).statusCode).toBe(401);
+      }
+      const locked = await login(app, { password: "wrong-password-again", remoteAddress: "198.51.100.11" });
+      expect(locked.statusCode).toBe(429);
+      expect(locked.json()).toMatchObject({ error: "Too many sign-in attempts. Try again later.", code: "sign_in_locked" });
+      expect(Number(locked.headers["retry-after"])).toBeGreaterThan(0);
+      // The owner, on an address that has not failed, is not refused.
+      expect((await login(app, { remoteAddress: "192.0.2.10" })).statusCode).toBe(200);
+    });
+
+    it("caps concurrent password checks and answers 429 when every slot is busy", async () => {
+      const app = await startApp();
+      await setupAdmin(app);
+      const original = passwordHashing.verify;
+      let releaseChecks!: () => void;
+      const held = new Promise<void>((resolve) => { releaseChecks = resolve; });
+      const verify = vi.spyOn(passwordHashing, "verify").mockImplementation(async (secret, hash) => {
+        await held;
+        return original(secret, hash);
+      });
+      const attempts = [1, 2, 3].map((client) => login(app, { password: "wrong-password", remoteAddress: `198.51.100.${client}` }));
+      await vi.waitFor(() => expect(verify).toHaveBeenCalledTimes(2));
+      releaseChecks();
+      const statuses = (await Promise.all(attempts)).map((response) => response.statusCode).sort();
+      expect(statuses).toEqual([401, 401, 429]);
+      const busy = (await Promise.all(attempts)).find((response) => response.statusCode === 429)!;
+      expect(busy.json()).toMatchObject({ code: "sign_in_busy" });
+      expect(busy.headers["retry-after"]).toBe("1");
+      // The refused attempt was not counted against anyone.
+      verify.mockRestore();
+      expect((await login(app, { remoteAddress: "198.51.100.3" })).statusCode).toBe(200);
     });
 
     it("backs off exponentially per key up to a cap and forgets old failures", () => {
@@ -344,8 +384,94 @@ describe("authentication and sessions", () => {
       for (let attempt = 0; attempt < 20; attempt += 1) login.failure(`user-${attempt}`, remoteClient);
       expect(login.check("someone-new", remoteClient).allowed).toBe(false);
       expect(login.check("someone-new", "203.0.113.11").allowed).toBe(true);
-      login.success("someone-new", remoteClient);
-      expect(login.check("someone-new", remoteClient).allowed).toBe(true);
+    });
+
+    describe("login throttle", () => {
+      const owner = "198.51.100.20";
+      const attacker = "203.0.113.66";
+
+      it("lets the owner sign in from address B after an attacker locked the name from address A", () => {
+        let now = 1_000_000;
+        const throttle = new LoginThrottle(() => now);
+        for (let round = 0; round < 50; round += 1) {
+          const reserved = throttle.reserve("alex_03", attacker);
+          if (reserved.allowed) throttle.failed(reserved.reservation);
+          now += 1_000;
+        }
+        expect(throttle.check("alex_03", attacker).allowed).toBe(false);
+        expect(throttle.check("ALEX_03 ", attacker).allowed).toBe(false);
+        const ownerAttempt = throttle.reserve("alex_03", owner);
+        expect(ownerAttempt.allowed).toBe(true);
+        if (ownerAttempt.allowed) throttle.succeeded(ownerAttempt.reservation);
+        expect(throttle.check("alex_03", attacker).allowed).toBe(false);
+      });
+
+      it("never refuses a client with no failures on a name under attack, but slows clients that keep failing", () => {
+        let now = 1_000_000;
+        const throttle = new LoginThrottle(() => now);
+        // Guessing from many addresses, one attempt each.
+        for (let client = 1; client <= 30; client += 1) {
+          const reserved = throttle.reserve("alex_03", `203.0.113.${client}`);
+          expect(reserved.allowed).toBe(true);
+        }
+        // Once the name has had 10 failures, each client that fails on it has to wait before trying it again.
+        const again = throttle.check("alex_03", "203.0.113.30");
+        expect(again.allowed).toBe(false);
+        expect(again.retryAfterMs).toBeLessThanOrEqual(60_000);
+        // A client that has not failed on the name is not refused.
+        expect(throttle.check("alex_03", owner).allowed).toBe(true);
+        // A client that mistyped once waits at most the guard's cap, never indefinitely.
+        const typo = throttle.reserve("alex_03", owner);
+        expect(typo.allowed).toBe(true);
+        if (typo.allowed) throttle.failed(typo.reservation);
+        expect(throttle.check("alex_03", owner).retryAfterMs).toBeLessThanOrEqual(60_000);
+        now += 60_000;
+        expect(throttle.check("alex_03", owner).allowed).toBe(true);
+      });
+
+      it("counts an attempt before the password check, so parallel attempts cannot all pass", () => {
+        const throttle = new LoginThrottle(() => 1_000_000);
+        const pending = [];
+        for (let attempt = 0; attempt < 10; attempt += 1) pending.push(throttle.reserve("alex_03", attacker));
+        expect(pending.filter((reserved) => reserved.allowed)).toHaveLength(5);
+      });
+
+      it("refunds only its own reservation on success, so a valid sign-in cannot clear a client lock", () => {
+        const throttle = new LoginThrottle(() => 1_000_000);
+        for (let attempt = 0; attempt < 19; attempt += 1) throttle.failure(`user-${attempt}`, attacker);
+        // The attacker signs in to an account of their own from the same address.
+        const valid = throttle.reserve("riley_07", attacker);
+        expect(valid.allowed).toBe(true);
+        if (valid.allowed) throttle.succeeded(valid.reservation);
+        throttle.failure("user-19", attacker);
+        expect(throttle.check("someone-else", attacker).allowed).toBe(false);
+      });
+
+      it("keeps locks in force when the table is flooded with new keys", () => {
+        const throttle = new LoginThrottle(() => 1_000_000, 50);
+        for (let attempt = 0; attempt < 5; attempt += 1) throttle.failure("alex_03", attacker);
+        expect(throttle.check("alex_03", attacker).allowed).toBe(false);
+        for (let name = 0; name < 150; name += 1) throttle.failure(`spray-${name}`, `198.51.100.${name % 250}`);
+        expect(throttle.check("alex_03", attacker).allowed).toBe(false);
+        expect(throttle.pairs.size).toBeLessThanOrEqual(200);
+      });
+
+      it("buckets IPv6 clients by /64 and treats IPv4-mapped addresses as IPv4", () => {
+        expect(clientBucket("2001:db8:1:2:aaaa::1")).toBe("2001:db8:1:2::/64");
+        expect(clientBucket("2001:0db8:0001:0002:ffff:ffff:ffff:ffff")).toBe("2001:db8:1:2::/64");
+        expect(clientBucket("::ffff:192.0.2.10")).toBe("192.0.2.10");
+        expect(clientBucket("192.0.2.10")).toBe("192.0.2.10");
+        expect(clientBucket("fe80::1%eth0")).toBe("fe80:0:0:0::/64");
+        expect(clientBucket("::1")).toBe("0:0:0:0::/64");
+        expect(clientBucket(undefined)).toBe("unknown");
+      });
+
+      it("lifts every lock on a name when its password is reset", () => {
+        const throttle = new LoginThrottle(() => 1_000_000);
+        for (let attempt = 0; attempt < 5; attempt += 1) throttle.failure("alex_03", attacker);
+        throttle.clearUsername("Alex_03");
+        expect(throttle.check("alex_03", attacker).allowed).toBe(true);
+      });
     });
 
     it("rate limits account changes", async () => {

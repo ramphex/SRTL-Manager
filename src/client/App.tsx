@@ -3,6 +3,7 @@ import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, O
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { useAccess } from "./access";
+import { cacheAccount, clearAccountData, showSignedOut } from "./accountCache";
 import { api } from "./api";
 import { BackupAlertBanner } from "./backupSettings";
 import { activatePwaUpdate, clearPendingPwaUpdate, getPendingPwaUpdate, pwaUpdateReadyEvent, type PwaUpdateReadyDetail } from "./pwa";
@@ -283,7 +284,7 @@ function RootLayout() {
   const contentRef = useRef<HTMLElement>(null);
   const logout = useMutation({
     mutationFn: api.logout,
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] })
+    onSuccess: () => showSignedOut(queryClient)
   });
   const username = me.data?.user?.username ?? "Signed in";
   const { role, can } = useAccess();
@@ -765,6 +766,16 @@ function LoginGate() {
   const queryClient = useQueryClient();
   const me = useQuery({ queryKey: ["me"], queryFn: api.me });
   const online = useOnlineStatus();
+  // Cached data belongs to the account that loaded it. When the account changes (a sign-out, an expired session,
+  // someone else signing in), everything else cached is dropped before the next screen shows.
+  const account = cacheAccount(me.data);
+  const [cachedFor, setCachedFor] = useState(account);
+  const accountChanged = account !== undefined && account !== cachedFor;
+  useEffect(() => {
+    if (!accountChanged) return;
+    clearAccountData(queryClient);
+    setCachedFor(account);
+  }, [account, accountChanged, queryClient]);
   // Setup status is only reported to local clients. Everyone else opens the setup form at its
   // direct address from the server log, which looks the same whether or not an admin exists.
   const pathname = useSyncExternalStore(router.history.subscribe, () => router.history.location.pathname);
@@ -784,6 +795,7 @@ function LoginGate() {
       </AuthShell>
     );
   }
+  if (accountChanged) return <AuthShell title="Loading" icon={<Shield size={22} />} />;
   if (!me.data?.authenticated && (me.data?.setupRequired || setupAddressOpen)) {
     return (
       <SetupForm
@@ -799,7 +811,7 @@ function LoginGate() {
 
 function SignOutButton() {
   const queryClient = useQueryClient();
-  const logout = useMutation({ mutationFn: api.logout, onSuccess: () => queryClient.invalidateQueries({ queryKey: ["me"] }) });
+  const logout = useMutation({ mutationFn: api.logout, onSuccess: () => showSignedOut(queryClient) });
   return (
     <button type="button" className="secondary" onClick={() => logout.mutate()} disabled={logout.isPending}>
       <LogOut size={16} />

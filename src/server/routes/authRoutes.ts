@@ -25,7 +25,7 @@ import { first, type Db } from "../db/database";
 import { AppError } from "../errors";
 import * as schema from "../db/schema";
 import { markOnboardingAccountCreated } from "../lib/onboarding";
-import { LoginThrottle } from "../loginThrottle";
+import { ConcurrencyGate, LoginThrottle } from "../loginThrottle";
 import { listSecurityEvents, recordSecurityEvent } from "../securityEvents";
 import { sessionClient, type SessionAccess } from "../sessionAccess";
 import { setupStatusVisibleTo, type SetupTokenGate } from "../setupToken";
@@ -82,11 +82,24 @@ export interface AuthRouteOptions {
   sessions: SessionAccess;
   setupTokens: SetupTokenGate;
   throttle: LoginThrottle;
+  /** Caps concurrent password checks, see {@link ConcurrencyGate}. */
+  verificationGate: ConcurrencyGate;
   securityEventRetentionDays: number;
 }
 
 export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRouteOptions): void {
-  const { sessions, setupTokens, throttle } = options;
+  const { sessions, setupTokens, throttle, verificationGate } = options;
+
+  const signInLocked = (reply: FastifyReply, retryAfterMs: number): SignInLockedError => {
+    const locked = new SignInLockedError(retryAfterMs);
+    reply.header("Retry-After", String(locked.retryAfterSeconds));
+    return locked;
+  };
+
+  const signInBusy = (reply: FastifyReply): AppError => {
+    reply.header("Retry-After", "1");
+    return new AppError("The server is busy checking other sign-ins. Try again in a moment.", 429, { code: "sign_in_busy" });
+  };
 
   const adoptSession = (request: FastifyRequest, reply: FastifyReply, started: { token: string; session: ActiveSession }): ActiveSession => {
     sessions.issue(reply, started.token, started.session.expiresAt);
@@ -138,23 +151,40 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
 
   app.post("/api/auth/login", { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } }, async (request, reply) => {
     const body = loginSchema.parse(request.body);
+    // Checked first, so a locked client never takes a password check slot.
     const blocked = throttle.check(body.username, request.ip);
-    if (!blocked.allowed) {
-      const locked = new SignInLockedError(blocked.retryAfterMs);
-      reply.header("Retry-After", String(locked.retryAfterSeconds));
-      throw locked;
-    }
-    const result = await authenticate(db, body.username, body.password);
-    const started = result ? await createSessionForSignIn(db, result.user, sessions.policy, sessionClient(request)) : null;
-    if (!result || !started) {
-      const failure = throttle.failure(body.username, request.ip);
-      await recordSecurityEvent(db, { event: "login_failed", request, username: body.username });
-      if (failure.lockedNow) {
-        await recordSecurityEvent(db, { event: "login_locked", request, username: body.username, details: { retryAfterSeconds: Math.ceil(failure.retryAfterMs / 1000) } });
+    if (!blocked.allowed) throw signInLocked(reply, blocked.retryAfterMs);
+    const release = verificationGate.tryAcquire();
+    if (!release) throw signInBusy(reply);
+    let succeeded: { result: NonNullable<Awaited<ReturnType<typeof authenticate>>>; started: NonNullable<Awaited<ReturnType<typeof createSessionForSignIn>>> };
+    try {
+      // Counted as a failure before the password is checked, and refunded on success,
+      // so parallel attempts cannot all slip past the check.
+      const reserved = throttle.reserve(body.username, request.ip);
+      if (!reserved.allowed) throw signInLocked(reply, reserved.retryAfterMs);
+      let result: Awaited<ReturnType<typeof authenticate>>;
+      let started: Awaited<ReturnType<typeof createSessionForSignIn>> | null;
+      try {
+        result = await authenticate(db, body.username, body.password);
+        started = result ? await createSessionForSignIn(db, result.user, sessions.policy, sessionClient(request)) : null;
+      } catch (error) {
+        throttle.cancelled(reserved.reservation);
+        throw error;
       }
-      return reply.code(401).send({ error: loginFailed });
+      if (!result || !started) {
+        const failure = throttle.failed(reserved.reservation);
+        await recordSecurityEvent(db, { event: "login_failed", request, username: body.username });
+        if (failure.lockedNow) {
+          await recordSecurityEvent(db, { event: "login_locked", request, username: body.username, details: { retryAfterSeconds: Math.ceil(failure.retryAfterMs / 1000) } });
+        }
+        return reply.code(401).send({ error: loginFailed });
+      }
+      throttle.succeeded(reserved.reservation);
+      succeeded = { result, started };
+    } finally {
+      release();
     }
-    throttle.success(body.username, request.ip);
+    const { result, started } = succeeded;
     const session = adoptSession(request, reply, started);
     await recordSecurityEvent(db, {
       event: "login_succeeded",
@@ -183,7 +213,15 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
     const user = await first(db.select().from(schema.adminUsers).where(eq(schema.adminUsers.id, session.userId)).limit(1));
     if (!user) return reply.code(401).send({ error: "Authentication required" });
 
-    if (!(await passwordHashing.verify(body.currentPassword, user.passwordHash))) {
+    const release = verificationGate.tryAcquire();
+    if (!release) throw signInBusy(reply);
+    let passwordMatches: boolean;
+    try {
+      passwordMatches = await passwordHashing.verify(body.currentPassword, user.passwordHash);
+    } finally {
+      release();
+    }
+    if (!passwordMatches) {
       await recordSecurityEvent(db, { event: "reauthentication_failed", request, userId: user.id, username: user.username, sessionId: session.id });
       return reply.code(401).send({ error: "Current password is incorrect" });
     }

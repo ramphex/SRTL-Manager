@@ -70,7 +70,7 @@ rsync_args=(
     --exclude node_modules
     --exclude dist
     --exclude data
-    --exclude .env
+    --exclude '.env*'
     --exclude coverage
     --exclude .cache
     --exclude test-results
@@ -80,9 +80,11 @@ rsync_args=(
     --exclude .srtl-dev-workspace
     --exclude .DS_Store
 )
-# Files a developer excludes locally from Git stay on this machine.
-if [[ -f "$ROOT_DIR/.git/info/exclude" ]]; then
-    rsync_args+=(--exclude-from "$ROOT_DIR/.git/info/exclude")
+# Files a developer excludes locally from Git stay on this machine. In a worktree .git is a file,
+# so ask Git where the shared exclude file is.
+local_exclude="$(git -C "$ROOT_DIR" rev-parse --path-format=absolute --git-path info/exclude 2>/dev/null || true)"
+if [[ -n "$local_exclude" && -f "$local_exclude" ]]; then
+    rsync_args+=(--exclude-from "$local_exclude")
 fi
 if [[ "$SYNC_DRY_RUN" == "1" ]]; then
     rsync_args+=(--dry-run --itemize-changes)

@@ -24,6 +24,7 @@ export type ActionAuditAction =
   | "copy.discard_partial"
   | "orphan.purge_hold"
   | "orphan.purge_delete"
+  | "orphan.restore"
   | "damaged.hold"
   | "damaged.delete"
   | "re_request.retry"

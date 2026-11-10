@@ -48,6 +48,19 @@ function str(value: unknown): string | null {
   return null;
 }
 
+// Names and labels a server reports are cut to this length. Nothing real is this long, and every Now Playing
+// broadcast passes these fields through the restricted-view scrubber.
+export const maxReportedTextLength = 256;
+
+// Display text: names, titles, players, codecs. Keys, ids and paths keep their full value through str.
+function text(value: unknown): string | null {
+  const found = str(value);
+  if (!found || found.length <= maxReportedTextLength) return found;
+  const cut = found.charCodeAt(maxReportedTextLength - 1);
+  // Never ends on the first half of a surrogate pair.
+  return found.slice(0, cut >= 0xd800 && cut <= 0xdbff ? maxReportedTextLength - 1 : maxReportedTextLength);
+}
+
 function num(value: unknown): number | null {
   const parsed = typeof value === "string" && value.trim() ? Number(value) : value;
   return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : null;
@@ -60,7 +73,7 @@ function bool(value: unknown): boolean | null {
 }
 
 function lower(value: unknown): string | null {
-  return str(value)?.toLowerCase() ?? null;
+  return text(value)?.toLowerCase() ?? null;
 }
 
 // Clamps placeholder bitrates (INT32_MAX and similar) to "unknown".
@@ -164,7 +177,7 @@ function plexMediaInfo(media: Json | null): NowPlayingMediaInfo {
   return {
     container: lower(media.container) ?? lower(part?.container),
     videoCodec: lower(media.videoCodec) ?? lower(video?.codec),
-    resolution: resolutionLabel(width, height, str(media.videoResolution)),
+    resolution: resolutionLabel(width, height, text(media.videoResolution)),
     width,
     height,
     dynamicRange: video ? plexDynamicRange(video) : null,
@@ -283,13 +296,13 @@ export function parsePlexSession(raw: unknown, sourceMetadata: unknown, now: Dat
   const subtitle = subtitleStream || subtitleDecisionRaw ? {
     decision: burn ? "burn" as const : subtitleDecisionRaw === "transcode" ? "transcode" as const : subtitleDecisionRaw === "copy" ? "copy" as const : subtitleStream ? "directPlay" as const : null,
     codec: lower(subtitleStream?.codec),
-    language: str(subtitleStream?.language) ?? str(subtitleStream?.languageCode)
+    language: text(subtitleStream?.language) ?? text(subtitleStream?.languageCode)
   } : null;
 
   let transcode: NowPlayingTranscode | null = null;
   if (playMethod === "transcode") {
-    const hardwareEncode = videoDecision === "transcode" ? str(transcodeSession?.transcodeHwEncoding) : null;
-    const hardwareDecode = videoDecision === "transcode" ? str(transcodeSession?.transcodeHwDecoding) : null;
+    const hardwareEncode = videoDecision === "transcode" ? text(transcodeSession?.transcodeHwEncoding) : null;
+    const hardwareDecode = videoDecision === "transcode" ? text(transcodeSession?.transcodeHwDecoding) : null;
     transcode = {
       // Audio is always converted on the CPU; a video transcode counts as hardware when Plex encodes on the GPU.
       engine: videoDecision === "transcode" && hardwareEncode ? "hardware" : "cpu",
@@ -310,7 +323,7 @@ export function parsePlexSession(raw: unknown, sourceMetadata: unknown, now: Dat
   const local = bool(player?.local);
   const locationRaw = lower(session?.location);
   const location = locationRaw === "lan" || locationRaw === "wan" ? locationRaw : local === null ? null : local ? "lan" : "wan";
-  const address = local === false ? str(player?.remotePublicAddress) ?? str(player?.address) : str(player?.address) ?? str(player?.remotePublicAddress);
+  const address = local === false ? text(player?.remotePublicAddress) ?? text(player?.address) : text(player?.address) ?? text(player?.remotePublicAddress);
   const mediaType = plexMediaType(meta.type);
   const posterPath = mediaType === "episode"
     ? str(meta.grandparentThumb) ?? str(meta.parentThumb) ?? str(meta.thumb)
@@ -325,13 +338,13 @@ export function parsePlexSession(raw: unknown, sourceMetadata: unknown, now: Dat
     remoteControl: false,
     stream: {
       sessionKey,
-      user: { id: str(user?.id), name: str(user?.title) ?? "Unknown user" },
+      user: { id: str(user?.id), name: text(user?.title) ?? "Unknown user" },
       mediaType,
-      title: str(meta.title) ?? "Unknown title",
-      grandparentTitle: mediaType === "episode" || mediaType === "track" ? str(meta.grandparentTitle) : null,
+      title: text(meta.title) ?? "Unknown title",
+      grandparentTitle: mediaType === "episode" || mediaType === "track" ? text(meta.grandparentTitle) : null,
       episodeLabel: mediaType === "episode" ? episodeLabel(num(meta.parentIndex), num(meta.index)) : null,
       year: num(meta.year),
-      player: { name: str(player?.title), device: str(player?.device), platform: str(player?.platform), product: str(player?.product), version: str(player?.version) },
+      player: { name: text(player?.title), device: text(player?.device), platform: text(player?.platform), product: text(player?.product), version: text(player?.version) },
       state: plexState(player?.state),
       positionMs: Math.max(0, Math.round(num(meta.viewOffset) ?? 0)),
       durationMs: num(meta.duration),
@@ -355,7 +368,7 @@ const ticksPerMs = 10_000;
 
 function jellyfinDynamicRange(stream: Json | null): string | null {
   if (!stream) return null;
-  const type = str(stream.VideoRangeType) ?? "";
+  const type = text(stream.VideoRangeType) ?? "";
   if (/^dovi/i.test(type)) return "Dolby Vision";
   if (/^hdr10plus$/i.test(type)) return "HDR10+";
   if (/^hdr10$/i.test(type)) return "HDR10";
@@ -366,7 +379,7 @@ function jellyfinDynamicRange(stream: Json | null): string | null {
 }
 
 function jellyfinReasons(value: unknown): string[] {
-  const raw = Array.isArray(value) ? value.map(str).filter((entry): entry is string => Boolean(entry)) : (str(value) ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  const raw = Array.isArray(value) ? value.map(text).filter((entry): entry is string => Boolean(entry)) : (str(value) ?? "").split(",").map((entry) => text(entry.trim())).filter((entry): entry is string => Boolean(entry));
   return [...new Set(raw)].map(humanizeReason);
 }
 
@@ -462,7 +475,8 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
     transcode = { engine: "cpu", hardwareDecode: null, hardwareEncode: null, speed: null, throttled: null, reasons, reasonsDerived: false };
   }
 
-  const ip = str(session.RemoteEndPoint) ? normalizeAddress(str(session.RemoteEndPoint)!) : null;
+  const endPoint = text(session.RemoteEndPoint);
+  const ip = endPoint ? normalizeAddress(endPoint) : null;
   const mediaType = jellyfinMediaType(item.Type);
   const posterPath = mediaType === "episode"
     ? jellyfinImage(str(item.SeriesId), str(item.SeriesPrimaryImageTag)) ?? jellyfinImage(str(item.Id), str(obj(item.ImageTags)?.Primary))
@@ -480,13 +494,13 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
     remoteControl: bool(session.SupportsRemoteControl) === true || bool(session.SupportsMediaControl) === true || bool(capabilities?.SupportsMediaControl) === true,
     stream: {
       sessionKey,
-      user: { id: str(session.UserId), name: str(session.UserName) ?? "Unknown user" },
+      user: { id: str(session.UserId), name: text(session.UserName) ?? "Unknown user" },
       mediaType,
-      title: str(item.Name) ?? "Unknown title",
-      grandparentTitle: mediaType === "episode" ? str(item.SeriesName) : mediaType === "track" ? str(item.AlbumArtist) ?? (Array.isArray(item.Artists) ? str(item.Artists[0]) : null) : null,
+      title: text(item.Name) ?? "Unknown title",
+      grandparentTitle: mediaType === "episode" ? text(item.SeriesName) : mediaType === "track" ? text(item.AlbumArtist) ?? (Array.isArray(item.Artists) ? text(item.Artists[0]) : null) : null,
       episodeLabel: mediaType === "episode" ? episodeLabel(num(item.ParentIndexNumber), num(item.IndexNumber)) : null,
       year: num(item.ProductionYear),
-      player: { name: str(session.DeviceName), device: null, platform: null, product: str(session.Client), version: str(session.ApplicationVersion) },
+      player: { name: text(session.DeviceName), device: null, platform: null, product: text(session.Client), version: text(session.ApplicationVersion) },
       state: bool(playState?.IsPaused) === true ? "paused" : "playing",
       positionMs: Math.max(0, Math.round((num(playState?.PositionTicks) ?? 0) / ticksPerMs)),
       durationMs: runTicks !== null ? Math.round(runTicks / ticksPerMs) : null,
@@ -497,7 +511,7 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
       subtitle: subtitleStream ? {
         decision: burn ? "burn" : playMethod === "directPlay" ? "directPlay" : "copy",
         codec: lower(subtitleStream.Codec),
-        language: str(subtitleStream.Language)
+        language: text(subtitleStream.Language)
       } : null,
       source,
       output,

@@ -51,7 +51,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -262,7 +262,8 @@ describe("database bootstrap", () => {
         { version: 27 },
         { version: 28 },
         { version: 29 },
-        { version: 30 }
+        { version: 30 },
+        { version: 31 }
       ]);
     } finally {
       await database.close();
@@ -467,7 +468,8 @@ describe("database bootstrap", () => {
         { version: 27, name: "database_backups" },
         { version: 28, name: "accounts_and_roles" },
         { version: 29, name: "re_requests" },
-        { version: 30, name: "media_link_search_text" }
+        { version: 30, name: "media_link_search_text" },
+        { version: 31, name: "worker_file_jobs" }
       ]);
     } finally {
       await database.close();

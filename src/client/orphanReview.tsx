@@ -3,13 +3,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { Archive, ArrowDown, ArrowUp, Check, ChevronDown, Equal, LoaderCircle, OctagonX, RotateCcw, Search, Trash2, TriangleAlert, X } from "lucide-react";
-import type { JobRecord, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
+import type { JobRecord, OrphanRestoreJobProgress, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, StorageRootType } from "../shared/types";
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, recordFromUnknown, useModalLifecycle } from "./appShared";
 import { filterOrphans, purgeBatches, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
 import { ReRequestActivity, ReRequestOption, ReRequestPreviewCheck, reRequestExplanation, reRequestOptionLabel } from "./reRequest";
 import { SettingsTabs } from "./settingsTabs";
+import { jobFinished, useQueuedJob } from "./queuedJob";
 
 const pageSize = 50;
 
@@ -191,6 +192,33 @@ function readDismissedJob(): number | null {
   }
 }
 
+/** What became of a restore this page queued: running, done, or what went wrong. */
+function RestoreJobStatus({ jobId, job }: { jobId: number; job: JobRecord | null }) {
+  const progress = (job?.progress ?? null) as Partial<OrphanRestoreJobProgress> | null;
+  const jobLink = (
+    <Link to="/logs" search={{ job: jobId }}>
+      Open job #{jobId}
+    </Link>
+  );
+  if (!job || !jobFinished(job)) {
+    return (
+      <p className="panel-message" role="status">
+        <LoaderCircle size={14} className="spin-icon" aria-hidden /> Restore job #{jobId} is running. {progress?.message ?? "The list refreshes when it finishes."} {jobLink}
+      </p>
+    );
+  }
+  if (job.status === "completed") {
+    return <p className="panel-message success">Restored {countText(progress?.restored ?? 0, "file")}. Rescan to relink them if needed.</p>;
+  }
+  const detail = progress?.firstError ? ` First error: ${progress.firstError.message}` : "";
+  return (
+    <p className="panel-message error" role="alert">
+      {progress?.message ?? `Restore job #${jobId} ${job.status.replace("_", " ")}.`}
+      {detail} {jobLink}
+    </p>
+  );
+}
+
 /** The latest purge job on this storage: running, failed, or (when started from this page) finished. A failure stays until dismissed. */
 function PurgeJobStatus({ rootType, startedHere, purgeRunning }: { rootType: StorageRootType; startedHere: number[]; purgeRunning: boolean }) {
   const [dismissed, setDismissed] = useState<number | null>(() => readDismissedJob());
@@ -330,6 +358,9 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
       refresh();
     }
   });
+  // The worker restores the files; the list refreshes when its job finishes.
+  const restoreJob = useQueuedJob(restore.data?.jobId ?? null, refresh);
+  const restoreRunning = Boolean(restore.data && !jobFinished(restoreJob.data));
 
   const data = review.data as ReviewWithSkips | undefined;
   const allItems = useMemo(() => data?.items ?? [], [data]);
@@ -358,7 +389,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const totalBytes = items.reduce((total, item) => total + item.sizeBytes, 0);
   // A purge is refused in either case, so nothing here should look like it could start one.
   const stale = Boolean(data?.staleWarning || extraSymlinks?.problems.length);
-  const busy = purge.isPending || restore.isPending;
+  const busy = purge.isPending || restore.isPending || restoreRunning;
   const filteredSelected = filtered.filter((item) => selected.has(item.storageFileId)).length;
   // Results land when the purge job finishes, not when it is queued, so refresh once it stops running.
   useEffect(() => {
@@ -722,8 +753,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                     </div>
                   </>
                 )}
-                {restore.data && restore.data.errors.length === 0 ? <p className="panel-message success">Restored {countText(restore.data.restored, "file")}. Rescan to relink them if needed.</p> : null}
-                {restore.data?.errors.length ? <p className="panel-message error" role="alert">{restore.data.errors.join("; ")}</p> : null}
+                {restore.data ? <RestoreJobStatus jobId={restore.data.jobId} job={restoreJob.data ?? null} /> : null}
                 {restore.error ? <p className="panel-message error" role="alert">{restore.error.message}</p> : null}
                 <ReRequestActivity />
               </div>

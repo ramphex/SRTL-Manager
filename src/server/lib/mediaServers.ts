@@ -45,6 +45,11 @@ export class MediaServerInUse extends WatchSyncError {
   override readonly statusCode = 409;
 }
 
+// The server's address or token changed while a request made with the old ones was still running.
+export class MediaServerChanged extends WatchSyncError {
+  override readonly statusCode = 409;
+}
+
 const settingKey = "mediaServers";
 const lockKey = 781_889_471;
 
@@ -104,6 +109,15 @@ export function findMediaServer(servers: MediaServerRecord[], serverId: string, 
 export async function getMediaServer(db: Db, serverId: string, kind?: MediaServerKind): Promise<MediaServerRecord> {
   const row = (await db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
   return findMediaServer(row ? [toRecord(row)] : [], serverId, kind);
+}
+
+// Locks the server's row until the transaction ends and confirms it still has the address and token a request
+// started with, so nothing that request learned is saved for a connection that changed meanwhile.
+export async function lockMediaServerConnection(transaction: Db, server: Pick<MediaServerRecord, "id" | "url" | "token">, changedMessage: string): Promise<void> {
+  const row = (await transaction.select({ url: schema.mediaServers.url, token: schema.mediaServers.token }).from(schema.mediaServers)
+    .where(eq(schema.mediaServers.id, server.id)).for("update").limit(1))[0];
+  if (!row) throw new MediaServerNotFound("This media server no longer exists. Reload Settings > Media servers.");
+  if (row.url !== server.url || openToken(row.token) !== server.token) throw new MediaServerChanged(changedMessage);
 }
 
 export async function listMediaServers(db: Db): Promise<MediaServerList> {
@@ -277,23 +291,27 @@ export async function startPlexSignIn(db: Db, serverId: string): Promise<MediaSe
 }
 
 export async function checkPlexSignIn(db: Db, serverId: string, pinId: number, afterSignIn?: (serverId: string) => Promise<unknown>): Promise<MediaServerPinStatus> {
-  await getMediaServer(db, serverId, "plex");
+  const server = await getMediaServer(db, serverId, "plex");
   const row = (await db.select({ pendingPin: schema.mediaServers.pendingPin }).from(schema.mediaServers).where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
+  const storedPin = row?.pendingPin ?? null;
   let pending: PendingPin | null;
-  try { pending = row?.pendingPin ? JSON.parse(row.pendingPin) as PendingPin : null; } catch { pending = null; }
-  if (!pending || pending.id !== pinId) throw new WatchSyncError("This Plex sign-in is no longer pending. Start it again.");
+  try { pending = storedPin ? JSON.parse(storedPin) as PendingPin : null; } catch { pending = null; }
+  if (!storedPin || !pending || pending.id !== pinId) throw new WatchSyncError("This Plex sign-in is no longer pending. Start it again.");
+  // Only the sign-in checked here, still for the address it was started at: a new address or a new sign-in meanwhile wins.
+  const unchanged = and(eq(schema.mediaServers.id, serverId), eq(schema.mediaServers.pendingPin, storedPin), eq(schema.mediaServers.url, server.url));
   const pin = await new PlexTvClient(await mediaServerClientIdentifier(db)).checkPin(pinId);
   if (!pin.authToken) {
     const expiresAt = Date.parse(pin.expiresAt || pending.expiresAt);
     if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) {
-      await db.update(schema.mediaServers).set({ pendingPin: null }).where(eq(schema.mediaServers.id, serverId));
+      await db.update(schema.mediaServers).set({ pendingPin: null }).where(unchanged);
       return { status: "expired" };
     }
     return { status: "waiting" };
   }
-  await db.update(schema.mediaServers).set({
+  const saved = await db.update(schema.mediaServers).set({
     token: sealToken(pin.authToken), pendingPin: null, machineIdentifier: null, accountName: null, accountId: null, lastError: null, updatedAt: nowIso()
-  }).where(eq(schema.mediaServers.id, serverId));
+  }).where(unchanged).returning({ id: schema.mediaServers.id });
+  if (!saved.length) throw new MediaServerChanged("The server changed or a new Plex sign-in started while this one was waiting. Start it again.");
   await testMediaServer(db, serverId).catch(() => undefined);
   if (afterSignIn) await afterSignIn(serverId).catch(() => undefined);
   return { status: "authorized", servers: await listMediaServers(db) };

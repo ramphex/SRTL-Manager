@@ -208,6 +208,27 @@ describe("media servers API", () => {
     expect(row.token).not.toContain(mock.ownerToken);
   });
 
+  it("discards a Plex sign-in that finishes after the server's address changed", async () => {
+    const created = await call("POST", "/api/media-servers", { kind: "plex", name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [] });
+    const id = (created.json() as MediaServerList).servers[0]!.id;
+    const pin = (await call("POST", `/api/media-servers/${id}/plex-pin`)).json() as { pinId: number };
+    const newUrl = `${mock.base}/moved`;
+    mock.pinAuthorizedAfter = 1;
+    // The address changes while plex.tv is answering the poll that carries the token.
+    mock.beforeReply = async (request) => {
+      if (request !== `GET /plextv/api/v2/pins/${pin.pinId}`) return;
+      mock.beforeReply = undefined;
+      expect((await call("PUT", `/api/media-servers/${id}`, { name: "Home Plex", url: newUrl, prefixMappings: [] })).statusCode).toBe(200);
+    };
+    mock.requests = [];
+    const polled = await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`);
+    expect(polled.statusCode).toBe(409);
+    expect(polled.json().error).toContain("Start it again");
+    expect((await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]).toMatchObject({ url: newUrl, token: "", pendingPin: null });
+    expect(await app.database.db.select().from(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.serverId, id))).toEqual([]);
+    expect(mock.requests.filter((request) => request.includes("/moved"))).toEqual([]);
+  });
+
   it("blocks removing a server while watch sync pairs use it, naming the pairs", async () => {
     const plexId = ((await call("POST", "/api/media-servers", { kind: "plex", name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [] })).json() as MediaServerList).servers[0]!.id;
     const jellyfinId = ((await call("POST", "/api/media-servers", { kind: "jellyfin", name: "Jellyfin", url: `${mock.base}/jf1`, token: mock.jellyfin.get("jf1")!.apiKey, prefixMappings: [] })).json() as MediaServerList).servers

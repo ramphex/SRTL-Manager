@@ -1085,3 +1085,187 @@ describe("links to folders and to files that are not video", () => {
     expect(review.skippedInUse).toEqual({ total: 1, files: 0, folders: 1, byReason: { library_link: 1, extra_link: 0 } });
   });
 });
+
+describe("holding area safety", () => {
+  let outside: string;
+
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+    outside = await fs.mkdtemp(path.join(os.tmpdir(), "srtl-outside-"));
+  });
+
+  afterEach(async () => {
+    await fs.rm(outside, { recursive: true, force: true });
+  });
+
+  async function holdOne(name: string) {
+    const orphan = await storageFile("local", `movies/${name}/${name}.mkv`);
+    expect(await purge("local", [orphan.id], "hold")).toMatchObject({ status: "completed" });
+    const [entry] = (await listHeldOrphans(app.database.db)).filter((held) => held.filePath === orphan.filePath);
+    return { orphan, entry: entry! };
+  }
+
+  // Builds the same layout outside the root, so a delete that followed the symlink would hit it.
+  async function decoy(relative: string): Promise<string> {
+    const target = path.join(outside, relative);
+    await fs.mkdir(path.dirname(target), { recursive: true });
+    await fs.writeFile(target, "keep me");
+    return target;
+  }
+
+  for (const swapped of [".srtl-purged", "job"] as const) {
+    it(`does not follow a ${swapped === "job" ? "job folder" : "holding folder"} replaced with a symlink when the holding period ends`, async () => {
+      const { entry } = await holdOne("Alpha (2001)");
+      const holdRoot = path.join(paths.localDir, ".srtl-purged");
+      const jobFolder = path.join(holdRoot, `job-${entry.jobId}`);
+      const replaced = swapped === "job" ? jobFolder : holdRoot;
+      const inside = path.relative(replaced, entry.heldPath);
+      const outsideFile = await decoy(inside);
+      await fs.rm(replaced, { recursive: true });
+      await fs.symlink(outside, replaced);
+
+      const errors: unknown[] = [];
+      expect(await expireHeldOrphans(app.database.db, paths, Date.parse(entry.purgeAfter) + 1000, (error) => errors.push(error))).toBe(0);
+      await expect(fs.readFile(outsideFile, "utf8")).resolves.toBe("keep me");
+      expect(String(errors[0])).toContain("is a symlink");
+      expect(await listHeldOrphans(app.database.db)).toHaveLength(1);
+    });
+  }
+
+  it("does not follow a folder inside a job folder replaced with a symlink", async () => {
+    const { entry } = await holdOne("Bravo (2002)");
+    const titleFolder = path.dirname(entry.heldPath);
+    const outsideFile = await decoy(path.basename(entry.heldPath));
+    await fs.rm(titleFolder, { recursive: true });
+    await fs.symlink(outside, titleFolder);
+    expect(await expireHeldOrphans(app.database.db, paths, Date.parse(entry.purgeAfter) + 1000)).toBe(0);
+    await expect(fs.readFile(outsideFile, "utf8")).resolves.toBe("keep me");
+  });
+
+  it("refuses to hold a file when the holding folder is a symlink, and leaves the file in place", async () => {
+    const orphan = await storageFile("local", "movies/Charlie (2003)/Charlie (2003).mkv");
+    await fs.symlink(outside, path.join(paths.localDir, ".srtl-purged"));
+    const job = await purge("local", [orphan.id], "hold");
+    expect(job).toMatchObject({ status: "failed" });
+    await expect(fs.stat(orphan.filePath)).resolves.toBeTruthy();
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it("refuses to hold a file when a job folder already exists as a symlink", async () => {
+    const orphan = await storageFile("local", "movies/Delta (2004)/Delta (2004).mkv");
+    const jobId = await app.jobs.startOrphanPurge("local", [orphan.id], "hold");
+    await fs.mkdir(path.join(paths.localDir, ".srtl-purged"));
+    await fs.symlink(outside, path.join(paths.localDir, ".srtl-purged", `job-${jobId}`));
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    await expect(fs.stat(orphan.filePath)).resolves.toBeTruthy();
+    expect(await fs.readdir(outside)).toEqual([]);
+  });
+
+  it("refuses to restore from a job folder replaced with a symlink", async () => {
+    const { orphan, entry } = await holdOne("Echo (2005)");
+    const jobFolder = path.join(paths.localDir, ".srtl-purged", `job-${entry.jobId}`);
+    const outsideFile = await decoy(path.relative(jobFolder, entry.heldPath));
+    await fs.rm(jobFolder, { recursive: true });
+    await fs.symlink(outside, jobFolder);
+    const result = await restoreHeldOrphans(app.database.db, paths, [entry.operationId]);
+    expect(result.restored).toBe(0);
+    expect(result.errors[0]).toContain("could not be restored safely");
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(fs.readFile(outsideFile, "utf8")).resolves.toBe("keep me");
+  });
+
+  it("refuses to restore into a folder that now points outside the storage root", async () => {
+    const { orphan, entry } = await holdOne("Foxtrot (2006)");
+    await fs.symlink(outside, path.dirname(orphan.filePath));
+    const result = await restoreHeldOrphans(app.database.db, paths, [entry.operationId]);
+    expect(result.restored).toBe(0);
+    expect(await fs.readdir(outside)).toEqual([]);
+    await expect(fs.stat(entry.heldPath)).resolves.toBeTruthy();
+  });
+
+  it("never replaces a file that appeared where a held file came from", async () => {
+    const { orphan, entry } = await holdOne("Golf (2007)");
+    await fs.mkdir(path.dirname(orphan.filePath), { recursive: true });
+    await fs.writeFile(orphan.filePath, "a new copy");
+    const result = await restoreHeldOrphans(app.database.db, paths, [entry.operationId]);
+    expect(result).toMatchObject({ restored: 0 });
+    expect(result.errors[0]).toContain("A file now exists");
+    await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toBe("a new copy");
+    await expect(fs.stat(entry.heldPath)).resolves.toBeTruthy();
+  });
+
+  it("checks each file of a folder delete again right before it goes", async () => {
+    const folder = path.join(paths.localDir, "movies/Hotel (2008)");
+    await fs.mkdir(folder, { recursive: true });
+    const notes = path.join(folder, "notes.txt");
+    await fs.writeFile(notes, "notes");
+    const outsideFile = await decoy("notes.txt");
+    const contents = { files: [notes], directories: [folder] };
+    // Swapped for a symlink after the list was collected.
+    await fs.rm(notes);
+    await fs.symlink(outsideFile, notes);
+    const { assertStillInside } = await import("../src/server/lib/holdingArea");
+    await expect(deleteFolderFileByFile(folder, contents, fs, async (target, kind) => { await assertStillInside(paths.localDir, target, kind, target); })).rejects.toThrow("no longer a regular file");
+    await expect(fs.readFile(outsideFile, "utf8")).resolves.toBe("keep me");
+  });
+});
+
+describe("restoring held files through the worker", () => {
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  async function adminCookie(): Promise<string> {
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "alex_03", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    return String(setup.headers["set-cookie"]);
+  }
+
+  it("queues a restore job that the worker runs, with progress, events and an audit record", async () => {
+    const orphan = await storageFile("local", "movies/India (2009)/India (2009).mkv");
+    const subtitle = path.join(paths.localDir, "movies/India (2009)/India (2009).en.srt");
+    await fs.writeFile(subtitle, "1\n00:00:01,000 --> 00:00:02,000\nhi\n");
+    expect(await purge("local", [orphan.id], "hold")).toMatchObject({ status: "completed" });
+    const [held] = await listHeldOrphans(app.database.db);
+    const cookie = await adminCookie();
+
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId, held!.operationId] } });
+    expect(queued.statusCode).toBe(200);
+    const { jobId } = queued.json<{ jobId: number }>();
+    // Nothing moves until the worker runs the job.
+    await expect(fs.stat(orphan.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ type: "orphan_restore", status: "queued", progress: { stage: "queued", total: 1 } });
+    const trail = (await app.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; targets: Record<string, unknown> }>>();
+    expect(trail).toEqual([expect.objectContaining({ action: "orphan.restore", targets: { jobId, operationIds: [held!.operationId] } })]);
+
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: { stage: "completed", restored: 1, failed: 0, total: 1 } });
+    await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toContain("bytes of");
+    await expect(fs.stat(subtitle)).resolves.toBeTruthy();
+    expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toEqual(expect.arrayContaining(["Restore started", "Held file restored", "Restore finished"]));
+    expect(await listHeldOrphans(app.database.db)).toEqual([]);
+
+    // Restoring it again is refused up front.
+    const again = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId] } });
+    expect(again.statusCode).toBe(409);
+    expect(again.json().error).toContain("not available to restore");
+  });
+
+  it("reports a restore that could not finish, with the first error", async () => {
+    const orphan = await storageFile("local", "movies/Juliett (2010)/Juliett (2010).mkv");
+    expect(await purge("local", [orphan.id], "hold")).toMatchObject({ status: "completed" });
+    const [held] = await listHeldOrphans(app.database.db);
+    const cookie = await adminCookie();
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/held/restore", headers: { cookie }, payload: { operationIds: [held!.operationId] } });
+    // Something takes the file's place after the restore was queued.
+    await fs.mkdir(path.dirname(orphan.filePath), { recursive: true });
+    await fs.writeFile(orphan.filePath, "a new copy");
+    await runJobs();
+    const job = await app.jobs.getJob(queued.json<{ jobId: number }>().jobId);
+    expect(job).toMatchObject({ status: "failed", progress: { stage: "failed", restored: 0, failed: 1, firstError: { filePath: orphan.filePath, message: expect.stringContaining("A file now exists") } } });
+    await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toBe("a new copy");
+    expect(await listHeldOrphans(app.database.db)).toHaveLength(1);
+  });
+});
