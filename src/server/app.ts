@@ -16,7 +16,7 @@ import packageJson from "../../package.json";
 import type { AppConfig } from "./config";
 import { loadConfig, secretKeyOptions } from "./config";
 import { dummyPasswordHash, findActiveSession, hasOwner, type SessionPolicy } from "./auth";
-import { LoginThrottle } from "./loginThrottle";
+import { ConcurrencyGate, LoginThrottle, passwordVerificationSlots } from "./loginThrottle";
 import { pruneSecurityEvents } from "./securityEvents";
 import { createSessionAccess, sessionCookieSettings } from "./sessionAccess";
 import { SetupTokenGate } from "./setupToken";
@@ -164,7 +164,9 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
     reply.header("Permissions-Policy", permissionsPolicy);
     reply.header("X-Request-Id", request.id);
   });
-  await app.register(rateLimit, { global: false });
+  // Rate limits count IPv6 clients by /64 (the plugin's default for its own key), and
+  // routes with their own key use clientBucket for the same reason.
+  await app.register(rateLimit, { global: false, ipv6Subnet: 64 });
   const anonymousRateLimit = app.createRateLimit({ max: config.anonymousRequestsPerMinute, timeWindow: 60_000 });
   await app.register(compress, {
     encodings: ["br", "gzip"],
@@ -352,6 +354,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
     sessions,
     setupTokens,
     throttle,
+    verificationGate: new ConcurrencyGate(passwordVerificationSlots),
     securityEventRetentionDays: config.jobHistoryRetentionDays
   });
 

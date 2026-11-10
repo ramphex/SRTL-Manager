@@ -4,6 +4,12 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Security
+
+- Sign-in lockouts are tied to the username and the client together, so failed attempts from one address can no longer lock the real user out from another. A per-username guard slows clients that keep failing on a name under attack without refusing a client that has not failed. IPv6 clients are counted per /64 network.
+- Every sign-in attempt is counted before its password is checked and refunded only if it succeeds, so parallel attempts cannot get past the limit, and a successful sign-in no longer clears failures that other attempts caused. A full lockout table drops unlocked entries first.
+- At most two password checks run at once. Further sign-ins get 429 with `Retry-After` instead of piling up memory-heavy checks.
+
 ## [0.1.4] - 2026-11-09
 
 Everything from 0.1.4-beta.1 to 0.1.4-beta.7. The beta sections below have the full detail.

@@ -1,4 +1,5 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
+import { clientBucket } from "../clientAddress";
 import { z } from "zod";
 import type { Db } from "../db/database";
 import { recordActionAudit } from "../lib/actionAudit";
@@ -14,7 +15,7 @@ export function sonarrWebhookInstanceId(request: FastifyRequest): string {
 }
 
 // Sonarr instances often share one host, so the limit is counted per instance as well as per address.
-const webhookRateLimit = { max: 120, timeWindow: "1 minute", keyGenerator: (request: FastifyRequest) => `${request.ip}\0sonarr\0${String((request.params as { instanceId?: unknown }).instanceId)}` };
+const webhookRateLimit = { max: 120, timeWindow: "1 minute", keyGenerator: (request: FastifyRequest) => `${clientBucket(request.ip)}\0sonarr\0${String((request.params as { instanceId?: unknown }).instanceId)}` };
 
 export function registerSonarrRoutes(app: FastifyInstance, db: Db): void {
   const instanceId = (request: FastifyRequest) => instanceParams.parse(request.params).instanceId;
