@@ -517,6 +517,10 @@ export const orphanPurgeOperations = pgTable(
     removedLinks: text("removed_links").notNull().default("[]"),
     purgeAfter: text("purge_after"),
     errorMessage: text("error_message"),
+    // How many times the path was deleted: more than 1 when another copy appeared at the same path and was deleted too.
+    deleteRounds: integer("delete_rounds").notNull().default(1),
+    // Something worth knowing about an item that did not fail, such as storage still listing a file it cannot open.
+    note: text("note"),
     createdAt: text("created_at").notNull(),
     updatedAt: text("updated_at").notNull(),
     completedAt: text("completed_at")

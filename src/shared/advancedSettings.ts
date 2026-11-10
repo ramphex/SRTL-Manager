@@ -35,8 +35,19 @@ export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
 export const defaultCleanupSettings: CleanupSettings = {
   holdDays: 7,
   deleteRemoteSourceAfterCopy: false,
-  reRequestsPerMinute: 6
+  reRequestsPerMinute: 6,
+  // A remote mount can bring a deleted file back by itself. Two minutes covers several of its refresh cycles
+  // (30 seconds by default on the usual mount), so a file that comes back is caught by the purge that deleted it.
+  purgeRecheckSeconds: 120,
+  // Every remote delete is looked at again straight away, which catches a mount that shows another copy at the same
+  // path as part of the delete. This extra wait is only for a mount that does it some seconds later. It is paid once
+  // per remote folder whose last video a purge deletes (about 8 hours for 10,000 folders at 3 seconds), so it is off
+  // by default; the recheck after the purge still reports any such copy as came back.
+  purgeSettleSeconds: 0
 };
+
+export const maxPurgeRecheckSeconds = 3600;
+export const maxPurgeSettleSeconds = 60;
 
 export const defaultAdvancedSettings: AdvancedSettings = {
   scan: defaultScanJobBehaviorSettings,
@@ -89,10 +100,20 @@ function normalizeCleanup(value: unknown): CleanupSettings {
   const record = isRecord(value) ? value : {};
   const holdDays = Number(record.holdDays);
   const reRequestsPerMinute = Number(record.reRequestsPerMinute);
+  const purgeRecheckSeconds = Number(record.purgeRecheckSeconds);
+  const purgeSettleSeconds = Number(record.purgeSettleSeconds);
   return {
     holdDays: Number.isInteger(holdDays) && holdDays >= 1 && holdDays <= 90 ? holdDays : defaultCleanupSettings.holdDays,
     deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true,
-    reRequestsPerMinute: Number.isInteger(reRequestsPerMinute) && reRequestsPerMinute >= 1 && reRequestsPerMinute <= 60 ? reRequestsPerMinute : defaultCleanupSettings.reRequestsPerMinute
+    reRequestsPerMinute: Number.isInteger(reRequestsPerMinute) && reRequestsPerMinute >= 1 && reRequestsPerMinute <= 60 ? reRequestsPerMinute : defaultCleanupSettings.reRequestsPerMinute,
+    purgeRecheckSeconds:
+      record.purgeRecheckSeconds !== undefined && record.purgeRecheckSeconds !== null && Number.isInteger(purgeRecheckSeconds) && purgeRecheckSeconds >= 0 && purgeRecheckSeconds <= maxPurgeRecheckSeconds
+        ? purgeRecheckSeconds
+        : defaultCleanupSettings.purgeRecheckSeconds,
+    purgeSettleSeconds:
+      record.purgeSettleSeconds !== undefined && record.purgeSettleSeconds !== null && Number.isInteger(purgeSettleSeconds) && purgeSettleSeconds >= 0 && purgeSettleSeconds <= maxPurgeSettleSeconds
+        ? purgeSettleSeconds
+        : defaultCleanupSettings.purgeSettleSeconds
   };
 }
 

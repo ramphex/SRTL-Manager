@@ -341,6 +341,26 @@ function AuditRunsList({
   );
 }
 
+const purgeRecheckOptions = [0, 30, 60, 120, 300, 600, 1800];
+
+// A value saved through the API that is not in the list still shows, rather than reading as another choice.
+function purgeRecheckChoices(current: number): number[] {
+  return purgeRecheckOptions.includes(current) ? purgeRecheckOptions : [...purgeRecheckOptions, current].sort((left, right) => left - right);
+}
+
+const purgeSettleOptions = [0, 2, 3, 5, 10];
+
+function purgeSettleChoices(current: number): number[] {
+  return purgeSettleOptions.includes(current) ? purgeSettleOptions : [...purgeSettleOptions, current].sort((left, right) => left - right);
+}
+
+function purgeRecheckLabel(seconds: number): string {
+  if (seconds === 0) return "Do not recheck";
+  if (seconds < 60 || seconds % 60 !== 0) return `${seconds} seconds`;
+  const minutes = seconds / 60;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
 function auditModeLabel(mode: AuditMode | null | undefined): string {
   if (mode === "deep") return "Deep";
   if (mode === "fast") return "Fast";
@@ -1029,6 +1049,28 @@ function AdvancedSettingsPanel() {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="advanced-field">
+              <span>Recheck deleted remote files after</span>
+              <select value={draft.cleanup.purgeRecheckSeconds} onChange={(event) => updateCleanup({ purgeRecheckSeconds: Number(event.target.value) })}>
+                {purgeRecheckChoices(draft.cleanup.purgeRecheckSeconds).map((seconds) => (
+                  <option key={seconds} value={seconds}>
+                    {purgeRecheckLabel(seconds)}
+                  </option>
+                ))}
+              </select>
+              <small>A remote mount can bring a deleted file back by itself. The purge waits this long after its last remote delete, then lists any that came back.</small>
+            </label>
+            <label className="advanced-field">
+              <span>Look for another copy after a remote delete</span>
+              <select value={draft.cleanup.purgeSettleSeconds} onChange={(event) => updateCleanup({ purgeSettleSeconds: Number(event.target.value) })}>
+                {purgeSettleChoices(draft.cleanup.purgeSettleSeconds).map((seconds) => (
+                  <option key={seconds} value={seconds}>
+                    {seconds === 0 ? "Do not look" : `${seconds} ${seconds === 1 ? "second" : "seconds"} later`}
+                  </option>
+                ))}
+              </select>
+              <small>Every remote delete is checked straight away, and another copy found at the same path is deleted too, up to 3 deletes in all. This adds a wait for mounts that show such a copy only some seconds later. It is paid once per remote folder a purge empties, so it slows large purges a lot.</small>
             </label>
             <label className="advanced-toggle">
               <input

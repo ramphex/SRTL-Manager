@@ -77,7 +77,7 @@ describe("a real backup, restored", () => {
     expect((await fs.stat(directory)).mode & 0o777).toBe(0o700);
     const sets = await listBackups(directory);
     expect(sets).toHaveLength(1);
-    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: 31 } });
+    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: 32 } });
     expect(sets[0]!.entry.sizeBytes).toBeGreaterThan(1_000);
     const dumpPath = path.join(directory, `${sets[0]!.entry.name}.dump`);
     expect((await fs.stat(dumpPath)).mode & 0o777).toBe(0o600);

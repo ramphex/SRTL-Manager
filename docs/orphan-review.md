@@ -45,6 +45,28 @@ A purge job that fails or partly fails records its first error, the file and the
 
 Folders with no video are deleted one file at a time, then the folders that held them. Some remote mounts refuse to remove a folder that still has files but remove it themselves once its last file goes, and a folder that is already gone counts as removed. If a file cannot be deleted, the job says how many were deleted before it stopped, and the folder is left in place.
 
+## Checking that a delete happened
+
+Some remote mount software does not behave like a disk. It can keep listing a file after it was deleted, even though the file can no longer be opened. It can also keep several copies of a release under one folder name and show another copy at the same path as soon as the first one is deleted. SRTL does not take a delete on trust, and checks for both:
+
+- **Right after each delete**, SRTL looks the file up, then lists its folder. A file only counts as still there if a lookup finds it and it opens. If it does, SRTL looks again after 1.5 seconds and 3 seconds more, because a mount can briefly answer from a listing it made just before the delete. The same file, unchanged, still there after that never went: the item fails. A file the folder still lists but that cannot be opened counts as deleted, with a note, because scans do not count such files either (see below). A folder with no video is looked at once at the end, since some mounts keep listing the files of a folder until its last one is deleted.
+- **Another copy at the same path.** The look right after each delete also catches another copy that storage shows at the same path, as some mounts do as part of the delete itself. For a mount that shows it only some seconds later, **Look for another copy after a remote delete** adds a wait: once the last video in a remote folder is gone, SRTL waits that long and looks again. It is off by default, because the wait is paid once per remote folder a purge empties: 3 seconds adds about 8 hours to a purge of 10,000 folders. The recheck after the purge (below) still reports such a copy as **came back**. If another copy is there, it is checked again like any orphan: no symlink in the Symlink folder points to it or to a folder above it, no symlink in an extra symlink folder does either, it is not part of an unfinished copy, it is a regular file inside the storage root, and it was not modified in the last 24 hours. The one check it skips is that the file matches the inventoried size and date, which another copy fails by nature. If the checks pass, it is deleted too. A folder with no video gets the same treatment, with the same re-walk as its first delete. After 3 deletes in all, a path that still has another copy is left in place and listed as **keeps coming back**.
+- **After the purge**, SRTL waits (**Recheck deleted remote files after**, 2 minutes by default, several refresh cycles of a typical remote mount) and looks at every deleted remote file and folder again, one listing per folder. A file that is found and opens again is recorded as **came back**: it is not counted as deleted, its inventory row is marked present again so the review and dashboard show it at once, and nothing is re-requested for it. The job ends as partly failed. The wait counts from the last delete, so the job stays in its **Checking deleted remote files again** stage for at most that long. **Terminate** stops it early and keeps what was deleted. **Do not recheck** turns it off. Local purges never wait.
+
+The purge status window and the job summary count each outcome apart: deleted, deleted after another copy appeared, kept coming back, came back at the recheck, and deleted but still listed. Each has its own list in the status window, with what was found.
+
+The review marks a file that a purge deleted, or could not get rid of, when storage shows it again, with **Came back after purge** and the job number, and says above the list how many there are.
+
+## Files a remote mount lists but cannot open
+
+A remote storage scan opens every file it lists, without reading from it. On a FUSE remote mount, opening a file without reading it took about a quarter of a millisecond, so this adds a few seconds to a scan of 20,000 files. Local storage is not checked, so local scans are unchanged.
+
+- A file that opens is counted as usual.
+- A file that says it does not exist when opened (ENOENT) is not there: it is not added, and a file that was present becomes missing.
+- A file that fails with any other error, such as EIO, is opened once more after a short wait, together with the others like it. Some mounts give EIO for a file that is not there when it is opened right after its folder was listed. If it then opens, it counts. If it then says it does not exist, it is not there. If it still fails, SRTL cannot tell, so the file keeps the state it had: present stays present, missing stays missing, and a new file is not added.
+
+The scan job log counts these as **listed but not readable** and names the first few. A file that becomes missing this way is treated like any other missing file: it drops out of the orphan review, the dashboard counts and storage policy counts. Nothing is deleted or unlinked because of it.
+
 ## Symlinks kept by other tools
 
 SRTL only scans its own symlink folder. If another tool, such as a download client, keeps its own folder of symlinks pointing at files on your storage, SRTL cannot see those links and would list their targets as orphans. Name those folders so they are checked too:

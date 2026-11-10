@@ -12,6 +12,7 @@ import { applyPendingOnboardingPolicy } from "./onboarding";
 import { applyDefaultPoliciesToNewTitles, type DefaultPolicyTitle } from "./defaultPolicy";
 import { holdingFolderName, isCoveredByPath, isMediaFile, isPathInside, safeRelativePath } from "./media";
 import { assertReadableRegularFile, withFilesystemTimeout } from "./filesystemSafety";
+import { confirmOpenable } from "./openCheck";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
 import { effectiveIntegrity } from "./mediaIntegrity";
 import { matchesNormalizedSearch, searchPrefilter } from "./textSearch";
@@ -80,12 +81,23 @@ export interface StorageScanIssue {
   attempts: number;
 }
 
+/** A remote file the walk listed but could not open. */
+export interface UnreadableStorageFile {
+  filePath: string;
+  relativePath: string;
+  message: string;
+  // True when opening it kept failing for a reason other than "not found": its inventory row is left as it was.
+  keptPreviousState: boolean;
+}
+
 export interface ScanResult {
   options: ScanOptions;
   links: ClassifiedLink[];
   storageFiles: ClassifiedStorageFile[];
   reconciledStorageFiles: ClassifiedStorageFile[];
   storageScanIssues: StorageScanIssue[];
+  // Remote files that were listed but could not be opened. They are not counted as present. Absent on results built elsewhere.
+  unreadableStorageFiles?: UnreadableStorageFile[];
   // Top-most storage folders whose subtree holds no media file; the walk root and section roots are never included.
   leftoverFolders: LeftoverFolder[];
   summaries: SectionSummary[];
@@ -750,9 +762,17 @@ export async function scanLibrary(
     leftoverFolders.push(...localScan.leftoverFolders);
   }
 
+  const unreadableStorageFiles: UnreadableStorageFile[] = [];
   if (options.scanRemote) {
     await assertReadableDirectory(paths.remoteDir, "Remote storage root");
     const remoteScan = await walkStorageFilesWithRetry(paths.remoteDir, "remote", paths.remoteDir, isCancelled);
+    // A remote mount can keep listing files that are gone, so a remote file only counts once it can be opened.
+    // Local storage does not do this and is not checked, which keeps local scans as they were.
+    const confirmed = await confirmOpenable(remoteScan.files, (file) => file.filePath, isCancelled);
+    const readable = new Set(confirmed.readable);
+    remoteScan.files = remoteScan.files.filter((file) => readable.has(file));
+    for (const { item, message } of confirmed.missing) unreadableStorageFiles.push({ filePath: item.filePath, relativePath: item.relativePath, message, keptPreviousState: false });
+    for (const { item, message } of confirmed.unknown) unreadableStorageFiles.push({ filePath: item.filePath, relativePath: item.relativePath, message, keptPreviousState: true });
     storageFiles.push(...remoteScan.files);
     storageScanIssues.push(...remoteScan.issues);
     leftoverFolders.push(...remoteScan.leftoverFolders);
@@ -772,6 +792,7 @@ export async function scanLibrary(
     storageFiles: classifiedStorageFiles,
     reconciledStorageFiles,
     storageScanIssues,
+    unreadableStorageFiles,
     leftoverFolders,
     summaries,
     inventory: summarizeInventory(links, classifiedStorageFiles)
@@ -1003,10 +1024,14 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
+  // A file the walk listed but could not open is not revived through a link to it either, and one whose state is
+  // unknown keeps the state it had: present stays present, missing stays missing.
+  const unreadablePaths = new Set((result.unreadableStorageFiles ?? []).map((file) => file.filePath));
+  const keptStatePaths = new Set((result.unreadableStorageFiles ?? []).filter((file) => file.keptPreviousState).map((file) => file.filePath));
   // Walked files carry storage-derived metadata, so they win over the same file seen through a link.
   const filesToReconcile = uniqueStorageFiles([
     ...result.storageFiles,
-    ...result.reconciledStorageFiles.filter((file) => !seenStorageFilePaths.has(file.filePath))
+    ...result.reconciledStorageFiles.filter((file) => !seenStorageFilePaths.has(file.filePath) && !unreadablePaths.has(file.filePath))
   ]);
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
@@ -1087,6 +1112,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       scannedStorageRootTypes.has(file.rootType as StorageRootType) &&
       scannedFileSection &&
       !seenStorageFilePaths.has(file.filePath) &&
+      !keptStatePaths.has(file.filePath) &&
       !isInsideUnscannedStorageDirectory(file, result.storageScanIssues)
     ) {
       missingStorageFileIds.push(file.id);

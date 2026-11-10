@@ -235,6 +235,10 @@ export interface CleanupSettings {
   deleteRemoteSourceAfterCopy: boolean;
   // Searches sent to each Radarr or Sonarr instance per minute when deleted files are re-requested.
   reRequestsPerMinute: number;
+  // Seconds a purge waits after its last remote delete before it looks at every deleted remote path again. 0 skips the recheck.
+  purgeRecheckSeconds: number;
+  // Seconds a purge waits after a remote folder's last video is deleted before it looks for another copy at the same path. 0 skips it.
+  purgeSettleSeconds: number;
 }
 
 export interface AdvancedSettings {
@@ -637,6 +641,15 @@ export interface OrphanReviewItem {
   episodeCoverage: { linked: number; total: number } | null;
   // A symlink in an extra symlink folder that still points at this file.
   extraLinkPath: string | null;
+  // The last purge that deleted this file, or tried to, while storage shows it again now. Absent or null otherwise.
+  cameBackAfterPurge?: OrphanCameBackAfterPurge | null;
+}
+
+/** A purge that deleted a file storage shows again: "deleted" when it came back after the purge ended, "came_back" when the purge's recheck saw it, "keeps_coming_back" when the purge gave up. */
+export interface OrphanCameBackAfterPurge {
+  jobId: number;
+  at: string;
+  outcome: "deleted" | "came_back" | "keeps_coming_back";
 }
 
 export interface OrphanLeftoverFolder {
@@ -669,6 +682,8 @@ export interface OrphanReview {
   extraSymlinks: { folders: string[]; linkCount: number; unmatchedCount: number; problems: string[] };
   // Files and folders left out of `items` and `leftoverFolders` because a symlink uses them, so SRTL would never purge them.
   skippedInUse: OrphanSkippedInUse;
+  // Listed files that a purge deleted before and that storage shows again. Absent from older servers.
+  cameBackAfterPurgeCount?: number;
   holdDays: number;
 }
 
@@ -691,11 +706,24 @@ export interface OrphanPurgeJobProgress {
   deleted: number;
   alreadyMissing: number;
   failed: number;
+  // Deleted remote files or folders that were back when the purge looked again after the delay. Not counted in deleted.
+  // Absent on jobs from before the recheck existed.
+  cameBack?: number;
+  // Deleted, after another copy appeared at the same path and was deleted too. Counted in deleted as well.
+  resurfacedDeleted?: number;
+  // Left in place because another copy was back after every delete. Not counted in deleted or failed.
+  keepsComingBack?: number;
+  // Deleted, but storage still lists them although they cannot be opened. Counted in deleted as well.
+  listedNotReadable?: number;
   remaining: number;
-  stage: "preparing" | "purging" | "cancelled" | "failed" | "partially_failed" | "completed";
+  stage: "preparing" | "purging" | "rechecking" | "cancelled" | "failed" | "partially_failed" | "completed";
   message: string;
   // The first item that was not purged and why. Absent when nothing failed.
   firstError?: { filePath: string; message: string };
+  // The first deleted item that came back, and what was found. Absent when none did.
+  firstCameBack?: { filePath: string; message: string };
+  // The recheck of deleted remote paths: when it runs (or ran), the delay it waited, and how far it got.
+  recheck?: { at: string; delaySeconds: number; total: number; checked: number };
 }
 
 export type OrphanPurgeMode = "hold" | "delete";
@@ -714,8 +742,11 @@ export interface OrphanRestoreJobProgress {
   firstError?: { filePath: string | null; message: string };
 }
 
-/** Which of a purge job's items to list: the ones that failed, or the ones moved to the holding area. */
-export type OrphanPurgeItemOutcome = "failed" | "held";
+/**
+ * Which of a purge job's items to list: failed, moved to the holding area, deleted but back at the recheck (came_back),
+ * left in place because another copy kept appearing (keeps_coming_back), or deleted after another copy appeared (resurfaced).
+ */
+export type OrphanPurgeItemOutcome = "failed" | "held" | "came_back" | "keeps_coming_back" | "resurfaced";
 
 export interface OrphanPurgeItem {
   operationId: number;
@@ -723,8 +754,12 @@ export interface OrphanPurgeItem {
   rootType: StorageRootType;
   filePath: string;
   sizeBytes: number;
-  stage: "planned" | "held" | "deleted" | "already_missing" | "failed" | "restored" | "expired";
+  stage: "planned" | "held" | "deleted" | "already_missing" | "failed" | "came_back" | "keeps_coming_back" | "restored" | "expired";
   errorMessage: string | null;
+  // Something worth knowing about an item that did not fail, such as storage still listing a file it cannot open.
+  note: string | null;
+  // How many times the path was deleted; more than 1 when another copy appeared at it.
+  deleteRounds: number;
   heldPath: string | null;
   purgeAfter: string | null;
   completedAt: string | null;

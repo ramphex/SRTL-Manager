@@ -329,10 +329,40 @@ describe("orphan purge job presentation", () => {
     expect(orphanPurgeHoldingAreaView("remote")).toBe("remote-orphans");
   });
 
+  it("shows the wait before deleted remote files are checked again, and what came back", () => {
+    const recheckAt = "2026-11-09T02:17:00.000Z";
+    const waiting = purgeJob("running", {
+      options,
+      current: 10,
+      total: 10,
+      deleted: 10,
+      failed: 0,
+      cameBack: 0,
+      remaining: 0,
+      stage: "rechecking",
+      message: "Checking 10 deleted remote items again",
+      recheck: { at: recheckAt, delaySeconds: 120, total: 10, checked: 0 }
+    });
+    const view = orphanPurgeProgressFromJob(waiting);
+    expect(view).toMatchObject({ stage: "rechecking", cameBack: 0, recheck: { at: recheckAt, delaySeconds: 120, total: 10, checked: 0 }, firstCameBack: null });
+    expect(orphanPurgeStageLabel(view, waiting.status)).toBe("Checking deleted remote files again");
+    // The message starts with "Checking" but names no file.
+    expect(orphanPurgeCurrentFile(view)).toBeNull();
+    expect(orphanPurgeRemainingLabel(waiting, view, Date.parse(recheckAt) - 90_000)).toBe("Recheck in 1m 30s");
+    expect(orphanPurgeRemainingLabel(waiting, view, Date.parse(recheckAt) + 1_000)).toBe("Rechecking");
+
+    const done = purgeJob(
+      "partially_failed",
+      { options, current: 10, total: 10, deleted: 8, cameBack: 2, failed: 0, remaining: 0, stage: "partially_failed", message: "", firstCameBack: { filePath: "/remote/Golf/Golf.mkv", message: "Storage showed the file again 2 minutes after the delete" } },
+      "2026-11-09T02:20:00.000Z"
+    );
+    expect(orphanPurgeProgressFromJob(done)).toMatchObject({ cameBack: 2, firstCameBack: { filePath: "/remote/Golf/Golf.mkv", message: "Storage showed the file again 2 minutes after the delete" }, recheck: null });
+  });
+
   it("copes with a queued job that has no progress yet", () => {
     const queued: JobRecord = { id: 7, type: "orphan_purge", status: "queued", createdAt: startedAt, startedAt: null, finishedAt: null, options: { ...options, total: 3 }, progress: {} };
     const view = orphanPurgeProgressFromJob(queued);
-    expect(view).toMatchObject({ total: 3, current: 0, remaining: 3, firstError: null, message: null });
+    expect(view).toMatchObject({ total: 3, current: 0, remaining: 3, cameBack: 0, firstError: null, message: null });
     expect(orphanPurgeStageLabel(view, queued.status)).toBe("Queued");
     expect(orphanPurgeProgressPercent(queued, view)).toBe(0);
     expect(orphanPurgeRateLabel(queued, view)).toBe("-");

@@ -116,6 +116,11 @@ function FileFlags({ item }: { item: OrphanReviewItem }) {
   if (item.integrity === "partial_hollow") flags.push({ text: "Damaged", title: `${item.zeroSamples ?? "Several"} of 24 sampled regions are zero-filled`, tone: "bad" });
   if (item.episodeCoverage && item.episodeCoverage.linked < item.episodeCoverage.total)
     flags.push({ text: `${formatNumber(item.episodeCoverage.linked)} of ${formatNumber(item.episodeCoverage.total)} episodes linked`, title: `Holds ${formatNumber(item.episodeCoverage.total)} episodes, and only ${formatNumber(item.episodeCoverage.linked)} of them ${item.episodeCoverage.linked === 1 ? "has" : "have"} a linked file`, tone: "warn" });
+  if (item.cameBackAfterPurge) {
+    const purge = item.cameBackAfterPurge;
+    const how = purge.outcome === "keeps_coming_back" ? "could not get rid of it: another copy kept appearing at the same path" : purge.outcome === "came_back" ? "deleted it, and it was back when the purge looked again" : "deleted it, and storage shows it again";
+    flags.push({ text: "Came back after purge", title: `Purge job #${purge.jobId} ${how}`, tone: "warn" });
+  }
   if (!flags.length) return null;
   return (
     <>
@@ -457,6 +462,11 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                   {(data.hollowCount || data.damagedCount) && skippedParts.length ? " · " : ""}
                   {skippedParts.length ? `${skippedParts.join(", ")} not listed.` : ""}
                 </p>
+                {data.cameBackAfterPurgeCount ? (
+                  <p className="orv-skipped orv-came-back">
+                    {countText(data.cameBackAfterPurgeCount, "listed file")} came back after a purge deleted {data.cameBackAfterPurgeCount === 1 ? "it" : "them"}. Storage shows {data.cameBackAfterPurgeCount === 1 ? "it" : "them"} again; each is marked.
+                  </p>
+                ) : null}
               </div>
               <div className="orv-header-actions">
                 <button type="button" className="secondary orv-how" aria-expanded={howOpen} aria-controls={`orv-how-${rootType}`} onClick={() => setHowOpen((value) => !value)}>
