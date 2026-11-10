@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.1] - 2026-11-10
+
+Fixes from a security review, and held file restores and partial copy discards now work in the standard Docker setup. Database migration 31 adds two worker job types.
+
 ### Fixed
 
 - **Restore** in the orphan holding area and **Discard partial copy** work in the standard Docker setup, where storage is mounted read-only into the API. Both now run in the worker as jobs, with progress, a log and an entry in the action record, and the page follows the job until it finishes. Each item is checked again when the job runs.
