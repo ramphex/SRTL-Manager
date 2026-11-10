@@ -341,6 +341,20 @@ function AuditRunsList({
   );
 }
 
+const purgeRecheckOptions = [0, 30, 60, 120, 300, 600, 1800];
+
+// A value saved through the API that is not in the list still shows, rather than reading as another choice.
+function purgeRecheckChoices(current: number): number[] {
+  return purgeRecheckOptions.includes(current) ? purgeRecheckOptions : [...purgeRecheckOptions, current].sort((left, right) => left - right);
+}
+
+function purgeRecheckLabel(seconds: number): string {
+  if (seconds === 0) return "Do not recheck";
+  if (seconds < 60 || seconds % 60 !== 0) return `${seconds} seconds`;
+  const minutes = seconds / 60;
+  return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+}
+
 function auditModeLabel(mode: AuditMode | null | undefined): string {
   if (mode === "deep") return "Deep";
   if (mode === "fast") return "Fast";
@@ -1029,6 +1043,17 @@ function AdvancedSettingsPanel() {
                   </option>
                 ))}
               </select>
+            </label>
+            <label className="advanced-field">
+              <span>Recheck deleted remote files after</span>
+              <select value={draft.cleanup.purgeRecheckSeconds} onChange={(event) => updateCleanup({ purgeRecheckSeconds: Number(event.target.value) })}>
+                {purgeRecheckChoices(draft.cleanup.purgeRecheckSeconds).map((seconds) => (
+                  <option key={seconds} value={seconds}>
+                    {purgeRecheckLabel(seconds)}
+                  </option>
+                ))}
+              </select>
+              <small>A remote mount can bring a deleted file back by itself. The purge waits this long after its last remote delete, then lists any that came back.</small>
             </label>
             <label className="advanced-toggle">
               <input

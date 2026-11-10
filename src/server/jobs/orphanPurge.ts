@@ -545,14 +545,100 @@ async function findLiveSymlinkTo(directory: string, target: string, depth = 3): 
 }
 
 type Stat = import("node:fs").Stats;
+type Lstat = (target: string) => Promise<Pick<Stat, "size" | "mtimeMs">>;
+type ListNames = (directory: string) => Promise<string[]>;
+
+/** The filesystem calls that confirm a delete; tests swap in fakes that behave like a remote mount. */
+export interface DeleteProbeFs {
+  lstat: Lstat;
+  readdir: ListNames;
+}
+
+const realProbeFs: DeleteProbeFs = { lstat: (target) => fs.lstat(target), readdir: (directory) => fs.readdir(directory) };
+
+/**
+ * Waits between looks at a path that was just deleted. A FUSE mount answers lookups made within about a second of a
+ * listing from that listing, so a file can look present for a moment after a delete that worked. Tests shorten these.
+ */
+export const deleteConfirmation = { delaysMs: [1500, 3000] };
+
+function isGoneCode(error: unknown): boolean {
+  const code = errorCode(error);
+  return code === "ENOENT" || code === "ENOTDIR";
+}
+
+type Shown = { reason: string; ghost: boolean } | null;
+
+const ghostReason = "storage still lists it although it can no longer be opened";
+
+/**
+ * Whether storage still shows a path, the way a scan would see it. The lookup comes first: a FUSE mount can answer a
+ * lookup made just after a listing from that listing, so a listing first would make a lookup find what is gone.
+ * Then the parent folder is listed, because a remote mount can keep listing a file its lookups no longer find, and a
+ * scan, which lists folders, would count it again. Either one means the path is not gone. Null when it is.
+ */
+async function stillShown(target: string, before: Pick<Stat, "size" | "mtimeMs"> | null, probe: DeleteProbeFs): Promise<Shown> {
+  let stat: Pick<Stat, "size" | "mtimeMs"> | null = null;
+  try {
+    stat = await withFilesystemTimeout(probe.lstat(target), `Checking ${target} after the delete`);
+  } catch (error) {
+    if (!isGoneCode(error)) return { reason: `it could not be checked afterwards (${fsErrorText(error)})`, ghost: false };
+  }
+  if (stat) {
+    if (!before) return { reason: "it is still there", ghost: false };
+    const unchanged = stat.size === before.size && Math.trunc(stat.mtimeMs) === Math.trunc(before.mtimeMs);
+    return { reason: unchanged ? "it is still there, unchanged" : "a file with a different size or date is there now", ghost: false };
+  }
+  try {
+    const names = await withFilesystemTimeout(probe.readdir(path.dirname(target)), `Listing ${path.dirname(target)} after the delete`);
+    return names.includes(path.basename(target)) ? { reason: ghostReason, ghost: true } : null;
+  } catch (error) {
+    if (isGoneCode(error)) return null;
+    return { reason: `it could not be checked afterwards (${fsErrorText(error)})`, ghost: false };
+  }
+}
+
+const pause = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Why a path that storage reported as deleted does not count as gone, or null once it is. A remote FUSE mount can
+ * answer a delete with success and keep listing the file, or serve another file at the same path straight after, so
+ * a delete is only trusted once the path is no longer shown. A path a lookup still finds is looked at again after
+ * short pauses, since the mount can briefly answer from a listing made just before the delete; the last look decides.
+ * A path that is only listed is final at once: waiting does not change that.
+ */
+export async function stillThereAfterDelete(target: string, before?: Pick<Stat, "size" | "mtimeMs"> | null, probe: DeleteProbeFs = realProbeFs): Promise<string | null> {
+  let shown = await stillShown(target, before ?? null, probe);
+  for (const delay of deleteConfirmation.delaysMs) {
+    if (!shown || shown.ghost) break;
+    await pause(delay);
+    shown = await stillShown(target, before ?? null, probe);
+  }
+  return shown?.reason ?? null;
+}
+
+/** Thrown when storage reported a delete as done but still shows the path. */
+export class StillThereAfterDeleteError extends Error {
+  constructor(target: string, reason: string) {
+    super(`Storage reported ${path.basename(target)} as deleted, but ${reason}; it was not counted as deleted`);
+    this.name = "StillThereAfterDeleteError";
+  }
+}
+
+/** Throws when storage still shows a file it reported as deleted. Every storage gets this; where the file is gone it costs one listing and one lookup. */
+async function confirmDeleted(filePath: string, before: Pick<Stat, "size" | "mtimeMs">): Promise<void> {
+  const reason = await stillThereAfterDelete(filePath, before);
+  if (reason) throw new StillThereAfterDeleteError(filePath, reason);
+}
 
 // Checks the file right before it is touched: still a regular file, still inside the root, and, for the file the
 // purge is about, unchanged since it was inventoried. The holding area is checked folder by folder on the way in.
-async function moveOrRemove(root: string, from: string, to: string | null, expect?: (stat: Stat) => void): Promise<void> {
+async function moveOrRemove(root: string, from: string, to: string | null, expect?: (stat: Stat) => void): Promise<Stat> {
   const stat = await assertStillInside(root, from, "file", from);
   expect?.(stat);
   if (to) await moveIntoHoldingArea(root, from, to);
   else await withFilesystemTimeout(fs.unlink(from), `Deleting ${from}`);
+  return stat;
 }
 
 function unchangedSince(operation: PurgeOperation, now: number, action: string): (stat: Stat) => void {
@@ -636,8 +722,8 @@ async function assertFolderStillLeftover(directory: string, now: number, content
   return contents;
 }
 
-/** The filesystem calls a folder delete needs; tests swap in a fake that behaves like a debrid mount. */
-export type FolderDeleteFs = Pick<typeof fs, "unlink" | "rmdir">;
+/** The filesystem calls a folder delete needs; tests swap in a fake that behaves like a debrid mount. lstat and readdir default to the real ones. */
+export type FolderDeleteFs = Pick<typeof fs, "unlink" | "rmdir"> & Partial<DeleteProbeFs>;
 
 /** Runs right before each unlink or rmdir of a folder delete; throws to stop it. */
 export type FolderDeleteCheck = (target: string, kind: "file" | "folder") => Promise<void>;
@@ -647,8 +733,11 @@ export type FolderDeleteCheck = (target: string, kind: "file" | "folder") => Pro
  * Debrid FUSE mounts refuse rmdir on a folder that still has files (EIO), which is all a recursive rm tries,
  * but they allow unlinking files and drop the folder themselves once its last file goes. So a folder that is
  * already gone counts as removed. A failure says how far the delete got.
+ * Such a mount may keep listing files it accepted deletes for until the whole folder goes, so the files are not
+ * looked at one by one: the folder is looked at once at the end, and a folder still listing files is a failure.
  */
 export async function deleteFolderFileByFile(directory: string, contents: FolderContents, ops: FolderDeleteFs = fs, check?: FolderDeleteCheck): Promise<void> {
+  const probe: DeleteProbeFs = { lstat: ops.lstat ?? realProbeFs.lstat, readdir: ops.readdir ?? realProbeFs.readdir };
   let deleted = 0;
   for (const filePath of contents.files) {
     try {
@@ -669,10 +758,28 @@ export async function deleteFolderFileByFile(directory: string, contents: Folder
       await withFilesystemTimeout(ops.rmdir(folder), `Removing folder ${folder}`);
     } catch (error) {
       if (errorCode(error) === "ENOENT") continue;
-      const files = contents.files.length === 1 ? "the 1 file" : `all ${contents.files.length} files`;
-      throw new Error(`Deleted ${files} in ${directory}, but folder ${folder} could not be removed (${fsErrorText(error)})`, { cause: error });
+      // A folder that will not go because storage lists files in it again says so, rather than only giving the error code.
+      const listed = await listedAfterDelete(directory, probe);
+      if (listed) throw new Error(`Deleted ${filesText(contents)} in ${directory}, but storage still lists ${listed} in it after the delete`, { cause: error });
+      throw new Error(`Deleted ${filesText(contents)} in ${directory}, but folder ${folder} could not be removed (${fsErrorText(error)})`, { cause: error });
     }
   }
+  const reason = await stillThereAfterDelete(directory, null, probe);
+  if (!reason) return;
+  const listed = await listedAfterDelete(directory, probe);
+  throw new Error(listed ? `Deleted ${filesText(contents)} in ${directory}, but storage still lists ${listed} in it after the delete` : `Deleted ${filesText(contents)} in ${directory}, and storage reported the folder as removed, but ${reason}`);
+}
+
+function filesText(contents: FolderContents): string {
+  return contents.files.length === 1 ? "the 1 file" : `all ${contents.files.length} files`;
+}
+
+// "a.nfo, b.jpg and 3 more", or null when the folder is gone or empty.
+async function listedAfterDelete(directory: string, probe: DeleteProbeFs): Promise<string | null> {
+  const names = await withFilesystemTimeout(probe.readdir(directory), `Listing ${directory} after the delete`).catch(() => [] as string[]);
+  if (names.length === 0) return null;
+  const shown = [...names].sort().slice(0, 3).join(", ");
+  return names.length > 3 ? `${shown} and ${names.length - 3} more` : shown;
 }
 
 async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperation, root: string, paths: PathsSettings, now: number): Promise<PurgeOutcome> {
@@ -791,14 +898,17 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
   const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
+  let deletedStat: Stat;
   try {
     // Checked again right before the move or delete: the symlink walks above take time.
-    await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "purging"));
+    deletedStat = await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "purging"));
   } catch (error) {
     throw holdingAreaError(error, heldPath);
   }
   const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
   const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase, extraSymlinks).catch(() => []);
+  // Looked at after the sidecars go: a remote mount may only drop a folder's files once the last of them is deleted.
+  if (!heldPath) await confirmDeleted(operation.filePath, deletedStat);
   await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
   return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: [], linkErrors: [] };
 }
@@ -878,13 +988,16 @@ async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation
 
   const holdBase = operation.mode === "hold" ? path.join(root, holdingFolderName, `job-${operation.jobId}`) : null;
   const heldPath = holdBase ? path.join(holdBase, path.relative(root, operation.filePath)) : null;
+  let deletedStat: Stat;
   try {
-    await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "deleting"));
+    deletedStat = await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "deleting"));
   } catch (error) {
     throw holdingAreaError(error, heldPath);
   }
   const stopAt = storageFile.section ? path.join(root, storageFile.section) : root;
   const extras = await cleanFolderAfterPurge(root, stopAt, path.dirname(operation.filePath), holdBase).catch(() => []);
+  // Its symlinks stay while storage still shows the file.
+  if (!heldPath) await confirmDeleted(operation.filePath, deletedStat);
   const links = await removeLinksToFile(db, operation.filePath, operation.storageFileId, symlinkDir, titleFolder);
   await db.update(schema.storageFiles).set({ missingSince: nowIso(), updatedAt: nowIso() }).where(eq(schema.storageFiles.id, operation.storageFileId));
   return { stage: heldPath ? "held" : "deleted", heldPath, extras, removedLinks: links.removed, linkErrors: links.errors };
@@ -1058,6 +1171,7 @@ export async function queueReRequestsForJob(db: DbExecutor, jobId: number): Prom
       const links = parseRemovedLinks(operation.removedLinks);
       const names = [file ? titleRelativePath(file.relativePath, section, itemName) : path.basename(operation.filePath), ...links.map((link) => titleRelativePath(link.relativePath, section, itemName))];
       const deleted = ["held", "deleted", "already_missing"].includes(operation.stage);
+      const cameBack = operation.stage === "came_back";
       return {
         jobId,
         operationId: operation.id,
@@ -1067,13 +1181,107 @@ export async function queueReRequestsForJob(db: DbExecutor, jobId: number): Prom
         wasLinked: links.length > 0,
         displayName: path.basename(operation.filePath),
         status: deleted ? "queued" : "skipped",
-        message: deleted ? null : "The file was not deleted, so nothing was requested.",
+        message: deleted ? null : cameBack ? "Storage showed the file again after the delete, so nothing was requested." : "The file was not deleted, so nothing was requested.",
         createdAt: timestamp,
         updatedAt: timestamp
       };
     });
     await db.insert(schema.reRequests).values(rows).onConflictDoNothing();
   }
+}
+
+/** One deleted path the recheck found shown again. */
+export interface CameBackPath {
+  operationId: number;
+  filePath: string;
+  message: string;
+}
+
+/** Deleted remote files and folders of a job, which the recheck looks at again. */
+export function recheckCandidates(operations: PurgeOperation[]): PurgeOperation[] {
+  return operations.filter((operation) => operation.stage === "deleted" && operation.rootType === "remote" && operation.mode === "delete");
+}
+
+function agoText(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000));
+  if (seconds < 120) return `${seconds} seconds`;
+  return `${Math.round(seconds / 60)} minutes`;
+}
+
+/**
+ * Looks again at deleted paths, one listing per parent folder: a path counts as back when a lookup finds it or its
+ * folder lists it, since a scan lists folders and would count either. A folder that is gone, or cannot be read,
+ * does not mark anything (the second is reported).
+ */
+export async function findCameBack(
+  operations: PurgeOperation[],
+  now = Date.now(),
+  probe: DeleteProbeFs = realProbeFs,
+  onProgress?: (checked: number) => Promise<void>,
+  shouldStop?: () => Promise<boolean>
+): Promise<{ cameBack: CameBackPath[]; unreadable: Array<{ directory: string; message: string }>; checked: number }> {
+  const byParent = new Map<string, PurgeOperation[]>();
+  for (const operation of operations) {
+    const parent = path.dirname(path.resolve(operation.filePath));
+    const list = byParent.get(parent);
+    if (list) list.push(operation);
+    else byParent.set(parent, [operation]);
+  }
+  const cameBack: CameBackPath[] = [];
+  const unreadable: Array<{ directory: string; message: string }> = [];
+  let checked = 0;
+  for (const [parent, group] of byParent) {
+    if (await shouldStop?.()) break;
+    // Every lookup in a folder comes before its listing, so none is answered from that listing.
+    const stats = new Map<number, Pick<Stat, "size" | "mtimeMs">>();
+    for (const operation of group) {
+      const stat = await withFilesystemTimeout(probe.lstat(operation.filePath), `Checking ${operation.filePath} again after the purge`).catch(() => null);
+      if (stat) stats.set(operation.id, stat);
+    }
+    let names: Set<string> | null = null;
+    try {
+      names = new Set(await withFilesystemTimeout(probe.readdir(parent), `Listing ${parent} again after the purge`));
+    } catch (error) {
+      if (!isGoneCode(error)) unreadable.push({ directory: parent, message: fsErrorText(error) });
+    }
+    for (const operation of group) {
+      checked += 1;
+      const stat = stats.get(operation.id);
+      const listed = names?.has(path.basename(operation.filePath)) ?? false;
+      if (!stat && !listed) continue;
+      const deletedAt = Date.parse(operation.completedAt ?? operation.updatedAt);
+      const after = Number.isFinite(deletedAt) ? ` ${agoText(now - deletedAt)} after the delete` : " after the delete";
+      const what = operation.targetKind === "folder" ? "the folder" : "the file";
+      let message: string;
+      if (!stat) message = `Storage listed ${what} again${after}, but it could not be opened`;
+      else if (operation.targetKind === "folder") message = `Storage showed ${what} again${after}`;
+      else {
+        const unchanged = stat.size === Number(operation.sizeBytes) && Math.trunc(stat.mtimeMs) === Number(operation.mtimeMs);
+        message = `Storage showed ${what} again${after}, ${unchanged ? "with the same size and date" : "with a different size or date"}`;
+      }
+      cameBack.push({ operationId: operation.id, filePath: operation.filePath, message });
+    }
+    await onProgress?.(checked);
+  }
+  return { cameBack, unreadable, checked };
+}
+
+/** Records a deleted path that came back. A file's inventory row is marked present again, so the review and dashboard show it now rather than after the next scan. */
+export async function markCameBack(db: DbExecutor, item: CameBackPath): Promise<boolean> {
+  const timestamp = nowIso();
+  const [operation] = await db
+    .update(schema.orphanPurgeOperations)
+    .set({ stage: "came_back", errorMessage: item.message, updatedAt: timestamp })
+    .where(and(eq(schema.orphanPurgeOperations.id, item.operationId), eq(schema.orphanPurgeOperations.stage, "deleted")))
+    .returning();
+  if (!operation) return false;
+  if (operation.targetKind === "file") {
+    await db
+      .update(schema.storageFiles)
+      .set({ missingSince: null, updatedAt: timestamp })
+      .where(and(eq(schema.storageFiles.id, operation.storageFileId), eq(schema.storageFiles.filePath, operation.filePath)));
+  }
+  return true;
 }
 
 export function purgeModeIsValid(value: unknown): value is OrphanPurgeMode {
@@ -1091,7 +1299,8 @@ export async function operationsByIds(db: DbExecutor, ids: number[]): Promise<Pu
 const purgeItemStages: Record<OrphanPurgeItemOutcome, string[]> = {
   failed: ["failed"],
   // Held files stay in this list after they are restored or their holding period ends, with their current stage.
-  held: ["held", "restored", "expired"]
+  held: ["held", "restored", "expired"],
+  came_back: ["came_back"]
 };
 
 /** One page of a purge job's items with the given outcome, oldest first. */

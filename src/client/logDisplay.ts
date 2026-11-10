@@ -13,6 +13,7 @@ export interface LogDataChip {
 const dataLabels: Record<string, string> = {
   action: "Action",
   alreadyMissing: "Already missing",
+  cameBack: "Came back",
   actionableLocalFiles: "Copy to remote files",
   actionableLocalLinks: "Copy to remote links",
   actionableRemoteFiles: "Copy to local files",
@@ -95,6 +96,7 @@ const chipPriority = [
   "repointed",
   "removed",
   "alreadyMissing",
+  "cameBack",
   "skipped",
   "conflicts",
   "passed",

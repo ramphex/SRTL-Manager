@@ -648,11 +648,20 @@ export type OrphanPurgeProgressView = {
   held: number;
   alreadyMissing: number;
   failed: number;
+  // Deleted remote items that storage showed again when the purge looked after its delay.
+  cameBack: number;
   remaining: number;
   stage: string;
   message: string | null;
   firstError: { filePath: string; message: string } | null;
+  firstCameBack: { filePath: string; message: string } | null;
+  recheck: { at: string; delaySeconds: number; total: number; checked: number } | null;
 };
+
+function fileMessageFromUnknown(value: unknown): { filePath: string; message: string } | null {
+  const record = recordFromUnknown(value);
+  return record && typeof record.filePath === "string" && typeof record.message === "string" ? { filePath: record.filePath, message: record.message } : null;
+}
 
 function orphanPurgeOptions(job: JobRecord | null): Record<string, unknown> | null {
   return recordFromUnknown(job?.options) ?? recordFromUnknown(recordFromUnknown(job?.progress)?.options);
@@ -663,10 +672,11 @@ export function orphanPurgeProgressFromJob(job: JobRecord | null): OrphanPurgePr
   const options = orphanPurgeOptions(job);
   const total = finiteNumberFromUnknown(progress?.total) || finiteNumberFromUnknown(options?.total);
   const current = Math.min(finiteNumberFromUnknown(progress?.current), total || Number.POSITIVE_INFINITY);
-  const firstErrorRecord = recordFromUnknown(progress?.firstError);
-  const firstError =
-    firstErrorRecord && typeof firstErrorRecord.filePath === "string" && typeof firstErrorRecord.message === "string"
-      ? { filePath: firstErrorRecord.filePath, message: firstErrorRecord.message }
+  const firstError = fileMessageFromUnknown(progress?.firstError);
+  const recheckRecord = recordFromUnknown(progress?.recheck);
+  const recheck =
+    recheckRecord && typeof recheckRecord.at === "string"
+      ? { at: recheckRecord.at, delaySeconds: finiteNumberFromUnknown(recheckRecord.delaySeconds), total: finiteNumberFromUnknown(recheckRecord.total), checked: finiteNumberFromUnknown(recheckRecord.checked) }
       : null;
   const remainingValue = finiteNullableNumberFromUnknown(progress?.remaining);
   return {
@@ -680,10 +690,13 @@ export function orphanPurgeProgressFromJob(job: JobRecord | null): OrphanPurgePr
     held: finiteNumberFromUnknown(progress?.held),
     alreadyMissing: finiteNumberFromUnknown(progress?.alreadyMissing),
     failed: finiteNumberFromUnknown(progress?.failed),
+    cameBack: finiteNumberFromUnknown(progress?.cameBack),
     remaining: remainingValue ?? Math.max(0, total - current),
     stage: typeof progress?.stage === "string" ? progress.stage : job?.status ?? "waiting",
     message: typeof progress?.message === "string" && progress.message.trim() ? progress.message : null,
-    firstError
+    firstError,
+    firstCameBack: fileMessageFromUnknown(progress?.firstCameBack),
+    recheck
   };
 }
 
@@ -713,6 +726,8 @@ export function orphanPurgeStageLabel(progress: OrphanPurgeProgressView, status?
       return "Preparing";
     case "purging":
       return progress.mode === "hold" ? "Moving files to the holding area" : "Deleting files";
+    case "rechecking":
+      return "Checking deleted remote files again";
     case "cancelled":
       return "Stopped";
     case "failed":
@@ -736,6 +751,7 @@ export function orphanPurgeProgressPercent(job: JobRecord | null, progress: Orph
 
 /** The file the job says it is working on; the job writes "Checking <file name>" before each item. */
 export function orphanPurgeCurrentFile(progress: OrphanPurgeProgressView): string | null {
+  if (progress.stage === "rechecking") return null;
   const match = progress.message?.match(/^Checking (.+)$/);
   return match?.[1]?.trim() || null;
 }
@@ -759,6 +775,10 @@ export function orphanPurgeRateLabel(job: JobRecord | null, progress: OrphanPurg
 export function orphanPurgeRemainingLabel(job: JobRecord | null, progress: OrphanPurgeProgressView, now = Date.now()): string {
   if (!job || job.status === "queued") return "-";
   if (job.status !== "running") return "Done";
+  if (progress.stage === "rechecking" && progress.recheck) {
+    const until = Date.parse(progress.recheck.at) - now;
+    return until > 1000 ? `Recheck in ${formatDurationMs(until)}` : "Rechecking";
+  }
   if (progress.remaining <= 0) return progress.total > 0 ? "Finishing" : "-";
   const perMs = orphanPurgeItemsPerMs(job, progress, now);
   if (perMs == null || perMs <= 0) return "Estimating";

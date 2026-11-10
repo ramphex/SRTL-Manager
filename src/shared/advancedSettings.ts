@@ -35,8 +35,13 @@ export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
 export const defaultCleanupSettings: CleanupSettings = {
   holdDays: 7,
   deleteRemoteSourceAfterCopy: false,
-  reRequestsPerMinute: 6
+  reRequestsPerMinute: 6,
+  // A remote mount can bring a deleted file back by itself. Two minutes covers several of its refresh cycles
+  // (30 seconds by default on the usual mount), so a file that comes back is caught by the purge that deleted it.
+  purgeRecheckSeconds: 120
 };
+
+export const maxPurgeRecheckSeconds = 3600;
 
 export const defaultAdvancedSettings: AdvancedSettings = {
   scan: defaultScanJobBehaviorSettings,
@@ -89,10 +94,15 @@ function normalizeCleanup(value: unknown): CleanupSettings {
   const record = isRecord(value) ? value : {};
   const holdDays = Number(record.holdDays);
   const reRequestsPerMinute = Number(record.reRequestsPerMinute);
+  const purgeRecheckSeconds = Number(record.purgeRecheckSeconds);
   return {
     holdDays: Number.isInteger(holdDays) && holdDays >= 1 && holdDays <= 90 ? holdDays : defaultCleanupSettings.holdDays,
     deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true,
-    reRequestsPerMinute: Number.isInteger(reRequestsPerMinute) && reRequestsPerMinute >= 1 && reRequestsPerMinute <= 60 ? reRequestsPerMinute : defaultCleanupSettings.reRequestsPerMinute
+    reRequestsPerMinute: Number.isInteger(reRequestsPerMinute) && reRequestsPerMinute >= 1 && reRequestsPerMinute <= 60 ? reRequestsPerMinute : defaultCleanupSettings.reRequestsPerMinute,
+    purgeRecheckSeconds:
+      record.purgeRecheckSeconds !== undefined && record.purgeRecheckSeconds !== null && Number.isInteger(purgeRecheckSeconds) && purgeRecheckSeconds >= 0 && purgeRecheckSeconds <= maxPurgeRecheckSeconds
+        ? purgeRecheckSeconds
+        : defaultCleanupSettings.purgeRecheckSeconds
   };
 }
 

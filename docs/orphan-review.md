@@ -45,6 +45,15 @@ A purge job that fails or partly fails records its first error, the file and the
 
 Folders with no video are deleted one file at a time, then the folders that held them. Some remote mounts refuse to remove a folder that still has files but remove it themselves once its last file goes, and a folder that is already gone counts as removed. If a file cannot be deleted, the job says how many were deleted before it stopped, and the folder is left in place.
 
+## Checking that a delete happened
+
+A remote mount can answer a delete with success and still show the file, or show it again a little later. So SRTL does not take a delete on trust, on either storage location:
+
+- **Right after each delete**, SRTL looks the file up and lists its folder. If the lookup still finds it, SRTL waits 1.5 seconds and looks again, then 3 seconds more, since a mount can briefly answer from a listing it made just before the delete. A file still found, or still listed by its folder although it can no longer be opened, is a failure, with the reason, not a delete. A scan lists folders, so it would count such a file again. For a folder with no video, SRTL looks once at the end, since some mounts keep listing the files of a folder until its last one is deleted. A folder that still lists files after the delete is a failure that names them.
+- **After the purge**, SRTL waits and then looks at every deleted remote file and folder again, one listing per folder. Anything that is back is recorded as **came back**: it is not counted as deleted, its file shows in the orphan review and dashboard again straight away, nothing is re-requested for it, and the job ends as partly failed. The purge status window lists these items with what was found (same size and date, a different size or date, or listed but no longer opening).
+
+The wait is **Recheck deleted remote files after** under **Settings > Advanced > Cleanup**. The default is 2 minutes, several of the usual remote mount's refresh cycles (30 seconds by default). It counts from the last delete, so the job stays in its **Checking deleted remote files again** stage for at most that long, and **Terminate** stops it early, keeping what was deleted. **Do not recheck** turns it off. Local purges never wait.
+
 ## Symlinks kept by other tools
 
 SRTL only scans its own symlink folder. If another tool, such as a download client, keeps its own folder of symlinks pointing at files on your storage, SRTL cannot see those links and would list their targets as orphans. Name those folders so they are checked too:

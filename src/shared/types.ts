@@ -235,6 +235,8 @@ export interface CleanupSettings {
   deleteRemoteSourceAfterCopy: boolean;
   // Searches sent to each Radarr or Sonarr instance per minute when deleted files are re-requested.
   reRequestsPerMinute: number;
+  // Seconds a purge waits after its last remote delete before it looks at every deleted remote path again. 0 skips the recheck.
+  purgeRecheckSeconds: number;
 }
 
 export interface AdvancedSettings {
@@ -691,11 +693,18 @@ export interface OrphanPurgeJobProgress {
   deleted: number;
   alreadyMissing: number;
   failed: number;
+  // Deleted remote files or folders that were back when the purge looked again after the delay. Not counted in deleted.
+  // Absent on jobs from before the recheck existed.
+  cameBack?: number;
   remaining: number;
-  stage: "preparing" | "purging" | "cancelled" | "failed" | "partially_failed" | "completed";
+  stage: "preparing" | "purging" | "rechecking" | "cancelled" | "failed" | "partially_failed" | "completed";
   message: string;
   // The first item that was not purged and why. Absent when nothing failed.
   firstError?: { filePath: string; message: string };
+  // The first deleted item that came back, and what was found. Absent when none did.
+  firstCameBack?: { filePath: string; message: string };
+  // The recheck of deleted remote paths: when it runs (or ran), the delay it waited, and how far it got.
+  recheck?: { at: string; delaySeconds: number; total: number; checked: number };
 }
 
 export type OrphanPurgeMode = "hold" | "delete";
@@ -714,8 +723,8 @@ export interface OrphanRestoreJobProgress {
   firstError?: { filePath: string | null; message: string };
 }
 
-/** Which of a purge job's items to list: the ones that failed, or the ones moved to the holding area. */
-export type OrphanPurgeItemOutcome = "failed" | "held";
+/** Which of a purge job's items to list: the ones that failed, the ones moved to the holding area, or deleted ones that came back. */
+export type OrphanPurgeItemOutcome = "failed" | "held" | "came_back";
 
 export interface OrphanPurgeItem {
   operationId: number;
@@ -723,7 +732,7 @@ export interface OrphanPurgeItem {
   rootType: StorageRootType;
   filePath: string;
   sizeBytes: number;
-  stage: "planned" | "held" | "deleted" | "already_missing" | "failed" | "restored" | "expired";
+  stage: "planned" | "held" | "deleted" | "already_missing" | "failed" | "came_back" | "restored" | "expired";
   errorMessage: string | null;
   heldPath: string | null;
   purgeAfter: string | null;

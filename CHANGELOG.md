@@ -4,6 +4,15 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- A purge no longer reports a file as deleted when storage still shows it. Each delete is checked straight after: a file still found, or still listed by its folder although it can no longer be opened, fails with that reason. A folder with no video that still lists files after its delete fails and names them.
+- After a remote purge, SRTL waits and checks every deleted remote file and folder again. Anything that is back is recorded as **came back** instead of deleted, shows in the review and dashboard again at once, is not re-requested, and is listed in the purge status window and job summary. The job ends as partly failed.
+
+### Added
+
+- **Recheck deleted remote files after** under **Settings > Advanced > Cleanup**: 2 minutes by default, or off.
+
 ## [0.1.5-beta.1] - 2026-11-10
 
 Fixes from a security review, and held file restores and partial copy discards now work in the standard Docker setup. Database migration 31 adds two worker job types.

@@ -7,7 +7,7 @@ import { createApp, type AppContext } from "../src/server/app";
 import { setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
-import { deleteFolderFileByFile, episodeKey, episodeKeys, expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans, type FolderDeleteFs } from "../src/server/jobs/orphanPurge";
+import { deleteConfirmation, deleteFolderFileByFile, episodeKey, stillThereAfterDelete, type DeleteProbeFs, episodeKeys, expireHeldOrphans, listHeldOrphans, listOrphanReview, restoreHeldOrphans, type FolderDeleteFs } from "../src/server/jobs/orphanPurge";
 import { configureExtraSymlinkFolders, extraSymlinkFolderProblems, parseExtraSymlinkFolders } from "../src/server/lib/extraSymlinkFolders";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
@@ -83,8 +83,11 @@ async function plainLink(section: string, itemName: string, name: string, target
 
 const completedSymlinkScan = (options: Parameters<typeof recordSymlinkScan>[1] = {}) => recordSymlinkScan(app.database.db, options);
 
+// The wait before a purge rechecks deleted remote files. Tests run it at once, or swap in a step of their own.
+let recheckWait: (ms: number, signal: AbortSignal) => Promise<void> = async () => undefined;
+
 async function runJobs(): Promise<void> {
-  const worker = new JobWorker(app.database.db, { workerId: "orphan-test", logger: quietLogger });
+  const worker = new JobWorker(app.database.db, { workerId: "orphan-test", logger: quietLogger, purgeRecheckWait: (ms, signal) => recheckWait(ms, signal) });
   while (await worker.runOnce()) {
     // drain the queue
   }
@@ -110,6 +113,7 @@ beforeEach(async () => {
 
 afterEach(async () => {
   configureExtraSymlinkFolders([]);
+  recheckWait = async () => undefined;
   await app?.app.close();
   await database?.cleanup();
   await fs.rm(root, { recursive: true, force: true });
@@ -1267,5 +1271,184 @@ describe("restoring held files through the worker", () => {
     expect(job).toMatchObject({ status: "failed", progress: { stage: "failed", restored: 0, failed: 1, firstError: { filePath: orphan.filePath, message: expect.stringContaining("A file now exists") } } });
     await expect(fs.readFile(orphan.filePath, "utf8")).resolves.toBe("a new copy");
     expect(await listHeldOrphans(app.database.db)).toHaveLength(1);
+  });
+});
+
+// A remote mount that answers deletes with success and keeps showing the file, or shows it again later.
+describe("deletes that storage does not carry out", () => {
+  const savedDelays = deleteConfirmation.delaysMs;
+  const enoent = (target: string) => Object.assign(new Error(`ENOENT: ${target}`), { code: "ENOENT" });
+
+  beforeEach(async () => {
+    deleteConfirmation.delaysMs = [5, 10];
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  afterEach(() => {
+    deleteConfirmation.delaysMs = savedDelays;
+  });
+
+  async function login() {
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    return String(setup.headers["set-cookie"]);
+  }
+
+  it("fails a file the mount reported deleted but still shows, and keeps it in the inventory", async () => {
+    const stubborn = await storageFile("remote", "Kilo.Lima.2004/Kilo.Lima.2004.mkv");
+    const unlinkSpy = vi.spyOn(fs, "unlink").mockResolvedValue(undefined);
+    try {
+      const job = await purge("remote", [stubborn.id], "delete");
+      expect(job).toMatchObject({
+        status: "failed",
+        progress: expect.objectContaining({ deleted: 0, failed: 1, firstError: { filePath: stubborn.filePath, message: expect.stringContaining("Storage reported Kilo.Lima.2004.mkv as deleted, but it is still there, unchanged") } })
+      });
+    } finally {
+      unlinkSpy.mockRestore();
+    }
+    const [row] = await app.database.db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, stubborn.id));
+    expect(row!.missingSince).toBeNull();
+    const [operation] = await app.database.db.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.storageFileId, stubborn.id));
+    expect(operation!.stage).toBe("failed");
+  });
+
+  it("looks again before failing, so a lookup answered from a listing made just before the delete does not count", async () => {
+    let lookups = 0;
+    const probe: DeleteProbeFs = {
+      // The first lookup still finds the file, as a mount answering from its last listing would.
+      lstat: async (target) => {
+        lookups += 1;
+        if (lookups === 1) return { size: 10, mtimeMs: 1000 };
+        throw enoent(target);
+      },
+      readdir: async () => ["other.mkv"]
+    };
+    await expect(stillThereAfterDelete("/remote/Mike/Mike.mkv", { size: 10, mtimeMs: 1000 }, probe)).resolves.toBeNull();
+    expect(lookups).toBe(2);
+  });
+
+  it("counts a file its folder still lists as not deleted, even when a lookup no longer finds it", async () => {
+    const calls: string[] = [];
+    const ghost: DeleteProbeFs = {
+      lstat: async (target) => {
+        calls.push("lstat");
+        throw enoent(target);
+      },
+      readdir: async () => {
+        calls.push("readdir");
+        return ["November.mkv", "November.nfo"];
+      }
+    };
+    await expect(stillThereAfterDelete("/remote/November/November.mkv", { size: 1, mtimeMs: 1 }, ghost)).resolves.toBe("storage still lists it although it can no longer be opened");
+    // The lookup comes before the listing, and a file that is only listed is not waited on.
+    expect(calls).toEqual(["lstat", "readdir"]);
+    const goneFolder: DeleteProbeFs = { lstat: async (target) => Promise.reject(enoent(target)), readdir: async (target) => Promise.reject(enoent(target)) };
+    await expect(stillThereAfterDelete("/remote/Oscar/Oscar.mkv", null, goneFolder)).resolves.toBeNull();
+  });
+
+  it("names the files a folder lists again when the folder will not go after its files were deleted", async () => {
+    const torrent = "/remote/Papa.Quebec.S02";
+    const files = [`${torrent}/Papa.Quebec.nfo`, `${torrent}/cover.jpg`];
+    const ops: FolderDeleteFs = {
+      unlink: (async () => undefined) as FolderDeleteFs["unlink"],
+      rmdir: (async (target: string) => {
+        throw Object.assign(new Error(`EIO: ${target}`), { code: "EIO" });
+      }) as FolderDeleteFs["rmdir"],
+      lstat: async () => ({ size: 1, mtimeMs: 1 }),
+      // Another download with the same folder name fills it again as soon as the last file goes.
+      readdir: async () => ["Papa.Quebec.nfo", "cover.jpg"]
+    };
+    await expect(deleteFolderFileByFile(torrent, { files, directories: [torrent] }, ops)).rejects.toThrow(
+      `Deleted all 2 files in ${torrent}, but storage still lists Papa.Quebec.nfo, cover.jpg in it after the delete`
+    );
+  });
+
+  it("records deleted remote files that are back at the recheck as came back, not deleted, and lists them", async () => {
+    const returning = await storageFile("remote", "Romeo.Sierra.2005/Romeo.Sierra.2005.mkv");
+    const gone = await storageFile("remote", "Tango.Uniform.2006/Tango.Uniform.2006.mkv");
+    const waits: number[] = [];
+    recheckWait = async (ms) => {
+      waits.push(ms);
+      // The mount serves the file again, from another download with the same name.
+      await fs.mkdir(path.dirname(returning.filePath), { recursive: true });
+      await fs.writeFile(returning.filePath, "different bytes");
+    };
+    const jobId = await app.jobs.startOrphanPurge("remote", [returning.id, gone.id], "delete", [], true);
+    await runJobs();
+    expect(waits).toHaveLength(1);
+    expect(waits[0]).toBeGreaterThan(100_000);
+    expect(waits[0]).toBeLessThanOrEqual(120_000);
+    const job = await app.jobs.getJob(jobId);
+    expect(job).toMatchObject({
+      status: "partially_failed",
+      progress: expect.objectContaining({
+        stage: "partially_failed",
+        deleted: 1,
+        failed: 0,
+        cameBack: 1,
+        message: "Orphan purge partially failed: 1 of 2 was deleted but came back on remote storage",
+        firstCameBack: { filePath: returning.filePath, message: expect.stringMatching(/^Storage showed the file again \d+ seconds after the delete, with a different size or date$/) },
+        recheck: expect.objectContaining({ delaySeconds: 120, total: 2, checked: 2 })
+      })
+    });
+    const operations = await app.database.db.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.jobId, jobId));
+    expect(Object.fromEntries(operations.map((operation) => [operation.filePath, operation.stage]))).toEqual({ [returning.filePath]: "came_back", [gone.filePath]: "deleted" });
+    // The inventory shows the file again now, rather than waiting for the next scan.
+    const rows = await app.database.db.select().from(schema.storageFiles);
+    expect(rows.find((row) => row.id === returning.id)!.missingSince).toBeNull();
+    expect(rows.find((row) => row.id === gone.id)!.missingSince).not.toBeNull();
+    // Nothing is requested for a file that came back.
+    const requests = await app.database.db.select().from(schema.reRequests).where(eq(schema.reRequests.jobId, jobId));
+    expect(requests.find((request) => request.displayName === path.basename(returning.filePath))).toMatchObject({ status: "skipped", message: expect.stringContaining("showed the file again") });
+    expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toEqual(expect.arrayContaining(["Deleted orphan came back", "Checked deleted remote items again"]));
+
+    const cookie = await login();
+    const page = (await app.app.inject({ method: "GET", url: `/api/jobs/${jobId}/purge-items?outcome=came_back`, headers: { cookie } })).json<OrphanPurgeItemPage>();
+    expect(page).toMatchObject({ jobId, outcome: "came_back", total: 1, hasMore: false });
+    expect(page.items).toEqual([expect.objectContaining({ filePath: returning.filePath, stage: "came_back", errorMessage: expect.stringContaining("Storage showed the file again") })]);
+  });
+
+  it("finds a deleted folder its parent lists again", async () => {
+    const dirPath = path.join(paths.remoteDir, "Victor.Whiskey.DVD");
+    await fs.mkdir(dirPath);
+    await fs.writeFile(path.join(dirPath, "info.nfo"), "nfo");
+    await fs.utimes(path.join(dirPath, "info.nfo"), oldTime, oldTime);
+    await fs.utimes(dirPath, oldTime, oldTime);
+    const [folder] = await app.database.db.insert(schema.storageLeftoverFolders).values({ rootType: "remote", dirPath, relativePath: "Victor.Whiskey.DVD", fileCount: 1, totalBytes: 3, newestMtimeMs: oldTime.getTime(), lastSeenJobId: 0, updatedAt: new Date().toISOString() }).returning();
+    recheckWait = async () => {
+      await fs.mkdir(dirPath);
+    };
+    const jobId = await app.jobs.startOrphanPurge("remote", [], "delete", [folder!.id]);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed", progress: expect.objectContaining({ cameBack: 1, deleted: 0, firstCameBack: { filePath: dirPath, message: expect.stringContaining("Storage showed the folder again") } }) });
+  });
+
+  it("skips the recheck when it is turned off, and never waits for local purges", async () => {
+    await setSetting(app.database.db, "advancedSettings", { cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 0 } });
+    const remote = await storageFile("remote", "Xray.Yankee.2007/Xray.Yankee.2007.mkv");
+    const local = await storageFile("local", "movies/Zulu (2008)/Zulu (2008).mkv");
+    let waited = 0;
+    recheckWait = async () => {
+      waited += 1;
+    };
+    const remoteJob = await purge("remote", [remote.id], "delete");
+    expect(remoteJob).toMatchObject({ status: "completed", progress: expect.objectContaining({ deleted: 1, cameBack: 0 }) });
+    expect(remoteJob!.progress).not.toHaveProperty("recheck");
+    expect((await app.jobs.listEvents(remoteJob!.id)).map((event) => event.message)).toContain("Deleted remote items were not checked again: turned off in settings");
+    await setSetting(app.database.db, "advancedSettings", {});
+    expect(await purge("local", [local.id], "delete")).toMatchObject({ status: "completed" });
+    expect(waited).toBe(0);
+  });
+
+  it("stops waiting when the job is terminated, and keeps what it deleted", async () => {
+    const remote = await storageFile("remote", "Alpha.Echo.2009/Alpha.Echo.2009.mkv");
+    const jobId = await app.jobs.startOrphanPurge("remote", [remote.id], "delete");
+    recheckWait = async () => {
+      await app.jobs.cancel(jobId);
+    };
+    await runJobs();
+    const job = await app.jobs.getJob(jobId);
+    expect(job).toMatchObject({ status: "cancelled", progress: expect.objectContaining({ stage: "cancelled", deleted: 1 }) });
+    expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toContain("Deleted remote items were not checked again: the job was stopped");
   });
 });

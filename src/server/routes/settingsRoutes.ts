@@ -12,8 +12,10 @@ import {
 } from "../lib/storageLocations";
 import {
   defaultAuditJobBehaviorSettings,
+  defaultCleanupSettings,
   defaultCopyJobBehaviorSettings,
   defaultScanJobBehaviorSettings,
+  maxPurgeRecheckSeconds,
   normalizeAdvancedSettings
 } from "../../shared/advancedSettings";
 import type {
@@ -73,9 +75,10 @@ const advancedSettingsSchema = z.object({
     .object({
       holdDays: z.number().int().min(1).max(90).default(7),
       deleteRemoteSourceAfterCopy: z.boolean().default(false),
-      reRequestsPerMinute: z.number().int().min(1).max(60).default(6)
+      reRequestsPerMinute: z.number().int().min(1).max(60).default(6),
+      purgeRecheckSeconds: z.number().int().min(0).max(maxPurgeRecheckSeconds).default(defaultCleanupSettings.purgeRecheckSeconds)
     })
-    .default({ holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6 })
+    .default(defaultCleanupSettings)
 });
 
 const userPreferencesSchema = z.object({

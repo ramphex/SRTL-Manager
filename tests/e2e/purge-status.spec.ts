@@ -51,6 +51,32 @@ const finishedPurge: JobRecord = {
   }
 };
 
+// A remote purge where two deleted files were back when the job looked again.
+const cameBackPurge: JobRecord = {
+  id: 1933,
+  type: "orphan_purge",
+  status: "partially_failed",
+  createdAt: minutesAgo(30),
+  startedAt: minutesAgo(30),
+  finishedAt: minutesAgo(25),
+  options: { rootType: "remote", mode: "delete", total: 6, reRequest: false },
+  progress: {
+    options: { rootType: "remote", mode: "delete", total: 6, reRequest: false },
+    current: 6,
+    total: 6,
+    held: 0,
+    deleted: 4,
+    alreadyMissing: 0,
+    failed: 0,
+    cameBack: 2,
+    remaining: 0,
+    stage: "partially_failed",
+    message: "Orphan purge partially failed: 2 of 6 were deleted but came back on remote storage",
+    firstCameBack: { filePath: "/remote/India.Juliet.2003/India.Juliet.2003.mkv", message: "Storage showed the file again 2 minutes after the delete, with a different size or date" },
+    recheck: { at: minutesAgo(26), delaySeconds: 120, total: 6, checked: 6 }
+  }
+};
+
 function item(operationId: number, filePath: string, stage: OrphanPurgeItem["stage"], errorMessage: string | null = null): OrphanPurgeItem {
   return {
     operationId,
@@ -70,6 +96,10 @@ const failedItems = [
   item(11, "/local/shows/Charlie Delta/Charlie.Delta.S02E03.mkv", "failed", "The file changed after it was inventoried"),
   item(12, "/local/shows/Echo Foxtrot/Echo.Foxtrot.S01E01.mkv", "failed", "No longer an orphan: a symlink points at it")
 ];
+const cameBackItems: OrphanPurgeItem[] = [
+  { ...item(21, "/remote/India.Juliet.2003/India.Juliet.2003.mkv", "came_back", "Storage showed the file again 2 minutes after the delete, with a different size or date"), rootType: "remote" },
+  { ...item(22, "/remote/Kilo.Lima.2004/Kilo.Lima.2004.mkv", "came_back", "Storage listed the file again 2 minutes after the delete, but it could not be opened"), rootType: "remote" }
+];
 const heldItems = [
   item(13, "/local/shows/Alpha Bravo/Alpha.Bravo.S01E02.mkv", "held"),
   item(14, "/local/shows/Alpha Bravo/Alpha.Bravo.S01E03.mkv", "held"),
@@ -86,7 +116,7 @@ async function mockApi(page: Page) {
     const url = new URL(route.request().url());
     let body: unknown = [];
     const jobMatch = url.pathname.match(/^\/api\/jobs\/(\d+)(\/.*)?$/);
-    const job = jobMatch ? [runningPurge, finishedPurge].find((candidate) => candidate.id === Number(jobMatch[1])) : undefined;
+    const job = jobMatch ? [runningPurge, finishedPurge, cameBackPurge].find((candidate) => candidate.id === Number(jobMatch[1])) : undefined;
     if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test", role: "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
@@ -102,16 +132,19 @@ async function mockApi(page: Page) {
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.6", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.6", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
-    } else if (url.pathname === "/api/jobs") body = [runningPurge, finishedPurge];
+    } else if (url.pathname === "/api/jobs") body = [runningPurge, finishedPurge, cameBackPurge];
     else if (job && !jobMatch?.[2]) body = job;
     else if (job && jobMatch?.[2] === "/events/page") {
       body = job.id === runningPurge.id
         ? { events: [event(2, job.id, "info", "Orphan deleted", { filePath: "/remote/Alpha.Bravo/Alpha.Bravo.S01E01.mkv" })], total: 1, hasOlder: false }
-        : { events: [event(3, job.id, "error", "Orphan was not purged", { filePath: failedItems[0]!.filePath, reason: failedItems[0]!.errorMessage })], total: 1, hasOlder: false };
+        : job.id === cameBackPurge.id
+          ? { events: [event(4, job.id, "warn", "Deleted orphan came back", { filePath: cameBackItems[0]!.filePath, reason: cameBackItems[0]!.errorMessage })], total: 1, hasOlder: false }
+          : { events: [event(3, job.id, "error", "Orphan was not purged", { filePath: failedItems[0]!.filePath, reason: failedItems[0]!.errorMessage })], total: 1, hasOlder: false };
     } else if (job && jobMatch?.[2] === "/purge-items") {
       itemRequests.push(url.search);
-      const outcome = url.searchParams.get("outcome") === "held" ? "held" : "failed";
-      const all = outcome === "held" ? heldItems : failedItems;
+      const requested = url.searchParams.get("outcome");
+      const outcome = requested === "held" ? "held" : requested === "came_back" ? "came_back" : "failed";
+      const all = outcome === "held" ? heldItems : outcome === "came_back" ? cameBackItems : failedItems;
       const offset = Number(url.searchParams.get("offset") ?? 0);
       // One failed item per page, so the window has to load the second one.
       const limit = outcome === "failed" ? 1 : Number(url.searchParams.get("limit") ?? 100);
@@ -192,4 +225,27 @@ test("the logs page shows a purge's progress and opens the same status window", 
   await detail.getByRole("button", { name: "View purge status" }).click();
   const dialog = page.getByRole("dialog", { name: "Orphan purge" });
   await expect(dialog.getByRole("list", { name: "Failed items" })).toBeVisible();
+});
+
+test("a purge whose deleted files came back lists them apart from the deleted ones", async ({ page }) => {
+  const itemRequests = await mockApi(page);
+  await page.goto(`${baseUrl}/`);
+  const table = page.getByRole("table", { name: "Recent jobs" });
+  await table.getByRole("button", { name: "View purge status for job #1933" }).click();
+
+  const dialog = page.getByRole("dialog", { name: "Orphan purge" });
+  const panel = dialog.getByRole("group", { name: "Purge progress" });
+  await expect(panel.getByText("Partially failed").first()).toBeVisible();
+  await expect(panel.locator("span", { hasText: /^[\d,]+Deleted$/ }).locator("strong")).toHaveText("4");
+  await expect(panel.locator("span", { hasText: /^[\d,]+Came back$/ }).locator("strong")).toHaveText("2");
+  await expect(panel.locator("p", { hasText: "Came back:" })).toContainText("India.Juliet.2003.mkv: Storage showed the file again 2 minutes after the delete");
+  await expect(panel.getByText("Checked 6 deleted remote items again 2 minutes after the last delete. 2 came back and are not counted as deleted.")).toBeVisible();
+
+  const cameBack = dialog.getByRole("list", { name: "Came back after the delete" });
+  await expect(cameBack.getByRole("listitem")).toHaveCount(2);
+  await expect(cameBack.getByText("Storage listed the file again 2 minutes after the delete, but it could not be opened")).toBeVisible();
+  await expect(cameBack.getByText("Came back", { exact: true })).toHaveCount(2);
+  await expect(dialog.getByRole("list", { name: "Failed items" })).toHaveCount(0);
+  await expect(dialog.getByRole("link", { name: "Open holding area" })).toHaveCount(0);
+  expect(itemRequests.every((search) => search.includes("outcome=came_back"))).toBe(true);
 });
