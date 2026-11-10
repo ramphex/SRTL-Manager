@@ -32,7 +32,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 31;
+export const currentSchemaVersion = 32;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -956,6 +956,19 @@ async function initializeDatabase(pool: Pool): Promise<void> {
       try {
         await applyWorkerFileJobsMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (31, 'worker_file_jobs', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(32)) {
+      await client.query("BEGIN");
+      try {
+        // Two defaulted columns; existing purge items read as deleted once, with no note.
+        await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS delete_rounds INTEGER NOT NULL DEFAULT 1`);
+        await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS note TEXT`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (32, 'purge_delete_rounds', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

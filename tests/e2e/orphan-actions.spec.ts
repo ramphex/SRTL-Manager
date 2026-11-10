@@ -11,6 +11,7 @@ interface FixtureOptions {
   failedJob?: "progress" | "events";
   held?: boolean;
   paths?: string[];
+  cameBack?: boolean;
 }
 
 function orphanReview(rootType: "local" | "remote", count: number, extra: FixtureOptions = {}) {
@@ -19,7 +20,8 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: Fixtur
     sizeBytes: 1_000_000, mtimeMs: 0, category: index % 2 ? "superseded" : "unlinked", protectedReason: index === 0 ? "modified recently" : null, hollow: false,
     label: index % 2 ? "superseded" : index % 8 === 6 ? "episode_not_linked" : index % 4 === 2 ? "title_in_library" : "no_title_match", matchedTitle: index % 4 === 2 ? `Title ${index} (2020)` : null,
     releaseName: `Title ${index}`, releaseStatus: index === 2 ? "partly_linked" : "none_linked", releaseFileCount: index === 2 ? 8 : 1, releaseLinkedCount: index === 2 ? 3 : 0,
-    linkedSizeBytes: index % 2 ? 500_000 : null, sizeComparison: index % 2 ? "larger" : null, episodeCoverage: null, extraLinkPath: null
+    linkedSizeBytes: index % 2 ? 500_000 : null, sizeComparison: index % 2 ? "larger" : null, episodeCoverage: null, extraLinkPath: null,
+    cameBackAfterPurge: extra.cameBack && index === 3 ? { jobId: 1932, at: "2026-11-09T07:20:00.000Z", outcome: "deleted" } : null
   }));
   const labelTotals = (label: string) => {
     const matching = items.filter((item) => item.label === label);
@@ -31,6 +33,7 @@ function orphanReview(rootType: "local" | "remote", count: number, extra: Fixtur
     summary: [], labelSummary: ["superseded", "episode_not_linked", "title_in_library", "no_title_match"].map(labelTotals).filter((entry) => entry.count > 0), hollowCount: 0, symlinkInventoryAt: null, storageInventoryAt: null,
     staleWarning: extra.stale ? "The symlink scan is more than 24 hours old." : null, storageStaleWarning: null,
     extraSymlinks: { folders: [], linkCount: 0, unmatchedCount: 0, problems: extra.extraProblem ? ["Extra symlink folder /other could not be read (ENOENT)."] : [] }, holdDays: 7,
+    ...(extra.cameBack ? { cameBackAfterPurgeCount: 1 } : {}),
     ...(extra.inUseSkipped === undefined ? {} : { skippedInUse: { total: extra.inUseSkipped.library + extra.inUseSkipped.extra, files: extra.inUseSkipped.library + extra.inUseSkipped.extra, folders: 0, byReason: { library_link: extra.inUseSkipped.library, extra_link: extra.inUseSkipped.extra } } })
   };
 }
@@ -290,4 +293,13 @@ test("held files have their own tab with a restore button", async ({ page }) => 
   expect(purges.restores[0]).toEqual({ operationIds: [5] });
   // The worker restores the files as a job; the page follows it to the end.
   await expect(page.getByText("Restored 1 file. Rescan to relink them if needed.")).toBeVisible();
+});
+
+test("files that came back after a purge are counted and marked in the review", async ({ page }) => {
+  await fixture(page, { remoteCount: 6, cameBack: true });
+  await page.goto(`${baseUrl}/library?view=remote-orphans`);
+  await expect(page.getByText("1 listed file came back after a purge deleted it.", { exact: false })).toBeVisible();
+  const chip = page.locator(".orv-chip", { hasText: "Came back after purge" });
+  await expect(chip).toHaveCount(1);
+  await expect(chip).toHaveAttribute("title", "Purge job #1932 deleted it, and storage shows it again");
 });

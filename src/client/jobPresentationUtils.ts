@@ -650,6 +650,12 @@ export type OrphanPurgeProgressView = {
   failed: number;
   // Deleted remote items that storage showed again when the purge looked after its delay.
   cameBack: number;
+  // Deleted after another copy appeared at the same path (counted in deleted too).
+  resurfacedDeleted: number;
+  // Left in place because another copy kept appearing.
+  keepsComingBack: number;
+  // Deleted, but still listed by storage although they cannot be opened (counted in deleted too).
+  listedNotReadable: number;
   remaining: number;
   stage: string;
   message: string | null;
@@ -691,6 +697,9 @@ export function orphanPurgeProgressFromJob(job: JobRecord | null): OrphanPurgePr
     alreadyMissing: finiteNumberFromUnknown(progress?.alreadyMissing),
     failed: finiteNumberFromUnknown(progress?.failed),
     cameBack: finiteNumberFromUnknown(progress?.cameBack),
+    resurfacedDeleted: finiteNumberFromUnknown(progress?.resurfacedDeleted),
+    keepsComingBack: finiteNumberFromUnknown(progress?.keepsComingBack),
+    listedNotReadable: finiteNumberFromUnknown(progress?.listedNotReadable),
     remaining: remainingValue ?? Math.max(0, total - current),
     stage: typeof progress?.stage === "string" ? progress.stage : job?.status ?? "waiting",
     message: typeof progress?.message === "string" && progress.message.trim() ? progress.message : null,

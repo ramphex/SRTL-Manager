@@ -38,10 +38,14 @@ export const defaultCleanupSettings: CleanupSettings = {
   reRequestsPerMinute: 6,
   // A remote mount can bring a deleted file back by itself. Two minutes covers several of its refresh cycles
   // (30 seconds by default on the usual mount), so a file that comes back is caught by the purge that deleted it.
-  purgeRecheckSeconds: 120
+  purgeRecheckSeconds: 120,
+  // Some remote mounts show another copy of a release at the same path as soon as the last file of its folder is
+  // deleted. A few seconds is enough for that, and is paid once per remote folder whose last video a purge deletes.
+  purgeSettleSeconds: 3
 };
 
 export const maxPurgeRecheckSeconds = 3600;
+export const maxPurgeSettleSeconds = 60;
 
 export const defaultAdvancedSettings: AdvancedSettings = {
   scan: defaultScanJobBehaviorSettings,
@@ -95,6 +99,7 @@ function normalizeCleanup(value: unknown): CleanupSettings {
   const holdDays = Number(record.holdDays);
   const reRequestsPerMinute = Number(record.reRequestsPerMinute);
   const purgeRecheckSeconds = Number(record.purgeRecheckSeconds);
+  const purgeSettleSeconds = Number(record.purgeSettleSeconds);
   return {
     holdDays: Number.isInteger(holdDays) && holdDays >= 1 && holdDays <= 90 ? holdDays : defaultCleanupSettings.holdDays,
     deleteRemoteSourceAfterCopy: record.deleteRemoteSourceAfterCopy === true,
@@ -102,7 +107,11 @@ function normalizeCleanup(value: unknown): CleanupSettings {
     purgeRecheckSeconds:
       record.purgeRecheckSeconds !== undefined && record.purgeRecheckSeconds !== null && Number.isInteger(purgeRecheckSeconds) && purgeRecheckSeconds >= 0 && purgeRecheckSeconds <= maxPurgeRecheckSeconds
         ? purgeRecheckSeconds
-        : defaultCleanupSettings.purgeRecheckSeconds
+        : defaultCleanupSettings.purgeRecheckSeconds,
+    purgeSettleSeconds:
+      record.purgeSettleSeconds !== undefined && record.purgeSettleSeconds !== null && Number.isInteger(purgeSettleSeconds) && purgeSettleSeconds >= 0 && purgeSettleSeconds <= maxPurgeSettleSeconds
+        ? purgeSettleSeconds
+        : defaultCleanupSettings.purgeSettleSeconds
   };
 }
 

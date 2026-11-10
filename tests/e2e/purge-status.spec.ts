@@ -69,9 +69,12 @@ const cameBackPurge: JobRecord = {
     alreadyMissing: 0,
     failed: 0,
     cameBack: 2,
+    resurfacedDeleted: 1,
+    keepsComingBack: 1,
+    listedNotReadable: 3,
     remaining: 0,
     stage: "partially_failed",
-    message: "Orphan purge partially failed: 2 of 6 were deleted but came back on remote storage",
+    message: "Orphan purge partially failed: 1 of 6 kept coming back after 3 deletes and was left in place; 2 of 6 were deleted but came back on remote storage",
     firstCameBack: { filePath: "/remote/India.Juliet.2003/India.Juliet.2003.mkv", message: "Storage showed the file again 2 minutes after the delete, with a different size or date" },
     recheck: { at: minutesAgo(26), delaySeconds: 120, total: 6, checked: 6 }
   }
@@ -86,6 +89,8 @@ function item(operationId: number, filePath: string, stage: OrphanPurgeItem["sta
     sizeBytes: 1_000,
     stage,
     errorMessage,
+    note: null,
+    deleteRounds: 1,
     heldPath: stage === "held" ? `/local/.srtl-purged/${operationId}` : null,
     purgeAfter: stage === "held" ? new Date(Date.now() + 7 * 86_400_000).toISOString() : null,
     completedAt: minutesAgo(39)
@@ -99,6 +104,12 @@ const failedItems = [
 const cameBackItems: OrphanPurgeItem[] = [
   { ...item(21, "/remote/India.Juliet.2003/India.Juliet.2003.mkv", "came_back", "Storage showed the file again 2 minutes after the delete, with a different size or date"), rootType: "remote" },
   { ...item(22, "/remote/Kilo.Lima.2004/Kilo.Lima.2004.mkv", "came_back", "Storage listed the file again 2 minutes after the delete, but it could not be opened"), rootType: "remote" }
+];
+const keepsItems: OrphanPurgeItem[] = [
+  { ...item(23, "/remote/Mike.November.2005/Mike.November.2005.mkv", "keeps_coming_back", "Mike.November.2005.mkv keeps coming back: storage showed another copy at the same path after each of 3 deletes, so it was left in place"), rootType: "remote", deleteRounds: 3 }
+];
+const resurfacedItems: OrphanPurgeItem[] = [
+  { ...item(24, "/remote/Oscar.Papa.2006/Oscar.Papa.2006.mkv", "deleted"), rootType: "remote", deleteRounds: 2, note: "Another copy appeared at the same path after the delete and was deleted too (2 deletes in all)" }
 ];
 const heldItems = [
   item(13, "/local/shows/Alpha Bravo/Alpha.Bravo.S01E02.mkv", "held"),
@@ -143,8 +154,8 @@ async function mockApi(page: Page) {
     } else if (job && jobMatch?.[2] === "/purge-items") {
       itemRequests.push(url.search);
       const requested = url.searchParams.get("outcome");
-      const outcome = requested === "held" ? "held" : requested === "came_back" ? "came_back" : "failed";
-      const all = outcome === "held" ? heldItems : outcome === "came_back" ? cameBackItems : failedItems;
+      const outcome = requested === "held" || requested === "came_back" || requested === "keeps_coming_back" || requested === "resurfaced" ? requested : "failed";
+      const all = { held: heldItems, came_back: cameBackItems, keeps_coming_back: keepsItems, resurfaced: resurfacedItems, failed: failedItems }[outcome];
       const offset = Number(url.searchParams.get("offset") ?? 0);
       // One failed item per page, so the window has to load the second one.
       const limit = outcome === "failed" ? 1 : Number(url.searchParams.get("limit") ?? 100);
@@ -238,6 +249,9 @@ test("a purge whose deleted files came back lists them apart from the deleted on
   await expect(panel.getByText("Partially failed").first()).toBeVisible();
   await expect(panel.locator("span", { hasText: /^[\d,]+Deleted$/ }).locator("strong")).toHaveText("4");
   await expect(panel.locator("span", { hasText: /^[\d,]+Came back$/ }).locator("strong")).toHaveText("2");
+  await expect(panel.locator("span", { hasText: /^[\d,]+Resurfaced copy deleted$/ }).locator("strong")).toHaveText("1");
+  await expect(panel.locator("span", { hasText: /^[\d,]+Keeps coming back$/ }).locator("strong")).toHaveText("1");
+  await expect(panel.locator("span", { hasText: /^[\d,]+Listed, not readable$/ }).locator("strong")).toHaveText("3");
   await expect(panel.locator("p", { hasText: "Came back:" })).toContainText("India.Juliet.2003.mkv: Storage showed the file again 2 minutes after the delete");
   await expect(panel.getByText("Checked 6 deleted remote items again 2 minutes after the last delete. 2 came back and are not counted as deleted.")).toBeVisible();
 
@@ -247,5 +261,10 @@ test("a purge whose deleted files came back lists them apart from the deleted on
   await expect(cameBack.getByText("Came back", { exact: true })).toHaveCount(2);
   await expect(dialog.getByRole("list", { name: "Failed items" })).toHaveCount(0);
   await expect(dialog.getByRole("link", { name: "Open holding area" })).toHaveCount(0);
-  expect(itemRequests.every((search) => search.includes("outcome=came_back"))).toBe(true);
+  const keeps = dialog.getByRole("list", { name: "Keeps coming back" });
+  await expect(keeps.getByText(/after each of 3 deletes, so it was left in place/)).toBeVisible();
+  const again = dialog.getByRole("list", { name: "Deleted again after another copy appeared" });
+  await expect(again.getByText("Deleted 2 times")).toBeVisible();
+  await expect(again.getByText("Another copy appeared at the same path after the delete and was deleted too (2 deletes in all)")).toBeVisible();
+  expect(itemRequests.every((search) => /outcome=(came_back|keeps_coming_back|resurfaced)/.test(search))).toBe(true);
 });

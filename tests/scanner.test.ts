@@ -7,6 +7,7 @@ import { openTestDatabase } from "./testDb";
 import * as schema from "../src/server/db/schema";
 import { getInventorySummary, getStoragePolicyMap, listMediaLinks, listMediaLinkTree, listStorageFileTree, listStorageFiles, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../src/server/lib/scanner";
 import { listStoragePolicyCandidates, setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
+import { remoteOpenConfirmation, type OpenCheck } from "../src/server/lib/openCheck";
 
 let tmpDir: string;
 
@@ -354,6 +355,100 @@ describe("scanner", () => {
     } finally {
       await database.close();
     }
+  });
+
+  it("only counts remote files that open, retries other open errors once, and leaves files it cannot check as they were", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(path.join(symlinkDir, "movies"), { recursive: true });
+    await fs.mkdir(path.join(localDir, "movies", "Local Kilo"), { recursive: true });
+    const names = ["Alpha.mkv", "Bravo.mkv", "Charlie.mkv", "Delta.mkv", "Echo.mkv"];
+    for (const name of names) {
+      await fs.mkdir(path.join(remoteDir, name.replace(".mkv", "")), { recursive: true });
+      await fs.writeFile(path.join(remoteDir, name.replace(".mkv", ""), name), name);
+    }
+    // Local files are never opened by the scan.
+    await fs.writeFile(path.join(localDir, "movies", "Local Kilo", "Local.Kilo.mkv"), "local");
+    const at = (name: string) => path.join(remoteDir, name.replace(".mkv", ""), name);
+    const scan = () => scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: false, scanLocal: true, scanRemote: true });
+    const saved = { ...remoteOpenConfirmation };
+    const database = await openTestDatabase();
+    try {
+      remoteOpenConfirmation.retryDelayMs = 1;
+      await persistScanResult(database.db, await scan(), 1);
+      expect(await database.db.select().from(schema.storageFiles)).toHaveLength(6);
+
+      const opened: string[] = [];
+      const attempts = new Map<string, number>();
+      const open: OpenCheck = async (filePath) => {
+        opened.push(filePath);
+        const attempt = (attempts.get(filePath) ?? 0) + 1;
+        attempts.set(filePath, attempt);
+        const name = path.basename(filePath);
+        const fail = (code: string) => Promise.reject(Object.assign(new Error(code), { code }));
+        // Listed, but not there: the second time Bravo is opened it says so; Alpha says so at once.
+        if (name === "Alpha.mkv") return fail("ENOENT");
+        if (name === "Bravo.mkv") return attempt === 1 ? fail("EIO") : fail("ENOENT");
+        // A passing error: the retry opens it.
+        if (name === "Charlie.mkv") return attempt === 1 ? fail("EIO") : undefined;
+        // Cannot be checked at all: it keeps the state it had.
+        if (name === "Delta.mkv") return fail("EIO");
+        return undefined;
+      };
+      remoteOpenConfirmation.open = open;
+      const result = await scan();
+      expect(opened.every((filePath) => filePath.startsWith(remoteDir))).toBe(true);
+      expect(result.storageFiles.map((file) => path.basename(file.filePath)).sort()).toEqual(["Charlie.mkv", "Echo.mkv", "Local.Kilo.mkv"]);
+      expect(result.unreadableStorageFiles?.map((file) => [path.basename(file.filePath), file.message, file.keptPreviousState]).sort()).toEqual([
+        ["Alpha.mkv", "ENOENT", false],
+        ["Bravo.mkv", "ENOENT", false],
+        ["Delta.mkv", "EIO", true]
+      ]);
+      const summary = await persistScanResult(database.db, result, 2);
+      expect(summary).toMatchObject({ missingRemoteFiles: 2 });
+      const rows = new Map((await database.db.select().from(schema.storageFiles)).map((row) => [path.basename(row.filePath), row]));
+      expect(rows.get("Alpha.mkv")?.missingSince).toEqual(expect.any(String));
+      expect(rows.get("Bravo.mkv")?.missingSince).toEqual(expect.any(String));
+      expect(rows.get("Charlie.mkv")?.missingSince).toBeNull();
+      // Present before, unknown now: still present.
+      expect(rows.get("Delta.mkv")?.missingSince).toBeNull();
+
+      // A missing file that is listed again is only brought back once it opens, and an unknown one stays missing.
+      remoteOpenConfirmation.open = async (filePath) => (path.basename(filePath) === "Alpha.mkv" ? Promise.reject(Object.assign(new Error("EIO"), { code: "EIO" })) : undefined);
+      await persistScanResult(database.db, await scan(), 3);
+      const later = new Map((await database.db.select().from(schema.storageFiles)).map((row) => [path.basename(row.filePath), row]));
+      expect(later.get("Alpha.mkv")?.missingSince).toEqual(expect.any(String));
+      expect(later.get("Bravo.mkv")?.missingSince).toBeNull();
+
+      // A new file that cannot be opened is not added.
+      await fs.mkdir(path.join(remoteDir, "Foxtrot"), { recursive: true });
+      await fs.writeFile(at("Foxtrot.mkv"), "listed only");
+      remoteOpenConfirmation.open = async (filePath) => (path.basename(filePath) === "Foxtrot.mkv" ? Promise.reject(Object.assign(new Error("ENOENT"), { code: "ENOENT" })) : undefined);
+      await persistScanResult(database.db, await scan(), 4);
+      expect((await database.db.select().from(schema.storageFiles)).some((row) => row.filePath === at("Foxtrot.mkv"))).toBe(false);
+    } finally {
+      Object.assign(remoteOpenConfirmation, saved);
+      await database.close();
+    }
+  });
+
+  it("opens remote files quickly enough not to slow a large scan", async () => {
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(remoteDir, { recursive: true });
+    const files: string[] = [];
+    for (let index = 0; index < 2_000; index += 1) {
+      const filePath = path.join(remoteDir, `file-${index}.mkv`);
+      await fs.writeFile(filePath, "x");
+      files.push(filePath);
+    }
+    const { confirmOpenable } = await import("../src/server/lib/openCheck");
+    const started = performance.now();
+    const result = await confirmOpenable(files, (filePath) => filePath);
+    const elapsed = performance.now() - started;
+    expect(result.readable).toHaveLength(2_000);
+    // Measured on a local disk only; well under a millisecond per file.
+    expect(elapsed / files.length).toBeLessThan(2);
   });
 
   it("records allocated bytes and flags hollow storage files", async () => {

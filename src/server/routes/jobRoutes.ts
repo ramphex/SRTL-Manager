@@ -59,7 +59,7 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
     const query = z
       .object({
-        outcome: z.enum(["failed", "held", "came_back"]).default("failed"),
+        outcome: z.enum(["failed", "held", "came_back", "keeps_coming_back", "resurfaced"]).default("failed"),
         offset: z.coerce.number().int().min(0).default(0),
         limit: z.coerce.number().int().min(1).max(500).default(100)
       })

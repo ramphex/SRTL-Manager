@@ -348,6 +348,12 @@ function purgeRecheckChoices(current: number): number[] {
   return purgeRecheckOptions.includes(current) ? purgeRecheckOptions : [...purgeRecheckOptions, current].sort((left, right) => left - right);
 }
 
+const purgeSettleOptions = [0, 2, 3, 5, 10];
+
+function purgeSettleChoices(current: number): number[] {
+  return purgeSettleOptions.includes(current) ? purgeSettleOptions : [...purgeSettleOptions, current].sort((left, right) => left - right);
+}
+
 function purgeRecheckLabel(seconds: number): string {
   if (seconds === 0) return "Do not recheck";
   if (seconds < 60 || seconds % 60 !== 0) return `${seconds} seconds`;
@@ -1054,6 +1060,17 @@ function AdvancedSettingsPanel() {
                 ))}
               </select>
               <small>A remote mount can bring a deleted file back by itself. The purge waits this long after its last remote delete, then lists any that came back.</small>
+            </label>
+            <label className="advanced-field">
+              <span>Look for another copy after a remote delete</span>
+              <select value={draft.cleanup.purgeSettleSeconds} onChange={(event) => updateCleanup({ purgeSettleSeconds: Number(event.target.value) })}>
+                {purgeSettleChoices(draft.cleanup.purgeSettleSeconds).map((seconds) => (
+                  <option key={seconds} value={seconds}>
+                    {seconds === 0 ? "Do not look" : `${seconds} ${seconds === 1 ? "second" : "seconds"} later`}
+                  </option>
+                ))}
+              </select>
+              <small>Some remote mounts show another copy at the same path once a folder&apos;s last video is deleted. The purge waits this long, then deletes such a copy too, up to 3 deletes in all. Paid once per remote folder.</small>
             </label>
             <label className="advanced-toggle">
               <input

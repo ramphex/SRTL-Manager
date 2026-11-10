@@ -4,14 +4,20 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+Purges check that every delete happened, and remote scans no longer count files a remote mount lists but cannot open. Database migration 32 adds two columns to purge items.
+
 ### Fixed
 
-- A purge no longer reports a file as deleted when storage still shows it. Each delete is checked straight after: a file still found, or still listed by its folder although it can no longer be opened, fails with that reason. A folder with no video that still lists files after its delete fails and names them.
+- A purge no longer reports a file as deleted when storage still shows it. Each delete is checked straight after, and a file that a lookup still finds and that still opens fails with that reason. A file storage still lists but cannot open counts as deleted, with a note.
+- When another copy appears at a deleted remote path, the purge checks it like any orphan (except for matching the inventoried size and date) and deletes it too, up to 3 deletes in all. A path that keeps getting another copy is left in place and listed as **keeps coming back**.
 - After a remote purge, SRTL waits and checks every deleted remote file and folder again. Anything that is back is recorded as **came back** instead of deleted, shows in the review and dashboard again at once, is not re-requested, and is listed in the purge status window and job summary. The job ends as partly failed.
+- Remote storage scans open every file they list, without reading it. A file that is not there is not counted, and one that cannot be checked keeps the state it had. The scan log counts them as **listed but not readable**.
 
 ### Added
 
-- **Recheck deleted remote files after** under **Settings > Advanced > Cleanup**: 2 minutes by default, or off.
+- The purge status window and job summary count files deleted after another copy appeared, files that keep coming back, files that came back at the recheck, and files deleted but still listed, each with its own list.
+- The orphan review marks files that came back after a purge, with the job number.
+- **Recheck deleted remote files after** (2 minutes by default) and **Look for another copy after a remote delete** (3 seconds by default) under **Settings > Advanced > Cleanup**. Either can be turned off.
 
 ## [0.1.5-beta.1] - 2026-11-10
 

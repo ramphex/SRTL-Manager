@@ -21,7 +21,7 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, extraSymlinksForPurge, findCameBack, markCameBack, operationsForJob, recheckCandidates, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { executeOrphanPurgeOperation, extraSymlinksForPurge, findCameBack, KeepsComingBackError, markCameBack, maxDeleteRounds, noteListedOnly, operationsForJob, recheckCandidates, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -201,7 +201,11 @@ export interface JobWorkerOptions {
   backup?: BackupRuntime;
   // How a purge waits before it rechecks deleted remote files. Resolves early when the signal aborts. Tests swap it.
   purgeRecheckWait?: (ms: number, signal: AbortSignal) => Promise<void>;
+  // How a purge waits before it looks for another copy at a path it just deleted. Tests swap it.
+  purgeSettleWait?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
+
+const maxDeleteRoundsText = String(maxDeleteRounds);
 
 function waitUnlessAborted(ms: number, signal: AbortSignal): Promise<void> {
   return new Promise((resolve) => {
@@ -3187,6 +3191,7 @@ export class JobWorker {
   private readonly copiedTitles: JobWorkerOptions["copiedTitles"];
   private readonly backupRuntime: JobWorkerOptions["backup"];
   private readonly purgeRecheckWait: NonNullable<JobWorkerOptions["purgeRecheckWait"]>;
+  private readonly purgeSettleWait: NonNullable<JobWorkerOptions["purgeSettleWait"]>;
   private readonly activeAbortControllers = new Map<number, AbortController>();
   private readonly activeRuns = new Set<Promise<void>>();
   private activeBackupRuns = 0;
@@ -3212,6 +3217,7 @@ export class JobWorker {
     this.copiedTitles = options.copiedTitles;
     this.backupRuntime = options.backup;
     this.purgeRecheckWait = options.purgeRecheckWait ?? waitUnlessAborted;
+    this.purgeSettleWait = options.purgeSettleWait ?? waitUnlessAborted;
   }
 
   async start(): Promise<void> {
@@ -4089,6 +4095,16 @@ export class JobWorker {
       for (const issue of result.storageScanIssues) {
         await ctx.event("warn", "Storage directory remained unreadable after retry", issue);
       }
+      const unreadable = result.unreadableStorageFiles ?? [];
+      if (unreadable.length > 0) {
+        // Not counted as present: a file that is gone stays or becomes missing, and one that could not be checked keeps its state.
+        await ctx.event("warn", `${unreadable.length} remote ${unreadable.length === 1 ? "file is" : "files are"} listed but not readable`, {
+          listedNotReadable: unreadable.length,
+          notFound: unreadable.filter((file) => !file.keptPreviousState).length,
+          keptPreviousState: unreadable.filter((file) => file.keptPreviousState).length,
+          firstPaths: unreadable.slice(0, 5).map((file) => `${file.relativePath} (${file.message})`)
+        });
+      }
       for (const link of result.links) {
         if (!link.targetReadError) continue;
         await ctx.event("warn", "Symlink target remained unreadable after retry", {
@@ -4128,7 +4144,7 @@ export class JobWorker {
           timestamp: nowIso(),
           level: "info",
           message: completionEvent,
-          data: JSON.stringify({ options: normalizedOptions, ...inventory })
+          data: JSON.stringify({ options: normalizedOptions, ...inventory, ...(unreadable.length > 0 ? { listedNotReadable: unreadable.length } : {}) })
         });
         persistedInventory = inventory;
       });
@@ -4346,7 +4362,10 @@ export class JobWorker {
     let alreadyMissing = count("already_missing");
     let failed = count("failed");
     let cameBack = count("came_back");
-    let current = held + deleted + alreadyMissing + failed + cameBack;
+    let keepsComingBack = count("keeps_coming_back");
+    let resurfacedDeleted = operations.filter((operation) => operation.stage === "deleted" && operation.deleteRounds > 1).length;
+    let listedNotReadable = operations.filter((operation) => operation.stage === "deleted" && operation.note?.includes("cannot be opened")).length;
+    let current = held + deleted + alreadyMissing + failed + cameBack + keepsComingBack;
     // The first failure is kept in the progress, so the review can say what went wrong without opening the log.
     const earlierFailure = operations.find((operation) => operation.stage === "failed" && operation.errorMessage);
     let firstError: { filePath: string; message: string } | null = earlierFailure ? { filePath: earlierFailure.filePath, message: earlierFailure.errorMessage! } : null;
@@ -4361,7 +4380,7 @@ export class JobWorker {
     const setProgress = (stage: OrphanPurgeJobProgress["stage"], message: string) => {
       const progress: OrphanPurgeJobProgress = {
         options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(damaged ? { source: "damaged" as const } : {}) },
-        current, total, held, deleted, alreadyMissing, failed, cameBack, remaining: Math.max(0, total - current), stage, message,
+        current, total, held, deleted, alreadyMissing, failed, cameBack, resurfacedDeleted, keepsComingBack, listedNotReadable, remaining: Math.max(0, total - current), stage, message,
         ...(firstError ? { firstError } : {}),
         ...(firstCameBack ? { firstCameBack } : {}),
         ...(recheck ? { recheck } : {})
@@ -4386,7 +4405,9 @@ export class JobWorker {
               .limit(1)
           );
           if (!journal) throw new Error(`Orphan purge operation #${operation.id} changed before execution`);
-          const result = await executeOrphanPurgeOperation(leaseDb, journal, { paths, holdDays });
+          // Another copy can appear at a deleted remote path once its folder goes, so the purge waits a moment and looks again.
+          const settle = journal.rootType === "remote" && cleanup.purgeSettleSeconds > 0 ? { settleMs: cleanup.purgeSettleSeconds * 1000, settle: (ms: number) => this.purgeSettleWait(ms, ctx.signal) } : undefined;
+          const result = await executeOrphanPurgeOperation(leaseDb, journal, { paths, holdDays, settle });
           const timestamp = nowIso();
           await leaseDb
             .update(schema.orphanPurgeOperations)
@@ -4397,6 +4418,8 @@ export class JobWorker {
               removedLinks: JSON.stringify(result.removedLinks),
               purgeAfter: result.stage === "held" ? new Date(Date.now() + holdDays * 86_400_000).toISOString() : null,
               errorMessage: null,
+              deleteRounds: result.rounds,
+              note: result.note,
               updatedAt: timestamp,
               completedAt: timestamp
             })
@@ -4407,18 +4430,37 @@ export class JobWorker {
         if (outcome.stage === "held") held += 1;
         else if (outcome.stage === "deleted") deleted += 1;
         else alreadyMissing += 1;
-        await ctx.event(outcome.stage === "already_missing" ? "warn" : "info", outcome.stage === "held" ? `${noun} moved to the holding area` : outcome.stage === "deleted" ? `${noun} deleted` : `${noun} was already missing`, {
+        if (outcome.stage === "deleted" && outcome.rounds > 1) resurfacedDeleted += 1;
+        if (outcome.stage === "deleted" && outcome.unreadable) listedNotReadable += 1;
+        const deletedMessage = outcome.rounds > 1 ? `${noun} deleted, with another copy that appeared at the same path` : `${noun} deleted`;
+        await ctx.event(outcome.stage === "already_missing" || outcome.rounds > 1 ? "warn" : "info", outcome.stage === "held" ? `${noun} moved to the holding area` : outcome.stage === "deleted" ? deletedMessage : `${noun} was already missing`, {
           filePath: operation.filePath,
           heldPath: outcome.heldPath,
           sidecars: outcome.extras.length,
+          ...(outcome.rounds > 1 ? { deletes: outcome.rounds } : {}),
+          ...(outcome.note ? { note: outcome.note } : {}),
           ...(damaged ? { symlinksRemoved: outcome.removedLinks.length } : {})
         });
         if (outcome.linkErrors.length) await ctx.event("warn", "The file is gone but a symlink to it was left in place", { filePath: operation.filePath, reasons: outcome.linkErrors });
       } catch (error: unknown) {
         if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
         current += 1;
-        failed += 1;
         const message = errorMessage(error);
+        if (error instanceof KeepsComingBackError) {
+          // Not a delete that failed: storage kept showing another copy. Kept apart so the summary can say so.
+          keepsComingBack += 1;
+          firstError ??= { filePath: operation.filePath, message };
+          await ctx.withLeaseDb((leaseDb) =>
+            leaseDb
+              .update(schema.orphanPurgeOperations)
+              .set({ stage: "keeps_coming_back", errorMessage: message, deleteRounds: error.rounds, updatedAt: nowIso(), completedAt: nowIso() })
+              .where(and(eq(schema.orphanPurgeOperations.id, operation.id), eq(schema.orphanPurgeOperations.stage, "planned")))
+          );
+          await ctx.event("error", `${noun} keeps coming back`, { filePath: operation.filePath, reason: message, deletes: error.rounds });
+          await setProgress("purging", `${current} of ${total} processed`);
+          continue;
+        }
+        failed += 1;
         firstError ??= { filePath: operation.filePath, message };
         await ctx.withLeaseDb((leaseDb) =>
           leaseDb
@@ -4475,6 +4517,10 @@ export class JobWorker {
             await ctx.event("warn", damaged ? "Deleted file came back" : "Deleted orphan came back", { filePath: item.filePath, reason: item.message });
           }
           for (const problem of found.unreadable) await ctx.event("warn", "A folder could not be read when checking deleted items again", problem);
+          if (found.listedOnly.length > 0) {
+            await ctx.withLeaseDb((leaseDb) => noteListedOnly(leaseDb, found.listedOnly));
+            await ctx.event("info", "Some deleted items are still listed but cannot be opened, so they still count as deleted", { listedNotReadable: found.listedOnly.length });
+          }
           if (found.checked < candidates.length) recheckSkipped = "the job was stopped";
           recheck = { ...recheck, checked: found.checked };
           await ctx.event(cameBack > 0 ? "warn" : "info", "Checked deleted remote items again", { checked: found.checked, cameBack: found.cameBack.length, unreadableFolders: found.unreadable.length });
@@ -4487,17 +4533,23 @@ export class JobWorker {
     // Nothing is requested for a file that came back.
     if (reRequest) await ctx.withLeaseDb((leaseDb) => queueReRequestsForJob(leaseDb, ctx.jobId));
 
-    const counts = { held, deleted, alreadyMissing, failed, cameBack, total };
+    const counts = { held, deleted, alreadyMissing, failed, cameBack, resurfacedDeleted, keepsComingBack, listedNotReadable, total };
     if (await ctx.isCancelled()) {
       await setProgress("cancelled", `${name} stopped; completed work was kept`);
       await ctx.event("warn", `${name} stopped; completed work was kept`, counts);
       return;
     }
-    const summary = [held ? `${held} held` : "", deleted ? `${deleted} deleted` : "", alreadyMissing ? `${alreadyMissing} already missing` : ""].filter(Boolean).join(", ");
-    if (failed > 0 || cameBack > 0) {
-      const partial = current - failed - cameBack > 0;
+    const summary = [
+      held ? `${held} held` : "",
+      deleted ? `${deleted} deleted` : "",
+      resurfacedDeleted ? `${resurfacedDeleted} of them after another copy appeared at the same path` : "",
+      alreadyMissing ? `${alreadyMissing} already missing` : ""
+    ].filter(Boolean).join(", ");
+    if (failed > 0 || cameBack > 0 || keepsComingBack > 0) {
+      const partial = current - failed - cameBack - keepsComingBack > 0;
       const problems = [
         failed > 0 ? `${failed} of ${total} files were not ${damaged ? "deleted" : "purged"}` : "",
+        keepsComingBack > 0 ? `${keepsComingBack} of ${total} kept coming back after ${maxDeleteRoundsText} deletes and ${keepsComingBack === 1 ? "was" : "were"} left in place` : "",
         cameBack > 0 ? `${cameBack} of ${total} ${cameBack === 1 ? "was" : "were"} deleted but came back on remote storage` : ""
       ].filter(Boolean);
       const message = `${name} ${partial ? "partially failed" : "failed"}: ${problems.join("; ")}`;

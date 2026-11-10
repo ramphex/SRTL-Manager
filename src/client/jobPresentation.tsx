@@ -1529,10 +1529,28 @@ export function OrphanPurgeProgressPanel({
           <strong>{formatNumber(progress.failed)}</strong>
           Failed
         </span>
+        {progress.resurfacedDeleted > 0 ? (
+          <span>
+            <strong>{formatNumber(progress.resurfacedDeleted)}</strong>
+            Resurfaced copy deleted
+          </span>
+        ) : null}
+        {progress.keepsComingBack > 0 ? (
+          <span className="copy-progress-stat-bad">
+            <strong>{formatNumber(progress.keepsComingBack)}</strong>
+            Keeps coming back
+          </span>
+        ) : null}
         {progress.cameBack > 0 || progress.recheck ? (
           <span className={progress.cameBack > 0 ? "copy-progress-stat-bad" : undefined}>
             <strong>{formatNumber(progress.cameBack)}</strong>
             Came back
+          </span>
+        ) : null}
+        {progress.listedNotReadable > 0 ? (
+          <span title="Deleted, but storage still lists them although they cannot be opened. Scans do not count them.">
+            <strong>{formatNumber(progress.listedNotReadable)}</strong>
+            Listed, not readable
           </span>
         ) : null}
         <span>
@@ -1580,11 +1598,20 @@ function orphanPurgeRecheckText(progress: ReturnType<typeof orphanPurgeProgressF
 }
 
 function purgeItemStageText(item: OrphanPurgeItem, timeFormat: TimeFormatPreference): string {
+  if (item.stage === "deleted" || (item.stage === "came_back" && !item.errorMessage)) return item.note ?? "Deleted";
   if (item.stage === "held") return item.purgeAfter ? `Held until ${formatDate(item.purgeAfter, timeFormat)}` : "Held";
   if (item.stage === "restored") return "Restored from the holding area";
   if (item.stage === "expired") return "Holding period ended, deleted";
   return item.errorMessage ?? "No reason recorded";
 }
+
+const purgeItemsLabels: Record<OrphanPurgeItemOutcome, string> = {
+  failed: "Failed items",
+  held: "Held items",
+  came_back: "Came back after the delete",
+  keeps_coming_back: "Keeps coming back",
+  resurfaced: "Deleted again after another copy appeared"
+};
 
 function OrphanPurgeItemsSection({
   jobId,
@@ -1614,8 +1641,10 @@ function OrphanPurgeItemsSection({
   const total = items.data?.pages[0]?.total ?? count;
   const failed = outcome === "failed";
   const cameBack = outcome === "came_back";
-  const problem = failed || cameBack;
-  const label = failed ? "Failed items" : cameBack ? "Came back after the delete" : "Held items";
+  const keeps = outcome === "keeps_coming_back";
+  const resurfaced = outcome === "resurfaced";
+  const problem = failed || cameBack || keeps;
+  const label = purgeItemsLabels[outcome];
   return (
     <section className="audit-result-summary purge-items" aria-label={label}>
       <div className="audit-dialog-section-title">
@@ -1644,14 +1673,14 @@ function OrphanPurgeItemsSection({
                 <small className="purge-item-path" title={item.filePath}>{item.filePath}</small>
                 <small className={problem ? "purge-item-reason" : undefined}>{purgeItemStageText(item, timeFormat)}</small>
               </div>
-              {failed ? <StatusPill value="Failed" /> : cameBack ? <span className="pill pill-warning">Came back</span> : <span className={`pill ${item.stage === "held" ? "pill-info" : "pill-cancelled"}`}>{item.stage === "held" ? "Held" : item.stage === "restored" ? "Restored" : "Deleted"}</span>}
+              {failed ? <StatusPill value="Failed" /> : cameBack ? <span className="pill pill-warning">Came back</span> : keeps ? <span className="pill pill-warning">Keeps coming back</span> : resurfaced ? <span className="pill pill-info">{`Deleted ${item.deleteRounds} times`}</span> : <span className={`pill ${item.stage === "held" ? "pill-info" : "pill-cancelled"}`}>{item.stage === "held" ? "Held" : item.stage === "restored" ? "Restored" : "Deleted"}</span>}
             </article>
           ))}
         </div>
       ) : null}
       {items.hasNextPage ? (
         <button className="secondary" type="button" disabled={items.isFetchingNextPage} onClick={() => void items.fetchNextPage()}>
-          {items.isFetchingNextPage ? "Loading more..." : `Load more ${failed ? "failed" : cameBack ? "came back" : "held"} items`}
+          {items.isFetchingNextPage ? "Loading more..." : failed ? "Load more failed items" : outcome === "held" ? "Load more held items" : `Load more: ${label.toLowerCase()}`}
         </button>
       ) : null}
     </section>
@@ -1706,7 +1735,9 @@ export function OrphanPurgeStatusDialog({
         <OrphanPurgeProgressPanel key={jobId ?? 0} job={currentJob} pendingJobId={jobId} />
 
         {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="failed" count={progress.failed} active={jobActive} rootType={progress.rootType} /> : null}
+        {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="keeps_coming_back" count={progress.keepsComingBack} active={jobActive} rootType={progress.rootType} /> : null}
         {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="came_back" count={progress.cameBack} active={jobActive} rootType={progress.rootType} /> : null}
+        {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="resurfaced" count={progress.resurfacedDeleted} active={jobActive} rootType={progress.rootType} /> : null}
         {jobId ? <OrphanPurgeItemsSection jobId={jobId} outcome="held" count={progress.held} active={jobActive} rootType={progress.rootType} /> : null}
 
         <div className="audit-dialog-events">
