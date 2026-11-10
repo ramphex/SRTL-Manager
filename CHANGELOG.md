@@ -9,6 +9,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 - Sign-in lockouts are tied to the username and the client together, so failed attempts from one address can no longer lock the real user out from another. A per-username guard slows clients that keep failing on a name under attack without refusing a client that has not failed. IPv6 clients are counted per /64 network.
 - Every sign-in attempt is counted before its password is checked and refunded only if it succeeds, so parallel attempts cannot get past the limit, and a successful sign-in no longer clears failures that other attempts caused. A full lockout table drops unlocked entries first.
 - At most two password checks run at once. Further sign-ins get 429 with `Retry-After` instead of piling up memory-heavy checks.
+- The orphan holding area is checked folder by folder right before every move, restore and delete in it. A symlink or a folder that does not belong to SRTL anywhere on the way stops the change, so the end of a holding period can no longer delete anything outside the storage root. A restore never replaces a file that has appeared in the meantime.
+- Orphan and damaged file purges check each file and folder by its real path immediately before moving or deleting it, including each file of a folder delete and the subtitles and artwork cleaned up after the last video in a folder.
 
 ## [0.1.4] - 2026-11-09
 

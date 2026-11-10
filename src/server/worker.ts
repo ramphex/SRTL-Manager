@@ -36,7 +36,9 @@ async function runDataMaintenance(): Promise<void> {
   await pruneWorkerHeartbeatHistory(database.db);
   await pruneExpiredSessions(database.db);
   await pruneTerminalJobHistory(database.db, config.jobHistoryRetentionDays);
-  const expired = await expireHeldOrphans(database.db, await getJsonSetting<PathsSettings>(database.db, "paths", config.paths));
+  const expired = await expireHeldOrphans(database.db, await getJsonSetting<PathsSettings>(database.db, "paths", config.paths), Date.now(), (error, operationId) => {
+    console.error(`Held orphan #${operationId} was not deleted at the end of its holding period: ${error instanceof Error ? error.message : String(error)}`);
+  });
   if (expired > 0) console.warn(`Permanently deleted ${expired} purged orphan file(s) whose holding period ended.`);
 }
 try {

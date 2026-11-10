@@ -156,13 +156,14 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
     if (!blocked.allowed) throw signInLocked(reply, blocked.retryAfterMs);
     const release = verificationGate.tryAcquire();
     if (!release) throw signInBusy(reply);
-    let started: Awaited<ReturnType<typeof createSessionForSignIn>> | null = null;
-    let result: Awaited<ReturnType<typeof authenticate>> = null;
+    let succeeded: { result: NonNullable<Awaited<ReturnType<typeof authenticate>>>; started: NonNullable<Awaited<ReturnType<typeof createSessionForSignIn>>> };
     try {
       // Counted as a failure before the password is checked, and refunded on success,
       // so parallel attempts cannot all slip past the check.
       const reserved = throttle.reserve(body.username, request.ip);
       if (!reserved.allowed) throw signInLocked(reply, reserved.retryAfterMs);
+      let result: Awaited<ReturnType<typeof authenticate>>;
+      let started: Awaited<ReturnType<typeof createSessionForSignIn>> | null;
       try {
         result = await authenticate(db, body.username, body.password);
         started = result ? await createSessionForSignIn(db, result.user, sessions.policy, sessionClient(request)) : null;
@@ -179,9 +180,11 @@ export function registerAuthRoutes(app: FastifyInstance, db: Db, options: AuthRo
         return reply.code(401).send({ error: loginFailed });
       }
       throttle.succeeded(reserved.reservation);
+      succeeded = { result, started };
     } finally {
       release();
     }
+    const { result, started } = succeeded;
     const session = adoptSession(request, reply, started);
     await recordSecurityEvent(db, {
       event: "login_succeeded",
