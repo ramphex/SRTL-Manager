@@ -32,7 +32,9 @@ async function restore(dumpPath: string, binDir: string | null, databaseUrl: str
     const child = spawn(binDir ? path.join(binDir, "pg_restore") : "pg_restore", ["--no-owner", "--exit-on-error", "--dbname", String(env.PGDATABASE)], { env, stdio: ["pipe", "ignore", "pipe"] });
     let stderr = "";
     child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
-    createReadStream(dumpPath).pipe(child.stdin);
+    // pg_restore can close its input before the last chunk of the dump is written; its exit code is the verdict.
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => { if (error.code !== "EPIPE") reject(error); });
+    createReadStream(dumpPath).on("error", reject).pipe(child.stdin);
     child.once("error", reject);
     child.once("close", (code) => (code === 0 ? resolve() : reject(new Error(`pg_restore exited with ${code}: ${stderr}`))));
   });
