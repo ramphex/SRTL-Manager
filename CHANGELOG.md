@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.3] - 2026-11-11
+
+Storage policies are set per library folder, and audits are targeted: byte compare is off by default, library-wide remote and deep audits are refused, and an optional nightly local audit is added (off by default). Database migration 33 copies each title policy to every folder that holds the title, and migration 34 adds audit columns.
+
 ### Changed
 
 - Storage policies are now set per library folder instead of per title. The same title can be Location 1 in one folder and Location 2 in another, for example a 1080p copy kept local and a 4K copy left remote. Assigning, unassigning, copying, folder defaults, onboarding, and Radarr and Sonarr tags all work per folder, and assigning in one folder never changes another. Existing assignments carry over unchanged: database migration 33 copies each title's policy to every folder that holds the title. A saved policy for a title that is in no folder yet is placed in the folders where the title first appears.
