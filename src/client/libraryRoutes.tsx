@@ -79,7 +79,7 @@ export function DashboardPage() {
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
   const [scanOptions, setScanOptions] = useState<ScanOptions>({ scanSymlinks: true, scanLocal: false, scanRemote: false });
-  const [auditSettingsDraft, setAuditSettingsDraft] = useState<AuditSettings>({ sections: [], targets: ["local", "remote"] });
+  const [auditSettingsDraft, setAuditSettingsDraft] = useState<AuditSettings>({ sections: [], targets: ["local"] });
   const [selectedRemoteWork, setSelectedRemoteWork] = useState<SectionWorkSelection | null>(null);
   const [auditPrompt, setAuditPrompt] = useState<AuditPrompt | null>(null);
   const [auditStatusPrompt, setAuditStatusPrompt] = useState<AuditStatusPrompt | null>(null);
@@ -190,9 +190,9 @@ export function DashboardPage() {
     selectedLocalSections.length === 0 ? "No folders selected" : oldestScanAgeLabel(selectedLocalSections.map((section) => scanTimestamps.data?.localSections[section] ?? null));
   const remoteScanAge = scanAgeLabel(scanTimestamps.data?.remoteRoot ?? null);
   const selectedAuditSections = auditSettingsDraft.sections.filter((section) => availableScanSectionNames.includes(section));
-  const selectedAuditTargets = normalizeAuditTargets(auditSettingsDraft.targets);
+  // The dashboard audit is library-wide, so it is local only: library-wide remote audits are refused.
+  const selectedAuditTargets = normalizeAuditTargets(auditSettingsDraft.targets).filter((target) => target === "local");
   const auditLocalSelected = selectedAuditTargets.includes("local");
-  const auditRemoteSelected = selectedAuditTargets.includes("remote");
   const selectedInventoryScopeCount = [scanOptions.scanSymlinks, scanOptions.scanLocal, scanOptions.scanRemote].filter(Boolean).length;
   const selectedSymlinkFolderCount = scanOptions.scanSymlinks ? selectedSymlinkSections.length : 0;
   const selectedLocalFolderCount = scanOptions.scanLocal ? selectedLocalSections.length : 0;
@@ -226,7 +226,7 @@ export function DashboardPage() {
       : hasScanScope
         ? 1
         : 0;
-  const canRunAudit = auditRemoteSelected || (auditLocalSelected && selectedAuditSections.length > 0);
+  const canRunAudit = auditLocalSelected && selectedAuditSections.length > 0;
   const sectionTotals = (sectionSummaries.data ?? []).reduce(
     (acc, section) => ({
       totalLinks: acc.totalLinks + section.totalLinks,
@@ -595,13 +595,13 @@ export function DashboardPage() {
                 <div>
                   <h3 id="audit-actions-title">Audits</h3>
                   <p>
-                    {selectedAuditScopeCount} of 2 storage locations · {selectedAuditSections.length} {localName} folders
+                    {selectedAuditScopeCount === 0 ? "No storage selected" : `${localName} only`} · {selectedAuditSections.length} {localName} folders
                   </p>
                 </div>
               </div>
               <div className="action-group-controls">
                 <InfoTooltip label="About audits">
-                  Verifies media in the selected storage locations as a read-only job. Fast audit checks container reads; deep audit fully decodes for heavier validation.
+                  Verifies media in the selected {localName} folders as a read-only job. Fast audit reads every byte of each file; deep audit fully decodes and is started from one title, a folder or a selection instead. Library-wide {remoteName} audits are turned off: they would read every {remoteName} byte through the remote mount. Audit {remoteName} files from a title or a selection in the library.
                 </InfoTooltip>
                 <button
                   type="button"
@@ -620,8 +620,8 @@ export function DashboardPage() {
                 <span>Audit scope</span>
                 <div className="inventory-scope-actions">
                   <button type="button" className="secondary inventory-scope-action" onClick={() => {
-                    updateAuditSettings({ ...auditSettingsDraft, targets: ["local", "remote"], sections: availableScanSectionNames });
-                  }} disabled={auditLocalSelected && auditRemoteSelected && selectedAuditSections.length === availableScanSections.length}>
+                    updateAuditSettings({ ...auditSettingsDraft, targets: ["local"], sections: availableScanSectionNames });
+                  }} disabled={auditLocalSelected && selectedAuditSections.length === availableScanSections.length}>
                     Select all
                   </button>
                   <button type="button" className="secondary inventory-scope-action" onClick={() => {
@@ -648,14 +648,10 @@ export function DashboardPage() {
                     onToggle={toggleAuditSection}
                   />
                 </ScanScopeBlock>
-                <ScanScopeBlock
-                  checked={auditRemoteSelected}
-                  icon={<HardDriveDownload size={15} />}
-                  title={`${remoteName} targets`}
-                  detail={`${remoteName} root`}
-                  onChange={(checked) => toggleAuditTarget("remote", checked)}
-                />
               </div>
+              <p className="section-settings-help">
+                Library-wide {remoteName} audits are turned off: an audit reads every {remoteName} byte through the remote mount, so it would download the whole {remoteName} library. Audit {remoteName} files from a title, a folder or a selection in the library. Deep audits are started the same way.
+              </p>
             </div>
             <button className="run-scan-button" onClick={openDashboardAuditPrompt} disabled={!canRunAudit}>
               <Activity size={16} />

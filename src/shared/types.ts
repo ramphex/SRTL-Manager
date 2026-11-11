@@ -208,9 +208,20 @@ export interface CopyJobBehaviorSettings {
   mediaValidation: CopyMediaValidationMode;
 }
 
+export interface RollingAuditSettings {
+  // Off by default: a nightly fast audit of local files reads every local byte over time.
+  enabled: boolean;
+  // Hour of the day (0-23, server local time) the nightly window opens.
+  startHour: number;
+  // Length of the nightly window in hours (1-12). The audit stops at the end and continues the next night.
+  windowHours: number;
+}
+
 export interface AuditJobBehaviorSettings {
   defaultMode: AuditMode;
+  // Off by default. A manual audit can still turn byte compare on for one run.
   byteCompareWhenSourceKnown: boolean;
+  rolling: RollingAuditSettings;
 }
 
 export type SymlinkScanSchedulingMode = "single_job" | "per_folder";
@@ -265,9 +276,49 @@ export interface AuditOptions {
   targets?: StorageRootType[];
   byteCompare?: boolean;
   linkIds?: number[];
+  // Storage files to audit directly, such as damaged files that no symlink points at.
+  storageFileIds?: number[];
   section?: string;
   itemName?: string;
   relativePathPrefix?: string;
+  // Set only on the nightly rolling audit, which picks local files oldest-checked first and stops at windowEnd.
+  rolling?: { windowStart: string; windowEnd: string };
+}
+
+export interface AuditEstimateBucket {
+  files: number;
+  bytes: number;
+}
+
+export interface AuditEstimate {
+  mode: AuditMode;
+  scoped: boolean;
+  local: AuditEstimateBucket;
+  remote: AuditEstimateBucket;
+  // Files whose recorded copy source would also be read by byte compare.
+  withKnownSource: AuditEstimateBucket;
+  byteCompare: boolean;
+  // Rough wall-clock time for the whole audit at typical read and decode speeds.
+  estimatedSeconds: number;
+  // Why this audit would be refused, or null when it can start.
+  refusal: string | null;
+}
+
+export interface RollingAuditCoverage {
+  enabled: boolean;
+  days: number;
+  localFiles: number;
+  localBytes: number;
+  checkedFiles: number;
+  checkedBytes: number;
+  neverCheckedFiles: number;
+  failedFiles: number;
+  // Measured bytes per second of recent nightly runs, or null before the first one.
+  measuredBytesPerSecond: number | null;
+  // Nights a full pass takes at the current window, or null when the rate is unknown.
+  nightsPerFullPass: number | null;
+  windowHours: number;
+  lastRun: { jobId: number; startedAt: string; finishedAt: string | null; checked: number; failed: number; stopReason: string | null } | null;
 }
 
 export type CopyDirection = "to_local" | "to_remote";
@@ -981,6 +1032,10 @@ export interface AuditRunRecord {
   targetValidationFailures: number;
   errorMessage: string | null;
   options?: AuditOptions | null;
+  // Nightly rolling audit runs: bytes read and why the run stopped (window_end, all_checked, yielded, cancelled).
+  rolling?: boolean;
+  checkedBytes?: number;
+  stopReason?: string | null;
 }
 
 export interface AuditResultRecord {
@@ -1028,7 +1083,8 @@ export interface DamagedFileRow {
   allocatedBytes: number | null;
   // Share of the file stored on disk, 0-100.
   storedPercent: number | null;
-  integrity: "hollow" | "partial_hollow";
+  // audit_failed: the last audit of this file failed; the other values come from scan sampling.
+  integrity: "hollow" | "partial_hollow" | "audit_failed";
   zeroSamples: number | null;
   zeroSamplesTotal: number;
   checkedAt: string | null;
@@ -1037,4 +1093,6 @@ export interface DamagedFileRow {
   remoteCopyExists: boolean;
   // Why this file cannot be deleted right now, the same rules orphans follow.
   protectedReason: string | null;
+  // The last audit of this file, when one has run since the file last changed.
+  audit: { status: string; mode: string; message: string | null; checkedAt: string } | null;
 }

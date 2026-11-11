@@ -10,7 +10,8 @@ import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./j
 import { jobEventCountLabel } from "./jobEvents";
 import { groupAdjacentJobs } from "./jobGrouping";
 import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
-import { type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
+import { roughDuration } from "../shared/auditEstimate";
+import { type AuditEstimate, type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { useAccess } from "./access";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
@@ -69,6 +70,19 @@ export function AuditDialog({
   });
   const advanced = normalizeAdvancedSettings(advancedSettings.data ?? defaultAdvancedSettings);
   const defaultAuditMode = advanced.audit.defaultMode;
+  // Byte compare is a per-run choice; the setting only picks where the checkbox starts.
+  const [byteCompareChoice, setByteCompareChoice] = useState<boolean | null>(null);
+  const byteCompare = byteCompareChoice ?? advanced.audit.byteCompareWhenSourceKnown;
+  const estimates = useQueries({
+    queries: (["fast", "deep"] as const).map((mode) => ({
+      queryKey: ["audit-estimate", mode, byteCompare, prompt?.options ?? null],
+      queryFn: () => api.estimateAudit({ ...(prompt?.options ?? {}), mode, byteCompare }),
+      enabled: Boolean(prompt && !jobId && advancedSettings.data),
+      staleTime: 30_000
+    }))
+  });
+  const [fastEstimate, deepEstimate] = estimates.map((query) => query.data ?? null);
+  const estimateError = estimates.find((query) => query.error)?.error ?? null;
   const jobQuery = useQuery({
     queryKey: ["job", jobId],
     queryFn: () => api.job(jobId!),
@@ -81,9 +95,9 @@ export function AuditDialog({
   const startAudit = useMutation({
     mutationFn: ({ auditPrompt, mode }: { auditPrompt: AuditPrompt; mode: AuditMode }) =>
       api.startAudit({
+        ...auditPrompt.options,
         mode,
-        ...(advanced.audit.byteCompareWhenSourceKnown ? {} : { byteCompare: false }),
-        ...auditPrompt.options
+        byteCompare
       }),
     onSuccess: (result, variables) => {
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
@@ -100,6 +114,7 @@ export function AuditDialog({
   useEffect(() => {
     setJobId(null);
     setSelectedMode(null);
+    setByteCompareChoice(null);
   }, [prompt]);
 
   const dialogRef = useModalLifecycle(Boolean(prompt), onClose);
@@ -109,9 +124,10 @@ export function AuditDialog({
   const displayedEvents = [...events.events].reverse();
   const canStart = !jobId && !startAudit.isPending;
   const highlightedMode = selectedMode ?? (!jobId ? defaultAuditMode : null);
+  const refusalFor = (mode: AuditMode) => (mode === "fast" ? fastEstimate : deepEstimate)?.refusal ?? null;
 
   function queueAudit(mode: AuditMode) {
-    if (!canStart || !prompt) return;
+    if (!canStart || !prompt || refusalFor(mode)) return;
     startAudit.mutate({ auditPrompt: prompt, mode });
   }
 
@@ -128,24 +144,42 @@ export function AuditDialog({
           <JobStatusHeaderActions closeLabel="Close audit window" onClose={onClose} />
         </div>
 
+        {!jobId ? (
+          <AuditEstimatePanel
+            fast={fastEstimate}
+            deep={deepEstimate}
+            loading={estimates.some((query) => query.isLoading)}
+            error={estimateError?.message ?? null}
+            byteCompare={byteCompare}
+            onByteCompareChange={setByteCompareChoice}
+          />
+        ) : null}
+
         <div className="audit-mode-grid" role="group" aria-label="Audit mode">
-          <button type="button" className={`audit-mode-card${highlightedMode === "fast" ? " selected" : ""}`} onClick={() => queueAudit("fast")} disabled={!canStart}>
+          <button type="button" className={`audit-mode-card${highlightedMode === "fast" ? " selected" : ""}`} onClick={() => queueAudit("fast")} disabled={!canStart || Boolean(refusalFor("fast"))}>
             <Play size={17} />
             <span>
               <strong>Fast Audit</strong>
-              <small>Read container streams without a full decode.</small>
+              <small>Read every byte of the file without a full decode.{fastEstimate && !fastEstimate.refusal ? ` ${capitalize(roughDuration(fastEstimate.estimatedSeconds))}.` : ""}</small>
               {!jobId && defaultAuditMode === "fast" ? <em>Default</em> : null}
             </span>
           </button>
-          <button type="button" className={`audit-mode-card${highlightedMode === "deep" ? " selected" : ""}`} onClick={() => queueAudit("deep")} disabled={!canStart}>
+          <button type="button" className={`audit-mode-card${highlightedMode === "deep" ? " selected" : ""}`} onClick={() => queueAudit("deep")} disabled={!canStart || Boolean(refusalFor("deep"))}>
             <Activity size={17} />
             <span>
               <strong>Deep Audit</strong>
-              <small>Decode media fully for stricter validation.</small>
+              <small>Decode media fully for stricter validation.{deepEstimate && !deepEstimate.refusal ? ` ${capitalize(roughDuration(deepEstimate.estimatedSeconds))}.` : ""}</small>
               {!jobId && defaultAuditMode === "deep" ? <em>Default</em> : null}
             </span>
           </button>
         </div>
+        {!jobId && (refusalFor("fast") || refusalFor("deep")) ? (
+          <div className="panel-message audit-refusal" role="note">
+            {[...new Set([refusalFor("fast"), refusalFor("deep")].filter((text): text is string => Boolean(text)))].map((text) => (
+              <p key={text}>{text}</p>
+            ))}
+          </div>
+        ) : null}
 
         {startAudit.error ? <p className="panel-message action-error">{startAudit.error.message}</p> : null}
         {advancedSettings.error ? <p className="panel-message action-error">{advancedSettings.error.message}</p> : null}
@@ -174,6 +208,63 @@ export function AuditDialog({
           onConfirm={(targetJobId) => terminateJob.mutate(targetJobId)}
         />
       </section>
+    </div>
+  );
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function AuditEstimatePanel({
+  fast,
+  deep,
+  loading,
+  error,
+  byteCompare,
+  onByteCompareChange
+}: {
+  fast: AuditEstimate | null;
+  deep: AuditEstimate | null;
+  loading: boolean;
+  error: string | null;
+  byteCompare: boolean;
+  onByteCompareChange: (value: boolean) => void;
+}) {
+  const estimate = fast ?? deep;
+  const totalFiles = estimate ? estimate.local.files + estimate.remote.files : 0;
+  const totalBytes = estimate ? estimate.local.bytes + estimate.remote.bytes : 0;
+  return (
+    <div className="audit-estimate" aria-live="polite">
+      {error ? <p className="panel-message action-error">{error}</p> : null}
+      {loading && !estimate ? <p className="panel-message">Estimating size and time...</p> : null}
+      {estimate ? (
+        <>
+          <p className="audit-estimate-summary">
+            <strong>{formatNumber(totalFiles)} {totalFiles === 1 ? "file" : "files"}</strong>, {formatBytes(totalBytes)}
+            {estimate.local.files > 0 && estimate.remote.files > 0 ? ` (${formatNumber(estimate.local.files)} local, ${formatNumber(estimate.remote.files)} remote)` : ""}
+            {fast && !fast.refusal ? ` · fast ${roughDuration(fast.estimatedSeconds)}` : ""}
+            {deep && !deep.refusal ? ` · deep ${roughDuration(deep.estimatedSeconds)}` : ""}
+          </p>
+          {estimate.remote.files > 0 ? (
+            <p className="audit-estimate-warning">
+              <TriangleAlert size={14} /> A remote audit reads every remote byte through the remote mount: this one downloads {formatBytes(estimate.remote.bytes)}.
+            </p>
+          ) : null}
+          <label className="audit-estimate-option">
+            <input type="checkbox" checked={byteCompare} onChange={(event) => onByteCompareChange(event.target.checked)} />
+            <span>
+              Byte compare against the recorded copy source
+              <small>
+                {estimate.withKnownSource.files > 0
+                  ? `Also reads the source of ${formatNumber(estimate.withKnownSource.files)} copied ${estimate.withKnownSource.files === 1 ? "file" : "files"} (${formatBytes(estimate.withKnownSource.bytes)}), usually through the remote mount. Copies already byte-compare every file.`
+                  : "No file in this audit has a recorded copy source."}
+              </small>
+            </span>
+          </label>
+          <p className="audit-estimate-note">Times are rough: a fast audit runs at disk or download speed, a deep audit decodes every frame in software.</p>
+        </>
+      ) : null}
     </div>
   );
 }
@@ -647,6 +738,11 @@ export function AuditResultSummary({ results }: { results: AuditResultRecord[] }
         <TriangleAlert size={15} />
         <span>Audit findings</span>
       </div>
+      {attentionResults.some((result) => result.status === "fail") ? (
+        <p className="panel-message">
+          Failed local files are listed on <Link to="/library" search={{ view: "damaged" }}>Damaged files</Link>, where a deep audit of just those files can be started.
+        </p>
+      ) : null}
       <div className="audit-result-list">
         {attentionResults.map((result) => (
           <article className="audit-result-item" key={result.id}>

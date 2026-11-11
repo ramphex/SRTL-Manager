@@ -17,6 +17,7 @@ import {
   defaultScanJobBehaviorSettings,
   maxPurgeRecheckSeconds,
   maxPurgeSettleSeconds,
+  maxRollingAuditWindowHours,
   normalizeAdvancedSettings
 } from "../../shared/advancedSettings";
 import type {
@@ -69,7 +70,14 @@ const advancedSettingsSchema = z.object({
   audit: z
     .object({
       defaultMode: z.enum(["fast", "deep"]).default("fast"),
-      byteCompareWhenSourceKnown: z.boolean().default(true)
+      byteCompareWhenSourceKnown: z.boolean().default(false),
+      rolling: z
+        .object({
+          enabled: z.boolean().default(false),
+          startHour: z.number().int().min(0).max(23).default(defaultAuditJobBehaviorSettings.rolling.startHour),
+          windowHours: z.number().int().min(1).max(maxRollingAuditWindowHours).default(defaultAuditJobBehaviorSettings.rolling.windowHours)
+        })
+        .default(defaultAuditJobBehaviorSettings.rolling)
     })
     .default(defaultAuditJobBehaviorSettings),
   cleanup: z
@@ -111,7 +119,8 @@ function normalizeScanSettings(value: unknown, configuredSections: string[]): Sc
 function normalizeAuditSettings(value: unknown, configuredSections: string[]): AuditSettings {
   const parsed = auditSettingsSchema.safeParse(value ?? {});
   const settings = parsed.success ? parsed.data : auditSettingsSchema.parse({});
-  const targets = [...new Set(settings.targets ?? ["local", "remote"])].filter((target): target is AuditSettings["targets"][number] => target === "local" || target === "remote");
+  // The dashboard audit covers whole folders, so it is local only: a library-wide remote audit is refused.
+  const targets = [...new Set(settings.targets ?? ["local"])].filter((target): target is AuditSettings["targets"][number] => target === "local");
   return {
     sections: normalizeSettingsSections(settings.sections, configuredSections),
     targets

@@ -475,6 +475,8 @@ export function formatScanScope(options: Partial<ScanOptions> | null, availableS
 export type AuditScopeDisplayOptions = Omit<Partial<AuditOptions>, "mode"> & { mode?: AuditMode | null };
 
 export function formatAuditScope(options: AuditScopeDisplayOptions, availableSections: Array<{ section: string; title?: string | null }>): string {
+  if (options.rolling) return "Nightly audit: local files, oldest checked first";
+  if (options.storageFileIds?.length) return options.storageFileIds.length === 1 ? "1 selected file" : `${options.storageFileIds.length} selected files`;
   if (options.linkIds?.length) return options.linkIds.length === 1 ? "1 selected link" : `${options.linkIds.length} selected links`;
   if (options.itemName) {
     const folderTitle = options.section ? (availableSections.find((section) => section.section === options.section)?.title ?? options.section) : null;

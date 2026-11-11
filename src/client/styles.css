@@ -8665,3 +8665,19 @@ button.danger-button:hover:not(:disabled) {
 .purge-first-error {
   overflow-wrap: anywhere;
 }
+
+/* Audit estimate shown before an audit starts. */
+.audit-estimate { display: grid; gap: 8px; }
+.audit-estimate p { margin: 0; }
+.audit-estimate-summary { color: var(--text); }
+.audit-estimate-warning { align-items: flex-start; color: var(--warn); display: flex; gap: 6px; }
+.audit-estimate-warning svg { flex: none; margin-top: 3px; }
+.audit-estimate-option { align-items: flex-start; display: flex; gap: 8px; }
+.audit-estimate-option input { margin-top: 3px; }
+.audit-estimate-option span { display: grid; gap: 2px; }
+.audit-estimate-option small, .audit-estimate-note { color: var(--muted); font-size: 12px; }
+.audit-refusal { color: var(--warn); }
+.audit-refusal p { margin: 0; }
+.damaged-audit { display: grid; gap: 2px; white-space: nowrap; }
+.damaged-audit small { color: var(--muted); font-size: 12px; }
+.rolling-audit-coverage { color: var(--muted); font-size: 13px; margin: 8px 0 0; }

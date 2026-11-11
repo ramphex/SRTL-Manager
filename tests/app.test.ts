@@ -516,7 +516,8 @@ describe("api app", () => {
 
     const defaultAuditSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/audit", headers: { cookie: String(setupCookie) } });
     expect(defaultAuditSettings.statusCode).toBe(200);
-    expect(defaultAuditSettings.json()).toEqual({ sections: ["movies", "shows"], targets: ["local", "remote"] });
+    // The dashboard audit is library-wide, so it covers local folders only.
+    expect(defaultAuditSettings.json()).toEqual({ sections: ["movies", "shows"], targets: ["local"] });
 
     const saveAuditSettings = await ctx.app.inject({
       method: "PUT",
@@ -525,11 +526,11 @@ describe("api app", () => {
       payload: { sections: ["shows"], targets: ["remote"] }
     });
     expect(saveAuditSettings.statusCode).toBe(200);
-    expect(saveAuditSettings.json()).toEqual({ sections: ["shows"], targets: ["remote"] });
+    expect(saveAuditSettings.json()).toEqual({ sections: ["shows"], targets: [] });
 
     const savedAuditSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/audit", headers: { cookie: String(setupCookie) } });
     expect(savedAuditSettings.statusCode).toBe(200);
-    expect(savedAuditSettings.json()).toEqual({ sections: ["shows"], targets: ["remote"] });
+    expect(savedAuditSettings.json()).toEqual({ sections: ["shows"], targets: [] });
 
     const clearAuditTargets = await ctx.app.inject({
       method: "PUT",
@@ -545,7 +546,7 @@ describe("api app", () => {
     expect(defaultAdvancedSettings.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
-      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: false, rolling: { enabled: false, startHour: 1, windowHours: 4 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
@@ -562,7 +563,7 @@ describe("api app", () => {
     expect(saveAdvancedSettings.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
-      audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false },
+      audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false, rolling: { enabled: false, startHour: 1, windowHours: 4 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
@@ -572,14 +573,14 @@ describe("api app", () => {
       headers: { cookie: String(setupCookie) },
       payload: {
         copy: { profile: "off", byteCompare: true, mediaValidation: "deep" },
-        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true, rolling: { enabled: true, startHour: 22, windowHours: 6 } }
       }
     });
     expect(disableCopyVerification.statusCode).toBe(200);
     expect(disableCopyVerification.json()).toEqual({
       scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
-      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+      audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true, rolling: { enabled: true, startHour: 22, windowHours: 6 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
     });
 
@@ -1591,7 +1592,7 @@ describe("api app", () => {
     expect(invalid.statusCode).toBe(400);
   });
 
-  it("runs broad audits against selected local folders and the remote root", async () => {
+  it("runs broad audits against selected local folders only", async () => {
     const cookie = await createAdminSession();
     await insertMediaLink("Local Movie", "local", "movies");
     await insertMediaLink("Remote Movie", "remote", "movies");
@@ -1610,82 +1611,7 @@ describe("api app", () => {
     await expect(runQueuedJob(jobId)).resolves.toMatchObject({
       status: "completed",
       progress: {
-        options: { mode: "fast", sections: ["movies"], targets: ["local", "remote"] },
-        checked: 4,
-        total: 4,
-        passed: 0,
-        failed: 4
-      }
-    });
-
-    const auditRun = await first(ctx.database.db.select().from(schema.auditRuns).where(eq(schema.auditRuns.jobId, jobId)).limit(1));
-    expect(auditRun).toMatchObject({ status: "completed", checked: 4, failed: 4 });
-
-    const results = await ctx.database.db.select().from(schema.auditResults);
-    expect(results).toHaveLength(4);
-    expect(results).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        auditRunId: auditRun?.id,
-        linkPath: expect.stringContaining(path.join("plex", "movies")),
-        message: "Media target is missing or unreadable"
-      }),
-      expect.objectContaining({
-        auditRunId: auditRun?.id,
-        linkPath: expect.stringContaining(path.join("plex", "movies")),
-        message: "Media target is missing or unreadable"
-      })
-    ]));
-    expect(results.map((result) => result.targetPath).sort()).toEqual([
-      path.join(tmpDir, "local", "Assigned Remote Local Title", "assigned-remote-local-title.mkv"),
-      path.join(tmpDir, "local", "Local Movie", "local-movie.mkv"),
-      path.join(tmpDir, "remote", "Remote Movie", "remote-movie.mkv"),
-      path.join(tmpDir, "remote", "Remote Show", "remote-show.mkv")
-    ].sort());
-
-    const firstResultPage = await ctx.app.inject({
-      method: "GET",
-      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=2&offset=0`,
-      headers: { cookie }
-    });
-    expect(firstResultPage.statusCode).toBe(200);
-    expect(firstResultPage.json()).toMatchObject({ total: 4, offset: 0, hasMore: true });
-    expect(firstResultPage.json().results).toHaveLength(2);
-    const secondResultPage = await ctx.app.inject({
-      method: "GET",
-      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=2&offset=2`,
-      headers: { cookie }
-    });
-    expect(secondResultPage.json()).toMatchObject({ total: 4, offset: 2, hasMore: false });
-    expect(secondResultPage.json().results).toHaveLength(2);
-
-    const unknownFolder = await ctx.app.inject({
-      method: "POST",
-      url: "/api/audits",
-      headers: { cookie },
-      payload: { mode: "fast", sections: ["movies", "missing"] }
-    });
-    expect(unknownFolder.statusCode).toBe(400);
-    expect(unknownFolder.json()).toMatchObject({ error: "Unknown audit folder: missing" });
-  });
-
-  it("runs broad remote audits without folder scope", async () => {
-    const cookie = await createAdminSession();
-    await insertMediaLink("Local Movie", "local", "movies");
-    await insertMediaLink("Remote Movie", "remote", "movies");
-    await insertMediaLink("Remote Show", "remote", "shows");
-
-    const audit = await ctx.app.inject({
-      method: "POST",
-      url: "/api/audits",
-      headers: { cookie },
-      payload: { mode: "fast", targets: ["remote"] }
-    });
-    expect(audit.statusCode).toBe(200);
-    const { jobId } = audit.json<{ jobId: number }>();
-    await expect(runQueuedJob(jobId)).resolves.toMatchObject({
-      status: "completed",
-      progress: {
-        options: { mode: "fast", targets: ["remote"] },
+        options: { mode: "fast", sections: ["movies"], targets: ["local"], byteCompare: false },
         checked: 2,
         total: 2,
         passed: 0,
@@ -1698,11 +1624,81 @@ describe("api app", () => {
 
     const results = await ctx.database.db.select().from(schema.auditResults);
     expect(results).toHaveLength(2);
+    expect(results).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        auditRunId: auditRun?.id,
+        linkPath: expect.stringContaining(path.join("plex", "movies")),
+        message: "Media target is missing or unreadable"
+      })
+    ]));
     expect(results.map((result) => result.targetPath).sort()).toEqual([
-      path.join(tmpDir, "remote", "Remote Movie", "remote-movie.mkv"),
-      path.join(tmpDir, "remote", "Remote Show", "remote-show.mkv")
+      path.join(tmpDir, "local", "Assigned Remote Local Title", "assigned-remote-local-title.mkv"),
+      path.join(tmpDir, "local", "Local Movie", "local-movie.mkv")
     ].sort());
 
+    const firstResultPage = await ctx.app.inject({
+      method: "GET",
+      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=1&offset=0`,
+      headers: { cookie }
+    });
+    expect(firstResultPage.statusCode).toBe(200);
+    expect(firstResultPage.json()).toMatchObject({ total: 2, offset: 0, hasMore: true });
+    expect(firstResultPage.json().results).toHaveLength(1);
+    const secondResultPage = await ctx.app.inject({
+      method: "GET",
+      url: `/api/audits/${auditRun?.id}/results/page?attentionOnly=true&limit=1&offset=1`,
+      headers: { cookie }
+    });
+    expect(secondResultPage.json()).toMatchObject({ total: 2, offset: 1, hasMore: false });
+    expect(secondResultPage.json().results).toHaveLength(1);
+
+    const unknownFolder = await ctx.app.inject({
+      method: "POST",
+      url: "/api/audits",
+      headers: { cookie },
+      payload: { mode: "fast", sections: ["movies", "missing"] }
+    });
+    expect(unknownFolder.statusCode).toBe(400);
+    expect(unknownFolder.json()).toMatchObject({ error: "Unknown audit folder: missing" });
+  });
+
+  it("refuses broad remote audits and runs remote audits scoped to a folder", async () => {
+    const cookie = await createAdminSession();
+    await insertMediaLink("Local Movie", "local", "movies");
+    await insertMediaLink("Remote Movie", "remote", "movies");
+    await insertMediaLink("Remote Show", "remote", "shows");
+
+    const broad = await ctx.app.inject({
+      method: "POST",
+      url: "/api/audits",
+      headers: { cookie },
+      payload: { mode: "fast", targets: ["remote"] }
+    });
+    expect(broad.statusCode).toBe(400);
+    expect(broad.json().error).toContain("Library-wide remote audits are turned off");
+    expect(await ctx.database.db.select().from(schema.jobs)).toEqual([]);
+
+    const audit = await ctx.app.inject({
+      method: "POST",
+      url: "/api/audits",
+      headers: { cookie },
+      payload: { mode: "fast", section: "movies", targets: ["remote"] }
+    });
+    expect(audit.statusCode).toBe(200);
+    const { jobId } = audit.json<{ jobId: number }>();
+    await expect(runQueuedJob(jobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: {
+        options: { mode: "fast", section: "movies", targets: ["remote"] },
+        checked: 1,
+        total: 1,
+        passed: 0,
+        failed: 1
+      }
+    });
+
+    const results = await ctx.database.db.select().from(schema.auditResults);
+    expect(results.map((result) => result.targetPath)).toEqual([path.join(tmpDir, "remote", "Remote Movie", "remote-movie.mkv")]);
   });
 
   it("applies advanced audit defaults to API-created audit jobs", async () => {
@@ -1732,7 +1728,7 @@ describe("api app", () => {
     await expect(runQueuedJob(jobId)).resolves.toMatchObject({
       status: "completed",
       progress: {
-        options: { mode: "fast", sections: ["movies"], targets: ["local", "remote"], byteCompare: false },
+        options: { mode: "fast", sections: ["movies"], targets: ["local"], byteCompare: false },
         checked: 2,
         total: 2,
         passed: 0,
@@ -2839,7 +2835,7 @@ describe("api app", () => {
     const warnings = (await ctx.jobs.listEvents(copied.jobId)).filter((event) => event.level === "warn" && event.message.includes("3862 bytes shorter"));
     expect(warnings).toHaveLength(1);
 
-    const audit = await ctx.app.inject({ method: "POST", url: "/api/audits", headers: { cookie }, payload: { mode: "fast", linkIds: [short.id] } });
+    const audit = await ctx.app.inject({ method: "POST", url: "/api/audits", headers: { cookie }, payload: { mode: "fast", linkIds: [short.id], byteCompare: true } });
     expect(audit.statusCode).toBe(200);
     const auditJobId = audit.json<{ jobId: number }>().jobId;
     await expect(runQueuedJob(auditJobId)).resolves.toMatchObject({ status: "completed" });

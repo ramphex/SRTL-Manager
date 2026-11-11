@@ -39,6 +39,7 @@ type OrphanRow = {
   allocated_bytes: number | string | null;
   integrity: string | null;
   integrity_zero_samples: number | null;
+  audit_status?: string | null;
   copy_leftover: boolean;
   active_copy: boolean;
 };
@@ -90,7 +91,7 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
         from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
         where ${unfinishedCopyCondition} and p is not null
       )
-      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples,
+      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples, sf.audit_status,
         cs.path is not null as copy_leftover,
         ap.path is not null as active_copy
       from storage_files sf
@@ -203,9 +204,10 @@ function integrityOf(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "in
   return effectiveIntegrity(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes), row.integrity);
 }
 
-function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity">): boolean {
+// Damaged files listed on the Damaged files page: hollow or zero-filled by sampling, or failed their last audit.
+function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity" | "audit_status">): boolean {
   const integrity = integrityOf(row);
-  return integrity === "hollow" || integrity === "partial_hollow";
+  return integrity === "hollow" || integrity === "partial_hollow" || row.audit_status === "fail";
 }
 
 function protectedReason(row: OrphanRow, now: number, extra?: ExtraSymlinks): string | null {
@@ -533,7 +535,7 @@ export async function purgeableDamagedFiles(db: DbExecutor, storageFileIds: numb
       rejected.push(`file #${id} is no longer on this storage`);
       continue;
     }
-    const reason = !isDamaged(row) ? "A later scan found this file healthy" : protectedReason(row, now);
+    const reason = !isDamaged(row) ? "A later scan or audit found this file healthy" : protectedReason(row, now);
     if (reason) rejected.push(`${path.basename(row.relative_path)}: ${reason}`);
     else eligible.push(row);
   }
@@ -1194,7 +1196,8 @@ async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
   )[0];
   if (!storageFile || path.resolve(storageFile.filePath) !== path.resolve(operation.filePath)) throw new Error("Inventory record changed after the delete was queued; rescan before deleting");
-  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity })) throw new Error("A later scan found this file healthy; nothing was deleted");
+  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity, audit_status: storageFile.auditStatus }))
+    throw new Error("A later scan or audit found this file healthy; nothing was deleted");
   if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
 
   const symlinkDir = context.paths.symlinkDir;

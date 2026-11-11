@@ -9,6 +9,8 @@ type AuditJobOptions = {
   itemName?: string;
   relativePathPrefix?: string;
   byteCompare?: boolean;
+  storageFileIds?: number[];
+  rolling?: { windowStart: string; windowEnd: string };
 };
 
 function recordFromUnknown(value: unknown): Record<string, unknown> | null {
@@ -32,7 +34,9 @@ export function auditOptionsFromJob(job: JobRecord): AuditJobOptions {
     section: typeof options?.section === "string" ? options.section : undefined,
     itemName: typeof options?.itemName === "string" ? options.itemName : undefined,
     relativePathPrefix: typeof options?.relativePathPrefix === "string" ? options.relativePathPrefix : undefined,
-    byteCompare: typeof options?.byteCompare === "boolean" ? options.byteCompare : undefined
+    byteCompare: typeof options?.byteCompare === "boolean" ? options.byteCompare : undefined,
+    storageFileIds: Array.isArray(options?.storageFileIds) ? options.storageFileIds.filter((id): id is number => Number.isInteger(id)) : undefined,
+    rolling: recordFromUnknown(options?.rolling) && typeof recordFromUnknown(options?.rolling)?.windowEnd === "string" ? { windowStart: String(recordFromUnknown(options?.rolling)?.windowStart ?? ""), windowEnd: String(recordFromUnknown(options?.rolling)?.windowEnd) } : undefined
   };
 }
 
@@ -144,6 +148,8 @@ function scanJobMatchesLink(job: JobRecord, link: MediaLinkRow): boolean {
 function auditJobMatchesLink(job: JobRecord, link: MediaLinkRow): boolean {
   if (!isActiveQueueJob(job) || job.type !== "audit") return false;
   const options = auditOptionsFromJob(job);
+  // File audits and the nightly audit read storage files directly and never hold library links.
+  if (options.storageFileIds?.length || options.rolling) return false;
   const requestedIds = options.linkIds?.length ? new Set(options.linkIds) : null;
   const requestedTargets = new Set(normalizeAuditTargets(options.targets));
   const hasScopedOptions = Boolean(options.linkIds?.length || options.section || options.itemName || options.relativePathPrefix);
@@ -179,6 +185,7 @@ function copyJobMatchesStoragePolicyTitle(job: JobRecord, item: StoragePolicyTit
 function auditJobMatchesStoragePolicyTitle(job: JobRecord, item: StoragePolicyTitle): boolean {
   if (!isActiveQueueJob(job) || job.type !== "audit") return false;
   const options = auditOptionsFromJob(job);
+  if (options.storageFileIds?.length || options.rolling) return false;
   if (options.linkIds?.length && !options.itemName) return false;
   const requestedTargets = new Set(normalizeAuditTargets(options.targets));
   if (!titleMatchesPolicyTitle(item, options.itemName)) return false;

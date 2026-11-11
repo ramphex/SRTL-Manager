@@ -19,9 +19,15 @@ type RawDamagedRow = {
   checkedAt: string | null;
   linkCount: number | string;
   remoteCopyExists: boolean;
+  auditCheckedAt: string | null;
+  auditStatus: string | null;
+  auditMode: string | null;
+  auditMessage: string | null;
 };
 
 // Local files only: block counts on the remote mount are meaningless, so its files are never classified.
+// Hollow and damaged come from scan sampling; a failed audit (manual or nightly) also lists the file until a later
+// audit passes or a scan sees its contents change.
 export async function listDamagedFiles(db: Db, now = Date.now()): Promise<DamagedFileRow[]> {
   const rows = await dbAll<RawDamagedRow>(db, sql`
     select
@@ -41,6 +47,10 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
       sf.integrity,
       sf.integrity_zero_samples as "zeroSamples",
       sf.integrity_checked_at as "checkedAt",
+      sf.audit_checked_at as "auditCheckedAt",
+      sf.audit_status as "auditStatus",
+      sf.audit_mode as "auditMode",
+      sf.audit_message as "auditMessage",
       (select count(*) from media_links ml where ml.missing_since is null and ml.resolved_storage_file_id = sf.id) as "linkCount",
       exists (
         select 1 from storage_files remote
@@ -50,6 +60,7 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
     where sf.root_type = 'local' and sf.missing_since is null
       and (
         sf.integrity in ('hollow', 'partial_hollow')
+        or sf.audit_status = 'fail'
         or (sf.size_bytes >= ${hollowMinimumBytes} and sf.allocated_bytes > 0 and sf.allocated_bytes < sf.size_bytes * ${hollowAllocationRatio}::float8)
       )
     order by lower(sf.item_name), lower(sf.relative_path)
@@ -57,8 +68,9 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
   return rows.flatMap((row) => {
     const sizeBytes = Number(row.sizeBytes);
     const allocatedBytes = row.allocatedBytes == null ? null : Number(row.allocatedBytes);
-    const integrity = effectiveIntegrity(sizeBytes, allocatedBytes, row.integrity);
-    if (integrity !== "hollow" && integrity !== "partial_hollow") return [];
+    const sampled = effectiveIntegrity(sizeBytes, allocatedBytes, row.integrity);
+    const integrity = sampled === "hollow" || sampled === "partial_hollow" ? sampled : row.auditStatus === "fail" ? "audit_failed" : null;
+    if (!integrity) return [];
     return [
       {
         storageFileId: row.id,
@@ -75,7 +87,8 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
         checkedAt: row.checkedAt,
         linked: Number(row.linkCount) > 0,
         remoteCopyExists: Boolean(row.remoteCopyExists),
-        protectedReason: row.activeCopy ? "Part of an unfinished copy" : now - Number(row.mtimeMs) < purgeGraceMs ? "Modified in the last 24 hours" : null
+        protectedReason: row.activeCopy ? "Part of an unfinished copy" : now - Number(row.mtimeMs) < purgeGraceMs ? "Modified in the last 24 hours" : null,
+        audit: row.auditCheckedAt && row.auditStatus ? { status: row.auditStatus, mode: row.auditMode ?? "fast", message: row.auditMessage, checkedAt: row.auditCheckedAt } : null
       }
     ];
   });
@@ -90,12 +103,12 @@ function csvCell(value: string | number | boolean | null): string {
 }
 
 export function damagedFilesCsv(rows: DamagedFileRow[]): string {
-  const header = ["Title", "Section", "Verdict", "Path", "Size bytes", "Stored bytes", "Stored %", "Zero samples", "Samples", "Checked at", "Linked in library", "Remote copy exists"];
+  const header = ["Title", "Section", "Verdict", "Path", "Size bytes", "Stored bytes", "Stored %", "Zero samples", "Samples", "Checked at", "Linked in library", "Remote copy exists", "Last audit", "Audit result", "Audited at"];
   const lines = rows.map((row) =>
     [
       row.itemName,
       row.section,
-      row.integrity === "hollow" ? "Hollow" : "Damaged",
+      row.integrity === "hollow" ? "Hollow" : row.integrity === "audit_failed" ? "Failed audit" : "Damaged",
       row.filePath,
       row.sizeBytes,
       row.allocatedBytes,
@@ -104,7 +117,10 @@ export function damagedFilesCsv(rows: DamagedFileRow[]): string {
       row.zeroSamplesTotal,
       row.checkedAt,
       row.linked ? "yes" : "no",
-      row.remoteCopyExists ? "yes" : "no"
+      row.remoteCopyExists ? "yes" : "no",
+      row.audit ? `${row.audit.mode} ${row.audit.status}` : null,
+      row.audit?.message ?? null,
+      row.audit?.checkedAt ?? null
     ]
       .map(csvCell)
       .join(",")

@@ -1,6 +1,8 @@
 import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
+  AuditEstimate,
   AuditOptions,
+  RollingAuditCoverage,
   AuditResultPage,
   AuditRunRecord,
   AuditSettings,
@@ -222,6 +224,8 @@ export const api = {
   applyDefaultPolicy: (section: string) => request<DefaultPolicyApplyResult>("/api/storage-policies/default-apply", { method: "POST", body: JSON.stringify({ section }) }),
   deleteStoragePolicy: (id: number) => request<StoragePolicyTitle>(`/api/storage-policies/${id}`, { method: "DELETE" }),
   startAudit: (body: AuditOptions) => request<{ jobId: number }>("/api/audits", { method: "POST", body: JSON.stringify(body) }),
+  estimateAudit: (body: AuditOptions) => request<AuditEstimate>("/api/audits/estimate", { method: "POST", body: JSON.stringify(body) }),
+  auditCoverage: (days = 30) => request<RollingAuditCoverage>(`/api/audits/coverage?days=${days}`),
   audits: () => request<AuditRunRecord[]>("/api/audits"),
   auditByJob: (jobId: number) => request<AuditRunRecord | null>(`/api/audits/job/${jobId}`),
   auditResultPage: (id: number, options: { offset?: number; limit?: number; attentionOnly?: boolean } = {}) => {

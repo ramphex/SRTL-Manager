@@ -1072,9 +1072,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       affectedStorageFilePolicyIds.add(existing.id);
       continue;
     }
+    // An audit result describes the bytes it read, so new contents need a new audit; other changes keep it.
+    const contentChanged = !existing || existing.sizeBytes !== persistedFile.sizeBytes || existing.mtimeMs !== persistedFile.mtimeMs;
     storageFileWrites.push({
       ...persistedFile,
       ...integrity,
+      auditCheckedAt: contentChanged ? null : existing.auditCheckedAt,
+      auditStatus: contentChanged ? null : existing.auditStatus,
+      auditMode: contentChanged ? null : existing.auditMode,
+      auditMessage: contentChanged ? null : existing.auditMessage,
       firstSeenAt: existing?.firstSeenAt ?? timestamp,
       lastSeenAt: timestamp,
       lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? timestamp,

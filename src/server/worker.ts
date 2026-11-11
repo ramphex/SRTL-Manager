@@ -6,6 +6,7 @@ import type { PathsSettings } from "../shared/types";
 import { CopyTransferLimiter } from "./jobs/copyLimiter";
 import { JobRunner, JobWorker } from "./jobs/jobRunner";
 import { startScheduledInventoryScan } from "./jobs/scheduledScans";
+import { startScheduledRollingAudit } from "./jobs/scheduledAudits";
 import { refreshBackupStatusIfDue, startScheduledBackup } from "./jobs/scheduledBackups";
 import { workerProcessLockKey } from "./jobs/scheduling";
 import { reconcileEnvironmentPaths } from "./lib/pathConfiguration";
@@ -124,6 +125,8 @@ let watchSyncRun: Promise<void> | null = null;
 let scheduledScanTimer: NodeJS.Timeout | null = null;
 let scheduledScanRun: Promise<void> | null = null;
 let scheduledBackupTimer: NodeJS.Timeout | null = null;
+let scheduledAuditTimer: NodeJS.Timeout | null = null;
+let scheduledAuditRun: Promise<void> | null = null;
 let scheduledBackupRun: Promise<void> | null = null;
 let backupStatusCheckedSinceStart = false;
 async function runScheduledBackupWork(): Promise<void> {
@@ -183,6 +186,21 @@ try {
         });
     }, 5 * 60 * 1_000);
     scheduledScanTimer.unref();
+    // The nightly audit is off by default; when on, this queues it while its window is open.
+    scheduledAuditTimer = setInterval(() => {
+      if (shuttingDown || scheduledAuditRun) return;
+      scheduledAuditRun = startScheduledRollingAudit(database.db, scheduledScanRunner)
+        .then((jobId) => {
+          if (jobId) console.warn(`Queued the nightly audit of local files as job #${jobId}.`);
+        })
+        .catch((error: unknown) => {
+          console.error("Nightly audit could not be queued; it will be retried.", error);
+        })
+        .finally(() => {
+          scheduledAuditRun = null;
+        });
+    }, 60_000);
+    scheduledAuditTimer.unref();
     scheduledBackupRun = runScheduledBackupWork()
       .catch((error: unknown) => { console.error("Scheduled database backup could not be checked; it will be retried.", error); })
       .finally(() => { scheduledBackupRun = null; });
@@ -228,6 +246,7 @@ try {
   if (watchSyncTimer) clearInterval(watchSyncTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (scheduledBackupTimer) clearInterval(scheduledBackupTimer);
+  if (scheduledAuditTimer) clearInterval(scheduledAuditTimer);
   if (workerRun) await Promise.allSettled([workerRun]);
   await heartbeatRun;
   await maintenanceRun;
@@ -239,6 +258,7 @@ try {
   await Promise.allSettled([...reRequestInstanceRuns.values()]);
   await scheduledScanRun;
   await scheduledBackupRun;
+  await scheduledAuditRun;
   await watchSyncRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);

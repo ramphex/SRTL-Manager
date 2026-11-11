@@ -1,11 +1,13 @@
 import { z } from "zod";
 import type { FastifyInstance } from "fastify";
 import { and, count, desc, eq, inArray, ne } from "drizzle-orm";
-import { first, getSectionSettings, type Db } from "../db/database";
+import { first, getJsonSetting, getSectionSettings, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { AdmissionError } from "../errors";
 import type { JobRunner } from "../jobs/jobRunner";
 import type { AuditOptions, AuditResultPage, AuditRunRecord, JobStatus } from "../../shared/types";
+import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
+import { rollingAuditCoverage } from "../jobs/rollingAudit";
 
 const maxBulkSelectionItems = 100_000;
 const largeSelectionBodyLimitBytes = 4 * 1024 * 1024;
@@ -15,6 +17,7 @@ const auditOptionsSchema = z.object({
   sections: z.array(z.string().trim().min(1).max(200)).min(1, "Select at least one audit folder").optional(),
   targets: z.array(z.enum(["local", "remote"])).min(1, "Select at least one audit target").optional(),
   linkIds: z.array(z.coerce.number().int().positive()).max(maxBulkSelectionItems).optional(),
+  storageFileIds: z.array(z.coerce.number().int().positive()).min(1, "Select at least one file to audit").max(maxBulkSelectionItems).optional(),
   section: z.string().trim().min(1).max(200).optional(),
   itemName: z.string().trim().min(1).max(500).optional(),
   relativePathPrefix: z.string().trim().min(1).max(2000).optional(),
@@ -57,6 +60,7 @@ function serializeAuditRun(run: typeof schema.auditRuns.$inferSelect, jobById: M
     ...run,
     mode: run.mode as AuditRunRecord["mode"],
     status: run.status as JobStatus,
+    checkedBytes: Number(run.checkedBytes ?? 0),
     options: auditOptionsFromJob(job?.progress ?? "", job?.options ?? "")
   };
 }
@@ -68,22 +72,37 @@ async function findAuditRunByJobId(db: Db, jobId: number): Promise<AuditRunRecor
   return serializeAuditRun(run, new Map(job ? [[job.id, job]] : []));
 }
 
+function auditOptionsFromBody(body: z.infer<typeof auditOptionsSchema>, configuredSections: string[]): AuditOptions {
+  const sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
+  return {
+    mode: body.mode,
+    ...(sections ? { sections } : {}),
+    ...(body.targets ? { targets: [...new Set(body.targets)] } : {}),
+    ...(body.linkIds ? { linkIds: body.linkIds } : {}),
+    ...(body.storageFileIds ? { storageFileIds: body.storageFileIds } : {}),
+    ...(body.section ? { section: body.section } : {}),
+    ...(body.itemName ? { itemName: body.itemName } : {}),
+    ...(body.relativePathPrefix ? { relativePathPrefix: body.relativePathPrefix } : {}),
+    ...(body.byteCompare !== undefined ? { byteCompare: body.byteCompare } : {})
+  };
+}
+
 export function registerAuditRoutes(app: FastifyInstance, db: Db, jobs: JobRunner): void {
+  // Library-wide remote and deep audits are refused here as well as in the job runner, with the reason.
+  app.post("/api/audits/estimate", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
+    const body = auditOptionsSchema.parse(request.body);
+    return jobs.estimateAudit(auditOptionsFromBody(body, (await getSectionSettings(db)).sections));
+  });
+
+  app.get("/api/audits/coverage", async (request) => {
+    const query = z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }).parse(request.query);
+    const settings = normalizeAdvancedSettings(await getJsonSetting<unknown>(db, "advancedSettings", {}));
+    return rollingAuditCoverage(db, settings.audit.rolling, query.days);
+  });
+
   app.post("/api/audits", { bodyLimit: largeSelectionBodyLimitBytes }, async (request) => {
     const body = auditOptionsSchema.parse(request.body);
-    const configuredSections = (await getSectionSettings(db)).sections;
-    const sections = body.sections ? normalizeAuditSections(body.sections, configuredSections) : undefined;
-    const options: AuditOptions = {
-      mode: body.mode,
-      ...(sections ? { sections } : {}),
-      ...(body.targets ? { targets: [...new Set(body.targets)] } : {}),
-      ...(body.linkIds ? { linkIds: body.linkIds } : {}),
-      ...(body.section ? { section: body.section } : {}),
-      ...(body.itemName ? { itemName: body.itemName } : {}),
-      ...(body.relativePathPrefix ? { relativePathPrefix: body.relativePathPrefix } : {}),
-      ...(body.byteCompare !== undefined ? { byteCompare: body.byteCompare } : {})
-    };
-    return { jobId: await jobs.startAudit(options) };
+    return { jobId: await jobs.startAudit(auditOptionsFromBody(body, (await getSectionSettings(db)).sections)) };
   });
 
   app.get("/api/audits", async () => listAuditHistory(db));

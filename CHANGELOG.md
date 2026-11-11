@@ -10,6 +10,15 @@ All notable changes are documented here. The project follows Semantic Versioning
 - **Storage Policies** lists one row per folder copy, with a Folder column, the policy the title has in its other folders, and which folders a bulk change affects. Changing every folder that holds a title is an explicit choice.
 - When two folders link the same file but want it in different places, the file stays where it is while any folder still uses it. A copy repoints only its own folder's links, its source is kept, and a replaced local file another folder still links is kept with a warning in the job log. The Storage Policies row shows which folders share files.
 - Radarr and Sonarr tag each movie or series from the policy of the folder the instance maps, so a 4K instance and a 1080p instance can carry different tags for the same title. Importing tags and the default policy's Radarr review work per folder too.
+- Audits no longer byte-compare against the recorded copy source by default. Copies already byte-compare every file, and the source is usually on the remote mount, so byte compare downloaded it again. The audit window has a checkbox to turn it on for one run, and the setting under **Settings > Advanced > Audit defaults** picks where it starts. Database migration 34 turns a saved **on** into **off**, since earlier versions saved it whenever any advanced setting was saved; a saved **off** is kept. Copy verification is unchanged.
+- Library-wide remote audits and library-wide deep audits are refused, in the app and the API, with the reason. A remote audit reads every remote byte through the remote mount, and a deep audit of everything would keep the CPU busy for weeks. Remote and deep audits of a title, a folder, a path or a selection work as before. **Dashboard > Audits** now covers local folders only and says why.
+
+### Added
+
+- Before an audit starts, the audit window shows how many files it covers, their size, and a rough time for a fast and a deep audit, and how much a remote audit would read through the remote mount.
+- **Audit local files every night** under **Settings > Advanced > Audit defaults**, off by default: a fast audit of local files without byte compare, in a window that starts at a chosen hour (01:00) and lasts a chosen number of hours (4). Never-audited files go first, then the oldest checked. It stops at the end of the window and continues the next night, and gives way to audits and scans someone starts. A line under the setting shows how much of the local library was checked in the last 30 days and how many nights a full pass takes. Database migration 34 records the last audit time and result on each file.
+- Files that failed their last audit, manual or nightly, are listed on **Library > Damaged files** until an audit passes or the file changes, with the last audit's mode, result and time. **Audit** on a row and **Audit selected** start a fast or deep audit of just those files, including files no symlink points at. Audit findings link to the page.
+- [Audits](docs/audits.md) describes audit modes, byte compare, what is refused and why, and the nightly audit.
 
 ## [0.1.5-beta.2] - 2026-11-10
 
