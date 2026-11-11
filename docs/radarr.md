@@ -10,7 +10,7 @@ Each instance has its own connection, API key, policy tag names, copy monitoring
 
 **Each SRTL folder belongs to one instance.** Saving a mapping to a folder another instance already maps is refused with a message naming that instance. Automatic mapping only takes folders that match the instance's own Radarr root folders and are free; roots that match a folder owned by another instance are listed separately and excluded. Remove a folder from one instance before mapping it to another.
 
-Storage policies belong to titles, not folders. When the same title exists in several folders, for example `movies` and `movies4k`, every instance that holds it tags it the same way, using its own tag names.
+Storage policies belong to a folder and a title, not to the title alone. When the same title exists in several folders, for example `movies` and `movies4k`, each folder's copy has its own policy, and each instance tags its movies from the policy of the folders it maps. So a 1080p instance can tag a title for Location 1 while a 4K instance tags the same title for Location 2. Assigning a policy in one folder never changes the other folder's copy, its tags, or its files.
 
 Removing an instance asks for confirmation and deletes only SRTL's records for it: its connection, mappings, preview, and activity. Tags and monitoring in Radarr are never changed by removal, and its folders become free for another instance. SRTL supports up to 25 instances.
 
@@ -46,7 +46,7 @@ When synchronization is first enabled, or after the tags or mappings change:
 Any policy you set in SRTL after that, including re-applying the same policy to a title in review, updates the title's tags. For reviewed titles you can also select them in the preview and choose:
 
 - **Use SRTL policies:** let SRTL manage the tags using SRTL's current assignments.
-- **Import existing tags:** assign a matching SRTL policy from one Radarr policy tag. Both tags, or a conflicting existing SRTL assignment, cannot be imported silently.
+- **Import existing tags:** assign a matching SRTL policy from one Radarr policy tag. Both tags, or a conflicting existing SRTL assignment, cannot be imported silently. The policy is imported for the folder the instance maps the movie to; the same title in another folder is not changed.
 
 **Select all matching** selects every mapped title in the current filter, up to 1,000 at a time. Tag updates are batched, so large libraries converge within minutes. SRTL re-reads the Radarr catalog every 30 minutes, and on **Refresh preview**, so titles added out of band are picked up. If a managed title's policy tag is changed directly in Radarr, SRTL restores it to match the SRTL policy.
 

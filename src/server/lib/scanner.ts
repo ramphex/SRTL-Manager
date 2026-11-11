@@ -7,7 +7,7 @@ import type { SQL } from "drizzle-orm";
 import { dbAll, dbGet, first, getSectionSettings, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { inferSectionContentType } from "../../shared/sections";
-import { canonicalTitleKey } from "./storagePolicies";
+import { getStoragePolicyLookup, resolveUnplacedStoragePolicies, storagePolicyFor, storagePolicyKey } from "./storagePolicies";
 import { applyPendingOnboardingPolicy } from "./onboarding";
 import { applyDefaultPoliciesToNewTitles, type DefaultPolicyTitle } from "./defaultPolicy";
 import { holdingFolderName, isCoveredByPath, isMediaFile, isPathInside, safeRelativePath } from "./media";
@@ -133,11 +133,6 @@ export interface RequiredStorageRoot {
   files: number;
 }
 
-function storagePolicyForTitle(storagePolicies: StoragePolicyLookup, title: string): StoragePolicyKind {
-  const titleKey = canonicalTitleKey(title);
-  return storagePolicies.get(titleKey) ?? "unassigned";
-}
-
 export async function classifySymlink(
   linkPath: string,
   sectionRoot: string,
@@ -195,7 +190,7 @@ export async function classifySymlink(
     kind = "other";
   }
 
-  const storagePolicy = storagePolicyForTitle(storagePolicies, itemName || "");
+  const storagePolicy = storagePolicyFor(storagePolicies, section, itemName || "");
   return {
     section,
     itemName: itemName || path.basename(linkPath),
@@ -1077,9 +1072,15 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
       affectedStorageFilePolicyIds.add(existing.id);
       continue;
     }
+    // An audit result describes the bytes it read, so new contents need a new audit; other changes keep it.
+    const contentChanged = !existing || existing.sizeBytes !== persistedFile.sizeBytes || existing.mtimeMs !== persistedFile.mtimeMs;
     storageFileWrites.push({
       ...persistedFile,
       ...integrity,
+      auditCheckedAt: contentChanged ? null : existing.auditCheckedAt,
+      auditStatus: contentChanged ? null : existing.auditStatus,
+      auditMode: contentChanged ? null : existing.auditMode,
+      auditMessage: contentChanged ? null : existing.auditMessage,
       firstSeenAt: existing?.firstSeenAt ?? timestamp,
       lastSeenAt: timestamp,
       lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? timestamp,
@@ -1141,15 +1142,18 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     const existingMediaLinkByPath = new Map(existingMediaLinks.map((link) => [link.linkPath, link]));
     const linkWrites: Array<typeof schema.mediaLinks.$inferInsert> = [];
     const unchangedLinkIds: number[] = [];
-    // A title is new when no link row, current or missing, has ever carried its name.
-    const knownTitleKeys = new Set(existingMediaLinks.map((link) => canonicalTitleKey(link.itemName)));
+    // A title is new to a folder when no link row in that folder, current or missing, has ever carried its name.
+    const knownTitleKeys = new Set(existingMediaLinks.map((link) => storagePolicyKey(link.section, link.itemName)));
 
     for (const link of new Map(result.links.map((link) => [link.linkPath, link])).values()) {
       const resolvedStorageFileId = storageFileIdByPath.get(link.targetPath) ?? null;
       const existing = existingMediaLinkByPath.get(link.linkPath);
       if (existing?.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(existing.resolvedStorageFileId);
       if (resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(resolvedStorageFileId);
-      if (link.isMedia && !knownTitleKeys.has(canonicalTitleKey(link.itemName))) newTitles.push({ section: link.section, itemName: link.itemName });
+      if (link.isMedia && !knownTitleKeys.has(storagePolicyKey(link.section, link.itemName))) {
+        knownTitleKeys.add(storagePolicyKey(link.section, link.itemName));
+        newTitles.push({ section: link.section, itemName: link.itemName });
+      }
       const changed = linkChanged(existing, link, resolvedStorageFileId);
       if (existing && !changed && !existing.missingSince && existing.firstSeenAt && existing.lastChangedAt) {
         unchangedLinkIds.push(existing.id);
@@ -1231,6 +1235,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         }
   );
   await throwIfPersistenceCancelled(isCancelled);
+  // A saved policy whose title had no folder yet is placed first, so it wins over a folder default.
+  if (result.options.scanSymlinks) await resolveUnplacedStoragePolicies(db, timestamp);
   if (!(await applyPendingOnboardingPolicy(db, jobId))) await applyDefaultPoliciesToNewTitles(db, newTitles, jobId);
   await throwIfPersistenceCancelled(isCancelled);
   await reconcileStorageFilePolicies(db, timestamp, [...affectedStorageFilePolicyIds]);
@@ -1388,18 +1394,9 @@ async function reconcileResolvedStorageFiles(db: Db, timestamp: string, scope?: 
   `);
 }
 
+// Policies by folder and title, as `classifySymlink` reads them.
 export async function getStoragePolicyMap(db: Db): Promise<Map<string, StoragePolicyKind>> {
-  const rows = await db.select().from(schema.storagePolicies);
-  return new Map(
-    rows
-      .map((row): [string, StoragePolicyKind] | null => {
-        const titleKey = canonicalTitleKey(row.normalizedTitle);
-        if (!titleKey) return null;
-        if (row.policy !== "location_1" && row.policy !== "location_2") return null;
-        return [titleKey, row.policy];
-      })
-      .filter((row): row is [string, StoragePolicyKind] => row !== null)
-  );
+  return getStoragePolicyLookup(db);
 }
 
 function normalizeStoragePolicy(value: string | null | undefined): StoragePolicyKind {

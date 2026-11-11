@@ -12,7 +12,7 @@ import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onbo
 import { createRadarrInstance, getRadarrState, processRadarrWork, saveRadarrSettings } from "../src/server/lib/radarr";
 import type { RadarrMovie } from "../src/server/lib/radarrClient";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
-import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
+import { assignTitle } from "./policyHelpers";
 import type { RadarrSettingsInput } from "../src/shared/radarr";
 import type { SectionSettings } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
@@ -54,6 +54,10 @@ async function configure(defaults: SectionSettings["sectionDefaultPolicies"]): P
 
 async function policies(): Promise<Record<string, { policy: string; source: string }>> {
   return Object.fromEntries((await app.database.db.select().from(schema.storagePolicies)).map((row) => [row.title, { policy: row.policy, source: row.source }]));
+}
+
+async function policiesByFolder(): Promise<Record<string, { policy: string; source: string }>> {
+  return Object.fromEntries((await app.database.db.select().from(schema.storagePolicies)).map((row) => [`${row.section}/${row.title}`, { policy: row.policy, source: row.source }]));
 }
 
 async function connectRadarr(): Promise<string> {
@@ -162,22 +166,41 @@ describe("default storage policy for new titles", () => {
   it("never overrides an existing policy", async () => {
     await configure({ movies: "location_1" });
     await addTitle("movies", "Alpha (2020)");
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_2");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["movies"]);
     await scan();
 
     expect(await policies()).toEqual({ "Alpha (2020)": { policy: "location_2", source: "manual" } });
   });
 
-  it("assigns a title once even when it is seen in several folders that agree, and skips folders that disagree", async () => {
-    await persistSectionSettings(app.database.db, { sections: ["movies", "shows", "extra"], sectionTypes: { movies: "movies", shows: "movies", extra: "movies" }, sectionDefaultPolicies: { movies: "location_1", shows: "location_1" } });
+  it("gives each folder copy of a title its own folder's default, also when the title is new to only one folder", async () => {
+    await persistSectionSettings(app.database.db, { sections: ["movies", "shows", "extra"], sectionTypes: { movies: "movies", shows: "movies", extra: "movies" }, sectionDefaultPolicies: { movies: "location_1", shows: "location_2" } });
     await fs.mkdir(path.join(root, "links", "extra"), { recursive: true });
     await addTitle("movies", "Both (2020)");
     await addTitle("shows", "Both (2020)");
     await addTitle("movies", "Mixed (2021)");
     await addTitle("extra", "Mixed (2021)");
+    await addTitle("movies", "Later (2022)");
     await scan();
 
-    expect(await policies()).toEqual({ "Both (2020)": { policy: "location_1", source: "default" } });
+    expect(await policiesByFolder()).toEqual({
+      "movies/Both (2020)": { policy: "location_1", source: "default" },
+      "shows/Both (2020)": { policy: "location_2", source: "default" },
+      "movies/Mixed (2021)": { policy: "location_1", source: "default" },
+      "movies/Later (2022)": { policy: "location_1", source: "default" }
+    });
+
+    // A title already known in one folder is still new to another folder, which applies its own default.
+    await addTitle("shows", "Later (2022)");
+    await scan();
+    expect((await policiesByFolder())["shows/Later (2022)"]).toEqual({ policy: "location_2", source: "default" });
+    expect((await policiesByFolder())["movies/Later (2022)"]).toEqual({ policy: "location_1", source: "default" });
+    const links = await app.database.db.select().from(schema.mediaLinks);
+    expect(Object.fromEntries(links.map((link) => [`${link.section}/${link.itemName}`, link.storagePolicy]))).toMatchObject({
+      "movies/Both (2020)": "location_1",
+      "shows/Both (2020)": "location_2",
+      "extra/Mixed (2021)": "unassigned",
+      "shows/Later (2022)": "location_2"
+    });
   });
 
   it("applies to unassigned titles of one folder only when asked, leaving assigned titles and other folders alone", async () => {
@@ -187,7 +210,7 @@ describe("default storage policy for new titles", () => {
     await addTitle("movies", "Assigned (2022)");
     await addTitle("shows", "Other Folder (2023)");
     await scan();
-    await setStoragePolicyTitle(app.database.db, "Assigned (2022)", "location_2");
+    await assignTitle(app.database.db, "Assigned (2022)", "location_2", ["movies"]);
     await configure({ movies: "location_1" });
 
     expect(await previewDefaultPolicyForUnassigned(app.database.db, "movies")).toEqual({ section: "movies", policy: "location_1", unassignedTitles: 2, radarrReviewTitles: 0 });

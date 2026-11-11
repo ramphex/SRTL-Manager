@@ -312,6 +312,11 @@ export const storageFiles = pgTable(
     integrity: text("integrity"),
     integrityZeroSamples: integer("integrity_zero_samples"),
     integrityCheckedAt: text("integrity_checked_at"),
+    // Last audit of this file since it last changed: pass | warning | fail | source_issue, and fast | deep. A scan that sees the size or mtime change clears them.
+    auditCheckedAt: text("audit_checked_at"),
+    auditStatus: text("audit_status"),
+    auditMode: text("audit_mode"),
+    auditMessage: text("audit_message"),
     firstSeenAt: text("first_seen_at").notNull(),
     lastSeenAt: text("last_seen_at").notNull(),
     lastChangedAt: text("last_changed_at").notNull(),
@@ -343,13 +348,15 @@ export const storagePolicies = pgTable(
   "storage_policies",
   {
     id: serial("id").primaryKey(),
+    // The library folder this policy applies to; empty while the title has no links in any folder.
+    section: text("section").notNull().default(""),
     title: text("title").notNull(),
     normalizedTitle: text("normalized_title").notNull(),
     policy: text("policy").notNull(),
     source: text("source").notNull(),
     updatedAt: text("updated_at").notNull()
   },
-  (table) => [uniqueIndex("storage_policies_normalized_idx").on(table.normalizedTitle)]
+  (table) => [uniqueIndex("storage_policies_section_title_idx").on(table.section, table.normalizedTitle), index("storage_policies_normalized_title_idx").on(table.normalizedTitle)]
 );
 
 export const copySources = pgTable(
@@ -633,7 +640,11 @@ export const auditRuns = pgTable("audit_runs", {
   sourceCompareErrors: integer("source_compare_errors").notNull(),
   byteMismatches: integer("byte_mismatches").notNull(),
   targetValidationFailures: integer("target_validation_failures").notNull().default(0),
-  errorMessage: text("error_message")
+  errorMessage: text("error_message"),
+  // The nightly rolling audit of local files, its bytes read, and why it stopped (window_end, all_checked, yielded).
+  rolling: boolean("rolling").notNull().default(false),
+  checkedBytes: bigint("checked_bytes", { mode: "number" }).notNull().default(0),
+  stopReason: text("stop_reason")
 });
 
 export const auditResults = pgTable(

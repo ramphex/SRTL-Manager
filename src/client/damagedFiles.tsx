@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Archive, Check, Download, LoaderCircle, Trash2, X } from "lucide-react";
+import { Activity, Archive, Check, Download, LoaderCircle, Trash2, X } from "lucide-react";
 import { normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { api } from "./api";
 import { useAccess } from "./access";
@@ -10,13 +10,27 @@ import type { DamagedFileRow, OrphanPurgeMode } from "../shared/types";
 import { StatusPill } from "./App";
 import { formatBytes, formatDate, formatNumber } from "./appShared";
 import { ReRequestActivity, ReRequestOption } from "./reRequest";
+import { AuditDialog } from "./jobPresentation";
+import type { AuditPrompt } from "./appShared";
 
 export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
   const { can } = useAccess();
   const canDelete = can("library.delete");
+  const canAudit = can("jobs.run");
   const damaged = useDamagedFiles();
   const rows = damaged.data ?? [];
   const hollow = rows.filter((row) => row.integrity === "hollow").length;
+  const auditFailed = rows.filter((row) => row.integrity === "audit_failed").length;
+  const [auditPrompt, setAuditPrompt] = useState<AuditPrompt | null>(null);
+  // A deep audit decodes every frame, so it is started for these files only, never library-wide.
+  const openDeepAudit = (targets: DamagedFileRow[]) => {
+    if (targets.length === 0) return;
+    setAuditPrompt({
+      title: targets.length === 1 ? `Audit ${targets[0]!.itemName || targets[0]!.relativePath}` : `Audit ${formatNumber(targets.length)} damaged files`,
+      description: targets.length === 1 ? targets[0]!.relativePath : `${formatNumber(targets.length)} files from Damaged files. A deep audit decodes every frame and gives the clearest verdict.`,
+      options: { storageFileIds: targets.map((row) => row.storageFileId) }
+    });
+  };
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [confirming, setConfirming] = useState(false);
   const queryClient = useQueryClient();
@@ -64,15 +78,15 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
         </div>
       </div>
       <p className="panel-message">
-        {rootLabel} files that are hollow (almost nothing stored) or damaged (zero-filled gaps found by sampling 24 spots in the file). Files are only sampled when a scan sees them change.
+        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit. Files are only sampled when a scan sees them change. A failed audit stays listed until a later audit passes or the file changes.
       </p>
       {damaged.error ? <p className="panel-message error">{damaged.error.message}</p> : null}
       {damaged.isLoading ? <p className="panel-message">Loading…</p> : null}
-      {damaged.data && rows.length === 0 ? <p className="panel-message">No hollow or damaged files were found by the last scans.</p> : null}
+      {damaged.data && rows.length === 0 ? <p className="panel-message">No hollow or damaged files were found by the last scans, and no audit has failed.</p> : null}
       {rows.length > 0 ? (
         <>
           <p className="panel-message">
-            {formatNumber(rows.length)} files: {formatNumber(hollow)} hollow, {formatNumber(rows.length - hollow)} damaged, {formatBytes(rows.reduce((total, row) => total + row.sizeBytes, 0))} in total.
+            {formatNumber(rows.length)} files: {formatNumber(hollow)} hollow, {formatNumber(rows.length - hollow - auditFailed)} damaged, {formatNumber(auditFailed)} failed an audit, {formatBytes(rows.reduce((total, row) => total + row.sizeBytes, 0))} in total.
           </p>
           {canDelete ? (
             <div className="orphan-toolbar damaged-files-actions">
@@ -82,6 +96,11 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
               <button type="button" className="secondary" disabled={remove.isPending || selected.size === 0} onClick={() => { setSelected(new Set()); setConfirming(false); }}>
                 Clear selection
               </button>
+              {canAudit ? (
+                <button type="button" className="secondary" disabled={selected.size === 0} onClick={() => openDeepAudit(selectedRows)}>
+                  <Activity size={16} /> Audit selected ({formatNumber(selected.size)})
+                </button>
+              ) : null}
               <button type="button" disabled={remove.isPending || selected.size === 0} onClick={() => setConfirming(true)}>
                 <Trash2 size={16} /> Delete selected ({formatNumber(selected.size)})
               </button>
@@ -104,11 +123,18 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
                   <th scope="col">In library</th>
                   <th scope="col">Remote copy</th>
                   <th scope="col">Checked</th>
+                  <th scope="col">Last audit</th>
+                  {canAudit ? <th scope="col" aria-label="Actions" /> : null}
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row) => (
-                  <DamagedFileTableRow key={row.storageFileId} row={row} selection={canDelete ? { checked: selected.has(row.storageFileId), disabled: remove.isPending, onChange: (checked) => toggle(row.storageFileId, checked) } : null} />
+                  <DamagedFileTableRow
+                    key={row.storageFileId}
+                    row={row}
+                    selection={canDelete ? { checked: selected.has(row.storageFileId), disabled: remove.isPending, onChange: (checked) => toggle(row.storageFileId, checked) } : null}
+                    onAudit={canAudit ? () => openDeepAudit([row]) : null}
+                  />
                 ))}
               </tbody>
             </table>
@@ -121,6 +147,7 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
         </p>
       ) : null}
       {canDelete ? <ReRequestActivity /> : null}
+      <AuditDialog prompt={auditPrompt} onClose={() => setAuditPrompt(null)} />
     </section>
   );
 }
@@ -165,7 +192,15 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
   );
 }
 
-function DamagedFileTableRow({ row, selection }: { row: DamagedFileRow; selection: { checked: boolean; disabled: boolean; onChange: (checked: boolean) => void } | null }) {
+function DamagedFileTableRow({
+  row,
+  selection,
+  onAudit
+}: {
+  row: DamagedFileRow;
+  selection: { checked: boolean; disabled: boolean; onChange: (checked: boolean) => void } | null;
+  onAudit: (() => void) | null;
+}) {
   return (
     <tr>
       {selection ? (
@@ -187,11 +222,29 @@ function DamagedFileTableRow({ row, selection }: { row: DamagedFileRow; selectio
       <td>{row.linked ? "Linked" : "Orphan"}</td>
       <td>{row.remoteCopyExists ? "Yes" : "No"}</td>
       <td className="orphan-nowrap">{row.checkedAt ? formatDate(row.checkedAt) : "-"}</td>
+      <td>
+        {row.audit ? (
+          <span className="damaged-audit" title={row.audit.message ?? undefined}>
+            {row.audit.mode === "deep" ? "Deep" : "Fast"} {row.audit.status === "fail" ? "failed" : row.audit.status === "pass" ? "passed" : row.audit.status.replace("_", " ")}
+            <small>{formatDate(row.audit.checkedAt)}</small>
+          </span>
+        ) : (
+          "-"
+        )}
+      </td>
+      {onAudit ? (
+        <td>
+          <button type="button" className="table-action-button secondary" onClick={onAudit} title="Start a fast or deep audit of this file">
+            <Activity size={14} /> <span>Audit</span>
+          </button>
+        </td>
+      ) : null}
     </tr>
   );
 }
 
-export function DamageIntegrityPill({ integrity }: { integrity: "ok" | "hollow" | "partial_hollow" | "unknown" }) {
+export function DamageIntegrityPill({ integrity }: { integrity: "ok" | "hollow" | "partial_hollow" | "unknown" | "audit_failed" }) {
+  if (integrity === "audit_failed") return <span title="The last audit of this file failed; open the audit history for the reason"><StatusPill value="Failed audit" /></span>;
   if (integrity === "hollow") return <span title="Almost none of this file is stored on disk; it may be a placeholder or an interrupted copy"><StatusPill value="Hollow" /></span>;
   if (integrity === "partial_hollow") return <span title="Sampling found zero-filled gaps inside this file"><StatusPill value="Damaged" /></span>;
   return null;

@@ -28,6 +28,7 @@ import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfigu
 import { completeOnboardingScan } from "../lib/onboarding";
 import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../lib/scanner";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
+import { estimateAuditSeconds, libraryWideDeepAuditRefusal, libraryWideRemoteAuditRefusal } from "../../shared/auditEstimate";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
 import { runKeyedPool } from "./copyPool";
@@ -35,12 +36,14 @@ import { isCopySourceLink, planCopyRetry, type CopyRetryPlanning, type CopyRetry
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { discardPartialCopy, PartialCopyDiscardError, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
+import { currentStorageFilesById, nextRollingAuditBatch, recordStorageFileAudit, rollingAuditDue, storageFileSizes, type AuditStorageFile } from "./rollingAudit";
 import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
 import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
 import { runBackup, type BackupRuntime } from "../lib/backups";
 import type { BackupTrigger } from "../../shared/backups";
 import type {
   AuditMode,
+  AuditEstimate,
   AuditOptions,
   CopyConflictPreview,
   CopyDirection,
@@ -189,6 +192,8 @@ export interface JobWorkerOptions {
   logger?: Pick<Console, "info" | "warn" | "error">;
   copyRunner?: CopyCommandRunner;
   auditRunner?: AuditCommandRunner;
+  // Clock for the nightly audit window; tests move it forward.
+  now?: () => number;
   concurrency?: JobConcurrencySettings;
   copyTransferLimiter?: CopyTransferLimiter;
   dispatchConcurrency?: number;
@@ -375,36 +380,54 @@ async function normalizeScanOptions(db: Db, options: ScanOptions = defaultScanOp
   };
 }
 
-async function normalizeAuditOptions(db: Db, input: AuditMode | AuditOptions): Promise<AuditOptions> {
+/** Why an audit would be refused, or null. Unscoped means no folder, title, path prefix, link or file selection. */
+export function auditRefusal(options: Pick<AuditOptions, "mode" | "targets" | "linkIds" | "storageFileIds" | "section" | "itemName" | "relativePathPrefix" | "rolling">): string | null {
+  if (options.rolling || hasScopedAuditOptions(options)) return null;
+  if (normalizeAuditTargets(options.targets).includes("remote")) return libraryWideRemoteAuditRefusal;
+  if (options.mode === "deep") return libraryWideDeepAuditRefusal;
+  return null;
+}
+
+async function normalizeAuditOptions(db: DbExecutor, input: AuditMode | AuditOptions, { refuse = true }: { refuse?: boolean } = {}): Promise<AuditOptions> {
   const requestedOptions: { mode: AuditMode; sections?: string[]; targets?: StorageRootType[]; byteCompare?: boolean } = typeof input === "string" ? { mode: input } : input;
-  const configuredSections = await getSectionSettings(db);
+  const configuredSections = await getSectionSettings(db as Db);
   if (requestedOptions.mode !== "fast" && requestedOptions.mode !== "deep") throw new AdmissionError("Audit mode must be fast or deep");
   const section = typeof input === "string" ? undefined : input.section?.trim();
   if (section && !configuredSections.sections.includes(section)) throw new AdmissionError(`Unknown audit folder: ${section}`);
   const linkIds = typeof input === "string" || !input.linkIds ? undefined : [...new Set(input.linkIds)].filter((id) => Number.isInteger(id) && id > 0);
   if (typeof input !== "string" && input.linkIds && linkIds?.length !== input.linkIds.length) throw new AdmissionError("Audit link IDs must be positive integers");
+  const storageFileIds = typeof input === "string" || !input.storageFileIds ? undefined : [...new Set(input.storageFileIds)].filter((id) => Number.isInteger(id) && id > 0);
+  if (typeof input !== "string" && input.storageFileIds && storageFileIds?.length !== input.storageFileIds.length) throw new AdmissionError("Audit file IDs must be positive integers");
+  if (storageFileIds && storageFileIds.length === 0) throw new AdmissionError("Select at least one file to audit");
   const itemName = typeof input === "string" ? undefined : input.itemName?.trim();
   const relativePathPrefix = typeof input === "string" ? undefined : normalizeRelativePrefix(input.relativePathPrefix);
-  const hasScopedAudit = Boolean(linkIds !== undefined || section || itemName || relativePathPrefix);
+  const hasScopedAudit = Boolean(linkIds !== undefined || storageFileIds !== undefined || section || itemName || relativePathPrefix);
   const hasRequestedTargets = Array.isArray(requestedOptions.targets);
-  const targets = normalizeAuditTargets(requestedOptions.targets);
+  // Without a scope, the audit is library-wide; it covers local files unless remote is asked for, which is refused below.
+  const targets = !hasScopedAudit && !hasRequestedTargets ? (["local"] as StorageRootType[]) : normalizeAuditTargets(requestedOptions.targets);
   const selectedSections = requestedOptions.sections
     ? normalizeSelectedSections(requestedOptions.sections, configuredSections.sections, "audit folder")
     : hasScopedAudit || !targets.includes("local")
       ? undefined
       : normalizeSelectedSections(undefined, configuredSections.sections, "audit folder");
   if ((!hasScopedAudit || hasRequestedTargets) && targets.length === 0) throw new AdmissionError("Select at least one audit target");
-  if (!hasScopedAudit && targets.includes("local") && (!selectedSections || selectedSections.length === 0)) throw new AdmissionError("Select at least one local audit folder");
-  return {
+  const normalized: AuditOptions = {
     mode: requestedOptions.mode,
     ...(selectedSections ? { sections: selectedSections } : {}),
     ...(!hasScopedAudit ? { targets } : hasRequestedTargets ? { targets } : {}),
     ...(section ? { section } : {}),
     ...(linkIds !== undefined ? { linkIds } : {}),
+    ...(storageFileIds !== undefined ? { storageFileIds } : {}),
     ...(itemName ? { itemName } : {}),
     ...(relativePathPrefix ? { relativePathPrefix } : {}),
-    ...(requestedOptions.byteCompare === false ? { byteCompare: false } : {})
+    ...(typeof requestedOptions.byteCompare === "boolean" ? { byteCompare: requestedOptions.byteCompare } : {})
   };
+  if (refuse) {
+    const refusal = auditRefusal(normalized);
+    if (refusal) throw new AdmissionError(refusal);
+  }
+  if (!hasScopedAudit && targets.includes("local") && (!selectedSections || selectedSections.length === 0)) throw new AdmissionError("Select at least one local audit folder");
+  return normalized;
 }
 
 function readAuditOptions(job: JobRecord, frozenLinkIds?: number[]): AuditOptions {
@@ -424,7 +447,12 @@ function readAuditOptions(job: JobRecord, frozenLinkIds?: number[]): AuditOption
     ...(typeof options.section === "string" && options.section.trim() ? { section: options.section.trim() } : {}),
     ...(typeof options.itemName === "string" && options.itemName.trim() ? { itemName: options.itemName.trim() } : {}),
     ...(typeof options.relativePathPrefix === "string" && options.relativePathPrefix.trim() ? { relativePathPrefix: normalizeRelativePrefix(options.relativePathPrefix) } : {}),
-    ...(options.byteCompare === false ? { byteCompare: false } : {})
+    ...(Array.isArray(options.storageFileIds) ? { storageFileIds: options.storageFileIds.filter((id) => Number.isInteger(id) && id > 0) } : {}),
+    ...(options.rolling && typeof options.rolling.windowStart === "string" && typeof options.rolling.windowEnd === "string"
+      ? { rolling: { windowStart: options.rolling.windowStart, windowEnd: options.rolling.windowEnd } }
+      : {}),
+    // Jobs queued before byte compare became opt-in only stored false; a missing value there meant on.
+    ...(typeof options.byteCompare === "boolean" ? { byteCompare: options.byteCompare } : {})
   };
 }
 
@@ -507,8 +535,50 @@ function relativePathMatchesPrefix(relativePath: string, prefix: string): boolea
   return normalizedPath === normalizedPrefix || normalizedPath.startsWith(`${normalizedPrefix}/`);
 }
 
-function hasScopedAuditOptions(options: AuditOptions): boolean {
-  return Boolean(options.linkIds !== undefined || options.section || options.itemName || options.relativePathPrefix);
+function hasScopedAuditOptions(options: Pick<AuditOptions, "linkIds" | "storageFileIds" | "section" | "itemName" | "relativePathPrefix">): boolean {
+  return Boolean(options.linkIds !== undefined || options.storageFileIds !== undefined || options.section || options.itemName || options.relativePathPrefix);
+}
+
+interface AuditTarget {
+  linkPath: string;
+  targetPath: string;
+  kind: string;
+  itemName: string;
+  storageFileId: number | null;
+  sizeBytes: number;
+}
+
+function auditTargetForStorageFile(file: AuditStorageFile): AuditTarget {
+  return { linkPath: file.linkPath ?? file.filePath, targetPath: file.filePath, kind: file.rootType, itemName: file.itemName, storageFileId: file.id, sizeBytes: file.sizeBytes };
+}
+
+/**
+ * The nightly audit gives way to work someone started: another audit, an exclusive job, or a job that needs a scope
+ * it holds (such as a local storage scan). The scheduler queues it again once that work is done.
+ */
+async function rollingAuditShouldYield(db: DbExecutor, jobId: number): Promise<boolean> {
+  const waiting = await dbGet<{ value: number }>(db as Db, sql`
+    SELECT 1 AS value
+    FROM jobs AS queued
+    WHERE queued.status = 'queued'
+      AND queued.id <> ${jobId}
+      AND (
+        queued.exclusive
+        OR queued.type = 'audit'
+        OR EXISTS (
+          SELECT 1
+          FROM job_resource_claims AS wanted
+          JOIN job_resource_claims AS held
+            ON held.job_id = ${jobId}
+           AND held.resource_type = wanted.resource_type
+           AND held.resource_key = wanted.resource_key
+           AND (held.access = 'exclusive' OR wanted.access = 'exclusive')
+          WHERE wanted.job_id = queued.id
+        )
+      )
+    LIMIT 1
+  `);
+  return Boolean(waiting);
 }
 
 function filterScanLinks(links: MediaLinkRow[], options: ScanOptions): MediaLinkRow[] {
@@ -1242,6 +1312,22 @@ async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyO
   };
 }
 
+// The folders whose current links still point at a file. Policies are per folder, so another folder may want a
+// file kept where it is while this folder's copy moves; such a file is never deleted.
+async function sectionsLinkingFile(db: DbExecutor, filePath: string, exceptLinkId?: number): Promise<string[]> {
+  const rows = (
+    await db.execute<{ section: string }>(sql`
+      select distinct ml.section from media_links ml
+      left join storage_files sf on sf.id = ml.resolved_storage_file_id
+      where ml.missing_since is null
+        and (ml.target_path = ${filePath} or sf.file_path = ${filePath})
+        ${exceptLinkId === undefined ? sql`` : sql`and ml.id <> ${exceptLinkId}`}
+      order by ml.section
+    `)
+  ).rows;
+  return rows.map((row) => row.section);
+}
+
 // Deletes a copy's remote source only when it is provably the file that was verified and nothing else uses it.
 async function deleteVerifiedRemoteSource(db: DbExecutor, paths: PathsSettings, operation: typeof schema.copyOperations.$inferSelect): Promise<boolean> {
   const sourcePath = path.resolve(operation.sourcePath);
@@ -1253,15 +1339,10 @@ async function deleteVerifiedRemoteSource(db: DbExecutor, paths: PathsSettings, 
   if (!stat) return false;
   if (!stat.isFile()) throw new Error("source is no longer a regular file");
   if (operation.sizeBytes !== null && stat.size !== Number(operation.sizeBytes)) throw new Error("source changed after the copy was verified");
-  const user = (
-    await db.execute<{ id: number }>(sql`
-      select ml.id from media_links ml
-      left join storage_files sf on sf.id = ml.resolved_storage_file_id
-      where ml.missing_since is null and (ml.target_path = ${sourcePath} or sf.file_path = ${sourcePath})
-      limit 1
-    `)
-  ).rows[0];
-  if (user) throw new Error("another symlink still points to it");
+  if ((await sectionsLinkingFile(db, sourcePath)).length > 0) {
+    const others = await sectionsLinkingFile(db, sourcePath, operation.mediaLinkId);
+    throw new Error(`another symlink still points to it${others.length > 0 ? ` (in ${others.join(", ")})` : ""}`);
+  }
   const activeCopy = (
     await db.execute<{ id: number }>(sql`
       select id from copy_operations
@@ -1288,14 +1369,20 @@ async function removeLocalConflictCandidates(
   expectedIdentities: Map<string, CopyCleanupIdentity>,
   currentLinkId: number,
   selectedDestinations: CopySelectedDestinationIndex
-): Promise<string[]> {
+): Promise<{ removed: string[]; keptInUse: Array<{ filePath: string; sections: string[] }> }> {
   const timestamp = nowIso();
   const removed: string[] = [];
+  const keptInUse: Array<{ filePath: string; sections: string[] }> = [];
   const preserved = path.resolve(preservedPath);
   for (const candidate of candidates) {
     const candidatePath = path.resolve(candidate.filePath);
     if (candidatePath === preserved) continue;
     if (await isOtherSelectedCopyDestination(paths, candidatePath, currentLinkId, selectedDestinations)) continue;
+    const users = await sectionsLinkingFile(db, candidatePath, currentLinkId);
+    if (users.length > 0) {
+      keptInUse.push({ filePath: candidatePath, sections: users });
+      continue;
+    }
     await assertExistingPathInside(paths.localDir, candidatePath, "Local replacement candidate");
     const stat = await fs.stat(candidatePath).catch(() => null);
     if (!stat?.isFile()) continue;
@@ -1308,7 +1395,7 @@ async function removeLocalConflictCandidates(
     await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.filePath, candidatePath));
     removed.push(candidatePath);
   }
-  return removed;
+  return { removed, keptInUse };
 }
 
 type CopySourceRow = typeof schema.copySources.$inferSelect;
@@ -2797,13 +2884,32 @@ export class JobRunner {
   async startAudit(input: AuditMode | AuditOptions): Promise<number> {
     const normalizedOptions = await normalizeAuditOptions(this.db, input);
     const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
-    const requestedOptions: Partial<AuditOptions> = typeof input === "string" ? {} : input;
+    // Every new job stores its byte compare choice; the setting only supplies the default for this run.
     const optionsWithDefaults: AuditOptions = {
       ...normalizedOptions,
-      ...(requestedOptions.byteCompare === undefined && !advancedSettings.audit.byteCompareWhenSourceKnown ? { byteCompare: false } : {})
+      byteCompare: normalizedOptions.byteCompare ?? advancedSettings.audit.byteCompareWhenSourceKnown
     };
     const scoped = hasScopedAuditOptions(optionsWithDefaults);
     if (!scoped) return this.enqueueJob("audit", { options: optionsWithDefaults }, true, []);
+    if (optionsWithDefaults.storageFileIds) {
+      const storageFileIds = optionsWithDefaults.storageFileIds;
+      return this.enqueuePreparedJob("audit", async (transaction) => {
+        const files = await currentStorageFilesById(transaction, storageFileIds);
+        if (files.length === 0) throw new AdmissionError("None of the selected files are in the current inventory");
+        const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+        if (!paths.symlinkDir || !paths.localDir || !paths.remoteDir) throw new Error("Path settings are incomplete");
+        const frozenOptions: AuditOptions = { ...optionsWithDefaults, storageFileIds: files.map((file) => file.id) };
+        const claims: ResourceClaim[] = [];
+        for (const rootType of ["local", "remote"] as const) {
+          const rootFiles = files.filter((file) => file.rootType === rootType);
+          if (rootFiles.length === 0) continue;
+          claims.push(...inventoryScopeResourceClaims(rootType, rootFiles.map((file) => file.section), "shared"));
+          const root = rootType === "local" ? paths.localDir : paths.remoteDir;
+          for (const file of rootFiles) claims.push(...(await managedPathResourceClaims(root, file.filePath, "Audit file claim", "shared")));
+        }
+        return { progress: { options: frozenOptions }, options: frozenOptions, exclusive: false, claims: normalizeResourceClaims(claims) };
+      });
+    }
     return this.enqueuePreparedJob("audit", async (transaction) => {
       const auditLinks = filterAuditLinks(await listMediaLinks(transaction, undefined, "current"), optionsWithDefaults);
       const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
@@ -2818,6 +2924,62 @@ export class JobRunner {
         claims: await auditResourceClaims(auditLinks, paths)
       };
     });
+  }
+
+  /** File count, size and rough time for an audit before it starts, and why it would be refused. */
+  async estimateAudit(input: AuditOptions): Promise<AuditEstimate> {
+    const normalized = await normalizeAuditOptions(this.db, input, { refuse: false });
+    const advancedSettings = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {}));
+    const byteCompare = normalized.byteCompare ?? advancedSettings.audit.byteCompareWhenSourceKnown;
+    const local = { files: 0, bytes: 0 };
+    const remote = { files: 0, bytes: 0 };
+    const withKnownSource = { files: 0, bytes: 0 };
+    const sources = new Set((await this.db.select({ destinationPath: schema.copySources.destinationPath }).from(schema.copySources)).map((row) => row.destinationPath));
+    const count = (rootType: StorageRootType, targetPath: string, sizeBytes: number) => {
+      const bucket = rootType === "local" ? local : remote;
+      bucket.files += 1;
+      bucket.bytes += sizeBytes;
+      if (sources.has(targetPath)) {
+        withKnownSource.files += 1;
+        withKnownSource.bytes += sizeBytes;
+      }
+    };
+    if (normalized.storageFileIds) {
+      for (const file of await currentStorageFilesById(this.db, normalized.storageFileIds)) count(file.rootType, file.filePath, file.sizeBytes);
+    } else {
+      const links = filterAuditLinks(await listMediaLinks(this.db, undefined, "current"), normalized);
+      const sizes = await storageFileSizes(this.db, links.flatMap((link) => (link.resolvedStorageFileId == null ? [] : [link.resolvedStorageFileId])));
+      for (const link of links) {
+        if (link.kind !== "local" && link.kind !== "remote") continue;
+        count(link.kind, link.targetPath, (link.resolvedStorageFileId == null ? undefined : sizes.get(link.resolvedStorageFileId)) ?? link.sizeBytes ?? 0);
+      }
+    }
+    return {
+      mode: normalized.mode,
+      scoped: hasScopedAuditOptions(normalized),
+      local,
+      remote,
+      withKnownSource,
+      byteCompare,
+      estimatedSeconds: estimateAuditSeconds({ mode: normalized.mode, localBytes: local.bytes, remoteBytes: remote.bytes, sourceBytes: byteCompare ? withKnownSource.bytes : 0 }),
+      refusal: auditRefusal(normalized)
+    };
+  }
+
+  /**
+   * Queues the nightly rolling audit: local files only, fast mode, no byte compare, until windowEnd. It shares the
+   * local inventory scopes, so it waits behind a local storage scan and an exclusive job never runs beside it.
+   */
+  async startRollingAudit(window: { windowStart: string; windowEnd: string }): Promise<number> {
+    const sections = (await getSectionSettings(this.db)).sections;
+    const options: AuditOptions = { mode: "fast", targets: ["local"], byteCompare: false, rolling: window };
+    return this.enqueuePreparedJob("audit", async () => ({
+      progress: { options, rolling: true },
+      options,
+      exclusive: false,
+      claims: inventoryScopeResourceClaims("local", sections, "shared"),
+      queueBehindClaimConflicts: true
+    }));
   }
 
   /**
@@ -3185,6 +3347,7 @@ export class JobWorker {
   private readonly logger: Pick<Console, "info" | "warn" | "error">;
   private readonly copyRunner: CopyCommandRunner;
   private readonly auditRunner: AuditCommandRunner;
+  private readonly now: () => number;
   private readonly concurrency: JobConcurrencySettings;
   private readonly copyTransferLimiter: CopyTransferLimiter;
   private readonly mediaExpectations: JobWorkerOptions["mediaExpectations"];
@@ -3211,6 +3374,7 @@ export class JobWorker {
     this.logger = options.logger ?? console;
     this.copyRunner = options.copyRunner ?? defaultCopyRunner;
     this.auditRunner = options.auditRunner ?? defaultAuditRunner;
+    this.now = options.now ?? Date.now;
     this.concurrency = options.concurrency ?? defaultJobConcurrency;
     this.copyTransferLimiter = options.copyTransferLimiter ?? new CopyTransferLimiter(this.concurrency.maxActiveCopyFiles);
     this.mediaExpectations = options.mediaExpectations;
@@ -4173,7 +4337,20 @@ export class JobWorker {
   }
 
   private async runAuditJob(jobId: number, normalizedOptions: AuditOptions, ctx: JobContext): Promise<void> {
-    const links = filterAuditLinks(await listMediaLinks(this.db), normalizedOptions);
+    if (normalizedOptions.rolling) {
+      await this.runRollingAuditJob(jobId, normalizedOptions, normalizedOptions.rolling, ctx);
+      return;
+    }
+    const links: AuditTarget[] = normalizedOptions.storageFileIds
+      ? (await currentStorageFilesById(this.db, normalizedOptions.storageFileIds)).map(auditTargetForStorageFile)
+      : filterAuditLinks(await listMediaLinks(this.db), normalizedOptions).map((link) => ({
+          linkPath: link.linkPath,
+          targetPath: link.targetPath,
+          kind: link.kind,
+          itemName: link.itemName,
+          storageFileId: link.resolvedStorageFileId,
+          sizeBytes: link.sizeBytes ?? 0
+        }));
     const startedAt = nowIso();
     const auditRun = await ctx.withLeaseDb((leaseDb) =>
       first(
@@ -4207,9 +4384,10 @@ export class JobWorker {
     let sourceCompareErrors = 0;
     let byteMismatches = 0;
     let targetValidationFailures = 0;
+    let checkedBytes = 0;
 
     const auditMediaOptions = { byteCompare: normalizedOptions.byteCompare !== false };
-    const auditProgress = (stage: string, message: string, link?: MediaLinkRow) => ({
+    const auditProgress = (stage: string, message: string, link?: AuditTarget) => ({
       options: normalizedOptions,
       stage,
       message,
@@ -4263,9 +4441,12 @@ export class JobWorker {
         if (result.cmpStatus === "source_error") sourceCompareErrors += 1;
         if (result.cmpStatus === "fail") byteMismatches += 1;
         if (result.ffmpegStatus === "fail") targetValidationFailures += 1;
+        checkedBytes += link.sizeBytes;
 
         await ctx.withLeaseDb(async (leaseDb) => {
-          await leaseDb.insert(schema.auditResults).values({ ...result, auditRunId: auditRun.id, createdAt: nowIso() });
+          const createdAt = nowIso();
+          await leaseDb.insert(schema.auditResults).values({ ...result, auditRunId: auditRun.id, createdAt });
+          await recordStorageFileAudit(leaseDb, link, result, normalizedOptions.mode, createdAt);
         });
         await ctx.setProgress(auditProgress("auditing", "Recorded audit result", link));
       }
@@ -4311,7 +4492,7 @@ export class JobWorker {
         if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Audit was interrupted"));
         await leaseDb
           .update(schema.auditRuns)
-          .set({ status: "completed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, errorMessage: null })
+          .set({ status: "completed", finishedAt: nowIso(), checked, passed, failed, sourceUnknown, sourceMissing, sourceCompareErrors, byteMismatches, targetValidationFailures, checkedBytes, errorMessage: null })
           .where(eq(schema.auditRuns.id, auditRun.id));
         await leaseDb.update(schema.jobs).set({ progress: JSON.stringify(compactJobProgress(completedProgress)) }).where(eq(schema.jobs.id, jobId));
         await leaseDb.insert(schema.jobEvents).values({
@@ -4347,6 +4528,200 @@ export class JobWorker {
       });
       await ctx.setProgress(auditProgress("failed", message));
       throw error;
+    }
+  }
+
+  /**
+   * The nightly rolling audit: local files, fast mode, no byte compare, never-audited files first and then the
+   * oldest checked. It records each result on the storage file as it goes, so stopping keeps everything done so far.
+   * It stops cleanly at the window end (a file still being read is abandoned and comes first next night), when every
+   * due file was checked, or when other work is waiting on it (the scheduler queues it again later in the window).
+   */
+  private async runRollingAuditJob(jobId: number, options: AuditOptions, window: { windowStart: string; windowEnd: string }, ctx: JobContext): Promise<void> {
+    const windowEndMs = Date.parse(window.windowEnd);
+    const due = await rollingAuditDue(this.db, window.windowStart);
+    const startedAt = nowIso();
+    const auditRun = await ctx.withLeaseDb((leaseDb) =>
+      first(
+        leaseDb
+          .insert(schema.auditRuns)
+          .values({
+            jobId,
+            mode: "fast",
+            status: "running",
+            startedAt,
+            finishedAt: null,
+            checked: 0,
+            passed: 0,
+            failed: 0,
+            sourceUnknown: 0,
+            sourceMissing: 0,
+            sourceCompareErrors: 0,
+            byteMismatches: 0,
+            targetValidationFailures: 0,
+            errorMessage: null,
+            rolling: true,
+            checkedBytes: 0
+          })
+          .returning({ id: schema.auditRuns.id })
+      )
+    );
+    if (!auditRun) throw new Error("Audit run was not created");
+    let checked = 0;
+    let passed = 0;
+    let failed = 0;
+    let targetValidationFailures = 0;
+    let checkedBytes = 0;
+    let skippedFiles = 0;
+    let stopReason: "window_end" | "all_checked" | "yielded" | null = null;
+    const skipped: number[] = [];
+    const progress = (stage: string, message: string, file?: AuditTarget) => ({
+      options,
+      rolling: true,
+      windowEnd: window.windowEnd,
+      stage,
+      message,
+      current: checked,
+      total: due.files,
+      totalBytes: due.bytes,
+      checkedBytes,
+      checked,
+      passed,
+      failed,
+      skipped: skippedFiles,
+      sourceUnknown: 0,
+      sourceMissing: 0,
+      sourceCompareErrors: 0,
+      byteMismatches: 0,
+      targetValidationFailures,
+      ...(stopReason ? { stopReason } : {}),
+      ...(file ? { currentTitle: file.itemName, currentFile: file.targetPath, targetPath: file.targetPath } : {})
+    });
+    // The window end aborts a file still being read, without recording anything for it.
+    const windowAbort = new AbortController();
+    const forwardAbort = () => windowAbort.abort(ctx.signal.reason);
+    if (ctx.signal.aborted) forwardAbort();
+    else ctx.signal.addEventListener("abort", forwardAbort, { once: true });
+    const windowTimer = setTimeout(() => windowAbort.abort(new Error("Nightly audit window ended")), Math.max(0, windowEndMs - this.now()));
+    windowTimer.unref();
+    const runSummary = () => ({ checked, passed, failed, targetValidationFailures, checkedBytes, skipped: skippedFiles, stopReason });
+    try {
+      await ctx.event("info", "Nightly fast audit of local files started", { due: due.files, dueBytes: due.bytes, windowEnd: window.windowEnd });
+      await ctx.setProgress(progress("auditing", "Starting nightly audit"));
+      outer: while (true) {
+        const batch = await nextRollingAuditBatch(this.db, window.windowStart, skipped);
+        if (batch.length === 0) {
+          stopReason = "all_checked";
+          break;
+        }
+        for (const storageFile of batch) {
+          if (await ctx.isCancelled()) break outer;
+          if (this.now() >= windowEndMs) {
+            stopReason = "window_end";
+            break outer;
+          }
+          if (await rollingAuditShouldYield(this.db, jobId)) {
+            stopReason = "yielded";
+            break outer;
+          }
+          const file = auditTargetForStorageFile(storageFile);
+          try {
+            await withFilesystemTimeout(fs.stat(file.targetPath), `Audit target check for ${file.targetPath}`);
+          } catch (error) {
+            // Gone since the last scan: the next scan marks it missing, so it is not a failed audit.
+            if (error && typeof error === "object" && "code" in error && error.code === "ENOENT") {
+              skipped.push(storageFile.id);
+              skippedFiles += 1;
+              continue;
+            }
+          }
+          await ctx.setProgress({ ...progress("auditing", "Auditing media", file), current: checked + 1 });
+          let result: Awaited<ReturnType<typeof auditMediaLink>>;
+          try {
+            result = await auditMediaLink(file, null, "fast", this.auditRunner, { byteCompare: false, signal: windowAbort.signal });
+          } catch (error: unknown) {
+            if (await ctx.isCancelled()) break outer;
+            if (windowAbort.signal.aborted && !ctx.signal.aborted) {
+              stopReason = "window_end";
+              break outer;
+            }
+            throw error;
+          }
+          // An aborted read can come back as a failure; it says nothing about the file, so it is not recorded.
+          if (windowAbort.signal.aborted) {
+            if (!ctx.signal.aborted) stopReason = "window_end";
+            break outer;
+          }
+          checked += 1;
+          checkedBytes += file.sizeBytes;
+          if (result.status === "pass" || result.status === "warning") passed += 1;
+          else failed += 1;
+          if (result.ffmpegStatus === "fail") targetValidationFailures += 1;
+          await ctx.withLeaseDb(async (leaseDb) => {
+            const createdAt = nowIso();
+            await recordStorageFileAudit(leaseDb, file, result, "fast", createdAt);
+            // Passes live on the file only; keeping each night's 60,000 passes would grow the table without end.
+            if (result.status !== "pass") await leaseDb.insert(schema.auditResults).values({ ...result, auditRunId: auditRun.id, createdAt });
+            await leaseDb
+              .update(schema.auditRuns)
+              .set({ checked, passed, failed, targetValidationFailures, checkedBytes })
+              .where(eq(schema.auditRuns.id, auditRun.id));
+          });
+          if (result.status === "fail") await ctx.event("warn", "Nightly audit found a damaged file", { targetPath: file.targetPath, message: result.message });
+          await ctx.setProgress(progress("auditing", "Recorded audit result", file));
+        }
+      }
+
+      if (await ctx.isCancelled()) {
+        // Results already recorded on files stay: each one is a real check of that file.
+        await ctx.withLeaseDb(async (leaseDb) => {
+          await leaseDb
+            .update(schema.auditRuns)
+            .set({ status: "cancelled", finishedAt: nowIso(), checked, passed, failed, targetValidationFailures, checkedBytes, stopReason: "cancelled", errorMessage: null })
+            .where(eq(schema.auditRuns.id, auditRun.id));
+        });
+        await ctx.setProgress(progress("cancelled", "Nightly audit terminated"));
+        await ctx.event("warn", "Nightly audit terminated; results so far are kept", runSummary());
+        return;
+      }
+
+      const message =
+        stopReason === "window_end"
+          ? "Nightly audit stopped at the end of its window; it continues from here next night"
+          : stopReason === "yielded"
+            ? "Nightly audit paused for other work; it continues later in the window"
+            : "Nightly audit checked every due local file";
+      const completedProgress = progress("completed", message);
+      const finalized = await ctx.finishCompleted(async (leaseDb) => {
+        if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Audit was interrupted"));
+        await leaseDb
+          .update(schema.auditRuns)
+          .set({ status: "completed", finishedAt: nowIso(), checked, passed, failed, targetValidationFailures, checkedBytes, stopReason, errorMessage: null })
+          .where(eq(schema.auditRuns.id, auditRun.id));
+        await leaseDb.update(schema.jobs).set({ progress: JSON.stringify(compactJobProgress(completedProgress)) }).where(eq(schema.jobs.id, jobId));
+        await leaseDb.insert(schema.jobEvents).values({ jobId, timestamp: nowIso(), level: "info", message, data: JSON.stringify(runSummary()) });
+      });
+      if (finalized) return;
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.auditRuns)
+          .set({ status: "cancelled", finishedAt: nowIso(), checked, passed, failed, targetValidationFailures, checkedBytes, stopReason: "cancelled", errorMessage: null })
+          .where(eq(schema.auditRuns.id, auditRun.id));
+      });
+    } catch (error: unknown) {
+      if (error instanceof LeaseLostError || (error instanceof Error && error.name === "LeaseLostError")) throw error;
+      const message = errorMessage(error);
+      await ctx.withLeaseDb(async (leaseDb) => {
+        await leaseDb
+          .update(schema.auditRuns)
+          .set({ status: "failed", finishedAt: nowIso(), checked, passed, failed, targetValidationFailures, checkedBytes, errorMessage: message })
+          .where(eq(schema.auditRuns.id, auditRun.id));
+      });
+      await ctx.setProgress(progress("failed", message));
+      throw error;
+    } finally {
+      clearTimeout(windowTimer);
+      ctx.signal.removeEventListener("abort", forwardAbort);
     }
   }
 
@@ -5255,7 +5630,7 @@ export class JobWorker {
       const finalizationWarnings: string[] = [];
       for (const entry of replacementCandidateEntries.values()) {
         try {
-          const removed = await removeLocalConflictCandidates(
+          const { removed, keptInUse } = await removeLocalConflictCandidates(
             leaseDb,
             paths,
             entry.candidates,
@@ -5272,6 +5647,9 @@ export class JobWorker {
               message: "Replaced previous local files",
               data: JSON.stringify({ linkId: entry.linkId, removed })
             });
+          }
+          for (const kept of keptInUse) {
+            finalizationWarnings.push(`Kept previous local file ${kept.filePath}: still linked from ${kept.sections.join(", ")}`);
           }
         } catch (error: unknown) {
           finalizationWarnings.push(`Could not remove every previous local file for media #${entry.linkId}: ${errorMessage(error)}`);

@@ -1,8 +1,9 @@
-import { sql } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 import type { Db } from "../db/database";
 import { AppError } from "../errors";
 import * as schema from "../db/schema";
-import { canonicalTitleKey } from "../lib/storagePolicies";
+import { storagePolicyKey } from "../lib/storagePolicies";
+import type { StoragePolicyTarget } from "../../shared/types";
 import { reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
 import { schedulerLockKey } from "./scheduling";
 
@@ -53,17 +54,20 @@ function normalizeResources(resources: MutationResource[]): MutationResource[] {
   return [...unique.values()];
 }
 
-export async function storagePolicyMutationResources(db: Db, titles: string[]): Promise<MutationResource[]> {
-  const titleKeys = new Set(titles.map(canonicalTitleKey).filter(Boolean));
-  if (titleKeys.size === 0) return [];
+/** The links and title scopes a policy change for these folder copies touches; other folders are not involved. */
+export async function storagePolicyMutationResources(db: Db, targets: readonly StoragePolicyTarget[]): Promise<MutationResource[]> {
+  const keys = new Set(targets.filter((target) => target.section).map((target) => storagePolicyKey(target.section, target.title)));
+  if (keys.size === 0) return [];
+  const sections = [...new Set(targets.map((target) => target.section).filter(Boolean))];
 
   const links = await db
     .select({ id: schema.mediaLinks.id, section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName })
-    .from(schema.mediaLinks);
+    .from(schema.mediaLinks)
+    .where(inArray(schema.mediaLinks.section, sections));
 
   return normalizeResources(
     links
-      .filter((link) => titleKeys.has(canonicalTitleKey(link.itemName)))
+      .filter((link) => keys.has(storagePolicyKey(link.section, link.itemName)))
       .flatMap((link) => [
         { resourceType: "media", resourceKey: String(link.id) },
         { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]) }

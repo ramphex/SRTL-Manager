@@ -13,7 +13,7 @@ import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onbo
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
 import { createSonarrInstance, getSonarrCopyDefaults, getSonarrOverview, getSonarrState, mapSonarrSeries, processSonarrWork, queueCopiedSonarrEpisodes, receiveSonarrWebhook, reconcileSonarrSeries, removeSonarrInstance, renameSonarrInstance, saveSonarrSettings, sonarrMediaExpectation, testSonarrConnection } from "../src/server/lib/sonarr";
 import type { SonarrEpisode, SonarrEpisodeFile, SonarrSeries } from "../src/server/lib/sonarrClient";
-import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
+import { assignTitle } from "./policyHelpers";
 import type { SonarrSettingsInput } from "../src/shared/sonarr";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
@@ -144,13 +144,15 @@ describe("Sonarr instances and folder ownership", () => {
     const hdId = await instance("Sonarr", hd, [{ rootPath: "/tv", section: "shows" }]);
     const uhdId = await instance("Sonarr 4K", uhd, [{ rootPath: "/tv4k", section: "shows4k" }], { localTag: "uhd-local", remoteTag: "uhd-remote" });
     const animeId = await instance("Sonarr Anime", anime, [{ rootPath: "/anime", section: "anime" }]);
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_1");
-    await setStoragePolicyTitle(app.database.db, "Delta (2020)", "location_2");
+    // Policies are per folder: the 1080p copy of Alpha is local and the 4K copy remote.
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["shows"]);
+    await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["shows4k"]);
+    await assignTitle(app.database.db, "Delta (2020)", "location_2", ["anime"]);
     await processSonarrWork(app.database.db);
 
-    // The same title in two instances is tagged in both, each with that instance's own tag.
+    // Each instance tags the series from the policy of the folder it maps, with its own tag names.
     expect(hd.series.map((item) => item.tags)).toEqual([[1], []]);
-    expect(uhd.tags.map((tag) => tag.label)).toEqual(["keep", "uhd-local"]);
+    expect(uhd.tags.map((tag) => tag.label)).toEqual(["keep", "uhd-remote"]);
     expect(uhd.series[0]!.tags).toEqual([2]);
     expect(anime.series[0]!.tags).toEqual([2]);
     expect(hd.edits).toEqual([{ seriesIds: [1], tags: [1], applyTags: "add" }]);
@@ -162,8 +164,8 @@ describe("Sonarr instances and folder ownership", () => {
 
     // An offline instance records its own error and leaves the others working.
     anime.offline = true;
-    await setStoragePolicyTitle(app.database.db, "Bravo (2020)", "location_2");
-    await setStoragePolicyTitle(app.database.db, "Delta (2020)", "location_1");
+    await assignTitle(app.database.db, "Bravo (2020)", "location_2", ["shows"]);
+    await assignTitle(app.database.db, "Delta (2020)", "location_1", ["anime"]);
     await processSonarrWork(app.database.db);
     expect(hd.series[1]!.tags).toEqual([2]);
     expect((await getSonarrState(app.database.db, animeId)).series[0]).toMatchObject({ status: "error", message: "Sonarr returned HTTP 503." });
@@ -232,15 +234,15 @@ describe("Sonarr policy tags", () => {
   it("adds or removes only the two policy tags through the series editor", async () => {
     const hd = await fakeSonarr([show(1, "Alpha", "/tv", [3, 2])], ["/tv"]);
     await instance("Sonarr", hd, [{ rootPath: "/tv", section: "shows" }]);
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_2");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["shows"]);
     await processSonarrWork(app.database.db);
     // Already tagged for its policy: nothing is sent.
     expect(hd.edits).toEqual([]);
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_1");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["shows"]);
     await processSonarrWork(app.database.db);
     expect(hd.edits).toEqual([{ seriesIds: [1], tags: [2], applyTags: "remove" }, { seriesIds: [1], tags: [1], applyTags: "add" }]);
     expect(hd.series[0]!.tags).toEqual([3, 1]);
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "unassigned");
+    await assignTitle(app.database.db, "Alpha (2020)", "unassigned", ["shows"]);
     await processSonarrWork(app.database.db);
     expect(hd.edits.at(-1)).toEqual({ seriesIds: [1], tags: [1], applyTags: "remove" });
     // The unrelated family tag is never touched, and the series' monitoring is never sent.
@@ -252,7 +254,7 @@ describe("Sonarr policy tags", () => {
   it("keeps opposite tags in review until Use SRTL policies or Import tags resolves them", async () => {
     const hd = await fakeSonarr([show(1, "Alpha", "/tv", [2]), show(2, "Bravo", "/tv", [1]), show(3, "Charlie", "/tv", [1, 2])], ["/tv"]);
     const id = await instance("Sonarr", hd, [{ rootPath: "/tv", section: "shows" }]);
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_1");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["shows"]);
     await processSonarrWork(app.database.db);
     expect((await getSonarrState(app.database.db, id)).series.map((item) => [item.title, item.status, item.tagPolicy])).toEqual([
       ["Alpha (2020)", "review", "location_2"],
@@ -284,7 +286,7 @@ describe("Sonarr copy monitoring", () => {
     await setSetting(app.database.db, "advancedSettings", { copy: { profile: "fast" } });
     for (const file of files) await episodeLink("shows", itemName, `Season 01/${file.name}`);
     await scan([{ section: "shows", itemName }]);
-    await setStoragePolicyTitle(app.database.db, itemName, "location_1");
+    await assignTitle(app.database.db, itemName, "location_1", ["shows"]);
     let release = () => undefined as void;
     const released = new Promise<void>((resolve) => { release = resolve; });
     let reached = () => undefined as void;

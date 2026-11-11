@@ -21,10 +21,15 @@ export function copyBehaviorForProfile(profile: CopyVerificationProfile): CopyJo
 
 export const defaultCopyJobBehaviorSettings: CopyJobBehaviorSettings = copyBehaviorForProfile("balanced");
 
+// Byte compare reads the recorded source as well as the file, and on a remote source that means a full download.
+// Copies already byte-compare every file, so audits leave it off unless someone asks for it.
 export const defaultAuditJobBehaviorSettings: AuditJobBehaviorSettings = {
   defaultMode: "fast",
-  byteCompareWhenSourceKnown: true
+  byteCompareWhenSourceKnown: false,
+  rolling: { enabled: false, startHour: 1, windowHours: 4 }
 };
+
+export const maxRollingAuditWindowHours = 12;
 
 export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
   symlinkFolderScheduling: "single_job",
@@ -76,9 +81,19 @@ function normalizeCopyBehavior(value: unknown): CopyJobBehaviorSettings {
 
 function normalizeAuditBehavior(value: unknown): AuditJobBehaviorSettings {
   const record = isRecord(value) ? value : {};
+  const rolling = isRecord(record.rolling) ? record.rolling : {};
+  const startHour = Number(rolling.startHour);
+  const windowHours = Number(rolling.windowHours);
+  const defaults = defaultAuditJobBehaviorSettings.rolling;
   return {
     defaultMode: record.defaultMode === "deep" ? "deep" : "fast",
-    byteCompareWhenSourceKnown: record.byteCompareWhenSourceKnown !== false
+    // Only an explicit true turns it on; migration 34 turned the old stored default (true) into false.
+    byteCompareWhenSourceKnown: record.byteCompareWhenSourceKnown === true,
+    rolling: {
+      enabled: rolling.enabled === true,
+      startHour: Number.isInteger(startHour) && startHour >= 0 && startHour <= 23 ? startHour : defaults.startHour,
+      windowHours: Number.isInteger(windowHours) && windowHours >= 1 && windowHours <= maxRollingAuditWindowHours ? windowHours : defaults.windowHours
+    }
   };
 }
 

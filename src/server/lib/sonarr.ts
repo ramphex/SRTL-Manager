@@ -3,7 +3,7 @@ import path from "node:path";
 import { and, asc, desc, eq, inArray, isNull, lte, sql } from "drizzle-orm";
 import { z } from "zod";
 import { sonarrInstanceLimit, type SonarrConnectionTest, type SonarrCopyDefaults, type SonarrOverview, type SonarrSeriesStatus, type SonarrSettingsInput, type SonarrState } from "../../shared/sonarr";
-import type { CopyOptions, JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind } from "../../shared/types";
+import type { CopyOptions, JobStatus, MediaLinkRow, PathsSettings, ScanTitleScope, StoragePolicyKind, StoragePolicyTarget } from "../../shared/types";
 import { dbAll, first, getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { JobRunner } from "../jobs/jobRunner";
@@ -14,7 +14,7 @@ import type { MediaExpectation } from "./mediaIntegrity";
 import { isOnboardingComplete } from "./onboarding";
 import { isPathConfigurationBlocked } from "./pathConfiguration";
 import { SonarrClient, SonarrError, normalizeSonarrUrl, type SonarrEpisode, type SonarrEpisodeFile, type SonarrSeries } from "./sonarrClient";
-import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
+import { setStoragePolicies, storagePolicyKey } from "./storagePolicies";
 import { secretPurposes } from "./secretBox";
 
 const tagSyncBatchSize = 50;
@@ -314,32 +314,33 @@ export async function reconcileSonarrSeries(db: Db, instanceId: string, seriesId
     const policies = await arrPolicyLookup(transaction);
     const selected = await transaction.select().from(schema.sonarrSeries).where(seriesIdsIn(config, seriesIds));
     if (action === "import_tags") {
-      const groups = new Map<StoragePolicyKind, string[]>();
+      // Policies are per folder: two copies of a title in different folders may import different tags.
+      const groups = new Map<StoragePolicyKind, StoragePolicyTarget[]>();
       const assignments = new Map<string, StoragePolicyKind>();
       for (const row of selected) {
         const tagPolicy = arrTagPolicy(parseTags(row.tags), config);
         const policy = arrCurrentPolicy(row, policies);
         if (tagPolicy === "conflict" || tagPolicy === "unassigned" || (policy !== "unassigned" && policy !== tagPolicy)) throw new SonarrError("Only unassigned or matching titles with one policy tag can be imported. Resolve conflicting assignments in SRTL first.");
-        const key = canonicalTitleKey(row.itemName!);
-        if (assignments.has(key) && assignments.get(key) !== tagPolicy) throw new SonarrError("Selected copies of the same title have conflicting policy tags.");
+        const key = storagePolicyKey(row.section!, row.itemName!);
+        if (assignments.has(key) && assignments.get(key) !== tagPolicy) throw new SonarrError("Selected copies of the same title in one folder have conflicting policy tags.");
         assignments.set(key, tagPolicy);
-        groups.set(tagPolicy, [...(groups.get(tagPolicy) ?? []), row.itemName!]);
+        groups.set(tagPolicy, [...(groups.get(tagPolicy) ?? []), { section: row.section!, title: row.itemName! }]);
       }
       await withResourceMutationGuard(transaction, async (guarded) => {
         const latest = await arrPolicyLookup(guarded);
         for (const row of selected) {
           const existing = arrCurrentPolicy(row, latest);
-          if (existing !== "unassigned" && existing !== assignments.get(canonicalTitleKey(row.itemName!))) {
+          if (existing !== "unassigned" && existing !== assignments.get(storagePolicyKey(row.section!, row.itemName!))) {
             throw new SonarrError("SRTL policies changed during review. Refresh before importing tags.");
           }
         }
         return {
           resources: [
-            ...await storagePolicyMutationResources(guarded, selected.map((row) => row.itemName!)),
+            ...await storagePolicyMutationResources(guarded, selected.map((row) => ({ section: row.section!, title: row.itemName! }))),
             ...selected.map((row) => ({ resourceType: "title", resourceKey: JSON.stringify([row.section, row.itemName]) }))
           ],
           mutate: async () => {
-            for (const [policy, titles] of groups) await setStoragePolicyTitles(guarded, titles, policy, { source: "sonarr" });
+            for (const [policy, targets] of groups) await setStoragePolicies(guarded, targets, policy, { source: "sonarr" });
           }
         };
       });
@@ -498,7 +499,7 @@ async function observePolicies(db: Db, config: StoredSettings): Promise<void> {
     const groups = new Map<string, { marker: string; managed: boolean; seriesIds: number[] }>();
     for (const row of rows) {
       if (!row.section || !row.itemName) continue;
-      const marker = markers.get(canonicalTitleKey(row.itemName)) ?? "unassigned";
+      const marker = markers.get(storagePolicyKey(row.section, row.itemName)) ?? "unassigned";
       if (row.observedPolicyMarker === marker) continue;
       const tagPolicy = arrTagPolicy(parseTags(row.tags), config);
       const managed = row.managed || row.observedPolicyMarker !== null || tagPolicy === "unassigned" || tagPolicy === arrCurrentPolicy(row, policies);

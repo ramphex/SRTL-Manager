@@ -12,7 +12,8 @@ import { NotAllowed } from "./notAllowed";
 import { AccountSettingsPanel } from "./accountSettings";
 import { SecurityEventsPanel, SessionsPanel } from "./securitySettings";
 import { minimumPasswordLength } from "../shared/auth";
-import { copyBehaviorForProfile, defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
+import { copyBehaviorForProfile, defaultAdvancedSettings, maxRollingAuditWindowHours, normalizeAdvancedSettings } from "../shared/advancedSettings";
+import { auditThroughput } from "../shared/auditEstimate";
 import { formatJobType, jobProgressChips, matchesEventFilters, matchesJobFilters, type EventLevelFilter, type JobStatusFilter, type JobTypeFilter } from "./logDisplay";
 import { normalizeAuditTargets } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
@@ -297,7 +298,7 @@ function AuditRunsList({
               <div className="scan-run-title">
                 <strong>Audit #{run.id}</strong>
                 <span>
-                  Job #{run.jobId} / {auditModeLabel(options?.mode ?? run.mode)}
+                  Job #{run.jobId} / {auditModeLabel(options?.mode ?? run.mode)}{run.rolling ? " / Nightly" : ""}
                 </span>
               </div>
               <div className="scan-run-actions">
@@ -361,6 +362,14 @@ function purgeRecheckLabel(seconds: number): string {
   return minutes === 1 ? "1 minute" : `${minutes} minutes`;
 }
 
+function rollingStopLabel(reason: string): string {
+  if (reason === "window_end") return "End of window; continues next night";
+  if (reason === "all_checked") return "Every due file checked";
+  if (reason === "yielded") return "Paused for other work";
+  if (reason === "cancelled") return "Terminated";
+  return reason;
+}
+
 function auditModeLabel(mode: AuditMode | null | undefined): string {
   if (mode === "deep") return "Deep";
   if (mode === "fast") return "Fast";
@@ -387,13 +396,21 @@ function auditHistoryScopeItems(run: AuditRunRecord, options: AuditScopeDisplayO
     { label: "Byte compare", value: auditByteCompareLabel(options) }
   ];
 
+  if (run.rolling) {
+    items.push({ label: "Scope", value: "Nightly: local files, oldest checked first" });
+    if (run.checkedBytes) items.push({ label: "Read", value: formatBytes(run.checkedBytes) });
+    if (run.stopReason) items.push({ label: "Stopped", value: rollingStopLabel(run.stopReason) });
+    return items;
+  }
+
   if (!options) {
     items.push({ label: "Scope", value: "Unavailable" });
     return items;
   }
 
   const targets = normalizeAuditTargets(options.targets);
-  const hasScopedSelection = Boolean(options.linkIds?.length || options.section || options.itemName || options.relativePathPrefix);
+  if (options.storageFileIds?.length) items.push({ label: "Selected files", value: `${formatNumber(options.storageFileIds.length)} selected` });
+  const hasScopedSelection = Boolean(options.linkIds?.length || options.storageFileIds?.length || options.section || options.itemName || options.relativePathPrefix);
   if (options.linkIds?.length) items.push({ label: "Selected links", value: `${formatNumber(options.linkIds.length)} selected` });
   if (options.itemName) items.push({ label: "Title", value: options.itemName });
   if (options.section) items.push({ label: "Folder", value: availableSections.find((section) => section.section === options.section)?.title ?? options.section });
@@ -990,7 +1007,7 @@ function AdvancedSettingsPanel() {
           <div className="advanced-settings-heading">
             <div>
               <h3>Audit defaults</h3>
-              <p>Controls the default mode used by audit prompts and whether known source files are compared.</p>
+              <p>Controls the default mode used by audit prompts, whether known source files are compared, and the nightly audit of local files.</p>
             </div>
             <span className="pill pill-info">Current: {savedAuditModeLabel}</span>
           </div>
@@ -1016,10 +1033,50 @@ function AdvancedSettingsPanel() {
               />
               <span>
                 <strong>Byte compare when source is known</strong>
-                <small>Skip this when media validation alone is enough.</small>
+                <small>Off by default. Reads the recorded copy source as well, usually through the remote mount, and copies already byte-compare every file. Each audit can still turn it on for one run.</small>
               </span>
             </label>
+            <label className="advanced-toggle">
+              <input
+                type="checkbox"
+                checked={draft.audit.rolling.enabled}
+                onChange={(event) => updateAuditDefaults({ rolling: { ...draft.audit.rolling, enabled: event.target.checked } })}
+              />
+              <span>
+                <strong>Audit local files every night</strong>
+                <small>A fast audit of local files only, without byte compare, during the window below. Never-audited files go first, then the oldest checked; it stops at the end of the window and continues the next night. Failures are listed on Damaged files.</small>
+              </span>
+            </label>
+            <label className="advanced-field">
+              <span>Nightly audit starts at (server time)</span>
+              <select
+                value={draft.audit.rolling.startHour}
+                disabled={!draft.audit.rolling.enabled}
+                onChange={(event) => updateAuditDefaults({ rolling: { ...draft.audit.rolling, startHour: Number(event.target.value) } })}
+              >
+                {Array.from({ length: 24 }, (_unused, hour) => (
+                  <option key={hour} value={hour}>
+                    {String(hour).padStart(2, "0")}:00
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="advanced-field">
+              <span>Nightly audit window (hours)</span>
+              <select
+                value={draft.audit.rolling.windowHours}
+                disabled={!draft.audit.rolling.enabled}
+                onChange={(event) => updateAuditDefaults({ rolling: { ...draft.audit.rolling, windowHours: Number(event.target.value) } })}
+              >
+                {Array.from({ length: maxRollingAuditWindowHours }, (_unused, index) => index + 1).map((hours) => (
+                  <option key={hours} value={hours}>
+                    {hours} {hours === 1 ? "hour" : "hours"}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
+          <RollingAuditCoverageLine windowHours={draft.audit.rolling.windowHours} />
         </section>
 
         <section className="advanced-settings-section">
@@ -1612,5 +1669,25 @@ function SelectedLogJobSummary({ job, sections, timeFormat }: { job: JobRecord; 
       {job.type === "orphan_purge" ? <OrphanPurgeProgressPanel key={job.id} job={job} compact /> : null}
       <LogChipList chips={jobProgressChips(job)} />
     </div>
+  );
+}
+
+// How much of the local library audits checked lately, and how long a full nightly pass takes at this window.
+function RollingAuditCoverageLine({ windowHours }: { windowHours: number }) {
+  const coverage = useQuery({ queryKey: ["audit-coverage"], queryFn: () => api.auditCoverage(30), refetchInterval: 60_000 });
+  const data = coverage.data;
+  if (coverage.error) return <p className="rolling-audit-coverage">Audit coverage is unavailable: {coverage.error.message}</p>;
+  if (!data) return null;
+  const share = data.localBytes > 0 ? Math.round((data.checkedBytes / data.localBytes) * 1000) / 10 : 0;
+  const bytesPerSecond = data.measuredBytesPerSecond ?? auditThroughput.fastLocalBytesPerSecond;
+  const nights = data.localBytes > 0 ? Math.max(1, Math.ceil(data.localBytes / (bytesPerSecond * windowHours * 3600))) : 0;
+  const speed = `${formatBytes(bytesPerSecond)}/s ${data.measuredBytesPerSecond ? "measured on recent nights" : "estimated"}`;
+  return (
+    <p className="rolling-audit-coverage" role="status">
+      Last {data.days} days: audits checked {formatBytes(data.checkedBytes)} of {formatBytes(data.localBytes)} local ({share}%), {formatNumber(data.checkedFiles)} of {formatNumber(data.localFiles)} files;{" "}
+      {formatNumber(data.neverCheckedFiles)} never audited
+      {data.failedFiles > 0 ? `, ${formatNumber(data.failedFiles)} failed` : ""}.{" "}
+      {nights > 0 ? `A full pass takes about ${formatNumber(nights)} ${nights === 1 ? "night" : "nights"} at ${windowHours} ${windowHours === 1 ? "hour" : "hours"} a night (${speed}).` : ""}
+    </p>
   );
 }

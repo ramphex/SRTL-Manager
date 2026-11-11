@@ -10,13 +10,12 @@ import { requestHasPermission, requirePermission } from "../routeAccess";
 import { storagePolicyMutationResources, withResourceMutationGuard } from "../jobs/resourceMutationGuard";
 import { applyDefaultPolicyToUnassigned, listUnassignedSectionTitles, previewDefaultPolicyForUnassigned } from "../lib/defaultPolicy";
 import {
-  findStoragePolicyCandidateTitle,
-  findStoragePolicyCandidateTitles,
+  findStoragePolicyCandidateTargets,
   listStoragePolicyCandidates,
   listStoragePolicyTitles,
   removeStoragePolicyTitle,
-  setStoragePolicyTitle,
-  setStoragePolicyTitles
+  setStoragePolicies,
+  setStoragePolicy
 } from "../lib/storagePolicies";
 import { getInventoryScanTimestamps, getInventorySummary, listMediaLinks, listMediaLinksByIds, listMediaLinksPage, listMediaLinkTree, listSectionSummaries, listStorageFileTree, listStorageFiles } from "../lib/scanner";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
@@ -50,15 +49,29 @@ const storagePolicySchema = z.enum(["unassigned", "location_1", "location_2"]);
 const maxBulkSelectionItems = 100_000;
 const largeSelectionBodyLimitBytes = 4 * 1024 * 1024;
 
-const storagePolicyInputSchema = z.object({
-  title: z.string().trim().min(1, "Title is required").max(500, "Title is too long"),
-  policy: storagePolicySchema
-});
+const policyTitleSchema = z.string().trim().min(1, "Title is required").max(500, "Title is too long");
+const policySectionSchema = z.string().trim().min(1, "Folder is required").max(200);
+const allFoldersMessage = "Choose the folder to change, or ask for every folder that holds the title.";
 
-const storagePolicyBulkInputSchema = z.object({
-  titles: z.array(z.string().trim().min(1, "Title is required").max(500, "Title is too long")).min(1, "Select at least one title").max(1000),
-  policy: storagePolicySchema
-});
+// A policy belongs to one folder's copy of a title. Changing every folder that holds a title is an explicit choice.
+const storagePolicyInputSchema = z
+  .object({
+    title: policyTitleSchema,
+    section: policySectionSchema.optional(),
+    allFolders: z.boolean().optional(),
+    policy: storagePolicySchema
+  })
+  .refine((value) => Boolean(value.section) !== (value.allFolders === true), { message: allFoldersMessage });
+
+const storagePolicyBulkInputSchema = z
+  .object({
+    items: z.array(z.object({ title: policyTitleSchema, section: policySectionSchema })).max(1000).optional(),
+    titles: z.array(policyTitleSchema).max(1000).optional(),
+    allFolders: z.boolean().optional(),
+    policy: storagePolicySchema
+  })
+  .refine((value) => (value.items?.length ?? 0) + (value.titles?.length ?? 0) > 0, { message: "Select at least one title" })
+  .refine((value) => !value.titles?.length || value.allFolders === true, { message: allFoldersMessage });
 
 const mediaLinkLookupInputSchema = z.object({
   ids: z.array(z.coerce.number().int().positive()).max(1000)
@@ -336,15 +349,16 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
   app.post("/api/storage-policies", async (request) => {
     const body = storagePolicyInputSchema.parse(request.body);
     return withResourceMutationGuard(db, async (transaction) => {
-      const candidateTitle = await findStoragePolicyCandidateTitle(transaction, body.title);
-      if (!candidateTitle) throw new StoragePolicyRequestError(400, "Choose a title from the scanned library.");
-      const resources = await storagePolicyMutationResources(transaction, [candidateTitle]);
+      const { targets } = await findStoragePolicyCandidateTargets(transaction, [{ title: body.title, section: body.section ?? null }], { allFolders: body.allFolders });
+      if (targets.length === 0) throw new StoragePolicyRequestError(400, body.section ? "Choose a title from this folder of the scanned library." : "Choose a title from the scanned library.");
+      const resources = await storagePolicyMutationResources(transaction, targets);
       return {
         resources,
-        mutate: () =>
-          setStoragePolicyTitle(transaction, candidateTitle, body.policy as StoragePolicyKind, {
-            mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
-          })
+        mutate: async () => {
+          const options = { mediaLinkIds: mediaLinkIdsFromMutationResources(resources) };
+          if (targets.length === 1) return setStoragePolicy(transaction, targets[0]!, body.policy as StoragePolicyKind, options);
+          return (await setStoragePolicies(transaction, targets, body.policy as StoragePolicyKind, options)).items[0]!;
+        }
       };
     });
   });
@@ -352,15 +366,16 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
   app.post("/api/storage-policies/bulk", async (request) => {
     const body = storagePolicyBulkInputSchema.parse(request.body);
     return withResourceMutationGuard(db, async (transaction) => {
-      const { candidateTitles, invalidTitles } = await findStoragePolicyCandidateTitles(transaction, body.titles);
+      const requested = [...(body.items ?? []), ...(body.titles ?? []).map((title) => ({ title, section: null }))];
+      const { targets, invalidTitles } = await findStoragePolicyCandidateTargets(transaction, requested, { allFolders: body.allFolders });
       if (invalidTitles.length > 0) {
         throw new StoragePolicyRequestError(400, `Choose titles from the scanned library: ${invalidTitles.join(", ")}`);
       }
-      const resources = await storagePolicyMutationResources(transaction, candidateTitles);
+      const resources = await storagePolicyMutationResources(transaction, targets);
       return {
         resources,
         mutate: () =>
-          setStoragePolicyTitles(transaction, candidateTitles, body.policy as StoragePolicyKind, {
+          setStoragePolicies(transaction, targets, body.policy as StoragePolicyKind, {
             mediaLinkIds: mediaLinkIdsFromMutationResources(resources)
           })
       };
@@ -375,7 +390,10 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
   app.post("/api/storage-policies/default-apply", async (request) => {
     const body = z.object({ section: z.string().trim().min(1).max(200) }).parse(request.body);
     return withResourceMutationGuard(db, async (transaction) => ({
-      resources: await storagePolicyMutationResources(transaction, await listUnassignedSectionTitles(transaction, body.section)),
+      resources: await storagePolicyMutationResources(
+        transaction,
+        (await listUnassignedSectionTitles(transaction, body.section)).map((title) => ({ section: body.section, title }))
+      ),
       mutate: () => applyDefaultPolicyToUnassigned(transaction, body.section)
     }));
   });
@@ -386,7 +404,7 @@ export function registerLibraryRoutes(app: FastifyInstance, db: Db, jobs: JobRun
       const existing = await first(transaction.select().from(schema.storagePolicies).where(eq(schema.storagePolicies.id, params.id)).limit(1));
       if (!existing) throw new StoragePolicyRequestError(404, "Storage policy item not found");
       return {
-        resources: await storagePolicyMutationResources(transaction, [existing.normalizedTitle]),
+        resources: existing.section ? await storagePolicyMutationResources(transaction, [{ section: existing.section, title: existing.normalizedTitle }]) : [],
         mutate: async () => {
           const row = await removeStoragePolicyTitle(transaction, params.id);
           if (!row) throw new StoragePolicyRequestError(404, "Storage policy item not found");

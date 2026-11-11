@@ -1,6 +1,8 @@
 import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
+  AuditEstimate,
   AuditOptions,
+  RollingAuditCoverage,
   AuditResultPage,
   AuditRunRecord,
   AuditSettings,
@@ -39,6 +41,7 @@ import type {
   DefaultPolicyPreview,
   StoragePolicyKind,
   StoragePolicyBulkResult,
+  StoragePolicyTarget,
   StoragePolicyTitle,
   StorageFileRow,
   StorageFileTree,
@@ -214,12 +217,15 @@ export const api = {
     return request<StorageFileTree>(`/api/storage-files/tree?${search.toString()}`);
   },
   storagePolicies: (policy?: StoragePolicyKind) => request<StoragePolicyTitle[]>(`/api/storage-policies${policy ? `?policy=${policy}` : ""}`),
-  setStoragePolicy: (body: { title: string; policy: StoragePolicyKind }) => request<StoragePolicyTitle>("/api/storage-policies", { method: "POST", body: JSON.stringify(body) }),
-  setStoragePolicies: (body: { titles: string[]; policy: StoragePolicyKind }) => request<StoragePolicyBulkResult>("/api/storage-policies/bulk", { method: "POST", body: JSON.stringify(body) }),
+  // Policies belong to one folder's copy of a title; `allFolders` is the explicit choice to change every folder holding it.
+  setStoragePolicy: (body: { title: string; section?: string; allFolders?: boolean; policy: StoragePolicyKind }) => request<StoragePolicyTitle>("/api/storage-policies", { method: "POST", body: JSON.stringify(body) }),
+  setStoragePolicies: (body: { items: StoragePolicyTarget[]; allFolders?: boolean; policy: StoragePolicyKind }) => request<StoragePolicyBulkResult>("/api/storage-policies/bulk", { method: "POST", body: JSON.stringify(body) }),
   defaultPolicyPreview: (section: string) => request<DefaultPolicyPreview>(`/api/storage-policies/default-preview?section=${encodeURIComponent(section)}`),
   applyDefaultPolicy: (section: string) => request<DefaultPolicyApplyResult>("/api/storage-policies/default-apply", { method: "POST", body: JSON.stringify({ section }) }),
   deleteStoragePolicy: (id: number) => request<StoragePolicyTitle>(`/api/storage-policies/${id}`, { method: "DELETE" }),
   startAudit: (body: AuditOptions) => request<{ jobId: number }>("/api/audits", { method: "POST", body: JSON.stringify(body) }),
+  estimateAudit: (body: AuditOptions) => request<AuditEstimate>("/api/audits/estimate", { method: "POST", body: JSON.stringify(body) }),
+  auditCoverage: (days = 30) => request<RollingAuditCoverage>(`/api/audits/coverage?days=${days}`),
   audits: () => request<AuditRunRecord[]>("/api/audits"),
   auditByJob: (jobId: number) => request<AuditRunRecord | null>(`/api/audits/job/${jobId}`),
   auditResultPage: (id: number, options: { offset?: number; limit?: number; attentionOnly?: boolean } = {}) => {

@@ -15,7 +15,7 @@ import { authenticateRadarrWebhook, createRadarrInstance, getRadarrCopyDefaults,
 import { RadarrClient, normalizeRadarrUrl, radarrAddressAllowed, type RadarrMovie } from "../src/server/lib/radarrClient";
 import { defaultCopyRunner, type CopyCommandRunner } from "../src/server/lib/copier";
 import { persistSectionSettings } from "../src/server/lib/sectionSettings";
-import { setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
+import { assignTitle } from "./policyHelpers";
 import { generateRadarrWebhookSecret, type RadarrOverview, type RadarrSettingsInput } from "../src/shared/radarr";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
@@ -147,7 +147,7 @@ describe("Radarr policy and webhook integration", () => {
     const saved = await saveRadarrSettings(app.database.db, instanceId, { ...input, mappingMode: "auto", mappings: [] });
     await symlinkFor(movies[0]!);
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     await receiveRadarrWebhook(app.database.db, instanceId, { eventType: "Download", movie: { id: 1, title: "My First Wedding" } });
     await dueEvents();
     await processRadarrWork(app.database.db);
@@ -162,7 +162,7 @@ describe("Radarr policy and webhook integration", () => {
     movies[0]!.path = path.join(rootFolders[0]!, "My First Wedding (2020)");
     await saveRadarrSettings(app.database.db, instanceId, { ...input, mappingMode: "auto" });
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     await setSetting(app.database.db, "paths", { ...app.config.paths, symlinkDir: path.join(root, "changed-links") });
     await processRadarrWork(app.database.db);
     expect(edits).toHaveLength(0);
@@ -181,7 +181,7 @@ describe("Radarr policy and webhook integration", () => {
     const reordered = await saveRadarrSettings(app.database.db, instanceId, saved.settings);
     expect(reordered.settings.mappings.map((mapping) => mapping.section)).toEqual(["movies4k", "movies"]);
     expect(reordered.movies[0]?.managed).toBe(true);
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     await processRadarrWork(app.database.db);
     expect(movies[0]!.tags).toContain(1);
   });
@@ -234,7 +234,7 @@ describe("Radarr policy and webhook integration", () => {
     await connected();
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
     for (const [policy, expectedTags] of [["location_1", [1, 3]], ["location_2", [2, 3]], ["unassigned", [3]]] as const) {
-      await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", policy);
+      await assignTitle(app.database.db, "My First Wedding (2020)", policy, ["movies"]);
       await processRadarrWork(app.database.db);
       expect([...movies[0]!.tags].sort()).toEqual([...expectedTags]);
       expect((await getRadarrState(app.database.db, instanceId)).movies[0]).toMatchObject({ policy, status: "synced" });
@@ -249,7 +249,7 @@ describe("Radarr policy and webhook integration", () => {
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "import_tags");
     expect((await getRadarrState(app.database.db, instanceId)).movies.find((item) => item.movieId === 1)?.policy).toBe("location_1");
     await expect(reconcileRadarrMovies(app.database.db, instanceId, [2], "import_tags")).rejects.toThrow("one policy tag");
-    await setStoragePolicyTitle(app.database.db, "My Third Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My Third Wedding (2020)", "location_1", ["movies"]);
     await expect(reconcileRadarrMovies(app.database.db, instanceId, [3], "import_tags")).rejects.toThrow("conflicting assignments");
     expect(edits).toHaveLength(0);
   });
@@ -257,7 +257,7 @@ describe("Radarr policy and webhook integration", () => {
   it("retries tag failures independently and retains the requested policy", async () => {
     await connected();
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     offline = true;
     await processRadarrWork(app.database.db);
     expect((await getRadarrState(app.database.db, instanceId)).movies[0]).toMatchObject({ status: "error", policy: "location_1", message: "Radarr returned HTTP 503." });
@@ -513,7 +513,7 @@ describe("Radarr policy and webhook integration", () => {
     await dueEvents();
     await processRadarrWork(app.database.db);
     await new JobWorker(app.database.db, { workerId: "radarr-http-test" }).runOnce();
-    expect((await app.app.inject({ method: "POST", url: "/api/storage-policies", headers: { cookie }, payload: { title: "My First Wedding (2020)", policy: "location_1" } })).statusCode).toBe(200);
+    expect((await app.app.inject({ method: "POST", url: "/api/storage-policies", headers: { cookie }, payload: { title: "My First Wedding (2020)", section: "movies", policy: "location_1" } })).statusCode).toBe(200);
     await processRadarrWork(app.database.db);
     const status = await app.app.inject({ method: "GET", url: `/api/settings/radarr/instances/${instanceId}`, headers: { cookie } });
     expect(status.json().movies[0]).toMatchObject({ policy: "location_1", status: "synced" });
@@ -527,7 +527,7 @@ describe("Radarr policy and webhook integration", () => {
   it("does not process work during onboarding", async () => {
     await connected();
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     const onboarding = await getJsonSetting<Record<string, unknown>>(app.database.db, onboardingSettingKey, {});
     await setSetting(app.database.db, onboardingSettingKey, { ...onboarding, status: "configuration_required" });
     await processRadarrWork(app.database.db);
@@ -581,7 +581,7 @@ describe("Radarr policy and webhook integration", () => {
   it("pauses tag synchronization and authenticated webhooks during path maintenance", async () => {
     await connected();
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     const replacement = path.join(root, "new-links");
     await fs.mkdir(replacement);
     await reconcileEnvironmentPaths(app.database.db, { ...app.config.paths, symlinkDir: replacement });
@@ -610,8 +610,8 @@ describe("Radarr policy and webhook integration", () => {
 
   it("tags untagged titles on enable, keeps opposite tags in review, and lets explicit policy changes take over", async () => {
     movies = [movie(1, "Alpha", [3]), movie(2, "Bravo", [2, 3]), movie(3, "Charlie")];
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_1");
-    await setStoragePolicyTitle(app.database.db, "Bravo (2020)", "location_1");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["movies"]);
+    await assignTitle(app.database.db, "Bravo (2020)", "location_1", ["movies"]);
     await connected();
     await processRadarrWork(app.database.db);
     expect([...movies[0]!.tags].sort()).toEqual([1, 3]);
@@ -619,7 +619,7 @@ describe("Radarr policy and webhook integration", () => {
     expect(movies[2]!.tags).toEqual([]);
     const statuses = Object.fromEntries((await getRadarrState(app.database.db, instanceId)).movies.map((item) => [item.movieId, item.status]));
     expect(statuses).toEqual({ 1: "synced", 2: "review", 3: "synced" });
-    await setStoragePolicyTitle(app.database.db, "Bravo (2020)", "location_1");
+    await assignTitle(app.database.db, "Bravo (2020)", "location_1", ["movies"]);
     await processRadarrWork(app.database.db);
     expect([...movies[1]!.tags].sort()).toEqual([1, 3]);
     expect((await getRadarrState(app.database.db, instanceId)).movies.find((item) => item.movieId === 2)).toMatchObject({ managed: true, status: "synced" });
@@ -630,7 +630,7 @@ describe("Radarr policy and webhook integration", () => {
     await connected();
     await processRadarrWork(app.database.db);
     expect(edits).toEqual([]);
-    for (const item of movies) await setStoragePolicyTitle(app.database.db, `${item.title} (2020)`, "location_2");
+    for (const item of movies) await assignTitle(app.database.db, `${item.title} (2020)`, "location_2", ["movies"]);
     await processRadarrWork(app.database.db);
     expect(movies.every((item) => item.tags.includes(2) && item.tags.includes(3) && !item.tags.includes(1))).toBe(true);
     expect(edits).toEqual([{ movieIds: movies.filter((_, index) => index % 2).map((item) => item.id), tags: [1], applyTags: "remove" }, { movieIds: movies.map((item) => item.id), tags: [2], applyTags: "add" }]);
@@ -640,7 +640,7 @@ describe("Radarr policy and webhook integration", () => {
   it("enables tag synchronization without a webhook secret while rejecting webhooks", async () => {
     const saved = await saveRadarrSettings(app.database.db, instanceId, { ...input, webhookSecret: "" });
     expect(saved.settings).toMatchObject({ enabled: true, hasWebhookSecret: false });
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     await processRadarrWork(app.database.db);
     expect(movies[0]!.tags).toEqual([1]);
     expect((await app.app.inject({ method: "POST", url: `/api/integrations/radarr/${instanceId}/webhook`, headers: { "x-srtl-webhook-secret": webhookSecret }, payload: { eventType: "Test" } })).statusCode).toBe(401);
@@ -661,7 +661,7 @@ describe("Radarr policy and webhook integration", () => {
     const worker = new JobWorker(app.database.db, { workerId: "radarr-copy-test", copyRunner, logger: { info: () => undefined, warn: () => undefined, error: () => undefined } });
     await app.jobs.startExternalTitleScan([{ section: "movies", itemName }]);
     await worker.runOnce();
-    await setStoragePolicyTitle(app.database.db, itemName, "location_1");
+    await assignTitle(app.database.db, itemName, "location_1", ["movies"]);
     const [link] = await app.database.db.select().from(schema.mediaLinks);
     expect(link).toMatchObject({ kind: "remote" });
     const monitorEdits = () => edits.filter((edit) => "monitored" in edit);
@@ -740,7 +740,7 @@ describe("Radarr policy and webhook integration", () => {
       const worker = new JobWorker(app.database.db, { workerId: "radarr-per-title", copyRunner, logger: quiet, copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(app.database.db, copy, titles) });
       await app.jobs.startExternalTitleScan(itemNames.map((itemName) => ({ section: "movies", itemName })));
       await worker.runOnce();
-      for (const itemName of itemNames) await setStoragePolicyTitle(app.database.db, itemName, "location_1");
+      for (const itemName of itemNames) await assignTitle(app.database.db, itemName, "location_1", ["movies"]);
       const links = (await app.database.db.select().from(schema.mediaLinks)).sort((left, right) => left.itemName.localeCompare(right.itemName));
       expect(links.map((link) => [link.itemName, link.kind])).toEqual(itemNames.map((itemName) => [itemName, "remote"]));
       return { worker, links, held, release, queuedWhenHeld: () => queuedWhenHeld };
@@ -923,14 +923,16 @@ describe("multiple Radarr instances", () => {
     const animeId = (await createRadarrInstance(app.database.db, "Anime")).settings.id;
     await saveRadarrSettings(app.database.db, animeId, settingsFor(anime, [{ rootPath: "/anime", section: "anime" }]));
 
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_2");
-    await setStoragePolicyTitle(app.database.db, "Charlie (2020)", "location_1");
+    // Policies are per folder: the 1080p Alpha is remote and the 4K Alpha local.
+    await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["movies"]);
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["movies4k"]);
+    await assignTitle(app.database.db, "Charlie (2020)", "location_1", ["movies4k"]);
     await processRadarrWork(app.database.db);
-    // The same title in two folders follows one SRTL policy, under each instance's own tag names.
+    // Each instance tags the movie from the policy of the folder it maps, under its own tag names.
     expect(hd.movies.find((item) => item.id === 1)?.tags).toEqual([2]);
-    const cloud = uhd.tags.find((tag) => tag.label === "cloud")!;
-    expect(uhd.movies.find((item) => item.id === 1)?.tags).toEqual([cloud.id]);
-    expect(hd.tags.map((tag) => tag.label)).not.toContain("cloud");
+    expect(uhd.movies.find((item) => item.id === 1)?.tags).toEqual([7]);
+    expect(uhd.tags.map((tag) => tag.label)).not.toContain("cloud");
+    expect(hd.tags.map((tag) => tag.label)).not.toContain("keep");
     expect(uhd.movies.find((item) => item.id === 2)?.tags).toEqual([7]);
     expect(hd.movies.find((item) => item.id === 2)?.tags).toEqual([]);
     expect(anime.movies[0]?.tags).toEqual([]);
@@ -1069,8 +1071,9 @@ describe("multiple Radarr instances", () => {
     const worker = new JobWorker(app.database.db, { workerId: "radarr-instances-per-title", copyRunner, logger: quiet, copiedTitles: (copy, titles) => queueCopiedTitleMonitorUpdates(app.database.db, copy, titles) });
     await app.jobs.startExternalTitleScan([{ section: "movies", itemName: "Alpha (2020)" }, { section: "movies", itemName: "Bravo (2020)" }, { section: "movies4k", itemName: "Alpha (2020)" }]);
     await worker.runOnce();
-    for (const itemName of ["Alpha (2020)", "Bravo (2020)"]) await setStoragePolicyTitle(app.database.db, itemName, "location_1");
-    // The 1080p Alpha stays remote; only 1080p Bravo and 4K Alpha are copied. Both instances call their movie id 1.
+    await assignTitle(app.database.db, "Bravo (2020)", "location_1", ["movies"]);
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["movies4k"]);
+    // The 1080p Alpha has no policy and stays remote; only 1080p Bravo and 4K Alpha are copied. Both instances call their movie id 1.
     const links = (await app.database.db.select().from(schema.mediaLinks)).filter((link) => link.section === "movies4k" || link.itemName === "Bravo (2020)");
     const jobId = await app.jobs.startCopy({ direction: "to_local", linkIds: links.map((link) => link.id), radarrMonitoring: true });
     await worker.runOnce();
@@ -1094,7 +1097,7 @@ describe("multiple Radarr instances", () => {
     await saveRadarrSettings(app.database.db, uhdId, settingsFor(uhd, [{ rootPath: "/library4k", section: "movies4k" }]));
 
     hd.offline = true;
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_1");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_1", ["movies", "movies4k"]);
     await processRadarrWork(app.database.db);
     expect(uhd.movies[0]?.tags).toEqual([1]);
     expect((await getRadarrState(app.database.db, uhdId)).movies[0]).toMatchObject({ status: "synced" });
@@ -1107,7 +1110,7 @@ describe("multiple Radarr instances", () => {
     hd.offline = false;
     hd.delayMs = 1500;
     await app.database.db.update(schema.radarrMovies).set({ nextAttemptAt: null });
-    await setStoragePolicyTitle(app.database.db, "Alpha (2020)", "location_2");
+    await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["movies", "movies4k"]);
     const running = new Map<string, Promise<void>>();
     const failures: string[] = [];
     await startRadarrWork(app.database.db, running, (name) => failures.push(name));
@@ -1166,7 +1169,7 @@ describe("multiple Radarr instances", () => {
   it("migrates the single Radarr connection into the first instance without losing its state", async () => {
     await connected();
     await reconcileRadarrMovies(app.database.db, instanceId, [1], "use_srtl");
-    await setStoragePolicyTitle(app.database.db, "My First Wedding (2020)", "location_1");
+    await assignTitle(app.database.db, "My First Wedding (2020)", "location_1", ["movies"]);
     await processRadarrWork(app.database.db);
     expect(movies[0]!.tags).toEqual([1]);
     await receiveRadarrWebhook(app.database.db, instanceId, { eventType: "MovieAdded", movie: { id: 1, title: "My First Wedding" } });

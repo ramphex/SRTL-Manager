@@ -98,7 +98,7 @@ export const defaultAuditRunner: AuditCommandRunner = {
 };
 
 export async function auditMediaLink(
-  link: MediaLinkRow,
+  link: Pick<MediaLinkRow, "linkPath" | "targetPath">,
   sourcePath: string | null,
   mode: AuditMode,
   runner: AuditCommandRunner = defaultAuditRunner,

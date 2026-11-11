@@ -12,7 +12,7 @@ import * as schema from "../db/schema";
 import { withFilesystemTimeout } from "./filesystemSafety";
 import { isMediaFile } from "./media";
 import { openSecret, sealSecret, type SecretPurpose } from "./secretBox";
-import { canonicalTitleKey } from "./storagePolicies";
+import { storagePolicyKey } from "./storagePolicies";
 
 export const arrWebhookSecretSchema = z.string().min(24).max(256).regex(/^[A-Za-z0-9_-]+$/, "Webhook secret must use letters, numbers, hyphens, or underscores.");
 const policyTagSchema = z.string().trim().regex(/^(?:[a-z0-9][a-z0-9-]{0,99})?$/, "Use a lowercase tag with letters, numbers, or hyphens.");
@@ -65,11 +65,12 @@ export function arrPolicyTag(policy: StoragePolicyKind, config: Pick<ArrStoredSe
   return policy === "location_1" ? config.localTag : policy === "location_2" ? config.remoteTag : null;
 }
 
+// Policies are per folder: each catalog row is matched by the folder its instance maps it to, so a 4K instance
+// and a 1080p instance can carry different tags for the same title. Policies not placed in a folder are skipped.
 export async function arrPolicyLookup(db: Db): Promise<Map<string, StoragePolicyKind>> {
-  const policies = await db.select().from(schema.storagePolicies);
   const result = new Map<string, StoragePolicyKind>();
-  for (const row of policies) {
-    if (row.policy === "location_1" || row.policy === "location_2") result.set(canonicalTitleKey(row.title), row.policy);
+  for (const row of await db.select().from(schema.storagePolicies)) {
+    if (row.section && (row.policy === "location_1" || row.policy === "location_2")) result.set(storagePolicyKey(row.section, row.title), row.policy);
   }
   return result;
 }
@@ -78,13 +79,18 @@ export async function arrPolicyLookup(db: Db): Promise<Map<string, StoragePolicy
 export async function arrPolicyMarkers(db: Db): Promise<Map<string, string>> {
   const result = new Map<string, string>();
   for (const row of await db.select().from(schema.storagePolicies)) {
-    if (row.policy === "location_1" || row.policy === "location_2") result.set(canonicalTitleKey(row.title), `${row.policy}@${row.updatedAt}`);
+    if (row.section && (row.policy === "location_1" || row.policy === "location_2")) result.set(storagePolicyKey(row.section, row.title), `${row.policy}@${row.updatedAt}`);
   }
   return result;
 }
 
-export function arrCurrentPolicy(row: { itemName: string | null }, policies: Map<string, StoragePolicyKind>): StoragePolicyKind {
-  return row.itemName ? policies.get(canonicalTitleKey(row.itemName)) ?? "unassigned" : "unassigned";
+export function arrPolicyKey(row: { section: string | null; itemName: string | null }): string | null {
+  return row.section && row.itemName ? storagePolicyKey(row.section, row.itemName) : null;
+}
+
+export function arrCurrentPolicy(row: { section: string | null; itemName: string | null }, policies: Map<string, StoragePolicyKind>): StoragePolicyKind {
+  const key = arrPolicyKey(row);
+  return key ? policies.get(key) ?? "unassigned" : "unassigned";
 }
 
 export function arrRetryAt(attempts: number): string { return new Date(Date.now() + Math.min(300_000, 5000 * 2 ** Math.min(attempts, 6))).toISOString(); }

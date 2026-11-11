@@ -5,7 +5,7 @@ import { z } from "zod";
 import { first, getJsonSetting, getSectionSettings, getSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { AppError } from "../errors";
-import { canonicalTitleKey, setStoragePolicyTitles } from "./storagePolicies";
+import { canonicalTitleKey, setStoragePolicies, storagePolicyKey } from "./storagePolicies";
 import { getStorageLocationsSettings, storageLocationNamesFromUpdate } from "./storageLocations";
 import type {
   OnboardingPathCheck,
@@ -48,6 +48,7 @@ const persistedOnboardingSchema = z.object({
 type PersistedOnboardingState = z.infer<typeof persistedOnboardingSchema>;
 
 type TitleLocation = {
+  section: string;
   title: string;
   hasLocal: boolean;
   hasRemote: boolean;
@@ -406,17 +407,18 @@ export async function applyPendingOnboardingPolicy(db: Db, jobId: number): Promi
   if (!state || state.status !== "scan_pending" || state.initialScanJobId !== jobId || !state.policyMode) return null;
   if (state.policyAppliedAt && state.policyResult) return state.policyResult;
 
+  // Policies are per folder, so each folder's copy of a title is matched to where that folder's links point.
   const links = await db
-    .select({ itemName: schema.mediaLinks.itemName, kind: schema.mediaLinks.kind })
+    .select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, kind: schema.mediaLinks.kind })
     .from(schema.mediaLinks)
     .where(and(isNull(schema.mediaLinks.missingSince), eq(schema.mediaLinks.isMedia, true)));
   const titles = new Map<string, TitleLocation>();
   let localSymlinks = 0;
   let remoteSymlinks = 0;
   for (const link of links) {
-    const titleKey = canonicalTitleKey(link.itemName);
-    if (!titleKey) continue;
-    const title = titles.get(titleKey) ?? { title: link.itemName, hasLocal: false, hasRemote: false };
+    if (!canonicalTitleKey(link.itemName)) continue;
+    const titleKey = storagePolicyKey(link.section, link.itemName);
+    const title = titles.get(titleKey) ?? { section: link.section, title: link.itemName, hasLocal: false, hasRemote: false };
     if (link.kind === "local") {
       title.hasLocal = true;
       localSymlinks += 1;
@@ -428,15 +430,16 @@ export async function applyPendingOnboardingPolicy(db: Db, jobId: number): Promi
     titles.set(titleKey, title);
   }
 
-  const allTitles = [...titles.values()].map((title) => title.title);
-  const localTitles = [...titles.values()].filter((title) => title.hasLocal).map((title) => title.title);
-  const remoteOnlyTitles = [...titles.values()].filter((title) => title.hasRemote && !title.hasLocal).map((title) => title.title);
+  const target = (title: TitleLocation) => ({ section: title.section, title: title.title });
+  const allTitles = [...titles.values()].map(target);
+  const localTitles = [...titles.values()].filter((title) => title.hasLocal).map(target);
+  const remoteOnlyTitles = [...titles.values()].filter((title) => title.hasRemote && !title.hasLocal).map(target);
   const mixedTitles = [...titles.values()].filter((title) => title.hasLocal && title.hasRemote).length;
 
-  await setStoragePolicyTitles(db, allTitles, "unassigned", { source: "onboarding" });
+  await setStoragePolicies(db, allTitles, "unassigned", { source: "onboarding" });
   if (state.policyMode === "match_current_locations") {
-    await setStoragePolicyTitles(db, localTitles, "location_1", { source: "onboarding" });
-    await setStoragePolicyTitles(db, remoteOnlyTitles, "location_2", { source: "onboarding" });
+    await setStoragePolicies(db, localTitles, "location_1", { source: "onboarding" });
+    await setStoragePolicies(db, remoteOnlyTitles, "location_2", { source: "onboarding" });
   }
 
   const assignedLocalTitles = state.policyMode === "match_current_locations" ? localTitles.length : 0;

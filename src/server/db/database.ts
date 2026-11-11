@@ -11,6 +11,8 @@ import { applyBackupMigration } from "./backupMigration";
 import { applyWorkerFileJobsMigration } from "./jobTypesMigration";
 import { applyAccountsMigration } from "./accountsMigration";
 import { applySearchTextMigration } from "./searchTextMigration";
+import { applyStoragePolicySectionMigration } from "./storagePolicySectionMigration";
+import { applyAuditStateMigration } from "./auditStateMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -32,7 +34,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 32;
+export const currentSchemaVersion = 34;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -969,6 +971,30 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS delete_rounds INTEGER NOT NULL DEFAULT 1`);
         await client.query(`ALTER TABLE orphan_purge_operations ADD COLUMN IF NOT EXISTS note TEXT`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (32, 'purge_delete_rounds', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(33)) {
+      await client.query("BEGIN");
+      try {
+        // Policies become per folder; each title-wide row is copied to every folder holding the title.
+        await applyStoragePolicySectionMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (33, 'storage_policy_sections', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(34)) {
+      await client.query("BEGIN");
+      try {
+        // Per-file audit state for the nightly rolling audit, and byte compare off for audits that never chose it.
+        await applyAuditStateMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (34, 'audit_state', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
