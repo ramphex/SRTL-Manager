@@ -19,7 +19,7 @@ describe("matchReleaseTitle", () => {
   });
 
   it("ignores case, accents, punctuation and id tags on either side", () => {
-    expect(matches([movie("Amélie's Café & Bar (2001) {tmdb-12345}")], "Amelies.Cafe.and.Bar.2001.BluRay.1080p")).toBe("Amélie's Café & Bar (2001) {tmdb-12345}");
+    expect(matches([movie("Zoé's Café & Bar (2001) {tmdb-12345}")], "Zoes.Cafe.and.Bar.2001.BluRay.1080p")).toBe("Zoé's Café & Bar (2001) {tmdb-12345}");
     expect(matches([movie("Mr. Delta [imdb-tt0000000] (1999)")], "Mr.Delta.1999.720p")).toBe("Mr. Delta [imdb-tt0000000] (1999)");
   });
 
@@ -130,8 +130,8 @@ describe("matchReleaseTitle", () => {
     expect(matches([movie("K.N.O.T. Rescue (2003)")], "KNOT.Rescue.2003.1080p")).toBe("K.N.O.T. Rescue (2003)");
     // Ordinary abbreviations are left alone.
     expect(matches([movie("Mr. Delta (1999)")], "M.R.Delta.1999.1080p")).toBeNull();
-    expect(matches([show("E.R.")], "Er.S01E01")).toBeNull();
-    expect(matches([show("E.R. (1994)")], "Er.1994.S01E01")).toBe("E.R. (1994)");
+    expect(matches([show("U.V.")], "Uv.S01E01")).toBeNull();
+    expect(matches([show("U.V. (1994)")], "Uv.1994.S01E01")).toBe("U.V. (1994)");
   });
 
   it("returns every title with the same name when nothing tells them apart", () => {

@@ -969,7 +969,7 @@ describe("what a moderator can read", () => {
 
   it("scrubs text without damaging ordinary words or a similar folder name", () => {
     const roots = [{ path: "/mnt/media", label: "<local>" }];
-    expect(scrubText("AC/DC Live (2020)", roots)).toBe("AC/DC Live (2020)");
+    expect(scrubText("AB/XY Live (2020)", roots)).toBe("AB/XY Live (2020)");
     expect(scrubText("/mnt/media/Movies/a.mkv", roots)).toBe("<local>/Movies/a.mkv");
     expect(scrubText("/mnt/media2/Movies/a.mkv", roots)).toBe("…/a.mkv");
     expect(scrubText("/api/now-playing/poster/abc", roots)).toBe("/api/now-playing/poster/abc");

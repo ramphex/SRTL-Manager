@@ -4,8 +4,8 @@ import { evaluateSourceTitleRisk } from "../src/shared/sourceTitleRisk";
 describe("source title risk", () => {
   it("blocks a source file that does not match the expected title", () => {
     const risk = evaluateSourceTitleRisk({
-      expectedTitle: "Mother Jugs and Speed (1976)",
-      sourcePath: "/mnt/remote/storage/[1+7] - Crash.1976.UNCUT.1080p/[1+7] - Crash.1976.UNCUT.1080p.mkv"
+      expectedTitle: "Harbor Lights and Thunder (1976)",
+      sourcePath: "/mnt/remote/storage/[1+7] - Wreck.1976.UNCUT.1080p/[1+7] - Wreck.1976.UNCUT.1080p.mkv"
     });
 
     expect(risk).toMatchObject({
@@ -18,12 +18,12 @@ describe("source title risk", () => {
 
   it("allows dotted release names that match the expected title", () => {
     const risk = evaluateSourceTitleRisk({
-      expectedTitle: "Underworld Evolution (2006)",
-      sourcePath: "/mnt/remote/storage/Underworld.Evolution.2006.1080p.WEB-DL/Underworld.Evolution.2006.1080p.WEB-DL.mkv"
+      expectedTitle: "Nightfall Uprising (2006)",
+      sourcePath: "/mnt/remote/storage/Nightfall.Uprising.2006.1080p.WEB-DL/Nightfall.Uprising.2006.1080p.WEB-DL.mkv"
     });
 
     expect(risk.severity).toBe("ok");
-    expect(risk.matchedTokens).toEqual(["underworld", "evolution"]);
+    expect(risk.matchedTokens).toEqual(["nightfall", "uprising"]);
   });
 
   it("uses nearby parent folders when the file name is episode-only", () => {
@@ -37,8 +37,8 @@ describe("source title risk", () => {
 
   it("does not fail titles that only differ by common stopwords", () => {
     const risk = evaluateSourceTitleRisk({
-      expectedTitle: "The Matrix (1999)",
-      sourcePath: "/mnt/remote/Matrix.1999.1080p.BluRay/Matrix.1999.1080p.BluRay.mkv"
+      expectedTitle: "The Lattice (1999)",
+      sourcePath: "/mnt/remote/Lattice.1999.1080p.BluRay/Lattice.1999.1080p.BluRay.mkv"
     });
 
     expect(risk.severity).toBe("ok");
@@ -46,8 +46,8 @@ describe("source title risk", () => {
 
   it("handles initials in expected titles", () => {
     const risk = evaluateSourceTitleRisk({
-      expectedTitle: "Louis C.K. Ridiculous",
-      sourcePath: "/mnt/remote/Louis.CK.Ridiculous.2008/Louis.CK.Ridiculous.2008.mkv"
+      expectedTitle: "Morgan J.T. Unfiltered",
+      sourcePath: "/mnt/remote/Morgan.JT.Unfiltered.2008/Morgan.JT.Unfiltered.2008.mkv"
     });
 
     expect(risk.severity).toBe("ok");
@@ -55,11 +55,11 @@ describe("source title risk", () => {
 
   it("handles stylized dollar signs as s inside title words", () => {
     const risk = evaluateSourceTitleRisk({
-      expectedTitle: "Love Dont Co$t a Thing (2003)",
-      sourcePath: "/mnt/remote/storage/Love.Dont.Cost.a.Thing.2003.1080p/Love.Dont.Cost.a.Thing.2003.1080p.mkv"
+      expectedTitle: "Rain Wont Wa$h a Sin (2003)",
+      sourcePath: "/mnt/remote/storage/Rain.Wont.Wash.a.Sin.2003.1080p/Rain.Wont.Wash.a.Sin.2003.1080p.mkv"
     });
 
     expect(risk.severity).toBe("ok");
-    expect(risk.matchedTokens).toEqual(["love", "dont", "cost", "thing"]);
+    expect(risk.matchedTokens).toEqual(["rain", "wont", "wash", "sin"]);
   });
 });
