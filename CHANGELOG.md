@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Storage policies are now set per library folder instead of per title. The same title can be Location 1 in one folder and Location 2 in another, for example a 1080p copy kept local and a 4K copy left remote. Assigning, unassigning, copying, folder defaults, onboarding, and Radarr and Sonarr tags all work per folder, and assigning in one folder never changes another. Existing assignments carry over unchanged: database migration 33 copies each title's policy to every folder that holds the title. A saved policy for a title that is in no folder yet is placed in the folders where the title first appears.
+- **Storage Policies** lists one row per folder copy, with a Folder column, the policy the title has in its other folders, and which folders a bulk change affects. Changing every folder that holds a title is an explicit choice.
+- When two folders link the same file but want it in different places, the file stays where it is while any folder still uses it. A copy repoints only its own folder's links, its source is kept, and a replaced local file another folder still links is kept with a warning in the job log. The Storage Policies row shows which folders share files.
+- Radarr and Sonarr tag each movie or series from the policy of the folder the instance maps, so a 4K instance and a 1080p instance can carry different tags for the same title. Importing tags and the default policy's Radarr review work per folder too.
+
 ## [0.1.5-beta.2] - 2026-11-10
 
 Purges check that every delete happened, and remote scans no longer count files a remote mount lists but cannot open. Database migration 32 adds two columns to purge items.

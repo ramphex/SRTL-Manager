@@ -957,9 +957,12 @@ test("title rescan controls explain their scope and lock sibling actions while q
     id: null,
     title: "Targeted Rescan Test (2026)",
     normalizedTitle: "targeted rescan test (2026)",
+    section: "library",
     policy: "unassigned",
     category: "other",
     sections: ["library"],
+    otherFolders: [],
+    sharedFileSections: [],
     linkCount: 1,
     remoteLinkCount: 1,
     localLinkCount: 0,
@@ -1042,9 +1045,12 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     id: 42,
     title,
     normalizedTitle: "newly scanned title (2026)",
+    section: "shows",
     policy: "location_1",
     category: "other",
     sections: ["shows"],
+    otherFolders: [],
+    sharedFileSections: [],
     linkCount: 1,
     remoteLinkCount: 1,
     localLinkCount: 0,
@@ -1138,7 +1144,8 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
   await expect(dialog.getByRole("heading", { name: `Copy ${retryTitle} to Local`, exact: true })).toBeVisible();
   await expect(dialog.locator(".action-error")).toHaveCount(0);
   await expect(dialog.getByText(admissionError, { exact: true })).toHaveCount(0);
-  await expect(dialog.getByText(`Job #200 - ${retryTitle}`, { exact: true })).toBeVisible();
+  // The copy is scoped to the row's folder, which the job label names.
+  await expect(dialog.getByText(`Job #200 - Shows / ${retryTitle}`, { exact: true })).toBeVisible();
 });
 
 test("recent jobs identifies a targeted scan by title instead of only its parent folder", async ({ page }) => {
@@ -1764,4 +1771,78 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
   await expect(failedDetails).toBeVisible();
   await expect(failedDetails).toContainText("Failed Title (2026)");
   await expect(failedDetails).toContainText("Media validation failed: moov atom not found");
+});
+
+test("storage policies are listed and changed per folder", async ({ page }) => {
+  const timestamp = "2026-07-29T20:42:08.000Z";
+  const base = {
+    title: "Alpha (2020)",
+    normalizedTitle: "alpha (2020)",
+    category: "movies",
+    linkCount: 1,
+    remoteLinkCount: 1,
+    localLinkCount: 0,
+    fileCount: 1,
+    remoteFileCount: 1,
+    localFileCount: 0,
+    sectionCount: 1,
+    source: "scan",
+    updatedAt: null
+  };
+  const unassigned = [
+    { ...base, id: null, section: "movies", sections: ["movies"], policy: "unassigned", otherFolders: [{ section: "movies4k", policy: "location_2" }], sharedFileSections: ["movies4k"] },
+    { ...base, id: null, title: "Bravo (2021)", normalizedTitle: "bravo (2021)", section: "movies", sections: ["movies"], policy: "unassigned", otherFolders: [], sharedFileSections: [] }
+  ];
+  const bulkBodies: unknown[] = [];
+
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    let body: unknown = {};
+    if (url.pathname === "/api/auth/me") body = { setupRequired: false, authenticated: true, user: { id: 1, username: "admin", role: "owner", mustChangePassword: false } };
+    else if (url.pathname === "/api/system/path-migration") body = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
+    else if (url.pathname === "/api/onboarding") body = { required: false, phase: "completed" };
+    else if (url.pathname === "/api/settings/user-preferences") body = { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/storage-locations") body = { locations: [{ key: "location_1", rootType: "local", displayName: "Local", path: "/mnt/local" }, { key: "location_2", rootType: "remote", displayName: "Remote", path: "/mnt/remote" }] };
+    else if (url.pathname === "/api/system/version") {
+      const unavailableRelease = { latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, releaseNotes: null, message: "Unavailable" };
+      body = { currentVersion: "0.1.5-beta.2", currentChannel: "beta", currentChannelLabel: "Beta", stable: { channel: "stable", ...unavailableRelease }, beta: { channel: "beta", ...unavailableRelease }, latestVersion: null, updateAvailable: false, status: "unavailable", releaseUrl: null, checkedAt: timestamp, message: "Unavailable" };
+    }
+    else if (url.pathname === "/api/settings/sections") body = { sections: ["movies", "movies4k"], sectionTitles: { movies: "Movies", movies4k: "Movies 4K" }, sectionTypes: { movies: "movies", movies4k: "movies" } };
+    else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };
+    else if (url.pathname === "/api/sections") body = [];
+    else if (url.pathname === "/api/inventory/summary") body = {};
+    else if (url.pathname === "/api/inventory/scan-timestamps") body = { symlinkSections: {}, localSections: {}, remoteRoot: null };
+    else if (url.pathname === "/api/jobs") body = [];
+    else if (url.pathname === "/api/storage-policies") body = url.searchParams.get("policy") === "unassigned" ? unassigned : [];
+    else if (url.pathname === "/api/storage-policies/bulk") {
+      const request = route.request().postDataJSON() as { items: Array<{ section: string; title: string }>; policy: string; allFolders?: boolean };
+      bulkBodies.push(request);
+      body = { updated: request.allFolders ? 2 : request.items.length, policy: request.policy, sections: request.allFolders ? ["movies", "movies4k"] : ["movies"], items: [] };
+    }
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
+  });
+
+  await page.goto(`${baseUrl}/library`);
+  await page.getByRole("button", { name: "Storage Policies", exact: true }).click();
+  const table = page.locator(".storage-policy-table");
+  await expect(table.getByRole("columnheader", { name: "Folder", exact: true })).toBeVisible();
+  const alpha = table.locator("tbody tr").filter({ hasText: "Alpha (2020)" });
+  await expect(alpha).toContainText("Movies");
+  await expect(alpha).toContainText("Also in Movies 4K (Remote)");
+  await expect(alpha.getByRole("note")).toContainText("Shares files with Movies 4K, which has a different policy.");
+
+  // A row's own button changes only that folder's copy.
+  await alpha.getByRole("button", { name: "Assign Alpha (2020) in Movies to Local", exact: true }).click();
+  await expect.poll(() => bulkBodies.length).toBe(1);
+  expect(bulkBodies[0]).toEqual({ items: [{ section: "movies", title: "Alpha (2020)" }], policy: "location_1" });
+
+  // A bulk change says which folders it touches, and every folder is a separate, explicit choice.
+  await alpha.getByRole("checkbox").check();
+  await expect(page.locator(".policy-scope-note")).toContainText("1 selected: changes only Movies. Movies 4K keeps its own policy.");
+  await page.locator(".policy-scope-note").getByRole("checkbox", { name: "Also change these titles in every other folder that holds them" }).check();
+  await expect(page.locator(".policy-scope-note")).toContainText("1 selected: changes these titles in Movies and Movies 4K.");
+  await page.getByRole("button", { name: "Assign selected to Remote", exact: true }).click();
+  await expect.poll(() => bulkBodies.length).toBe(2);
+  expect(bulkBodies[1]).toEqual({ items: [{ section: "movies", title: "Alpha (2020)" }], policy: "location_2", allFolders: true });
+  await expect(page.getByText("2 folder copies set to Remote in Movies and Movies 4K.", { exact: true })).toBeVisible();
 });

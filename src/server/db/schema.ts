@@ -343,13 +343,15 @@ export const storagePolicies = pgTable(
   "storage_policies",
   {
     id: serial("id").primaryKey(),
+    // The library folder this policy applies to; empty while the title has no links in any folder.
+    section: text("section").notNull().default(""),
     title: text("title").notNull(),
     normalizedTitle: text("normalized_title").notNull(),
     policy: text("policy").notNull(),
     source: text("source").notNull(),
     updatedAt: text("updated_at").notNull()
   },
-  (table) => [uniqueIndex("storage_policies_normalized_idx").on(table.normalizedTitle)]
+  (table) => [uniqueIndex("storage_policies_section_title_idx").on(table.section, table.normalizedTitle), index("storage_policies_normalized_title_idx").on(table.normalizedTitle)]
 );
 
 export const copySources = pgTable(

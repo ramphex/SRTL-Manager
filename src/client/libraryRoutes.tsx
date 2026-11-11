@@ -9,7 +9,7 @@ import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/s
 import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount, mediaLinkTreeStatusCounts, orderSectionSummaries, sectionActionUnit, sectionCompositionParts, type LinkStatusWorkKind } from "./sectionSummaryDisplay";
 import { inferSectionContentType } from "../shared/sections";
-import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyKind, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
+import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyBulkResult, type StoragePolicyKind, type StoragePolicyTarget, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, OrphanPurgeStatusDialog, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
@@ -902,8 +902,11 @@ function uniqueMediaTitles(links: MediaLinkRow[]): string[] {
   return [...new Set(links.map((link) => link.itemName).filter(Boolean))];
 }
 
-function uniqueTitles(titles: string[]): string[] {
-  return [...new Set(titles.map((title) => title.trim()).filter(Boolean))];
+// The folder copies a selection of links belongs to; a policy change applies to exactly these.
+function selectedLinkTargets(links: MediaLinkRow[]): StoragePolicyTarget[] {
+  const targets = new Map<string, StoragePolicyTarget>();
+  for (const link of links) if (link.itemName) targets.set(`${link.section}\u0000${link.itemName}`, { section: link.section, title: link.itemName });
+  return [...targets.values()];
 }
 
 function sourceTitleRiskForLink(link: MediaLinkRow): SourceTitleRiskResult {
@@ -1038,8 +1041,9 @@ function RemoteWorkLinksTable({
     queryClient.invalidateQueries({ queryKey: ["sections"] });
     queryClient.invalidateQueries({ queryKey: ["inventory-summary"] });
   };
+  // Assigning here changes only this folder's copy of each title; the same title in other folders keeps its policy.
   const updatePolicy = useMutation({
-    mutationFn: ({ titles, policy }: { titles: string[]; policy: StoragePolicyKind }) => api.setStoragePolicies({ titles, policy }),
+    mutationFn: ({ items, policy }: { items: StoragePolicyTarget[]; policy: StoragePolicyKind }) => api.setStoragePolicies({ items, policy }),
     onSuccess: () => {
       setSelectedLinkIds([]);
       invalidateWorkData();
@@ -1088,7 +1092,7 @@ function RemoteWorkLinksTable({
   const policyButtonState = canManageLibrary ? policyButtonsForWorkKind(selection.kind) : { assignLocal: false, assignRemote: false };
   const actionPending = updatePolicy.isPending;
   const pendingPolicy = actionPending ? updatePolicy.variables?.policy ?? null : null;
-  const pendingTitleCount = actionPending ? updatePolicy.variables?.titles.length ?? 0 : 0;
+  const pendingTitleCount = actionPending ? updatePolicy.variables?.items.length ?? 0 : 0;
   const pendingPolicyText = pendingPolicy ? storagePolicyActionText(pendingPolicy, storageLocations) : "";
   const selectedLinkIdSet = new Set(selectedLinkIds);
   const selectedLinks = selectableRows.filter((row) => selectedLinkIdSet.has(row.id));
@@ -1107,7 +1111,8 @@ function RemoteWorkLinksTable({
   }
 
   function queuePolicy(title: string, policy: StoragePolicyKind) {
-    updatePolicy.mutate({ titles: [title], policy });
+    if (!selectedSection) return;
+    updatePolicy.mutate({ items: [{ section: selectedSection, title }], policy });
   }
 
   function queueSelectedCopy() {
@@ -1122,7 +1127,7 @@ function RemoteWorkLinksTable({
 
   function queueSelectedPolicy(policy: StoragePolicyKind) {
     if (selectedTitles.length === 0) return;
-    updatePolicy.mutate({ titles: selectedTitles, policy });
+    updatePolicy.mutate({ items: selectedLinkTargets(selectedLinks), policy });
   }
 
   function toggleLinkSelection(id: number, checked: boolean) {
@@ -1267,13 +1272,13 @@ function RemoteWorkLinksTable({
             {policyButtonState.assignLocal ? (
               <button type="button" className="secondary future-action-button" onClick={() => queueSelectedPolicy("location_1")} disabled={actionPending || selectedTitles.length === 0}>
                 <HardDrive size={14} />
-                {pendingPolicy === "location_1" ? `Assigning ${formatNumber(pendingTitleCount)} title${pendingTitleCount === 1 ? "" : "s"} to ${localName}...` : `Assign selected titles to ${localName}`}
+                {pendingPolicy === "location_1" ? `Assigning ${formatNumber(pendingTitleCount)} title${pendingTitleCount === 1 ? "" : "s"} to ${localName}...` : `Assign selected titles in ${sectionTitle} to ${localName}`}
               </button>
             ) : null}
             {policyButtonState.assignRemote ? (
               <button type="button" className="secondary future-action-button" onClick={() => queueSelectedPolicy("location_2")} disabled={actionPending || selectedTitles.length === 0}>
                 <HardDriveDownload size={14} />
-                {pendingPolicy === "location_2" ? `Assigning ${formatNumber(pendingTitleCount)} title${pendingTitleCount === 1 ? "" : "s"} to ${remoteName}...` : `Assign selected titles to ${remoteName}`}
+                {pendingPolicy === "location_2" ? `Assigning ${formatNumber(pendingTitleCount)} title${pendingTitleCount === 1 ? "" : "s"} to ${remoteName}...` : `Assign selected titles in ${sectionTitle} to ${remoteName}`}
               </button>
             ) : null}
             <button type="button" className="secondary future-action-button" onClick={queueSelectedAudit} disabled={actionPending || selectedLinks.length === 0}>
@@ -1285,7 +1290,7 @@ function RemoteWorkLinksTable({
         {updatePolicy.isPending && pendingPolicy ? (
           <p className="panel-message action-progress">
             <RefreshCw className="spin-icon" size={14} />
-            Assigning {formatNumber(pendingTitleCount)} title{pendingTitleCount === 1 ? "" : "s"} to {pendingPolicyText}. Large libraries can take a moment.
+            Assigning {formatNumber(pendingTitleCount)} title{pendingTitleCount === 1 ? "" : "s"} in {sectionTitle} to {pendingPolicyText}. Large libraries can take a moment.
           </p>
         ) : null}
         {activeVisibleLinkCount > 0 ? (
@@ -1295,7 +1300,11 @@ function RemoteWorkLinksTable({
           </p>
         ) : null}
         {updatePolicy.error ? <p className="panel-message action-error">{updatePolicy.error.message}</p> : null}
-        {updatePolicy.data ? <p className="panel-message">{formatNumber(updatePolicy.data.updated)} title{updatePolicy.data.updated === 1 ? "" : "s"} assigned to {storagePolicyLabel(updatePolicy.data.policy, storageLocations)}.</p> : null}
+        {updatePolicy.data ? (
+          <p className="panel-message">
+            {formatNumber(updatePolicy.data.updated)} title{updatePolicy.data.updated === 1 ? "" : "s"} in {sectionTitle} assigned to {storagePolicyLabel(updatePolicy.data.policy, storageLocations)}. Other folders keep their own policy.
+          </p>
+        ) : null}
         {remoteWorkLinks.isLoading ? (
           <p className="panel-message">Loading {detail.emptyName} symlinks...</p>
         ) : remoteWorkLinks.error ? (
@@ -1911,7 +1920,8 @@ function AllowedLibraryPage() {
     queryClient.invalidateQueries({ queryKey: ["inventory-summary"] });
   };
   const setPolicy = useMutation({
-    mutationFn: ({ titles, policy }: { titles: string[]; policy: StoragePolicyKind }) => api.setStoragePolicies({ titles, policy }),
+    mutationFn: ({ items, policy, allFolders }: { items: StoragePolicyTitle[]; policy: StoragePolicyKind; allFolders?: boolean }) =>
+      api.setStoragePolicies({ items: items.flatMap((item) => (item.section ? [{ section: item.section, title: item.title }] : [])), policy, ...(allFolders ? { allFolders: true } : {}) }),
     onSuccess: invalidateInventory
   });
   const removePolicy = useMutation({
@@ -1919,6 +1929,10 @@ function AllowedLibraryPage() {
     onSuccess: invalidateInventory
   });
   const orderedSectionSummaries = orderSectionSummaries(sectionSummaries.data ?? [], sectionSettings.data?.sections);
+  const folderLabel = (section: string) => {
+    const summary = orderedSectionSummaries.find((entry) => entry.section === section);
+    return summary ? sectionDisplayTitle(summary) : sectionSettings.data?.sectionTitles?.[section] ?? section;
+  };
   const availableScanSections = orderedSectionSummaries.map((section) => ({ section: section.section, title: section.title }));
   const startTitleScan = useMutation({
     mutationFn: (options: ScanOptions) => api.startScan(options),
@@ -2060,26 +2074,37 @@ function AllowedLibraryPage() {
           search={policySearch}
           error={storagePolicies.error?.message ?? setPolicy.error?.message ?? removePolicy.error?.message}
           isLoading={storagePolicies.isLoading || storagePolicies.isFetching}
-          mutatingTitles={setPolicy.isPending ? setPolicy.variables?.titles ?? [] : []}
+          mutatingKeys={setPolicy.isPending ? (setPolicy.variables?.items ?? []).map(storagePolicyItemKey) : []}
           mutatingPolicy={setPolicy.isPending ? setPolicy.variables?.policy ?? null : null}
+          mutatingAllFolders={setPolicy.isPending && setPolicy.variables?.allFolders === true}
+          folderLabel={folderLabel}
+          lastResult={setPolicy.data}
           copyingTitle={null}
           pendingTitleScopes={startTitleScan.isPending ? startTitleScan.variables?.titleScopes : undefined}
           copyJobId={null}
           removingId={removePolicy.isPending ? removePolicy.variables ?? null : null}
           onPolicyChange={setPolicyFilter}
           onSearchChange={setPolicySearch}
-          onAssign={(title, policy) => setPolicy.mutate({ titles: [title], policy })}
-          onAssignMany={(titles, policy) => setPolicy.mutate({ titles, policy })}
-          onCopy={(title, direction) =>
+          onAssign={(item, policy) => setPolicy.mutate({ items: [item], policy })}
+          onAssignMany={(items, policy, allFolders) => setPolicy.mutate({ items, policy, allFolders })}
+          onCopy={(item, direction) => {
+            // A copy follows the folder's own policy, so it is scoped to this folder's copy of the title.
+            const options: CopyOptions = { ...(item.section ? { section: item.section } : {}), itemName: item.title, direction };
             handleCopyRequest({
-              key: copyPromptKey({ itemName: title, direction }),
-              title: `Copy ${title} to ${direction === "to_local" ? localName : remoteName}`,
-              description: title,
-              options: { itemName: title, direction },
+              key: copyPromptKey(options),
+              title: `Copy ${item.title} to ${direction === "to_local" ? localName : remoteName}`,
+              description: item.section ? `${folderLabel(item.section)} / ${item.title}` : item.title,
+              options,
               autoStart: true
+            });
+          }}
+          onAudit={(item) =>
+            setAuditPrompt({
+              title: `Audit ${item.title}`,
+              description: item.section ? `${folderLabel(item.section)} / ${item.title}` : item.title,
+              options: { ...(item.section ? { section: item.section } : {}), itemName: item.title }
             })
           }
-          onAudit={(title) => setAuditPrompt({ title: `Audit ${title}`, description: title, options: { itemName: title } })}
           onRescan={(item) => startTitleScan.mutate(titleRescanOptions(item.sections.map((section) => ({ section, itemName: item.title }))))}
           onRemove={(id) => removePolicy.mutate(id)}
         />
@@ -2723,8 +2748,19 @@ function StorageFileStatus({ file, fallbackLinked }: { file: StorageFileRow | nu
   );
 }
 
-function filterStoragePolicyItems(items: StoragePolicyTitle[], search: string, storageLocations: StorageLocationsSettings): StoragePolicyTitle[] {
-  return filterBySearch(items, search, (item) => [item.title, item.category, storagePolicyLabel(item.policy, storageLocations), ...item.sections]);
+function filterStoragePolicyItems(items: StoragePolicyTitle[], search: string, storageLocations: StorageLocationsSettings, folderLabel: (section: string) => string): StoragePolicyTitle[] {
+  return filterBySearch(items, search, (item) => [item.title, item.category, storagePolicyLabel(item.policy, storageLocations), ...item.sections, ...item.sections.map(folderLabel)]);
+}
+
+// Policies are per folder, so a row is one folder's copy of a title.
+function storagePolicyItemKey(item: Pick<StoragePolicyTitle, "section" | "normalizedTitle">): string {
+  return `${item.section ?? ""}\u0000${item.normalizedTitle}`;
+}
+
+function listFolders(sections: string[], folderLabel: (section: string) => string): string {
+  const labels = sections.map(folderLabel);
+  if (labels.length <= 1) return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
 }
 
 function StoragePoliciesPanel({
@@ -2734,12 +2770,15 @@ function StoragePoliciesPanel({
   search,
   error,
   isLoading,
-  mutatingTitles,
+  mutatingKeys,
   mutatingPolicy,
+  mutatingAllFolders,
   copyingTitle,
   pendingTitleScopes,
   copyJobId,
   removingId,
+  folderLabel,
+  lastResult,
   onPolicyChange,
   onSearchChange,
   onAssign,
@@ -2755,18 +2794,21 @@ function StoragePoliciesPanel({
   search: string;
   error?: string;
   isLoading: boolean;
-  mutatingTitles: string[];
+  mutatingKeys: string[];
   mutatingPolicy: StoragePolicyKind | null;
+  mutatingAllFolders: boolean;
   copyingTitle: string | null;
   pendingTitleScopes?: ScanTitleScope[];
   copyJobId: number | null;
   removingId: number | null;
+  folderLabel: (section: string) => string;
+  lastResult?: StoragePolicyBulkResult;
   onPolicyChange: (policy: StoragePolicyKind) => void;
   onSearchChange: (title: string) => void;
-  onAssign: (title: string, policy: StoragePolicyKind) => void;
-  onAssignMany: (titles: string[], policy: StoragePolicyKind) => void;
-  onCopy: (title: string, direction: CopyDirection) => void;
-  onAudit: (title: string) => void;
+  onAssign: (item: StoragePolicyTitle, policy: StoragePolicyKind) => void;
+  onAssignMany: (items: StoragePolicyTitle[], policy: StoragePolicyKind, allFolders: boolean) => void;
+  onCopy: (item: StoragePolicyTitle, direction: CopyDirection) => void;
+  onAudit: (item: StoragePolicyTitle) => void;
   onRescan: (item: StoragePolicyTitle) => void;
   onRemove: (id: number) => void;
 }) {
@@ -2779,56 +2821,67 @@ function StoragePoliciesPanel({
     { value: "location_1", label: localName, detail: `Content assigned here should reside on ${localName}` },
     { value: "location_2", label: remoteName, detail: `Content assigned here should reside on ${remoteName}` }
   ];
-  const [selectedTitleKeys, setSelectedTitleKeys] = useState<string[]>([]);
-  const filteredItems = filterStoragePolicyItems(items, search, storageLocations);
+  const [selectedItemKeys, setSelectedItemKeys] = useState<string[]>([]);
+  const [allFolders, setAllFolders] = useState(false);
+  const filteredItems = filterStoragePolicyItems(items, search, storageLocations, folderLabel);
   const activeQueueJobs = useMemo(() => jobs.filter(isActiveQueueJob), [jobs]);
-  const activeJobsByTitleKey = useMemo(() => {
+  const activeJobsByItemKey = useMemo(() => {
     return new Map(
       filteredItems
-        .map((item) => [item.normalizedTitle, activeJobsForStoragePolicyTitle(item, activeQueueJobs)] as const)
+        .map((item) => [storagePolicyItemKey(item), activeJobsForStoragePolicyTitle(item, activeQueueJobs)] as const)
         .filter((entry) => entry[1].length > 0)
     );
   }, [activeQueueJobs, filteredItems]);
-  const pendingTitleKeys = new Set(
+  const pendingItemKeys = new Set(
     filteredItems
       .filter((item) => pendingTitleScopes?.some((scope) => item.sections.includes(scope.section) && scope.itemName === item.title))
-      .map((item) => item.normalizedTitle)
+      .map(storagePolicyItemKey)
   );
-  const selectableItems = filteredItems.filter((item) => !activeJobsByTitleKey.has(item.normalizedTitle) && !pendingTitleKeys.has(item.normalizedTitle));
-  const selectableTitleKeys = selectableItems.map((item) => item.normalizedTitle);
-  const selectableTitleKey = selectableTitleKeys.join("|");
+  // A saved policy whose title is not in any folder yet can only be removed.
+  const selectableItems = filteredItems.filter((item) => item.section !== null && !activeJobsByItemKey.has(storagePolicyItemKey(item)) && !pendingItemKeys.has(storagePolicyItemKey(item)));
+  const selectableItemKeys = selectableItems.map(storagePolicyItemKey);
+  const selectableItemKey = selectableItemKeys.join("|");
   useEffect(() => {
-    const selectableKeys = new Set(selectableTitleKey ? selectableTitleKey.split("|") : []);
-    setSelectedTitleKeys((current) => current.filter((key) => selectableKeys.has(key)));
-  }, [selectableTitleKey]);
-  const selectedTitleKeySet = new Set(selectedTitleKeys);
-  const selectedItems = selectableItems.filter((item) => selectedTitleKeySet.has(item.normalizedTitle));
-  const selectedTitles = uniqueTitles(selectedItems.map((item) => item.title));
-  const allVisibleSelected = selectableTitleKeys.length > 0 && selectableTitleKeys.every((key) => selectedTitleKeySet.has(key));
-  const mutatingTitleSet = new Set(mutatingTitles);
-  const isMutatingPolicy = mutatingTitles.length > 0 && Boolean(mutatingPolicy);
+    const selectableKeys = new Set(selectableItemKey ? selectableItemKey.split("|") : []);
+    setSelectedItemKeys((current) => current.filter((key) => selectableKeys.has(key)));
+  }, [selectableItemKey]);
+  const selectedItemKeySet = new Set(selectedItemKeys);
+  const selectedItems = selectableItems.filter((item) => selectedItemKeySet.has(storagePolicyItemKey(item)));
+  const selectedSections = [...new Set(selectedItems.flatMap((item) => item.sections))].sort((a, b) => a.localeCompare(b));
+  const selectedOtherSections = [...new Set(selectedItems.flatMap((item) => (item.otherFolders ?? []).map((other) => other.section)))]
+    .filter((section) => !selectedSections.includes(section))
+    .sort((a, b) => a.localeCompare(b));
+  const allVisibleSelected = selectableItemKeys.length > 0 && selectableItemKeys.every((key) => selectedItemKeySet.has(key));
+  const mutatingKeySet = new Set(mutatingKeys);
+  const isMutatingPolicy = mutatingKeys.length > 0 && Boolean(mutatingPolicy);
   const mutatingPolicyText = mutatingPolicy ? storagePolicyActionText(mutatingPolicy, storageLocations) : "";
   const emptyLabel = search.trim()
     ? "No matching titles."
     : policy === "unassigned"
       ? "No titles need a storage policy."
       : `No titles are assigned to ${policy === "location_1" ? localName : remoteName}.`;
-  const activeVisibleTitleCount = filteredItems.length - selectableItems.length;
+  const activeVisibleTitleCount = filteredItems.filter((item) => activeJobsByItemKey.has(storagePolicyItemKey(item)) || pendingItemKeys.has(storagePolicyItemKey(item))).length;
+  const selectedCount = selectedItems.length;
 
-  function toggleTitleSelection(item: StoragePolicyTitle, checked: boolean) {
-    if (activeJobsByTitleKey.has(item.normalizedTitle) || pendingTitleKeys.has(item.normalizedTitle)) return;
-    setSelectedTitleKeys((current) => {
-      if (checked) return current.includes(item.normalizedTitle) ? current : [...current, item.normalizedTitle];
-      return current.filter((key) => key !== item.normalizedTitle);
+  function toggleItemSelection(item: StoragePolicyTitle, checked: boolean) {
+    const key = storagePolicyItemKey(item);
+    if (!selectableItemKeys.includes(key)) return;
+    setSelectedItemKeys((current) => {
+      if (checked) return current.includes(key) ? current : [...current, key];
+      return current.filter((selected) => selected !== key);
     });
   }
 
-  function selectAllVisibleTitles() {
-    setSelectedTitleKeys(selectableTitleKeys);
+  function assignSelected(next: StoragePolicyKind) {
+    onAssignMany(selectedItems, next, allFolders);
   }
 
+  const selectedLabel = `${formatNumber(selectedCount)} selected`;
   return (
     <Panel title={`Storage Policies (${items.length})`} icon={<Shield size={18} />}>
+      <p className="panel-message">
+        Policies are set per folder. The same title in another folder, such as a 4K copy, keeps its own policy unless you choose to change every folder.
+      </p>
       <div className="policy-toolbar mobile-stack-toolbar">
         <div className="policy-tabs" role="group" aria-label="Storage policy groups">
           {storagePolicyTabs.map((tab) => (
@@ -2844,31 +2897,51 @@ function StoragePoliciesPanel({
         </label>
       </div>
       {filteredItems.length > 0 ? (
-        <BulkActionBar selectedCount={selectedItems.length} totalCount={filteredItems.length} allSelected={allVisibleSelected} onSelectAll={selectAllVisibleTitles} onClear={() => setSelectedTitleKeys([])} disabled={isMutatingPolicy}>
+        <BulkActionBar selectedCount={selectedCount} totalCount={filteredItems.length} allSelected={allVisibleSelected} onSelectAll={() => setSelectedItemKeys(selectableItemKeys)} onClear={() => setSelectedItemKeys([])} disabled={isMutatingPolicy}>
           {policy !== "location_1" ? (
-            <button type="button" className="secondary future-action-button" onClick={() => onAssignMany(selectedTitles, "location_1")} disabled={selectedTitles.length === 0 || mutatingTitles.length > 0}>
+            <button type="button" className="secondary future-action-button" onClick={() => assignSelected("location_1")} disabled={selectedCount === 0 || mutatingKeys.length > 0}>
               <HardDrive size={14} />
-              {mutatingPolicy === "location_1" ? `Assigning ${formatNumber(mutatingTitles.length)} title${mutatingTitles.length === 1 ? "" : "s"} to ${localName}...` : `Assign selected to ${localName}`}
+              {mutatingPolicy === "location_1" ? `Assigning ${formatNumber(mutatingKeys.length)} title${mutatingKeys.length === 1 ? "" : "s"} to ${localName}...` : `Assign selected to ${localName}`}
             </button>
           ) : null}
           {policy !== "location_2" ? (
-            <button type="button" className="secondary future-action-button" onClick={() => onAssignMany(selectedTitles, "location_2")} disabled={selectedTitles.length === 0 || mutatingTitles.length > 0}>
+            <button type="button" className="secondary future-action-button" onClick={() => assignSelected("location_2")} disabled={selectedCount === 0 || mutatingKeys.length > 0}>
               <HardDriveDownload size={14} />
-              {mutatingPolicy === "location_2" ? `Assigning ${formatNumber(mutatingTitles.length)} title${mutatingTitles.length === 1 ? "" : "s"} to ${remoteName}...` : `Assign selected to ${remoteName}`}
+              {mutatingPolicy === "location_2" ? `Assigning ${formatNumber(mutatingKeys.length)} title${mutatingKeys.length === 1 ? "" : "s"} to ${remoteName}...` : `Assign selected to ${remoteName}`}
             </button>
           ) : null}
           {policy !== "unassigned" ? (
-            <button type="button" className="secondary future-action-button" onClick={() => onAssignMany(selectedTitles, "unassigned")} disabled={selectedTitles.length === 0 || mutatingTitles.length > 0}>
+            <button type="button" className="secondary future-action-button" onClick={() => assignSelected("unassigned")} disabled={selectedCount === 0 || mutatingKeys.length > 0}>
               <Shield size={14} />
-              {mutatingPolicy === "unassigned" ? `Unassigning ${formatNumber(mutatingTitles.length)}...` : "Unassign selected"}
+              {mutatingPolicy === "unassigned" ? `Unassigning ${formatNumber(mutatingKeys.length)}...` : "Unassign selected"}
             </button>
           ) : null}
         </BulkActionBar>
       ) : null}
+      {selectedCount > 0 ? (
+        <div className="panel-message policy-scope-note" aria-live="polite">
+          <span>
+            {allFolders
+              ? `${selectedLabel}: changes these titles in ${listFolders([...selectedSections, ...selectedOtherSections].sort((a, b) => a.localeCompare(b)), folderLabel)}.`
+              : `${selectedLabel}: changes only ${listFolders(selectedSections, folderLabel)}.${selectedOtherSections.length > 0 ? ` ${listFolders(selectedOtherSections, folderLabel)} keep${selectedOtherSections.length === 1 ? "s" : ""} its own policy.` : ""}`}
+          </span>
+          {selectedOtherSections.length > 0 || allFolders ? (
+            <label className="policy-all-folders">
+              <input type="checkbox" checked={allFolders} onChange={(event) => setAllFolders(event.target.checked)} disabled={isMutatingPolicy} />
+              Also change these titles in every other folder that holds them
+            </label>
+          ) : null}
+        </div>
+      ) : null}
       {isMutatingPolicy ? (
         <p className="panel-message action-progress">
           <RefreshCw className="spin-icon" size={14} />
-          Assigning {formatNumber(mutatingTitles.length)} title{mutatingTitles.length === 1 ? "" : "s"} to {mutatingPolicyText}. Large libraries can take a moment.
+          Assigning {formatNumber(mutatingKeys.length)} title{mutatingKeys.length === 1 ? "" : "s"}{mutatingAllFolders ? " in every folder that holds them" : ""} to {mutatingPolicyText}. Large libraries can take a moment.
+        </p>
+      ) : null}
+      {lastResult && !isMutatingPolicy ? (
+        <p className="panel-message">
+          {formatNumber(lastResult.updated)} folder cop{lastResult.updated === 1 ? "y" : "ies"} set to {storagePolicyLabel(lastResult.policy, storageLocations)} in {listFolders(lastResult.sections, folderLabel)}.
         </p>
       ) : null}
       {activeVisibleTitleCount > 0 ? (
@@ -2886,7 +2959,7 @@ function StoragePoliciesPanel({
               <span className="sr-only">Select</span>
             </th>
             <th>Title</th>
-            <th>Category</th>
+            <th>Folder</th>
             <th>Media</th>
             <th>Policy</th>
             <th>Updated</th>
@@ -2907,55 +2980,69 @@ function StoragePoliciesPanel({
               </td>
             </tr>
           ) : (
-            filteredItems.map((item) => (
-              <tr key={`${item.policy}-${item.normalizedTitle}`} className="mobile-card-row">
-                <td className="mobile-card-select" data-label="Select">
-                  <label className="bulk-row-select">
-                    <input
-                      type="checkbox"
-                      checked={selectedTitleKeySet.has(item.normalizedTitle)}
-                      onChange={(event) => toggleTitleSelection(item, event.target.checked)}
-                      disabled={isMutatingPolicy || activeJobsByTitleKey.has(item.normalizedTitle) || pendingTitleKeys.has(item.normalizedTitle)}
+            filteredItems.map((item) => {
+              const key = storagePolicyItemKey(item);
+              return (
+                <tr key={`${item.policy}-${key}`} className="mobile-card-row">
+                  <td className="mobile-card-select" data-label="Select">
+                    <label className="bulk-row-select">
+                      <input
+                        type="checkbox"
+                        checked={selectedItemKeySet.has(key)}
+                        onChange={(event) => toggleItemSelection(item, event.target.checked)}
+                        disabled={isMutatingPolicy || !selectableItemKeys.includes(key)}
+                      />
+                      <span className="sr-only">Select {item.title}{item.section ? ` in ${folderLabel(item.section)}` : ""}</span>
+                    </label>
+                  </td>
+                  <td className="mobile-card-primary" data-label="Title">
+                    {item.title}
+                    {(item.otherFolders ?? []).length > 0 ? (
+                      <small className="table-cell-detail policy-other-folders">
+                        Also in {(item.otherFolders ?? []).map((other) => `${folderLabel(other.section)} (${storagePolicyLabel(other.policy, storageLocations)})`).join(", ")}
+                      </small>
+                    ) : null}
+                  </td>
+                  <td className="mobile-card-detail" data-label="Folder">
+                    {item.section ? folderLabel(item.section) : <span className="muted">Not in a folder yet</span>}
+                    <small className="table-cell-detail">
+                      <span className={`category-badge category-${item.category}`}>{storagePolicyCategoryLabels[item.category]}</span>
+                    </small>
+                  </td>
+                  <td className="mobile-card-detail" data-label="Media">
+                    {formatNumber(item.linkCount)} links / {formatNumber(item.fileCount)} files
+                    <small className="table-cell-detail">
+                      {formatNumber(item.remoteLinkCount + item.remoteFileCount)} {remoteName} / {formatNumber(item.localLinkCount + item.localFileCount)} {localName}
+                    </small>
+                    {(item.sharedFileSections ?? []).length > 0 ? (
+                      <small className="table-cell-detail policy-shared-files" role="note">
+                        <TriangleAlert size={12} /> Shares files with {listFolders(item.sharedFileSections ?? [], folderLabel)}, which {(item.sharedFileSections ?? []).length === 1 ? "has" : "have"} a different policy. Shared files stay where they are while another folder uses them.
+                      </small>
+                    ) : null}
+                  </td>
+                  <td className="mobile-card-status" data-label="Policy">
+                    <StatusPill value={storagePolicyLabel(item.policy, storageLocations)} toneValue={item.policy} />
+                  </td>
+                  <td className="mobile-card-detail" data-label="Updated">{formatDate(item.updatedAt, timeFormat)}</td>
+                  <td className="actions-cell mobile-card-actions" data-label="Actions">
+                    <PolicyActions
+                      item={item}
+                      mutating={mutatingKeySet.has(key)}
+                      copyingTitle={copyingTitle}
+                      activeJobs={activeJobsByItemKey.get(key) ?? []}
+                      rescanPending={pendingItemKeys.has(key)}
+                      removingId={removingId}
+                      folderName={item.section ? folderLabel(item.section) : null}
+                      onAssign={onAssign}
+                      onCopy={onCopy}
+                      onAudit={onAudit}
+                      onRescan={() => onRescan(item)}
+                      onRemove={onRemove}
                     />
-                    <span className="sr-only">Select {item.title}</span>
-                  </label>
-                </td>
-                <td className="mobile-card-primary" data-label="Title">{item.title}</td>
-                <td className="mobile-card-detail" data-label="Category">
-                  <span className={`category-badge category-${item.category}`}>
-                    {storagePolicyCategoryLabels[item.category]}
-                  </span>
-                </td>
-                <td className="mobile-card-detail" data-label="Media">
-                  {formatNumber(item.linkCount)} links / {formatNumber(item.fileCount)} files
-                  <small className="table-cell-detail">
-                    {formatNumber(item.remoteLinkCount + item.remoteFileCount)} {remoteName} / {formatNumber(item.localLinkCount + item.localFileCount)} {localName}
-                  </small>
-                </td>
-                <td className="mobile-card-status" data-label="Policy">
-                  <StatusPill
-                    value={storagePolicyLabel(item.policy, storageLocations)}
-                    toneValue={item.policy}
-                  />
-                </td>
-                <td className="mobile-card-detail" data-label="Updated">{formatDate(item.updatedAt, timeFormat)}</td>
-                <td className="actions-cell mobile-card-actions" data-label="Actions">
-                  <PolicyActions
-                    item={item}
-                    mutatingTitleSet={mutatingTitleSet}
-                    copyingTitle={copyingTitle}
-                    activeJobs={activeJobsByTitleKey.get(item.normalizedTitle) ?? []}
-                    rescanPending={Boolean(pendingTitleScopes?.some((scope) => item.sections.includes(scope.section) && scope.itemName === item.title))}
-                    removingId={removingId}
-                    onAssign={onAssign}
-                    onCopy={onCopy}
-                    onAudit={onAudit}
-                    onRescan={() => onRescan(item)}
-                    onRemove={onRemove}
-                  />
-                </td>
-              </tr>
-            ))
+                  </td>
+                </tr>
+              );
+            })
           )}
         </tbody>
       </table>
@@ -2965,11 +3052,12 @@ function StoragePoliciesPanel({
 
 function PolicyActions({
   item,
-  mutatingTitleSet,
+  mutating,
   copyingTitle,
   activeJobs,
   rescanPending,
   removingId,
+  folderName,
   onAssign,
   onCopy,
   onAudit,
@@ -2977,14 +3065,15 @@ function PolicyActions({
   onRemove
 }: {
   item: StoragePolicyTitle;
-  mutatingTitleSet: Set<string>;
+  mutating: boolean;
   copyingTitle: string | null;
   activeJobs: JobRecord[];
   rescanPending: boolean;
   removingId: number | null;
-  onAssign: (title: string, policy: StoragePolicyKind) => void;
-  onCopy: (title: string, direction: CopyDirection) => void;
-  onAudit: (title: string) => void;
+  folderName: string | null;
+  onAssign: (item: StoragePolicyTitle, policy: StoragePolicyKind) => void;
+  onCopy: (item: StoragePolicyTitle, direction: CopyDirection) => void;
+  onAudit: (item: StoragePolicyTitle) => void;
   onRescan: () => void;
   onRemove: (id: number) => void;
 }) {
@@ -2992,53 +3081,54 @@ function PolicyActions({
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
   const disabled =
-    mutatingTitleSet.has(item.title) ||
+    mutating ||
     copyingTitle === item.title ||
     rescanPending ||
     (item.id != null && removingId === item.id) ||
     activeJobs.length > 0;
   const notice = activeJobNotice(activeJobs);
-  const canAssign = item.linkCount + item.fileCount > 0;
-  const canAudit = item.linkCount > 0;
+  const canAssign = item.section !== null && item.linkCount + item.fileCount > 0;
+  const canAudit = item.section !== null && item.linkCount > 0;
+  const where = folderName ? ` in ${folderName}` : "";
   return (
     <div className={`future-actions policy-actions${notice ? " has-job-lock" : ""}`}>
       {notice ? <JobLockBadge jobs={activeJobs} /> : null}
       <span className="future-action-buttons">
         {canAudit ? <RescanTitleButton itemName={item.title} disabled={disabled} pending={rescanPending} onClick={onRescan} /> : null}
         {item.policy === "location_1" && item.remoteLinkCount > 0 ? (
-          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onCopy(item.title, "to_local")}>
+          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onCopy(item, "to_local")}>
             <Copy size={14} />
             Copy to {localName}
           </button>
         ) : null}
         {item.policy === "location_2" && item.localLinkCount > 0 ? (
-          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onCopy(item.title, "to_remote")}>
+          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onCopy(item, "to_remote")}>
             <Copy size={14} />
             Copy to {remoteName}
           </button>
         ) : null}
         {canAudit ? (
-          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onAudit(item.title)}>
+          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onAudit(item)}>
             <Activity size={14} />
             Audit
           </button>
         ) : null}
         {canAssign && item.policy !== "location_1" ? (
-          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onAssign(item.title, "location_1")}>
+          <button type="button" className="secondary future-action-button" disabled={disabled} aria-label={`Assign ${item.title}${where} to ${localName}`} onClick={() => onAssign(item, "location_1")}>
             <HardDrive size={14} />
             Assign to {localName}
           </button>
         ) : null}
         {canAssign && item.policy !== "location_2" ? (
-          <button type="button" className="secondary future-action-button" disabled={disabled} onClick={() => onAssign(item.title, "location_2")}>
+          <button type="button" className="secondary future-action-button" disabled={disabled} aria-label={`Assign ${item.title}${where} to ${remoteName}`} onClick={() => onAssign(item, "location_2")}>
             <HardDriveDownload size={14} />
             Assign to {remoteName}
           </button>
         ) : null}
         {item.id != null ? (
-          <button className="icon-button danger" type="button" title={`Unassign ${item.title}`} disabled={disabled} onClick={() => onRemove(item.id!)}>
+          <button className="icon-button danger" type="button" title={`Unassign ${item.title}${where}`} disabled={disabled} onClick={() => onRemove(item.id!)}>
             <Trash2 size={15} />
-            <span className="sr-only">Unassign {item.title}</span>
+            <span className="sr-only">Unassign {item.title}{where}</span>
           </button>
         ) : null}
       </span>

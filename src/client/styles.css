@@ -4013,6 +4013,28 @@ tbody tr:has(.job-link-title-tooltip:focus-within) > td:has(.job-link-title-tool
   justify-content: flex-start;
 }
 
+.policy-scope-note {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  align-items: center;
+}
+
+.policy-all-folders {
+  align-items: center;
+  display: inline-flex;
+  gap: 6px;
+  font-weight: 650;
+}
+
+.policy-shared-files {
+  color: var(--warn);
+}
+
+.policy-shared-files svg {
+  vertical-align: -2px;
+}
+
 .scan-run-list {
   display: grid;
   gap: 12px;

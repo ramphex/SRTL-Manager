@@ -8,10 +8,10 @@ Open **Settings > Library > Default policy for new titles**, choose **None**, **
 
 ## When It Applies
 
-- A title gets the folder default the first time a symlink scan or a title rescan (including one started by a Radarr webhook) records it. A title counts as new when no link with its name has ever been recorded.
-- It applies only to titles that have **no policy**. An existing policy, manual or imported, is never changed.
+- Policies are per folder, so defaults are too. A title gets a folder's default the first time a symlink scan or a title rescan (including one started by a Radarr webhook) records it **in that folder**. It counts as new to a folder when no link with its name has ever been recorded there.
+- It applies only to folder copies that have **no policy**. An existing policy, manual or imported, is never changed.
 - It is **not retroactive**. Titles already in the library when you turn a default on stay as they are.
-- A title found in several folders gets a default only when every folder it appears in has the same default; otherwise it stays unassigned.
+- A title found in several folders gets each folder's own default, for example Location 1 in `movies` and Location 2 in `movies4k`. A folder without a default leaves its copy unassigned.
 - The policy is recorded with source `default`, and the scan's job events list how many titles received it.
 
 ## Apply To Unassigned Titles Now
@@ -22,4 +22,4 @@ For a folder with a saved default, **Apply to unassigned titles now** assigns th
 
 - A default only assigns a policy. **No copy starts automatically.** Titles assigned Location 1 whose files are on Location 2 appear as **Copy to Location 1** candidates; you start the copy.
 - A default assignment is a normal policy change, so a managed Radarr movie receives its policy tag exactly as after a manual assignment.
-- If Radarr already carries the **opposite** policy tag on a new movie, the default leaves the title unassigned so it stays in the Radarr review list instead of being overwritten. **Apply to unassigned titles now** reports how many titles it left for review.
+- If the Radarr instance that maps the folder already carries the **opposite** policy tag on a new movie, the default leaves that folder's copy unassigned so it stays in the Radarr review list instead of being overwritten. **Apply to unassigned titles now** reports how many titles it left for review.

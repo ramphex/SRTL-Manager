@@ -10,7 +10,7 @@ Each instance has its own connection, API key, policy tag names, copy monitoring
 
 **Each SRTL folder belongs to one instance.** Only Shows sections can be mapped. Saving a mapping to a folder another Sonarr instance already maps is refused with a message naming that instance. Automatic mapping only takes free folders that match the instance's own root folders; roots that match a folder owned by another instance are listed separately and excluded.
 
-Storage policies belong to titles, not folders. When the same series exists in several folders, for example `shows` and `shows4k`, every instance that holds it tags it the same way, using its own tag names.
+Storage policies belong to a folder and a title, not to the title alone. When the same series exists in several folders, for example `shows` and `shows4k`, each folder's copy has its own policy, and each instance tags its series from the policy of the folders it maps. So a 1080p instance can tag a series for Location 1 while a 4K instance tags the same series for Location 2. Assigning a policy in one folder never changes the other folder's copy, its tags, or its files.
 
 Removing an instance asks for confirmation and deletes only SRTL's records for it. Tags and monitoring in Sonarr are never changed by removal, and its folders become free for another instance. SRTL supports up to 25 Sonarr instances.
 
@@ -37,7 +37,7 @@ Only those two tags are ever added or removed, through Sonarr's series editor. O
 When synchronization is first enabled, or after the tags or mappings change, series with neither policy tag, or whose tag already matches SRTL, follow SRTL automatically. Series where Sonarr already carries the other policy tag, or both tags, show **Needs review** and are not changed until you decide. Any policy you set in SRTL afterward updates the series' tags. In the preview you can also select series and choose:
 
 - **Use SRTL policies:** let SRTL manage the tags using SRTL's current assignments.
-- **Import existing tags:** assign a matching SRTL policy from one Sonarr policy tag. Both tags, or a conflicting existing SRTL assignment, cannot be imported.
+- **Import existing tags:** assign a matching SRTL policy from one Sonarr policy tag. Both tags, or a conflicting existing SRTL assignment, cannot be imported. The policy is imported for the folder the instance maps the series to; the same series in another folder is not changed.
 
 SRTL re-reads the Sonarr catalog every 30 minutes, and on **Refresh preview**.
 

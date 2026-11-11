@@ -6,7 +6,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openTestDatabase } from "./testDb";
 import * as schema from "../src/server/db/schema";
 import { getInventorySummary, getStoragePolicyMap, listMediaLinks, listMediaLinkTree, listStorageFileTree, listStorageFiles, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../src/server/lib/scanner";
-import { listStoragePolicyCandidates, setStoragePolicyTitle } from "../src/server/lib/storagePolicies";
+import { listStoragePolicyCandidates, storagePolicyKey } from "../src/server/lib/storagePolicies";
+import { assignTitle } from "./policyHelpers";
 import { remoteOpenConfirmation, type OpenCheck } from "../src/server/lib/openCheck";
 
 let tmpDir: string;
@@ -49,7 +50,7 @@ describe("scanner", () => {
     const result = await scanLibrary(
       { symlinkDir, localDir, remoteDir },
       { sections: ["movies"], sectionTitles: { movies: "Movie Library" }, sectionTypes: { movies: "movies" } },
-      new Map([["remote movie", "location_2"]]),
+      new Map([[storagePolicyKey("movies", "Remote Movie"), "location_2"]]),
       { scanSymlinks: true, scanLocal: true, scanRemote: true }
     );
     const kinds = Object.fromEntries(result.links.map((link) => [link.itemName, link.kind]));
@@ -961,8 +962,8 @@ describe("scanner", () => {
       sectionTypes: { movies: "movies" as const, shows: "shows" as const }
     };
     const policies = new Map([
-      ["movie one", "location_1" as const],
-      ["show one", "location_2" as const]
+      [storagePolicyKey("movies", "Movie One"), "location_1" as const],
+      [storagePolicyKey("shows", "Show One"), "location_2" as const]
     ]);
     const database = await openTestDatabase();
     try {
@@ -1260,7 +1261,7 @@ describe("scanner", () => {
       const candidates = await listStoragePolicyCandidates(database.db, "Remote Needs", 10);
       expect(candidates).toMatchObject([{ title: "Remote Needs Policy", linkCount: 1, remoteLinkCount: 1 }]);
 
-      await setStoragePolicyTitle(database.db, "Remote Needs Policy", "location_1");
+      await assignTitle(database.db, "Remote Needs Policy", "location_1", ["movies"]);
       expect(await getInventorySummary(database.db)).toMatchObject({
         actionableRemoteLinks: 2,
         unassignedRemoteLinks: 0,

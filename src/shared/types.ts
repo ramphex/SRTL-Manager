@@ -464,13 +464,34 @@ export interface AppVersionInfo {
 
 export type StoragePolicyCategory = "movies" | "shows" | "mixed" | "other" | "unmatched";
 
+/** One library folder's copy of a title. Storage policies are set per folder, so the same title can differ between folders. */
+export interface StoragePolicyTarget {
+  section: string;
+  title: string;
+}
+
+/** Another folder holding the same title, with the policy that folder's copy has. */
+export interface StoragePolicyOtherFolder {
+  section: string;
+  policy: StoragePolicyKind;
+}
+
 export interface StoragePolicyTitle {
   id: number | null;
   title: string;
   normalizedTitle: string;
+  /** The folder this policy applies to; null for a saved policy whose title is not in any folder yet. */
+  section: string | null;
   policy: StoragePolicyKind;
   category: StoragePolicyCategory;
   sections: string[];
+  /** The same title in other folders, each with its own policy. */
+  otherFolders: StoragePolicyOtherFolder[];
+  /**
+   * Folders whose links point at the same files as this folder's links but carry a different policy. Those files
+   * stay where they are while any folder still uses them: a copy repoints only this folder's links.
+   */
+  sharedFileSections: string[];
   linkCount: number;
   remoteLinkCount: number;
   localLinkCount: number;
@@ -485,6 +506,8 @@ export interface StoragePolicyTitle {
 export interface StoragePolicyBulkResult {
   updated: number;
   policy: StoragePolicyKind;
+  /** The folders the change applied to. */
+  sections: string[];
   items: StoragePolicyTitle[];
 }
 
@@ -505,6 +528,7 @@ export interface DefaultPolicyApplyResult {
 export interface StoragePolicyCandidate {
   title: string;
   normalizedTitle: string;
+  section: string;
   category: StoragePolicyCategory;
   sections: string[];
   linkCount: number;

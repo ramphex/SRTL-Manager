@@ -1242,6 +1242,22 @@ async function previewCopyConflicts(db: Db, paths: PathsSettings, options: CopyO
   };
 }
 
+// The folders whose current links still point at a file. Policies are per folder, so another folder may want a
+// file kept where it is while this folder's copy moves; such a file is never deleted.
+async function sectionsLinkingFile(db: DbExecutor, filePath: string, exceptLinkId?: number): Promise<string[]> {
+  const rows = (
+    await db.execute<{ section: string }>(sql`
+      select distinct ml.section from media_links ml
+      left join storage_files sf on sf.id = ml.resolved_storage_file_id
+      where ml.missing_since is null
+        and (ml.target_path = ${filePath} or sf.file_path = ${filePath})
+        ${exceptLinkId === undefined ? sql`` : sql`and ml.id <> ${exceptLinkId}`}
+      order by ml.section
+    `)
+  ).rows;
+  return rows.map((row) => row.section);
+}
+
 // Deletes a copy's remote source only when it is provably the file that was verified and nothing else uses it.
 async function deleteVerifiedRemoteSource(db: DbExecutor, paths: PathsSettings, operation: typeof schema.copyOperations.$inferSelect): Promise<boolean> {
   const sourcePath = path.resolve(operation.sourcePath);
@@ -1253,15 +1269,10 @@ async function deleteVerifiedRemoteSource(db: DbExecutor, paths: PathsSettings, 
   if (!stat) return false;
   if (!stat.isFile()) throw new Error("source is no longer a regular file");
   if (operation.sizeBytes !== null && stat.size !== Number(operation.sizeBytes)) throw new Error("source changed after the copy was verified");
-  const user = (
-    await db.execute<{ id: number }>(sql`
-      select ml.id from media_links ml
-      left join storage_files sf on sf.id = ml.resolved_storage_file_id
-      where ml.missing_since is null and (ml.target_path = ${sourcePath} or sf.file_path = ${sourcePath})
-      limit 1
-    `)
-  ).rows[0];
-  if (user) throw new Error("another symlink still points to it");
+  if ((await sectionsLinkingFile(db, sourcePath)).length > 0) {
+    const others = await sectionsLinkingFile(db, sourcePath, operation.mediaLinkId);
+    throw new Error(`another symlink still points to it${others.length > 0 ? ` (in ${others.join(", ")})` : ""}`);
+  }
   const activeCopy = (
     await db.execute<{ id: number }>(sql`
       select id from copy_operations
@@ -1288,14 +1299,20 @@ async function removeLocalConflictCandidates(
   expectedIdentities: Map<string, CopyCleanupIdentity>,
   currentLinkId: number,
   selectedDestinations: CopySelectedDestinationIndex
-): Promise<string[]> {
+): Promise<{ removed: string[]; keptInUse: Array<{ filePath: string; sections: string[] }> }> {
   const timestamp = nowIso();
   const removed: string[] = [];
+  const keptInUse: Array<{ filePath: string; sections: string[] }> = [];
   const preserved = path.resolve(preservedPath);
   for (const candidate of candidates) {
     const candidatePath = path.resolve(candidate.filePath);
     if (candidatePath === preserved) continue;
     if (await isOtherSelectedCopyDestination(paths, candidatePath, currentLinkId, selectedDestinations)) continue;
+    const users = await sectionsLinkingFile(db, candidatePath, currentLinkId);
+    if (users.length > 0) {
+      keptInUse.push({ filePath: candidatePath, sections: users });
+      continue;
+    }
     await assertExistingPathInside(paths.localDir, candidatePath, "Local replacement candidate");
     const stat = await fs.stat(candidatePath).catch(() => null);
     if (!stat?.isFile()) continue;
@@ -1308,7 +1325,7 @@ async function removeLocalConflictCandidates(
     await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(eq(schema.storageFiles.filePath, candidatePath));
     removed.push(candidatePath);
   }
-  return removed;
+  return { removed, keptInUse };
 }
 
 type CopySourceRow = typeof schema.copySources.$inferSelect;
@@ -5255,7 +5272,7 @@ export class JobWorker {
       const finalizationWarnings: string[] = [];
       for (const entry of replacementCandidateEntries.values()) {
         try {
-          const removed = await removeLocalConflictCandidates(
+          const { removed, keptInUse } = await removeLocalConflictCandidates(
             leaseDb,
             paths,
             entry.candidates,
@@ -5272,6 +5289,9 @@ export class JobWorker {
               message: "Replaced previous local files",
               data: JSON.stringify({ linkId: entry.linkId, removed })
             });
+          }
+          for (const kept of keptInUse) {
+            finalizationWarnings.push(`Kept previous local file ${kept.filePath}: still linked from ${kept.sections.join(", ")}`);
           }
         } catch (error: unknown) {
           finalizationWarnings.push(`Could not remove every previous local file for media #${entry.linkId}: ${errorMessage(error)}`);

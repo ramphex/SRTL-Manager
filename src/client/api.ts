@@ -39,6 +39,7 @@ import type {
   DefaultPolicyPreview,
   StoragePolicyKind,
   StoragePolicyBulkResult,
+  StoragePolicyTarget,
   StoragePolicyTitle,
   StorageFileRow,
   StorageFileTree,
@@ -214,8 +215,9 @@ export const api = {
     return request<StorageFileTree>(`/api/storage-files/tree?${search.toString()}`);
   },
   storagePolicies: (policy?: StoragePolicyKind) => request<StoragePolicyTitle[]>(`/api/storage-policies${policy ? `?policy=${policy}` : ""}`),
-  setStoragePolicy: (body: { title: string; policy: StoragePolicyKind }) => request<StoragePolicyTitle>("/api/storage-policies", { method: "POST", body: JSON.stringify(body) }),
-  setStoragePolicies: (body: { titles: string[]; policy: StoragePolicyKind }) => request<StoragePolicyBulkResult>("/api/storage-policies/bulk", { method: "POST", body: JSON.stringify(body) }),
+  // Policies belong to one folder's copy of a title; `allFolders` is the explicit choice to change every folder holding it.
+  setStoragePolicy: (body: { title: string; section?: string; allFolders?: boolean; policy: StoragePolicyKind }) => request<StoragePolicyTitle>("/api/storage-policies", { method: "POST", body: JSON.stringify(body) }),
+  setStoragePolicies: (body: { items: StoragePolicyTarget[]; allFolders?: boolean; policy: StoragePolicyKind }) => request<StoragePolicyBulkResult>("/api/storage-policies/bulk", { method: "POST", body: JSON.stringify(body) }),
   defaultPolicyPreview: (section: string) => request<DefaultPolicyPreview>(`/api/storage-policies/default-preview?section=${encodeURIComponent(section)}`),
   applyDefaultPolicy: (section: string) => request<DefaultPolicyApplyResult>("/api/storage-policies/default-apply", { method: "POST", body: JSON.stringify({ section }) }),
   deleteStoragePolicy: (id: number) => request<StoragePolicyTitle>(`/api/storage-policies/${id}`, { method: "DELETE" }),

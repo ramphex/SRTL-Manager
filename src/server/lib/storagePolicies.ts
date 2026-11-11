@@ -3,39 +3,33 @@ import { dbAll, first, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import type {
   SectionContentType,
-  StoragePolicyCandidate,
   StoragePolicyBulkResult,
+  StoragePolicyCandidate,
   StoragePolicyCategory,
   StoragePolicyKind,
+  StoragePolicyOtherFolder,
+  StoragePolicyTarget,
   StoragePolicyTitle
 } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
 import { reconcileStorageFilePolicies } from "./storageFilePolicies";
+import { canonicalTitleKey, normalizeTitle, planPolicyPlacement, storagePolicyKey, unplacedSection } from "./storagePolicyPlacement";
 
-export function normalizeTitle(value: string): string {
-  return value.trim().toLowerCase();
-}
+export { canonicalTitleKey, normalizeTitle, storagePolicyKey, unplacedSection } from "./storagePolicyPlacement";
 
-export function canonicalTitleKey(value: string): string {
-  return normalizeTitle(value)
-    .replace(/&/g, " and ")
-    .replace(/['’]/g, "")
-    .replace(/[^a-z0-9]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
+type PolicyRow = typeof schema.storagePolicies.$inferSelect;
 
-type StoragePolicyMediaMetadata = {
+// What SRTL knows about one folder's copy of a title from its links and storage files.
+type FolderTitleMetadata = {
+  section: string;
   title: string;
   normalizedTitle: string;
-  sections: string | null;
   linkCount: number;
   remoteLinkCount: number;
   localLinkCount: number;
   fileCount: number;
   remoteFileCount: number;
   localFileCount: number;
-  sectionCount: number;
 };
 
 type SectionTypeLookup = Map<string, SectionContentType>;
@@ -46,144 +40,32 @@ export interface LocalStoragePolicyBootstrapResult {
   skippedExistingPolicy: number;
 }
 
+export interface StoragePolicyChangeOptions {
+  source?: string;
+  mediaLinkIds?: readonly number[];
+}
+
+function knownPolicy(value: string | null | undefined): StoragePolicyKind {
+  return value === "location_1" || value === "location_2" ? value : "unassigned";
+}
+
 async function getSectionTypeLookup(db: Db): Promise<SectionTypeLookup> {
   return new Map(
-    (await db
-      .select()
-      .from(schema.sections)
-    )
-      .map((row) => [row.name, normalizeSectionContentType(row.contentType) ?? inferSectionContentType(row.name)])
+    (await db.select().from(schema.sections)).map((row) => [row.name, normalizeSectionContentType(row.contentType) ?? inferSectionContentType(row.name)])
   );
 }
 
-function serializeStoragePolicyTitle(
-  row: typeof schema.storagePolicies.$inferSelect,
-  sectionTypes: SectionTypeLookup,
-  metadata?: StoragePolicyMediaMetadata
-): StoragePolicyTitle {
-  const sections = splitCandidateSections(metadata?.sections ?? null);
-  const policy = row.policy === "location_1" || row.policy === "location_2" ? row.policy : "unassigned";
-  return {
-    id: row.id,
-    title: metadata?.title ?? row.title,
-    normalizedTitle: row.normalizedTitle,
-    policy,
-    category: categorizeCandidateSections(sections, sectionTypes),
-    sections,
-    linkCount: Number(metadata?.linkCount ?? 0),
-    remoteLinkCount: Number(metadata?.remoteLinkCount ?? 0),
-    localLinkCount: Number(metadata?.localLinkCount ?? 0),
-    fileCount: Number(metadata?.fileCount ?? 0),
-    remoteFileCount: Number(metadata?.remoteFileCount ?? 0),
-    localFileCount: Number(metadata?.localFileCount ?? 0),
-    sectionCount: Number(metadata?.sectionCount ?? 0),
-    source: row.source,
-    updatedAt: row.updatedAt
-  };
-}
-
-function serializeUnassignedTitle(row: StoragePolicyMediaMetadata, sectionTypes: SectionTypeLookup): StoragePolicyTitle {
-  const sections = splitCandidateSections(row.sections);
-  return {
-    id: null,
-    title: row.title,
-    normalizedTitle: row.normalizedTitle,
-    policy: "unassigned",
-    category: categorizeCandidateSections(sections, sectionTypes),
-    sections,
-    linkCount: Number(row.linkCount),
-    remoteLinkCount: Number(row.remoteLinkCount),
-    localLinkCount: Number(row.localLinkCount),
-    fileCount: Number(row.fileCount),
-    remoteFileCount: Number(row.remoteFileCount),
-    localFileCount: Number(row.localFileCount),
-    sectionCount: Number(row.sectionCount),
-    source: "scan",
-    updatedAt: null
-  };
-}
-
-function serializeCandidate(
-  row: {
-    title: string;
-    normalizedTitle: string;
-    sections: string | null;
-    linkCount: number;
-    remoteLinkCount: number;
-    localLinkCount: number;
-    fileCount: number;
-    remoteFileCount: number;
-    localFileCount: number;
-    sectionCount: number;
-  },
-  sectionTypes: SectionTypeLookup
-): StoragePolicyCandidate {
-  const sections = splitCandidateSections(row.sections);
-  return {
-    title: row.title,
-    normalizedTitle: row.normalizedTitle,
-    category: categorizeCandidateSections(sections, sectionTypes),
-    sections,
-    linkCount: Number(row.linkCount),
-    remoteLinkCount: Number(row.remoteLinkCount),
-    localLinkCount: Number(row.localLinkCount),
-    fileCount: Number(row.fileCount),
-    remoteFileCount: Number(row.remoteFileCount),
-    localFileCount: Number(row.localFileCount),
-    sectionCount: Number(row.sectionCount)
-  };
-}
-
-function splitCandidateSections(value: string | null): string[] {
-  if (!value) return [];
-  return value
-    .split(",")
-    .map((section) => section.trim())
-    .filter(Boolean)
-    .sort((a, b) => a.localeCompare(b));
-}
-
-function uniqueStoragePolicyTitles(titles: string[]): string[] {
-  const seen = new Set<string>();
-  const uniqueTitles: string[] = [];
-  for (const title of titles) {
-    const cleanedTitle = title.trim();
-    const normalizedTitle = normalizeTitle(cleanedTitle);
-    if (!normalizedTitle || seen.has(normalizedTitle)) continue;
-    seen.add(normalizedTitle);
-    uniqueTitles.push(cleanedTitle);
-  }
-  return uniqueTitles;
-}
-
-function fallbackStoragePolicyMetadata(title: string): StoragePolicyMediaMetadata {
-  return {
-    title,
-    normalizedTitle: normalizeTitle(title),
-    sections: null,
-    linkCount: 0,
-    remoteLinkCount: 0,
-    localLinkCount: 0,
-    fileCount: 0,
-    remoteFileCount: 0,
-    localFileCount: 0,
-    sectionCount: 0
-  };
-}
-
-function categorizeSection(section: string, sectionTypes: SectionTypeLookup): Exclude<StoragePolicyCategory, "mixed"> {
+function categorizeSection(section: string | null, sectionTypes: SectionTypeLookup): StoragePolicyCategory {
+  if (!section) return "unmatched";
   const type = sectionTypes.get(section) ?? inferSectionContentType(section);
   return type === "shows" || type === "movies" ? type : "other";
 }
 
-function categorizeCandidateSections(sections: string[], sectionTypes: SectionTypeLookup): StoragePolicyCategory {
-  const categories = new Set(sections.map((section) => categorizeSection(section, sectionTypes)));
-  if (categories.size === 0) return "unmatched";
-  if (categories.size === 1) return categories.values().next().value ?? "other";
-  return "mixed";
+function emptyMetadata(section: string, title: string): FolderTitleMetadata {
+  return { section, title, normalizedTitle: normalizeTitle(title), linkCount: 0, remoteLinkCount: 0, localLinkCount: 0, fileCount: 0, remoteFileCount: 0, localFileCount: 0 };
 }
 
-async function getAllMediaTitleMetadata(db: Db): Promise<Map<string, StoragePolicyMediaMetadata>> {
+async function getFolderTitleMetadata(db: Db): Promise<Map<string, FolderTitleMetadata>> {
   const linkRows = await dbAll<{ itemName: string; section: string; kind: string }>(db, sql`
     select ml.item_name as "itemName", ml.section, ml.kind
     from media_links ml
@@ -195,144 +77,174 @@ async function getAllMediaTitleMetadata(db: Db): Promise<Map<string, StoragePoli
     from storage_files sf
     where sf.missing_since is null
       and sf.item_name <> ''
+      and sf.section <> ''
   `);
-  const metadata = new Map<
-    string,
-    {
-      title: string;
-      sections: Set<string>;
-      linkCount: number;
-      remoteLinkCount: number;
-      localLinkCount: number;
-      fileCount: number;
-      remoteFileCount: number;
-      localFileCount: number;
-    }
-  >();
-
+  const metadata = new Map<string, FolderTitleMetadata>();
   for (const row of linkRows) {
-    const key = canonicalTitleKey(row.itemName);
-    if (!key) continue;
-    const current = metadata.get(key) ?? {
-      title: row.itemName,
-      sections: new Set<string>(),
-      linkCount: 0,
-      remoteLinkCount: 0,
-      localLinkCount: 0,
-      fileCount: 0,
-      remoteFileCount: 0,
-      localFileCount: 0
-    };
-    current.sections.add(row.section);
+    if (!canonicalTitleKey(row.itemName)) continue;
+    const key = storagePolicyKey(row.section, row.itemName);
+    const current = metadata.get(key) ?? emptyMetadata(row.section, row.itemName);
     current.linkCount += 1;
     if (row.kind === "remote") current.remoteLinkCount += 1;
     if (row.kind === "local") current.localLinkCount += 1;
     metadata.set(key, current);
   }
-
   for (const row of fileRows) {
-    const key = canonicalTitleKey(row.itemName);
-    if (!key) continue;
-    const current = metadata.get(key) ?? {
-      title: row.itemName,
-      sections: new Set<string>(),
-      linkCount: 0,
-      remoteLinkCount: 0,
-      localLinkCount: 0,
-      fileCount: 0,
-      remoteFileCount: 0,
-      localFileCount: 0
-    };
-    if (row.section) current.sections.add(row.section);
+    if (!row.section || !canonicalTitleKey(row.itemName)) continue;
+    const key = storagePolicyKey(row.section, row.itemName);
+    const current = metadata.get(key) ?? emptyMetadata(row.section, row.itemName);
     current.fileCount += 1;
     if (row.rootType === "remote") current.remoteFileCount += 1;
     if (row.rootType === "local") current.localFileCount += 1;
     metadata.set(key, current);
   }
-
-  return new Map(
-    [...metadata.entries()].map(([key, row]) => [
-      key,
-      {
-        title: row.title,
-        normalizedTitle: normalizeTitle(row.title),
-        sections: [...row.sections].join(","),
-        linkCount: row.linkCount,
-        remoteLinkCount: row.remoteLinkCount,
-        localLinkCount: row.localLinkCount,
-        fileCount: row.fileCount,
-        remoteFileCount: row.remoteFileCount,
-        localFileCount: row.localFileCount,
-        sectionCount: row.sections.size
-      }
-    ])
-  );
+  return metadata;
 }
 
-async function getCurrentLocalTitleMap(db: Db): Promise<Map<string, string>> {
-  const rows = await dbAll<{ title: string }>(db, sql`
-    select ml.item_name as title
-    from media_links ml
-    where ml.missing_since is null
-      and ml.is_media = true
-      and ml.kind = 'local'
-    order by lower(ml.item_name)
+// For each folder copy of a title, the other folders whose links share a storage file with it under a different policy.
+async function getSharedFileSections(db: Db): Promise<Map<string, string[]>> {
+  const rows = await dbAll<{ section: string; itemName: string; otherSection: string }>(db, sql`
+    with shared as (
+      select resolved_storage_file_id as file_id
+      from media_links
+      where missing_since is null and resolved_storage_file_id is not null
+      group by resolved_storage_file_id
+      having count(distinct section) > 1 and count(distinct storage_policy) > 1
+    )
+    select distinct mine.section, mine.item_name as "itemName", other.section as "otherSection"
+    from media_links mine
+    join shared on shared.file_id = mine.resolved_storage_file_id
+    join media_links other
+      on other.resolved_storage_file_id = mine.resolved_storage_file_id
+     and other.missing_since is null
+     and other.section <> mine.section
+     and other.storage_policy <> mine.storage_policy
+    where mine.missing_since is null
   `);
-  const titles = new Map<string, string>();
+  const result = new Map<string, string[]>();
   for (const row of rows) {
+    const key = storagePolicyKey(row.section, row.itemName);
+    const sections = result.get(key) ?? [];
+    if (!sections.includes(row.otherSection)) sections.push(row.otherSection);
+    result.set(key, sections.sort((a, b) => a.localeCompare(b)));
+  }
+  return result;
+}
+
+// Policy rows by folder key, newest first when two rows spell the same title differently.
+function policyRowsByKey(rows: readonly PolicyRow[]): Map<string, PolicyRow> {
+  const result = new Map<string, PolicyRow>();
+  for (const row of [...rows].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || b.id - a.id)) {
+    const key = storagePolicyKey(row.section, row.normalizedTitle);
+    if (!result.has(key)) result.set(key, row);
+  }
+  return result;
+}
+
+interface ListingContext {
+  sectionTypes: SectionTypeLookup;
+  metadata: Map<string, FolderTitleMetadata>;
+  policies: Map<string, PolicyRow>;
+  sharedFiles: Map<string, string[]>;
+  // Folders holding each title, by canonical title key.
+  foldersByTitle: Map<string, string[]>;
+}
+
+async function getListingContext(db: Db): Promise<ListingContext> {
+  const metadata = await getFolderTitleMetadata(db);
+  const foldersByTitle = new Map<string, string[]>();
+  for (const row of metadata.values()) {
+    if (row.linkCount === 0) continue;
     const titleKey = canonicalTitleKey(row.title);
-    if (titleKey && !titles.has(titleKey)) titles.set(titleKey, row.title);
+    foldersByTitle.set(titleKey, [...(foldersByTitle.get(titleKey) ?? []), row.section].sort((a, b) => a.localeCompare(b)));
   }
-  return titles;
+  return {
+    sectionTypes: await getSectionTypeLookup(db),
+    metadata,
+    policies: policyRowsByKey(await db.select().from(schema.storagePolicies)),
+    sharedFiles: await getSharedFileSections(db),
+    foldersByTitle
+  };
 }
 
-async function getStoragePoliciesByCanonicalTitle(db: Db): Promise<Map<string, Array<typeof schema.storagePolicies.$inferSelect>>> {
-  const policies = new Map<string, Array<typeof schema.storagePolicies.$inferSelect>>();
-  for (const row of await db.select().from(schema.storagePolicies)) {
-    const titleKey = canonicalTitleKey(row.normalizedTitle);
-    if (!titleKey) continue;
-    const rows = policies.get(titleKey) ?? [];
-    rows.push(row);
-    policies.set(titleKey, rows);
-  }
-  return policies;
+function otherFolders(context: ListingContext, section: string | null, title: string): StoragePolicyOtherFolder[] {
+  return (context.foldersByTitle.get(canonicalTitleKey(title)) ?? [])
+    .filter((other) => other !== section)
+    .map((other) => ({ section: other, policy: knownPolicy(context.policies.get(storagePolicyKey(other, title))?.policy) }));
 }
 
-async function assignLocalPolicy(
-  db: Db,
-  title: string,
-  source: string,
-  timestamp: string,
-  existingPolicies: Array<typeof schema.storagePolicies.$inferSelect> | undefined
-): Promise<void> {
-  if (existingPolicies && existingPolicies.length > 0) {
-    for (const policy of existingPolicies) {
-      await db
-        .update(schema.storagePolicies)
-        .set({ title, policy: "location_1", source, updatedAt: timestamp })
-        .where(eq(schema.storagePolicies.id, policy.id));
-    }
-    return;
-  }
-
-  const normalizedTitle = normalizeTitle(title);
-  await db
-    .insert(schema.storagePolicies)
-    .values({ title, normalizedTitle, policy: "location_1", source, updatedAt: timestamp })
-    .onConflictDoUpdate({
-      target: schema.storagePolicies.normalizedTitle,
-      set: { title, policy: "location_1", source, updatedAt: timestamp }
-    });
+function serializeFolderTitle(
+  context: ListingContext,
+  section: string | null,
+  fallbackTitle: string,
+  row: PolicyRow | null,
+  policyOverride?: StoragePolicyKind
+): StoragePolicyTitle {
+  const metadata = section ? context.metadata.get(storagePolicyKey(section, fallbackTitle)) : undefined;
+  const title = metadata?.title ?? row?.title ?? fallbackTitle;
+  return {
+    id: row?.id ?? null,
+    title,
+    normalizedTitle: row?.normalizedTitle ?? normalizeTitle(title),
+    section,
+    policy: policyOverride ?? knownPolicy(row?.policy),
+    category: categorizeSection(section, context.sectionTypes),
+    sections: section ? [section] : [],
+    otherFolders: otherFolders(context, section, title),
+    sharedFileSections: section ? context.sharedFiles.get(storagePolicyKey(section, title)) ?? [] : [],
+    linkCount: metadata?.linkCount ?? 0,
+    remoteLinkCount: metadata?.remoteLinkCount ?? 0,
+    localLinkCount: metadata?.localLinkCount ?? 0,
+    fileCount: metadata?.fileCount ?? 0,
+    remoteFileCount: metadata?.remoteFileCount ?? 0,
+    localFileCount: metadata?.localFileCount ?? 0,
+    sectionCount: section ? 1 : 0,
+    source: row?.source ?? "scan",
+    updatedAt: row?.updatedAt ?? null
+  };
 }
 
-async function syncStoragePolicyMediaLinksForTitleKeys(
-  db: Db,
-  titlePolicies: Map<string, StoragePolicyKind>,
-  timestamp: string,
-  mediaLinkIds?: readonly number[]
-): Promise<void> {
-  if (titlePolicies.size === 0) return;
-  const policies = [...new Set(titlePolicies.values())];
+function compareFolderTitles(a: StoragePolicyTitle, b: StoragePolicyTitle): number {
+  return a.title.localeCompare(b.title) || (a.section ?? "").localeCompare(b.section ?? "");
+}
+
+function uniqueTargets(targets: readonly StoragePolicyTarget[]): StoragePolicyTarget[] {
+  const seen = new Set<string>();
+  const result: StoragePolicyTarget[] = [];
+  for (const target of targets) {
+    const title = target.title.trim();
+    const section = target.section.trim();
+    if (!section || !canonicalTitleKey(title)) continue;
+    const key = storagePolicyKey(section, title);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ section, title });
+  }
+  return result;
+}
+
+/**
+ * Places saved policies whose title had no folder yet into every folder that now holds the title, then removes the
+ * unplaced row. Scans call this before applying folder defaults, so a saved policy wins over a default.
+ */
+export async function resolveUnplacedStoragePolicies(db: Db, timestamp = nowIso()): Promise<number> {
+  const unplaced = await first(db.select({ id: schema.storagePolicies.id }).from(schema.storagePolicies).where(eq(schema.storagePolicies.section, unplacedSection)).limit(1));
+  if (!unplaced) return 0;
+  const policies = await db.select().from(schema.storagePolicies);
+  const linkTitles = await dbAll<{ section: string; itemName: string }>(db, sql`select distinct section, item_name as "itemName" from media_links`);
+  const plan = planPolicyPlacement(policies, linkTitles);
+  if (plan.deleteIds.length === 0) return 0;
+  for (let offset = 0; offset < plan.inserts.length; offset += 500) {
+    await db.insert(schema.storagePolicies).values(plan.inserts.slice(offset, offset + 500)).onConflictDoNothing();
+  }
+  await db.delete(schema.storagePolicies).where(inArray(schema.storagePolicies.id, plan.deleteIds));
+  await syncStoragePolicyMediaLinksForKeys(db, new Map(plan.inserts.map((row) => [storagePolicyKey(row.section, row.normalizedTitle), knownPolicy(row.policy)])), timestamp);
+  return plan.inserts.length;
+}
+
+async function syncStoragePolicyMediaLinksForKeys(db: Db, keyPolicies: Map<string, StoragePolicyKind>, timestamp: string, mediaLinkIds?: readonly number[]): Promise<void> {
+  if (keyPolicies.size === 0) return;
+  const policies = [...new Set(keyPolicies.values())];
   if (mediaLinkIds !== undefined && policies.length === 1) {
     const uniqueIds = [...new Set(mediaLinkIds)];
     for (let offset = 0; offset < uniqueIds.length; offset += 500) {
@@ -342,67 +254,61 @@ async function syncStoragePolicyMediaLinksForTitleKeys(
         .where(inArray(schema.mediaLinks.id, uniqueIds.slice(offset, offset + 500)));
     }
   } else {
-    for (const link of await db.select().from(schema.mediaLinks)) {
-      const policy = titlePolicies.get(canonicalTitleKey(link.itemName));
+    const sections = [...new Set([...keyPolicies.keys()].map((key) => key.slice(0, key.indexOf("\u0000"))))];
+    const byPolicy = new Map<StoragePolicyKind, number[]>();
+    for (const link of await db
+      .select({ id: schema.mediaLinks.id, section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, storagePolicy: schema.mediaLinks.storagePolicy })
+      .from(schema.mediaLinks)
+      .where(inArray(schema.mediaLinks.section, sections))) {
+      const policy = keyPolicies.get(storagePolicyKey(link.section, link.itemName));
       if (!policy || link.storagePolicy === policy) continue;
-      await db.update(schema.mediaLinks).set({ storagePolicy: policy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
+      byPolicy.set(policy, [...(byPolicy.get(policy) ?? []), link.id]);
+    }
+    for (const [policy, ids] of byPolicy) {
+      for (let offset = 0; offset < ids.length; offset += 500) {
+        await db.update(schema.mediaLinks).set({ storagePolicy: policy, updatedAt: timestamp }).where(inArray(schema.mediaLinks.id, ids.slice(offset, offset + 500)));
+      }
     }
   }
   await reconcileStorageFilePolicies(db, timestamp);
 }
 
+/** Assigns location 1 to every folder copy of a title that currently has a local link. */
 export async function bootstrapLocalStoragePolicies(
   db: Db,
   options: { overwriteExisting?: boolean; source?: string } = {}
 ): Promise<LocalStoragePolicyBootstrapResult> {
-  const timestamp = nowIso();
   const overwriteExisting = options.overwriteExisting === true;
-  const source = options.source ?? "bootstrap";
-  const localTitles = await getCurrentLocalTitleMap(db);
-  const existingPolicies = await getStoragePoliciesByCanonicalTitle(db);
-  const assignedTitlePolicies = new Map<string, StoragePolicyKind>();
-  let assignedLocal = 0;
-  let skippedExistingPolicy = 0;
-
-  for (const [titleKey, title] of localTitles.entries()) {
-    const existing = existingPolicies.get(titleKey);
-    if (existing && existing.length > 0 && !overwriteExisting) {
-      skippedExistingPolicy += 1;
-      continue;
-    }
-    await assignLocalPolicy(db, title, source, timestamp, existing);
-    assignedTitlePolicies.set(titleKey, "location_1");
-    assignedLocal += 1;
-  }
-
-  await syncStoragePolicyMediaLinksForTitleKeys(db, assignedTitlePolicies, timestamp);
-
+  const rows = await dbAll<{ section: string; title: string }>(db, sql`
+    select ml.section, ml.item_name as title
+    from media_links ml
+    where ml.missing_since is null
+      and ml.is_media = true
+      and ml.kind = 'local'
+    order by ml.section, lower(ml.item_name)
+  `);
+  const localTargets = uniqueTargets(rows.map((row) => ({ section: row.section, title: row.title })));
+  const existing = policyRowsByKey(await db.select().from(schema.storagePolicies));
+  const targets = overwriteExisting ? localTargets : localTargets.filter((target) => !existing.has(storagePolicyKey(target.section, target.title)));
+  if (targets.length > 0) await setStoragePolicies(db, targets, "location_1", { source: options.source ?? "bootstrap" });
   return {
-    foundLocalTitles: localTitles.size,
-    assignedLocal,
-    skippedExistingPolicy
+    foundLocalTitles: localTargets.length,
+    assignedLocal: targets.length,
+    skippedExistingPolicy: localTargets.length - targets.length
   };
 }
 
+/** One row per folder copy of a title. Without a filter, assigned rows and unassigned folder copies are both listed. */
 export async function listStoragePolicyTitles(db: Db, policy?: StoragePolicyKind): Promise<StoragePolicyTitle[]> {
-  const rows = await db.select().from(schema.storagePolicies);
-  const metadata = await getAllMediaTitleMetadata(db);
-  const sectionTypes = await getSectionTypeLookup(db);
-  const policyRows = rows
-    .filter((row) => !policy || policy === "unassigned" || row.policy === policy)
-    .map((row) => serializeStoragePolicyTitle(row, sectionTypes, metadata.get(canonicalTitleKey(row.normalizedTitle))));
+  const context = await getListingContext(db);
+  const policyRows = policy === "unassigned" ? [] : [...context.policies.values()].filter((row) => !policy || row.policy === policy);
+  const assigned = policyRows.map((row) => serializeFolderTitle(context, row.section || null, row.title, row));
+  if (policy && policy !== "unassigned") return assigned.sort(compareFolderTitles);
 
-  if (policy && policy !== "unassigned") {
-    return policyRows.sort((a, b) => a.title.localeCompare(b.title));
-  }
-
-  const assignedTitleKeys = new Set(rows.map((row) => canonicalTitleKey(row.normalizedTitle)));
-  const unassignedRows = [...metadata.entries()]
-    .filter(([titleKey, row]) => !assignedTitleKeys.has(titleKey) && row.linkCount > 0)
-    .map(([, row]) => serializeUnassignedTitle(row, sectionTypes));
-
-  const combined = policy === "unassigned" ? unassignedRows : [...policyRows, ...unassignedRows];
-  return combined.sort((a, b) => a.title.localeCompare(b.title));
+  const unassigned = [...context.metadata.entries()]
+    .filter(([key, row]) => row.linkCount > 0 && !context.policies.has(key))
+    .map(([, row]) => serializeFolderTitle(context, row.section, row.title, null, "unassigned"));
+  return [...assigned, ...unassigned].sort(compareFolderTitles);
 }
 
 export async function listStoragePolicyCandidates(db: Db, query = "", limit = 50): Promise<StoragePolicyCandidate[]> {
@@ -412,106 +318,116 @@ export async function listStoragePolicyCandidates(db: Db, query = "", limit = 50
 
   const boundedLimit = Math.min(Math.max(limit, 1), 100);
   const sectionTypes = await getSectionTypeLookup(db);
-  const assignedTitleKeys = new Set((await db.select().from(schema.storagePolicies)).map((row) => canonicalTitleKey(row.normalizedTitle)));
-  return [...(await getAllMediaTitleMetadata(db)).values()]
+  const assignedKeys = policyRowsByKey(await db.select().from(schema.storagePolicies));
+  return [...(await getFolderTitleMetadata(db)).entries()]
+    .filter(([key, row]) => row.linkCount > 0 && !assignedKeys.has(key))
+    .map(([, row]) => row)
     .filter((row) => {
-      const haystack = normalizeTitle([row.title, row.sections ?? ""].join(" "));
+      const haystack = normalizeTitle([row.title, row.section].join(" "));
       return tokens.every((token) => haystack.includes(token));
     })
-    .filter((row) => row.linkCount > 0)
-    .filter((row) => !assignedTitleKeys.has(canonicalTitleKey(row.normalizedTitle)))
     .sort((a, b) => {
       const aTitle = normalizeTitle(a.title);
       const bTitle = normalizeTitle(b.title);
       const aRank = aTitle === normalizedQuery ? 0 : aTitle.startsWith(tokens[0]) ? 1 : 2;
       const bRank = bTitle === normalizedQuery ? 0 : bTitle.startsWith(tokens[0]) ? 1 : 2;
-      return aRank - bRank || a.title.localeCompare(b.title);
+      return aRank - bRank || a.title.localeCompare(b.title) || a.section.localeCompare(b.section);
     })
     .slice(0, boundedLimit)
-    .map((row) => serializeCandidate(row, sectionTypes));
+    .map((row) => ({
+      title: row.title,
+      normalizedTitle: normalizeTitle(row.title),
+      section: row.section,
+      category: categorizeSection(row.section, sectionTypes),
+      sections: [row.section],
+      linkCount: row.linkCount,
+      remoteLinkCount: row.remoteLinkCount,
+      localLinkCount: row.localLinkCount,
+      fileCount: row.fileCount,
+      remoteFileCount: row.remoteFileCount,
+      localFileCount: row.localFileCount,
+      sectionCount: 1
+    }));
 }
 
-export async function findStoragePolicyCandidateTitles(db: Db, titles: string[]): Promise<{ candidateTitles: string[]; invalidTitles: string[] }> {
-  const candidatesByTitleKey = new Map<string, string>();
-  for (const row of (await getAllMediaTitleMetadata(db)).values()) {
+/**
+ * Resolves requested folder copies to ones the scanned library holds, spelled as the library spells them.
+ * With `allFolders`, each title expands to every folder that holds it and any section given is ignored.
+ */
+export async function findStoragePolicyCandidateTargets(
+  db: Db,
+  requested: ReadonlyArray<{ title: string; section?: string | null }>,
+  options: { allFolders?: boolean } = {}
+): Promise<{ targets: StoragePolicyTarget[]; invalidTitles: string[] }> {
+  const byKey = new Map<string, StoragePolicyTarget>();
+  const byTitle = new Map<string, StoragePolicyTarget[]>();
+  for (const row of (await getFolderTitleMetadata(db)).values()) {
+    if (row.linkCount === 0) continue;
+    const target = { section: row.section, title: row.title };
+    byKey.set(storagePolicyKey(row.section, row.title), target);
     const titleKey = canonicalTitleKey(row.title);
-    if (row.linkCount > 0 && titleKey && !candidatesByTitleKey.has(titleKey)) candidatesByTitleKey.set(titleKey, row.title);
+    byTitle.set(titleKey, [...(byTitle.get(titleKey) ?? []), target]);
   }
 
-  const candidateTitles: string[] = [];
+  const targets: StoragePolicyTarget[] = [];
   const invalidTitles: string[] = [];
-  const seenCandidateTitleKeys = new Set<string>();
-
-  for (const title of uniqueStoragePolicyTitles(titles)) {
-    const titleKey = canonicalTitleKey(title);
-    const candidateTitle = titleKey ? candidatesByTitleKey.get(titleKey) : null;
-    if (!candidateTitle) {
-      invalidTitles.push(title);
+  for (const entry of requested) {
+    const title = entry.title.trim();
+    if (!canonicalTitleKey(title)) continue;
+    if (options.allFolders) {
+      const found = byTitle.get(canonicalTitleKey(title)) ?? [];
+      if (found.length === 0) invalidTitles.push(title);
+      targets.push(...found);
       continue;
     }
-
-    const candidateTitleKey = canonicalTitleKey(candidateTitle);
-    if (candidateTitleKey && !seenCandidateTitleKeys.has(candidateTitleKey)) {
-      seenCandidateTitleKeys.add(candidateTitleKey);
-      candidateTitles.push(candidateTitle);
-    }
+    const found = entry.section ? byKey.get(storagePolicyKey(entry.section.trim(), title)) : undefined;
+    if (found) targets.push(found);
+    else invalidTitles.push(entry.section ? `${title} (${entry.section})` : title);
   }
-
-  return { candidateTitles, invalidTitles };
+  return { targets: uniqueTargets(targets), invalidTitles: [...new Set(invalidTitles)] };
 }
 
-export async function findStoragePolicyCandidateTitle(db: Db, title: string): Promise<string | null> {
-  return (await findStoragePolicyCandidateTitles(db, [title])).candidateTitles[0] ?? null;
+export async function syncStoragePolicyMediaLinks(db: Db, target: StoragePolicyTarget, policy: StoragePolicyKind): Promise<void> {
+  await syncStoragePolicyMediaLinksForKeys(db, new Map([[storagePolicyKey(target.section, target.title), knownPolicy(policy)]]), nowIso());
 }
 
-export async function syncStoragePolicyMediaLinks(db: Db, normalizedTitle: string, policy: StoragePolicyKind): Promise<void> {
-  const titleKey = canonicalTitleKey(normalizedTitle);
-  const timestamp = nowIso();
-  const storagePolicy = policy === "location_1" || policy === "location_2" ? policy : "unassigned";
-  for (const link of await db.select().from(schema.mediaLinks)) {
-    if (canonicalTitleKey(link.itemName) !== titleKey) continue;
-    await db.update(schema.mediaLinks).set({ storagePolicy, updatedAt: timestamp }).where(eq(schema.mediaLinks.id, link.id));
-  }
-  await reconcileStorageFilePolicies(db, timestamp);
-}
-
-export async function setStoragePolicyTitles(
+/**
+ * Sets the policy of each folder copy given, and only those: the same title in another folder keeps its own policy.
+ * "unassigned" removes the folder's policy. Links in those folders follow, and storage files are reconciled.
+ */
+export async function setStoragePolicies(
   db: Db,
-  titles: string[],
+  targets: readonly StoragePolicyTarget[],
   policy: StoragePolicyKind,
-  options: { source?: string; mediaLinkIds?: readonly number[] } = {}
+  options: StoragePolicyChangeOptions = {}
 ): Promise<StoragePolicyBulkResult> {
-  const uniqueTitles = uniqueStoragePolicyTitles(titles);
+  const unique = uniqueTargets(targets);
   const timestamp = nowIso();
   const source = options.source ?? "manual";
-  const assignments = uniqueTitles.map((title) => ({ title, normalizedTitle: normalizeTitle(title), policy, source, updatedAt: timestamp }));
 
-  if (assignments.length > 0) {
+  if (unique.length > 0) {
     await db.transaction(async (transaction) => {
-      const assignmentByTitleKey = new Map(assignments.map((assignment) => [canonicalTitleKey(assignment.title), assignment]));
-      const existingPolicies = await transaction.select().from(schema.storagePolicies);
-      const matchingPolicies = existingPolicies.filter((row) => assignmentByTitleKey.has(canonicalTitleKey(row.normalizedTitle)));
+      await resolveUnplacedStoragePolicies(transaction, timestamp);
+      const wanted = new Map(unique.map((target) => [storagePolicyKey(target.section, target.title), target]));
+      const sections = [...new Set(unique.map((target) => target.section))];
+      const existing = (await transaction.select().from(schema.storagePolicies).where(inArray(schema.storagePolicies.section, sections))).filter((row) =>
+        wanted.has(storagePolicyKey(row.section, row.normalizedTitle))
+      );
       if (policy === "unassigned") {
-        if (matchingPolicies.length > 0) {
-          await transaction.delete(schema.storagePolicies).where(inArray(schema.storagePolicies.id, matchingPolicies.map((row) => row.id)));
-        }
+        if (existing.length > 0) await transaction.delete(schema.storagePolicies).where(inArray(schema.storagePolicies.id, existing.map((row) => row.id)));
       } else {
-        const existingByTitleKey = new Map<string, typeof schema.storagePolicies.$inferSelect>();
-        const duplicateIds: number[] = [];
-        for (const row of matchingPolicies) {
-          const titleKey = canonicalTitleKey(row.normalizedTitle);
-          if (existingByTitleKey.has(titleKey)) duplicateIds.push(row.id);
-          else existingByTitleKey.set(titleKey, row);
-        }
+        const kept = policyRowsByKey(existing);
+        const keptIds = new Set([...kept.values()].map((row) => row.id));
+        const duplicateIds = existing.filter((row) => !keptIds.has(row.id)).map((row) => row.id);
         if (duplicateIds.length > 0) await transaction.delete(schema.storagePolicies).where(inArray(schema.storagePolicies.id, duplicateIds));
 
-        const updates = assignments.flatMap((assignment) => {
-          const existing = existingByTitleKey.get(canonicalTitleKey(assignment.title));
-          return existing ? [{ id: existing.id, ...assignment }] : [];
+        const updates = [...wanted.entries()].flatMap(([key, target]) => {
+          const row = kept.get(key);
+          return row ? [{ id: row.id, title: target.title, normalizedTitle: normalizeTitle(target.title) }] : [];
         });
-        if (updates.length > 0) {
+        for (let offset = 0; offset < updates.length; offset += 500) {
           const updateRows = sql.join(
-            updates.map((assignment) => sql`(${assignment.id}::integer, ${assignment.title}::text, ${assignment.normalizedTitle}::text)`),
+            updates.slice(offset, offset + 500).map((update) => sql`(${update.id}::integer, ${update.title}::text, ${update.normalizedTitle}::text)`),
             sql`, `
           );
           await transaction.execute(sql`
@@ -526,70 +442,61 @@ export async function setStoragePolicyTitles(
           `);
         }
 
-        const inserts = assignments.filter((assignment) => !existingByTitleKey.has(canonicalTitleKey(assignment.title)));
-        if (inserts.length > 0) {
+        const inserts = [...wanted.entries()]
+          .filter(([key]) => !kept.has(key))
+          .map(([, target]) => ({ section: target.section, title: target.title, normalizedTitle: normalizeTitle(target.title), policy, source, updatedAt: timestamp }));
+        for (let offset = 0; offset < inserts.length; offset += 500) {
           await transaction
             .insert(schema.storagePolicies)
-            .values(inserts.map((assignment) => ({ ...assignment, policy })))
+            .values(inserts.slice(offset, offset + 500))
             .onConflictDoUpdate({
-              target: schema.storagePolicies.normalizedTitle,
+              target: [schema.storagePolicies.section, schema.storagePolicies.normalizedTitle],
               set: { title: sql`excluded.title`, policy, source, updatedAt: timestamp }
             });
         }
       }
-
-      const titlePolicies = new Map(assignments.map((assignment) => [canonicalTitleKey(assignment.title), policy]));
-      await syncStoragePolicyMediaLinksForTitleKeys(transaction, titlePolicies, timestamp, options.mediaLinkIds);
+      await syncStoragePolicyMediaLinksForKeys(transaction, new Map([...wanted.keys()].map((key) => [key, policy])), timestamp, options.mediaLinkIds);
     });
   }
 
-  const sectionTypes = await getSectionTypeLookup(db);
-  const metadata = await getAllMediaTitleMetadata(db);
-  const storagePolicyRows = new Map((await db.select().from(schema.storagePolicies)).map((row) => [canonicalTitleKey(row.normalizedTitle), row]));
-  const items = uniqueTitles.map((title) => {
-    const titleKey = canonicalTitleKey(title);
-    const rowMetadata = metadata.get(titleKey) ?? fallbackStoragePolicyMetadata(title);
-    if (policy === "unassigned") return serializeUnassignedTitle(rowMetadata, sectionTypes);
-    const row = storagePolicyRows.get(titleKey);
-    if (!row) throw new Error("Storage policy was not saved");
-    return serializeStoragePolicyTitle(row, sectionTypes, rowMetadata);
+  const context = await getListingContext(db);
+  const items = unique.map((target) => {
+    const row = context.policies.get(storagePolicyKey(target.section, target.title)) ?? null;
+    if (policy !== "unassigned" && !row) throw new Error("Storage policy was not saved");
+    return serializeFolderTitle(context, target.section, target.title, policy === "unassigned" ? null : row, policy === "unassigned" ? "unassigned" : undefined);
   });
-
-  return { updated: items.length, policy, items };
+  return { updated: items.length, policy, sections: [...new Set(unique.map((target) => target.section))].sort((a, b) => a.localeCompare(b)), items };
 }
 
-export async function setStoragePolicyTitle(
-  db: Db,
-  title: string,
-  policy: StoragePolicyKind,
-  options: { source?: string; mediaLinkIds?: readonly number[] } = {}
-): Promise<StoragePolicyTitle> {
-  return (await setStoragePolicyTitles(db, [title], policy, options)).items[0] ?? {
-    id: null,
-    title,
-    normalizedTitle: normalizeTitle(title),
-    policy: "unassigned",
-    category: "unmatched",
-    sections: [],
-    linkCount: 0,
-    remoteLinkCount: 0,
-    localLinkCount: 0,
-    fileCount: 0,
-    remoteFileCount: 0,
-    localFileCount: 0,
-    sectionCount: 0,
-    source: "scan",
-    updatedAt: null
-  };
+export async function setStoragePolicy(db: Db, target: StoragePolicyTarget, policy: StoragePolicyKind, options: StoragePolicyChangeOptions = {}): Promise<StoragePolicyTitle> {
+  const result = await setStoragePolicies(db, [target], policy, options);
+  if (result.items[0]) return result.items[0];
+  const context = await getListingContext(db);
+  return serializeFolderTitle(context, target.section, target.title, null, "unassigned");
 }
 
 export async function removeStoragePolicyTitle(db: Db, id: number): Promise<StoragePolicyTitle | null> {
   const existing = await first(db.select().from(schema.storagePolicies).where(eq(schema.storagePolicies.id, id)).limit(1));
   if (!existing) return null;
-  const metadata = (await getAllMediaTitleMetadata(db)).get(canonicalTitleKey(existing.normalizedTitle));
+  const context = await getListingContext(db);
+  const serialized = serializeFolderTitle(context, existing.section || null, existing.title, existing);
 
   await db.delete(schema.storagePolicies).where(eq(schema.storagePolicies.id, id));
-  await syncStoragePolicyMediaLinks(db, existing.normalizedTitle, "unassigned");
+  if (existing.section) await syncStoragePolicyMediaLinks(db, { section: existing.section, title: existing.normalizedTitle }, "unassigned");
+  return serialized;
+}
 
-  return serializeStoragePolicyTitle(existing, await getSectionTypeLookup(db), metadata);
+/** Policy per folder key (`storagePolicyKey`), plus unplaced rows under the empty section for scans to fall back on. */
+export async function getStoragePolicyLookup(db: Db): Promise<Map<string, StoragePolicyKind>> {
+  const result = new Map<string, StoragePolicyKind>();
+  for (const [key, row] of policyRowsByKey(await db.select().from(schema.storagePolicies))) {
+    const policy = knownPolicy(row.policy);
+    if (policy !== "unassigned" && canonicalTitleKey(row.normalizedTitle)) result.set(key, policy);
+  }
+  return result;
+}
+
+/** The policy one folder's copy of a title has, falling back to a saved policy not yet placed in any folder. */
+export function storagePolicyFor(lookup: Map<string, StoragePolicyKind>, section: string, title: string): StoragePolicyKind {
+  return lookup.get(storagePolicyKey(section, title)) ?? lookup.get(storagePolicyKey(unplacedSection, title)) ?? "unassigned";
 }

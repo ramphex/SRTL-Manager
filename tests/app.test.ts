@@ -2218,7 +2218,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Interrupted Identity Copy", policy: "location_2" }
+      payload: { title: "Interrupted Identity Copy", section: "movies", policy: "location_2" }
     });
     expect(policyMutation.statusCode).toBe(409);
     expect(policyMutation.json()).toMatchObject({ error: expect.stringContaining(`copy data from job #${jobId} requires manual reconciliation`) });
@@ -2650,7 +2650,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Later Commit Wins", policy: "location_2" }
+      payload: { title: "Later Commit Wins", section: "movies", policy: "location_2" }
     });
     expect(policyMutation.statusCode).toBe(200);
     expect(policyMutation.json()).toMatchObject({ title: "Later Commit Wins", policy: "location_2" });
@@ -5123,7 +5123,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Policy Copy Movie", policy: "location_2" }
+      payload: { title: "Policy Copy Movie", section: "movies", policy: "location_2" }
     });
     expect(overlapping.statusCode).toBe(409);
     expect(overlapping.json()).toMatchObject({ error: expect.stringContaining(`copy job #${copyJobId} is queued for the same media`) });
@@ -5135,7 +5135,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Disjoint Policy Movie", policy: "location_2" }
+      payload: { title: "Disjoint Policy Movie", section: "movies", policy: "location_2" }
     });
     expect(disjoint.statusCode).toBe(200);
     expect(disjoint.json()).toMatchObject({ title: "Disjoint Policy Movie", policy: "location_2" });
@@ -5151,7 +5151,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Policy Audit Movie", policy: "location_2" }
+      payload: { title: "Policy Audit Movie", section: "movies", policy: "location_2" }
     });
     expect(assigned.statusCode).toBe(200);
     const policyId = assigned.json<{ id: number }>().id;
@@ -5167,7 +5167,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies/bulk",
       headers: { cookie },
-      payload: { titles: ["Policy Audit Movie"], policy: "location_1" }
+      payload: { items: [{ title: "Policy Audit Movie", section: "movies" }], policy: "location_1" }
     });
     expect(bulk.statusCode).toBe(409);
     expect(bulk.json()).toMatchObject({ error: expect.stringContaining(`audit job #${auditJobId} is running for the same media`) });
@@ -5194,7 +5194,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Rock and Roll Movie", policy: "location_2" }
+      payload: { title: "Rock and Roll Movie", section: "movies", policy: "location_2" }
     });
 
     expect(response.statusCode).toBe(200);
@@ -5231,7 +5231,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: itemName, policy: "location_1" }
+      payload: { title: itemName, section: "movies", policy: "location_1" }
     });
 
     expect(response.statusCode).toBe(200);
@@ -5292,16 +5292,16 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Manual Movie (2024)", policy: "location_2" }
+      payload: { title: "Manual Movie (2024)", section: "movies", policy: "location_2" }
     });
     expect(invalidAdd.statusCode).toBe(400);
-    expect(invalidAdd.json()).toMatchObject({ error: "Choose a title from the scanned library." });
+    expect(invalidAdd.json()).toMatchObject({ error: "Choose a title from this folder of the scanned library." });
 
     const orphanAdd = await ctx.app.inject({
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Orphan Only", policy: "location_1" }
+      payload: { title: "Orphan Only", allFolders: true, policy: "location_1" }
     });
     expect(orphanAdd.statusCode).toBe(400);
     expect(orphanAdd.json()).toMatchObject({ error: "Choose a title from the scanned library." });
@@ -5310,7 +5310,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Manual Movie", policy: "assign_remote" }
+      payload: { title: "Manual Movie", section: "movies", policy: "assign_remote" }
     });
     expect(legacyPolicyAdd.statusCode).toBe(400);
 
@@ -5318,7 +5318,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Manual Movie", policy: "location_2" }
+      payload: { title: "Manual Movie", section: "movies", policy: "location_2" }
     });
     expect(add.statusCode).toBe(200);
     expect(add.json()).toMatchObject({
@@ -5353,21 +5353,22 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies/bulk",
       headers: { cookie },
-      payload: { titles: ["Manual Movie", "Orphan Only"], policy: "location_2" }
+      payload: { items: [{ title: "Manual Movie", section: "movies" }, { title: "Orphan Only", section: "movies" }], policy: "location_2" }
     });
     expect(invalidBulkAssign.statusCode).toBe(400);
-    expect(invalidBulkAssign.json()).toMatchObject({ error: "Choose titles from the scanned library: Orphan Only" });
+    expect(invalidBulkAssign.json()).toMatchObject({ error: "Choose titles from the scanned library: Orphan Only (movies)" });
 
     const bulkAssign = await ctx.app.inject({
       method: "POST",
       url: "/api/storage-policies/bulk",
       headers: { cookie },
-      payload: { titles: ["Manual Movie", "Manual Show", "Manual Show"], policy: "location_2" }
+      payload: { items: [{ title: "Manual Movie", section: "movies" }, { title: "Manual Show", section: "shows" }, { title: "Manual Show", section: "shows" }], policy: "location_2" }
     });
     expect(bulkAssign.statusCode).toBe(200);
     expect(bulkAssign.json()).toMatchObject({
       updated: 2,
       policy: "location_2",
+      sections: ["movies", "shows"],
       items: expect.arrayContaining([
         expect.objectContaining({ title: "Manual Movie", policy: "location_2" }),
         expect.objectContaining({ title: "Manual Show", policy: "location_2" })
@@ -5394,7 +5395,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies",
       headers: { cookie },
-      payload: { title: "Manual Movie", policy: "location_1" }
+      payload: { title: "Manual Movie", section: "movies", policy: "location_1" }
     });
     expect(assignLocal.statusCode).toBe(200);
     expect(assignLocal.json()).toMatchObject({ title: "Manual Movie", policy: "location_1" });
@@ -5417,7 +5418,7 @@ describe("api app", () => {
       method: "POST",
       url: "/api/storage-policies/bulk",
       headers: { cookie },
-      payload: { titles: ["Manual Show"], policy: "unassigned" }
+      payload: { titles: ["Manual Show"], allFolders: true, policy: "unassigned" }
     });
     expect(bulkUnassign.statusCode).toBe(200);
     expect(bulkUnassign.json()).toMatchObject({ updated: 1, policy: "unassigned" });
