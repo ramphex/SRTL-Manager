@@ -189,7 +189,7 @@ describe("Now Playing hub against mocked servers", () => {
       loadServers: async () => servers,
       clientIdentifier: async () => "client-1",
       loadSettings: async () => ({ geoLookup: options.geoLookup ?? false }),
-      resolveSource: async (_serverId, _mappings, filePath) => filePath?.includes("/movies/") ? { status: "local", locationName: "Home NAS", policy: "location_1" } : { status: "remote", locationName: "Debrid", policy: null },
+      resolveSource: async (_serverId, _mappings, filePath) => filePath?.includes("/movies/") ? { status: "local", locationName: "Home NAS", policy: "location_1" } : { status: "remote", locationName: "Remote storage", policy: null },
       hostMonitor: idleHost,
       timing: fastTiming
     });

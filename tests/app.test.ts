@@ -2950,11 +2950,11 @@ describe("api app", () => {
   it("blocks copy before transfer when the source name does not match the expected title", async () => {
     const cookie = await createAdminSession();
     const fixture = await insertCopySymlink({
-      itemName: "Mother Jugs and Speed (1976)",
+      itemName: "Harbor Lights and Thunder (1976)",
       kind: "remote",
       storagePolicy: "location_1",
-      relativePath: path.join("Mother Jugs and Speed (1976)", "Mother Jugs and Speed (1976).mkv"),
-      sourceRelativePath: path.join("[1+7] - Crash.1976.UNCUT.1080p", "[1+7] - Crash.1976.UNCUT.1080p.mkv"),
+      relativePath: path.join("Harbor Lights and Thunder (1976)", "Harbor Lights and Thunder (1976).mkv"),
+      sourceRelativePath: path.join("[1+7] - Wreck.1976.UNCUT.1080p", "[1+7] - Wreck.1976.UNCUT.1080p.mkv"),
       content: "wrong but valid media"
     });
 
@@ -2967,7 +2967,7 @@ describe("api app", () => {
     expect(preview.statusCode).toBe(200);
     expect(preview.json()).toMatchObject({
       totalSourceTitleBlocks: 1,
-      sourceTitleRisks: [expect.objectContaining({ linkId: fixture.id, itemName: "Mother Jugs and Speed (1976)" })]
+      sourceTitleRisks: [expect.objectContaining({ linkId: fixture.id, itemName: "Harbor Lights and Thunder (1976)" })]
     });
 
     const copy = await ctx.app.inject({
@@ -2997,8 +2997,8 @@ describe("api app", () => {
           level: "warn",
           message: "Source title mismatch blocked copy",
           data: expect.objectContaining({
-            itemName: "Mother Jugs and Speed (1976)",
-            risk: expect.objectContaining({ severity: "block", sourceName: "[1+7] - Crash.1976.UNCUT.1080p" })
+            itemName: "Harbor Lights and Thunder (1976)",
+            risk: expect.objectContaining({ severity: "block", sourceName: "[1+7] - Wreck.1976.UNCUT.1080p" })
           })
         })
       ])
@@ -5249,7 +5249,7 @@ describe("api app", () => {
     await insertMediaLink("Manual Movie");
     await insertMediaLink("Manual Show", "remote", "shows");
     await insertMediaLink("Anime Series", "remote", "anime", path.join("Anime Series", "Season 01", "episode-1.mkv"));
-    await insertMediaLink("Catfish The TV Show (2012)", "remote", "shows");
+    await insertMediaLink("Driftwood The TV Show (2012)", "remote", "shows");
     await insertStorageFile("remote", path.join("movies", "Manual Movie", "manual-movie.mkv"));
     await insertStorageFile("remote", path.join("shows", "Manual Show", "Season 01", "episode-1.mkv"));
     await insertStorageFile("remote", path.join("movies", "Orphan Only", "orphan.mkv"));

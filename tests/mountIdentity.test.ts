@@ -2,17 +2,17 @@ import { describe, expect, it } from "vitest";
 import { findMountIdentity, parseLinuxMountInfo, persistentRootIdentityMatch } from "../src/server/lib/mountIdentity";
 import type { PathRootIdentity } from "../src/shared/types";
 
-const decypharrMount = {
-  mountPoint: "/mnt/remote/realdebrid",
+const remoteMount = {
+  mountPoint: "/mnt/remote/storage",
   root: "/",
-  filesystemType: "fuse.decypharr",
-  source: "decypharr"
+  filesystemType: "fuse.remotefs",
+  source: "remotefs"
 };
 
-function rootIdentity(device: string, mount = decypharrMount): PathRootIdentity {
+function rootIdentity(device: string, mount = remoteMount): PathRootIdentity {
   return {
     available: true,
-    realPath: "/mnt/remote/realdebrid/__all__",
+    realPath: "/mnt/remote/storage/library",
     device,
     inode: "1320498586805139757",
     mount,
@@ -26,12 +26,12 @@ describe("managed root mount identity", () => {
       [
         "36 25 8:2 / / rw,relatime - ext4 /dev/sda2 rw",
         "51 36 0:51 / /mnt/local/nas rw,relatime - nfs4 192.168.1.20:/mnt/pool/media rw",
-        "65 36 0:65 / /mnt/remote/realdebrid rw,nosuid,nodev - fuse.decypharr decypharr rw",
+        "65 36 0:65 / /mnt/remote/storage rw,nosuid,nodev - fuse.remotefs remotefs rw",
         "66 36 0:66 / /mnt/media\\040pool rw - fuse.example source\\040name rw"
       ].join("\n")
     );
 
-    expect(findMountIdentity("/mnt/remote/realdebrid/__all__", mounts)).toEqual(decypharrMount);
+    expect(findMountIdentity("/mnt/remote/storage/library", mounts)).toEqual(remoteMount);
     expect(findMountIdentity("/mnt/media pool/library", mounts)).toMatchObject({ mountPoint: "/mnt/media pool", source: "source name" });
   });
 
