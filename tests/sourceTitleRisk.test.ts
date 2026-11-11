@@ -5,7 +5,7 @@ describe("source title risk", () => {
   it("blocks a source file that does not match the expected title", () => {
     const risk = evaluateSourceTitleRisk({
       expectedTitle: "Mother Jugs and Speed (1976)",
-      sourcePath: "/mnt/remote/__all__/[1+7] - Crash.1976.UNCUT.1080p/[1+7] - Crash.1976.UNCUT.1080p.mkv"
+      sourcePath: "/mnt/remote/storage/[1+7] - Crash.1976.UNCUT.1080p/[1+7] - Crash.1976.UNCUT.1080p.mkv"
     });
 
     expect(risk).toMatchObject({
@@ -19,7 +19,7 @@ describe("source title risk", () => {
   it("allows dotted release names that match the expected title", () => {
     const risk = evaluateSourceTitleRisk({
       expectedTitle: "Underworld Evolution (2006)",
-      sourcePath: "/mnt/remote/__all__/Underworld.Evolution.2006.1080p.WEB-DL/Underworld.Evolution.2006.1080p.WEB-DL.mkv"
+      sourcePath: "/mnt/remote/storage/Underworld.Evolution.2006.1080p.WEB-DL/Underworld.Evolution.2006.1080p.WEB-DL.mkv"
     });
 
     expect(risk.severity).toBe("ok");
@@ -56,7 +56,7 @@ describe("source title risk", () => {
   it("handles stylized dollar signs as s inside title words", () => {
     const risk = evaluateSourceTitleRisk({
       expectedTitle: "Love Dont Co$t a Thing (2003)",
-      sourcePath: "/mnt/remote/__all__/Love.Dont.Cost.a.Thing.2003.1080p/Love.Dont.Cost.a.Thing.2003.1080p.mkv"
+      sourcePath: "/mnt/remote/storage/Love.Dont.Cost.a.Thing.2003.1080p/Love.Dont.Cost.a.Thing.2003.1080p.mkv"
     });
 
     expect(risk.severity).toBe("ok");

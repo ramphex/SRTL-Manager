@@ -69,14 +69,14 @@ Everything from 0.1.4-beta.1 to 0.1.4-beta.7. The beta sections below have the f
 - Copies and audits check media much more strictly: source checks before every copy, and truncated or damaged files fail validation. An MKV missing only its last few KB is accepted with a warning.
 - Search is forgiving everywhere: case, punctuation, word order and small typos no longer matter.
 - The orphan review page is redesigned, and secondary buttons stand out from text across the app.
-- Disc formats such as `.vob`, `.iso` and `.img` count as video, and a link to any file counts as use. Remote orphans are deleted immediately, since debrid FUSE mounts can't hold files.
+- Disc formats such as `.vob`, `.iso` and `.img` count as video, and a link to any file counts as use. Remote orphans are deleted immediately, since some remote FUSE mounts can't hold files.
 - Purges need a complete symlink scan from the last 24 hours, and no longer ask for a typed confirmation phrase.
 - Webhook events are batched per title, symlink scans are faster on large libraries, and Recent Jobs groups repeated jobs for the same title.
 
 ### Fixed
 
 - Scans stop with a clear message when a storage root is unmounted or unreadable, instead of marking everything on it missing.
-- Deleting folders on a debrid FUSE mount works, one file at a time, and a failed purge is shown as failed with its first error.
+- Deleting folders on a remote FUSE mount works, one file at a time, and a failed purge is shown as failed with its first error.
 - Files opened for a read check are always closed, which Node.js 26 requires.
 
 ### Security
@@ -119,7 +119,7 @@ Upgrading from 0.1.3 applies database migrations up to 30 automatically. **Back 
 
 ### Fixed
 
-- Deleting folders with no video on a debrid FUSE mount failed with EIO and deleted nothing, because the mount refuses to remove a folder that still holds files. Folders are now deleted one file at a time, then the folders that held them, and a folder the mount already removed counts as gone. Only files the check right before the delete saw are touched, each with its own time limit. If one fails, the job says how many files went before it stopped.
+- Deleting folders with no video on some remote FUSE mounts failed with EIO and deleted nothing, because the mount refuses to remove a folder that still holds files. Folders are now deleted one file at a time, then the folders that held them, and a folder the mount already removed counts as gone. Only files the check right before the delete saw are touched, each with its own time limit. If one fails, the job says how many files went before it stopped.
 - A link to any file, not only video, and a link to a folder now count as use when deciding orphans and folders with no video. Files under a linked folder are no longer listed as orphans, and purges check for a link to the folder or one above it right before each delete. The dashboard's orphan counts and the storage tree still only count exact links, so they can include files under a linked folder.
 - An orphan purge job now records its first error, the file and the reason, in its progress beside the failed count, so a failed or partly failed purge can be shown as one without reading the log. The progress shape is the shared `OrphanPurgeJobProgress` type.
 

@@ -324,9 +324,9 @@ describe("orphan review labels", () => {
   });
 
   it("does not treat files loose in a virtual folder as one release", async () => {
-    const linked = await storageFile("remote", "__all__/Echo.2001.mkv");
+    const linked = await storageFile("remote", "__virtual__/Echo.2001.mkv");
     await mediaLink("movies", "Echo (2001)", "Echo (2001).mkv", linked.filePath);
-    const loose = await storageFile("remote", "__all__/Foxtrot.2002.mkv");
+    const loose = await storageFile("remote", "__virtual__/Foxtrot.2002.mkv");
     const review = await listOrphanReview(app.database.db, "remote", 7);
     expect(findItem(review.items, loose.id)).toMatchObject({ releaseStatus: "none_linked", releaseName: "Foxtrot.2002", releaseFileCount: 1 });
   });
@@ -887,9 +887,9 @@ describe("remote source deletion after copy", () => {
   });
 });
 
-// Behaves like a debrid FUSE mount: rmdir on a torrent folder that still holds files fails with EIO,
-// unlinking a file works, and the torrent folder disappears by itself once its last file is gone.
-function debridFs(torrentRoot: string, files: string[]) {
+// Behaves like some remote FUSE mounts: rmdir on a release folder that still holds files fails with EIO,
+// unlinking a file works, and the release folder disappears by itself once its last file is gone.
+function remoteMountFs(releaseRoot: string, files: string[]) {
   const remaining = new Set(files);
   let rootGone = false;
   const calls: string[] = [];
@@ -906,23 +906,23 @@ function debridFs(torrentRoot: string, files: string[]) {
       throw fail("EIO", target);
     }) as FolderDeleteFs["rmdir"]
   };
-  return { ops, calls, remaining, isGone: () => rootGone, torrentRoot };
+  return { ops, calls, remaining, isGone: () => rootGone, releaseRoot };
 }
 
-describe("folder deletes on a debrid mount", () => {
-  const torrent = "/remote/Alpha.Bravo.S01.DVD";
-  const files = [`${torrent}/Extras/notes.txt`, `${torrent}/info.nfo`, `${torrent}/cover.jpg`];
-  const contents = { files, directories: [`${torrent}/Extras`, torrent] };
+describe("folder deletes on a remote mount", () => {
+  const releaseDir = "/remote/Alpha.Bravo.S01.DVD";
+  const files = [`${releaseDir}/Extras/notes.txt`, `${releaseDir}/info.nfo`, `${releaseDir}/cover.jpg`];
+  const contents = { files, directories: [`${releaseDir}/Extras`, releaseDir] };
 
   it("unlinks each file, then counts folders the mount already removed as gone", async () => {
-    const mount = debridFs(torrent, files);
-    await deleteFolderFileByFile(torrent, contents, mount.ops);
+    const mount = remoteMountFs(releaseDir, files);
+    await deleteFolderFileByFile(releaseDir, contents, mount.ops);
     expect(mount.isGone()).toBe(true);
-    expect(mount.calls).toEqual([...files.map((file) => `unlink ${file}`), `rmdir ${torrent}/Extras`, `rmdir ${torrent}`]);
+    expect(mount.calls).toEqual([...files.map((file) => `unlink ${file}`), `rmdir ${releaseDir}/Extras`, `rmdir ${releaseDir}`]);
   });
 
   it("says how far it got when a file cannot be deleted, and leaves the folder", async () => {
-    const mount = debridFs(torrent, files);
+    const mount = remoteMountFs(releaseDir, files);
     const refusing: FolderDeleteFs = {
       ...mount.ops,
       unlink: (async (target: string) => {
@@ -930,7 +930,7 @@ describe("folder deletes on a debrid mount", () => {
         return mount.ops.unlink(target);
       }) as FolderDeleteFs["unlink"]
     };
-    await expect(deleteFolderFileByFile(torrent, contents, refusing)).rejects.toThrow(`Deleted 1 of 3 files in ${torrent}, then ${files[1]} could not be deleted (EACCES); the folder was left in place`);
+    await expect(deleteFolderFileByFile(releaseDir, contents, refusing)).rejects.toThrow(`Deleted 1 of 3 files in ${releaseDir}, then ${files[1]} could not be deleted (EACCES); the folder was left in place`);
     expect(mount.isGone()).toBe(false);
     expect(mount.calls.some((call) => call.startsWith("rmdir"))).toBe(false);
   });
@@ -944,7 +944,7 @@ describe("folder deletes on a debrid mount", () => {
         throw Object.assign(new Error(`EIO: ${target}`), { code: "EIO" });
       }) as FolderDeleteFs["rmdir"]
     };
-    await expect(deleteFolderFileByFile(torrent, contents, stubborn)).rejects.toThrow(`Deleted all 3 files in ${torrent}, but folder ${torrent}/Extras could not be removed (EIO)`);
+    await expect(deleteFolderFileByFile(releaseDir, contents, stubborn)).rejects.toThrow(`Deleted all 3 files in ${releaseDir}, but folder ${releaseDir}/Extras could not be removed (EIO)`);
   });
 
   it("purges a leftover folder through the job when the mount refuses rmdir on it", async () => {
@@ -967,7 +967,7 @@ describe("folder deletes on a debrid mount", () => {
       await fs.lstat(target);
       throw Object.assign(new Error(`EIO: i/o error, rmdir '${target}'`), { code: "EIO" });
     }) as typeof fs.rmdir);
-    // The torrent goes away by itself once its last file is unlinked.
+    // The release folder goes away by itself once its last file is unlinked.
     const unlinkSpy = vi.spyOn(fs, "unlink").mockImplementation((async (target: string) => {
       await realUnlink(target);
       const left = await realReaddir(dirPath, { recursive: true, withFileTypes: true });
@@ -1359,8 +1359,8 @@ describe("deletes that storage does not carry out", () => {
   });
 
   it("returns files a folder shows again after its delete, and only counts files it lists that cannot be opened", async () => {
-    const torrent = "/remote/Papa.Quebec.S02";
-    const files = [`${torrent}/Papa.Quebec.nfo`, `${torrent}/cover.jpg`];
+    const releaseDir = "/remote/Papa.Quebec.S02";
+    const files = [`${releaseDir}/Papa.Quebec.nfo`, `${releaseDir}/cover.jpg`];
     const base: FolderDeleteFs = {
       unlink: (async () => undefined) as FolderDeleteFs["unlink"],
       rmdir: (async (target: string) => {
@@ -1370,9 +1370,9 @@ describe("deletes that storage does not carry out", () => {
       // Another copy of the folder's files is there as soon as the last file goes.
       readdir: async () => ["Papa.Quebec.nfo", "cover.jpg"]
     };
-    await expect(deleteFolderFileByFile(torrent, { files, directories: [torrent] }, { ...base, openCheck: async () => undefined })).resolves.toEqual({ resurfaced: files.slice().reverse().sort(), unreadable: 0 });
+    await expect(deleteFolderFileByFile(releaseDir, { files, directories: [releaseDir] }, { ...base, openCheck: async () => undefined })).resolves.toEqual({ resurfaced: files.slice().reverse().sort(), unreadable: 0 });
     // Names that do not open are not there: the delete counts, and the folder refusing rmdir is not a failure.
-    await expect(deleteFolderFileByFile(torrent, { files, directories: [torrent] }, { ...base, openCheck: async (target) => Promise.reject(enoent(target)) })).resolves.toEqual({ resurfaced: [], unreadable: 2 });
+    await expect(deleteFolderFileByFile(releaseDir, { files, directories: [releaseDir] }, { ...base, openCheck: async (target) => Promise.reject(enoent(target)) })).resolves.toEqual({ resurfaced: [], unreadable: 2 });
   });
 
   it("counts a deleted file that storage still lists but cannot open as deleted, with a note", async () => {

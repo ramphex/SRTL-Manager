@@ -35,7 +35,7 @@ function streams(plexPass: boolean): NowPlayingStream[] {
       output: media({ container: "mp4", audioCodec: "aac", audioChannels: 2, bitrateKbps: 10_000 }), subtitle: { decision: "burn", codec: "pgs", language: "English" },
       transcode: { engine: "hardware", hardwareDecode: "nvdec", hardwareEncode: "nvenc", speed: 3.4, throttled: false, reasons: ["Subtitle burn-in", "Video codec hevc to h264"], reasonsDerived: true },
       bandwidth: { kbps: 10_500, kind: "nominal" }, network: { location: "wan", ip: "198.51.100.23", relayed: false, secure: true, geo: { city: "Example City", region: null, country: "Netherlands", code: "NL" } },
-      srtl: { status: "remote", locationName: "Debrid", policy: null }, stop: plexStop
+      srtl: { status: "remote", locationName: "Remote storage", policy: null }, stop: plexStop
     }),
     stream({
       sessionKey: "21", title: "Big Film", playMethod: "transcode", state: "paused", videoDecision: "copy", audioDecision: "transcode",
@@ -104,7 +104,7 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     if (url.pathname === "/api/auth/me") response = { setupRequired: false, authenticated: true, user: { id: 1, username: "integration-test", role: options.moderator ? "moderator" : "owner", mustChangePassword: false } };
     else if (url.pathname === "/api/system/path-migration") response = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") response = { required: false, phase: "completed" };
-    else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Debrid", path: "/remote" }] };
+    else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Remote storage", path: "/remote" }] };
     else if (url.pathname === "/api/settings/user-preferences") response = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.3", updateAvailable: false, status: "up_to_date", releaseUrl: null };
@@ -168,7 +168,7 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(hw).toContainText("Why (derived)");
   await expect(hw).toContainText("198.51.100.23");
   await expect(hw).toContainText("Example City, Netherlands");
-  await expect(hw).toContainText("Debrid");
+  await expect(hw).toContainText("Remote storage");
   await expect(hw).toContainText("WAN");
   const cpu = page.getByRole("article", { name: "Big Film — alex_03" });
   await expect(cpu).toContainText("Transcode (CPU)");
