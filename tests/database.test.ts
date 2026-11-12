@@ -51,7 +51,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -266,7 +266,8 @@ describe("database bootstrap", () => {
         { version: 31 },
         { version: 32 },
         { version: 33 },
-        { version: 34 }
+        { version: 34 },
+        { version: 35 }
       ]);
     } finally {
       await database.close();
@@ -475,7 +476,8 @@ describe("database bootstrap", () => {
         { version: 31, name: "worker_file_jobs" },
         { version: 32, name: "purge_delete_rounds" },
         { version: 33, name: "storage_policy_sections" },
-        { version: 34, name: "audit_state" }
+        { version: 34, name: "audit_state" },
+        { version: 35, name: "arr_rescans" }
       ]);
     } finally {
       await database.close();

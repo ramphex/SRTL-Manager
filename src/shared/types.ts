@@ -1,3 +1,4 @@
+import type { ArrRescanSummary } from "./reRequests";
 export type LinkKind = "remote" | "local" | "broken" | "other" | "non_media";
 export type MediaLinkTreeKindFilter = LinkKind | "mixed";
 
@@ -437,6 +438,8 @@ export interface CopyRetryStarted {
 export interface SymlinkCleanupOptions {
   sourceJobId: number;
   linkIds: number[];
+  // Ask Radarr or Sonarr to rescan each affected title once the symlinks are gone. Off unless chosen.
+  rescan?: boolean;
 }
 
 export interface SectionSummary {
@@ -774,7 +777,7 @@ export interface OrphanSkippedInUse {
 
 /** The progress an orphan purge or damaged file delete job records. Read it from `JobRecord.progress`; `JobRecord.status` says whether it failed. */
 export interface OrphanPurgeJobProgress {
-  options: { rootType: StorageRootType; mode: OrphanPurgeMode; total: number; reRequest: boolean; source?: "damaged" };
+  options: { rootType: StorageRootType; mode: OrphanPurgeMode; total: number; reRequest: boolean; rescan?: boolean; source?: "damaged" };
   current: number;
   total: number;
   held: number;
@@ -795,6 +798,8 @@ export interface OrphanPurgeJobProgress {
   message: string;
   // The first item that was not purged and why. Absent when nothing failed.
   firstError?: { filePath: string; message: string };
+  // What "Ask Radarr/Sonarr to rescan" queued once the deletes were done. Absent when it was off.
+  rescan?: ArrRescanSummary;
   // The first deleted item that came back, and what was found. Absent when none did.
   firstCameBack?: { filePath: string; message: string };
   // The recheck of deleted remote paths: when it runs (or ran), the delay it waited, and how far it got.

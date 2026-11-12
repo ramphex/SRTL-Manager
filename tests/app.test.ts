@@ -14,11 +14,14 @@ import type { AuditCommandRunner } from "../src/server/lib/auditor";
 import { readCopyFileIdentity, serializeCopyFileIdentity, type CopyCommandRunner, type CopyFileProgressReporter } from "../src/server/lib/copier";
 import { reconcileEnvironmentPaths } from "../src/server/lib/pathConfiguration";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
+import { createRadarrInstance, saveRadarrSettings } from "../src/server/lib/radarr";
+import { listReRequests, processReRequestWork } from "../src/server/lib/reRequests";
 import { getInventorySummary } from "../src/server/lib/scanner";
 import { bootstrapLocalStoragePolicies, normalizeTitle } from "../src/server/lib/storagePolicies";
 import type { AuditMode, SectionContentType, StoragePolicyKind } from "../src/shared/types";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 import { readSetupToken } from "./authHelpers";
+import { arrMockApiKey, closeArrMocks, fakeRadarr, mockMovie } from "./reRequestMocks";
 
 let tmpDir: string;
 let ctx: AppContext;
@@ -411,6 +414,7 @@ describe("api app", () => {
 
   afterEach(async () => {
     vi.unstubAllGlobals();
+    await closeArrMocks();
     if (typeof ctx !== "undefined") await ctx.app.close();
     if (typeof testDatabase !== "undefined") await testDatabase.cleanup();
     await fs.rm(tmpDir, { recursive: true, force: true });
@@ -3915,6 +3919,55 @@ describe("api app", () => {
     });
     const refreshed = await ctx.app.inject({ method: "GET", url: `/api/jobs/${copyJobId}/copy-failures`, headers: { cookie } });
     expect(refreshed.json()).toMatchObject({ eligibleCount: 0, items: [expect.objectContaining({ symlinkStatus: "already_missing" })] });
+  });
+
+  it("asks Radarr to rescan each title once after failed-copy symlinks are removed, only when chosen", async () => {
+    const cookie = await createAdminSession();
+    const radarr = await fakeRadarr([mockMovie(1, "Echo", "/m", "echo-part-1.mkv"), mockMovie(2, "Foxtrot", "/m", "foxtrot.mkv")], "/m");
+    const instanceId = (await createRadarrInstance(ctx.database.db, "Radarr")).settings.id;
+    await saveRadarrSettings(ctx.database.db, instanceId, { revision: 0, baseUrl: radarr.url, apiKey: arrMockApiKey, webhookSecret: "", enabled: true, localTag: "local", remoteTag: "remote", monitorOnCopy: false, mappingMode: "manual", mappings: [{ rootPath: "/m", section: "movies" }] });
+    const echoOne = await insertCopySymlink({ itemName: "Echo (2020)", kind: "remote", storagePolicy: "location_1", relativePath: "Echo (2020)/echo-part-1.mkv" });
+    const echoTwo = await insertCopySymlink({ itemName: "Echo (2020)", kind: "remote", storagePolicy: "location_1", relativePath: "Echo (2020)/echo-part-2.mkv" });
+    const foxtrot = await insertCopySymlink({ itemName: "Foxtrot (2020)", kind: "remote", storagePolicy: "location_1" });
+    const failedCopyRunner: CopyCommandRunner = {
+      ...testCopyRunner,
+      async copyFile() {
+        throw new Error("simulated transfer failure");
+      }
+    };
+    const copyJobId = await ctx.jobs.startCopy({ direction: "to_local", linkIds: [echoOne.id, echoTwo.id, foxtrot.id] });
+    await expect(runQueuedJob(copyJobId, { copyRunner: failedCopyRunner })).resolves.toMatchObject({ status: "failed" });
+    radarr.calls.length = 0;
+
+    // Off by default: the Foxtrot symlink goes and Radarr hears nothing.
+    const plain = await ctx.app.inject({ method: "POST", url: `/api/jobs/${copyJobId}/copy-failures/remove-symlinks`, headers: { cookie }, payload: { mediaLinkIds: [foxtrot.id] } });
+    expect(plain.statusCode).toBe(200);
+    const plainJob = await runQueuedJob(plain.json<{ jobId: number }>().jobId);
+    expect(plainJob).toMatchObject({ status: "completed" });
+    expect((plainJob.progress as Record<string, unknown>).rescan).toBeUndefined();
+    await processReRequestWork(ctx.database.db);
+    expect(radarr.calls).toEqual([]);
+
+    const cleanup = await ctx.app.inject({ method: "POST", url: `/api/jobs/${copyJobId}/copy-failures/remove-symlinks`, headers: { cookie }, payload: { mediaLinkIds: [echoOne.id, echoTwo.id], rescan: true } });
+    expect(cleanup.statusCode).toBe(200);
+    const cleanupJobId = cleanup.json<{ jobId: number }>().jobId;
+    await expect(ctx.jobs.getJob(cleanupJobId)).resolves.toMatchObject({ options: expect.objectContaining({ rescan: true }) });
+    await expect(runQueuedJob(cleanupJobId)).resolves.toMatchObject({
+      status: "completed",
+      progress: expect.objectContaining({
+        removed: 2,
+        message: "Symlink cleanup finished: 2 removed. Rescan asked for 1 title",
+        rescan: { titles: 1, asked: 1, coveredByReRequest: 0, notMatched: 0, failed: 0, problems: [] }
+      })
+    });
+    await expect(fs.lstat(echoOne.linkPath)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(radarr.calls).toEqual([]);
+    await processReRequestWork(ctx.database.db);
+    expect(radarr.rescans).toEqual([1]);
+    expect(radarr.searches).toEqual([]);
+    expect(radarr.deletedFiles).toEqual([]);
+    expect((await listReRequests(ctx.database.db)).items).toMatchObject([{ jobId: cleanupJobId, action: "rescan", status: "requested", title: "Echo (2020)" }]);
+    await expect(ctx.jobs.listEvents(cleanupJobId)).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ message: "Rescan sent to Radarr: Echo (2020)" })]));
   });
 
   it("does not remove an old failed symlink after a later copy succeeds", async () => {

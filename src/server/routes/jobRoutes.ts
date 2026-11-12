@@ -72,11 +72,11 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
 
   app.post("/api/jobs/:id/copy-failures/remove-symlinks", async (request, reply) => {
     const params = z.object({ id: z.coerce.number().int().positive() }).parse(request.params);
-    const body = z.object({ mediaLinkIds: z.array(z.number().int().positive()).min(1).max(10_000) }).parse(request.body);
+    const body = z.object({ mediaLinkIds: z.array(z.number().int().positive()).min(1).max(10_000), rescan: z.boolean().default(false) }).parse(request.body);
     const job = await jobs.getJob(params.id);
     if (!job) return reply.code(404).send({ error: "Copy job not found" });
     if (job.type !== "copy") return reply.code(400).send({ error: "Failed symlinks can only be removed for copy jobs" });
-    return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds) };
+    return { jobId: await jobs.startSymlinkCleanup(params.id, body.mediaLinkIds, body.rescan) };
   });
 
   app.get("/api/jobs/:id/copy-retry", async (request, reply) => {

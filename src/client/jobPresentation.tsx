@@ -14,8 +14,9 @@ import { roughDuration } from "../shared/auditEstimate";
 import { type AuditEstimate, type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { useAccess } from "./access";
+import { ArrRescanOption, ArrRescanResult } from "./reRequest";
 import { AuditPrompt, AuditStatusPrompt, canTerminateJob, copyElapsedLabel, CopyPrompt, finiteNumberFromUnknown, formatBytes, formatDate, formatNumber, formatTime, invalidateCopyJobData, recordFromUnknown, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionDisplayTitle, storageLocationName, useJobEventTimeline, useModalLifecycle, useStartCopyJob, useStorageLocations, useTerminateJobMutation, useUserPreferences } from "./appShared";
-import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyRetryStartedMessage, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle, type OrphanPurgeStatusPrompt } from "./jobPresentationUtils";
+import { auditProgressFromJob, auditProgressPercent, auditStageLabel, auditStatusDetail, basenameFromPath, copyCompletedCount, copyCompletedItemSummaries, copyCurrentItem, copyEventChips, copyFailedItemSummaries, copyOverallProgressPercent, copyProgressFromJob, copyRemainingLabel, copyRetryStartedMessage, copyStageLabel, copyStagePercent, copySymlinkedCount, copyThroughputLabel, copyTransferSpeedLabel, copyTransferSpeedSecondaryLabel, copyWorkTotalFromJob, formatAuditScope, formatCopyScope, formatScanScope, formatScopedFolderParts, formatTitleScanJobDetail, jobDurationLabel, scanFolderScopeParts, scanScopeLabels, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, arrRescanSummaryFromUnknown, selectedLinkIdsFromJobs, selectedLinkTitleSummaries, singleSelectedLinkTitle, type OrphanPurgeStatusPrompt } from "./jobPresentationUtils";
 function JobEventsHeader({
   label,
   jobId,
@@ -1169,8 +1170,9 @@ function FailedSymlinkCleanupDialog({
     () => new Set(initialSelectedIds.filter((id) => eligibleIds.includes(id)))
   );
   const [cleanupJobId, setCleanupJobId] = useState<number | null>(null);
+  const [rescan, setRescan] = useState(false);
   const cleanup = useMutation({
-    mutationFn: (mediaLinkIds: number[]) => api.removeFailedCopySymlinks(sourceJobId, mediaLinkIds),
+    mutationFn: (mediaLinkIds: number[]) => api.removeFailedCopySymlinks(sourceJobId, mediaLinkIds, rescan),
     onSuccess: (result) => {
       setCleanupJobId(result.jobId);
       queryClient.invalidateQueries({ queryKey: ["jobs"] });
@@ -1196,6 +1198,7 @@ function FailedSymlinkCleanupDialog({
   const selectedCount = selectedIds.size;
   const allSelected = eligibleIds.length > 0 && eligibleIds.every((id) => selectedIds.has(id));
   const progress = recordFromUnknown(cleanupJob.data?.progress);
+  const rescanResult = arrRescanSummaryFromUnknown(progress?.rescan);
 
   function toggleItem(mediaLinkId: number) {
     setSelectedIds((current) => {
@@ -1241,6 +1244,7 @@ function FailedSymlinkCleanupDialog({
                 <div><dt>Failed</dt><dd>{formatNumber(finiteNumberFromUnknown(progress.failed))}</dd></div>
               </dl>
             ) : null}
+            {rescanResult ? <ArrRescanResult summary={rescanResult} /> : null}
             {cleanupJob.error ? <p className="action-error">{cleanupJob.error.message}</p> : null}
           </div>
         ) : (
@@ -1287,6 +1291,7 @@ function FailedSymlinkCleanupDialog({
                 );
               })}
             </ul>
+            <ArrRescanOption checked={rescan} onChange={setRescan} disabled={cleanup.isPending} />
             {cleanup.error ? <p className="panel-message action-error">{cleanup.error.message}</p> : null}
           </>
         )}
@@ -1677,6 +1682,7 @@ export function OrphanPurgeProgressPanel({
         </p>
       ) : null}
       {progress.recheck && !compact ? <p className="panel-message purge-recheck-note">{orphanPurgeRecheckText(progress, active, timeFormat)}</p> : null}
+      {progress.rescan && !compact ? <ArrRescanResult summary={progress.rescan} /> : null}
     </div>
   );
 }

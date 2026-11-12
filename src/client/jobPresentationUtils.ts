@@ -1,4 +1,5 @@
 import type { CopyRetryStarted } from "../shared/types";
+import type { ArrRescanSummary } from "../shared/reRequests";
 import { auditOptionsFromJob, copyOptionsFromJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { type AuditMode, type AuditOptions, type AuditRunRecord, type JobEventRecord, type JobRecord, type JobStatus, type JobType, type CopyOptions, type MediaLinkRow, type ScanOptions, type ScanRunRecord, type ScanTitleScope, type StorageLocationsSettings } from "../shared/types";
 import { AuditStatusPrompt, CopyPrompt, finiteNullableNumberFromUnknown, finiteNumberFromUnknown, formatBytes, formatDuration, formatDurationMs, formatNumber, recordFromUnknown, ScanStatusPrompt, sectionDisplayTitle, storageLocationName } from "./appShared";
@@ -644,6 +645,7 @@ export type OrphanPurgeProgressView = {
   mode: "hold" | "delete";
   damaged: boolean;
   reRequest: boolean;
+  rescan: ArrRescanSummary | null;
   current: number;
   total: number;
   deleted: number;
@@ -692,6 +694,7 @@ export function orphanPurgeProgressFromJob(job: JobRecord | null): OrphanPurgePr
     mode: options?.mode === "hold" ? "hold" : "delete",
     damaged: options?.source === "damaged",
     reRequest: options?.reRequest === true,
+    rescan: arrRescanSummaryFromUnknown(progress?.rescan),
     current,
     total,
     deleted: finiteNumberFromUnknown(progress?.deleted),
@@ -717,7 +720,8 @@ export function orphanPurgeScopeText(job: JobRecord): string {
   const total = finiteNumberFromUnknown(orphanPurgeOptions(job)?.total) || progress.total;
   const kind = progress.damaged ? "damaged file" : "orphan";
   const how = progress.mode === "hold" ? "held for restore" : "deleted";
-  return `${total === 1 ? `1 ${progress.rootType} ${kind}` : `${formatNumber(total)} ${progress.rootType} ${kind}s`}, ${how}${progress.reRequest ? ", re-requested" : ""}`;
+  const rescan = orphanPurgeOptions(job)?.rescan === true;
+  return `${total === 1 ? `1 ${progress.rootType} ${kind}` : `${formatNumber(total)} ${progress.rootType} ${kind}s`}, ${how}${progress.reRequest ? ", re-requested" : ""}${rescan ? ", rescan asked" : ""}`;
 }
 
 export function orphanPurgeStatusPromptFromJob(job: JobRecord): OrphanPurgeStatusPrompt {
@@ -799,4 +803,38 @@ export function orphanPurgeRemainingLabel(job: JobRecord | null, progress: Orpha
 /** The library view that lists a purge's held files, in the orphan review's holding area tab. */
 export function orphanPurgeHoldingAreaView(rootType: "local" | "remote"): "local-orphans" | "remote-orphans" {
   return rootType === "remote" ? "remote-orphans" : "local-orphans";
+}
+
+/** The "Ask Radarr/Sonarr to rescan" result a delete job keeps in its progress, or null when the option was off. */
+export function arrRescanSummaryFromUnknown(value: unknown): ArrRescanSummary | null {
+  const record = recordFromUnknown(value);
+  if (!record) return null;
+  const problems = Array.isArray(record.problems)
+    ? record.problems.flatMap((entry) => {
+        const problem = recordFromUnknown(entry);
+        return problem && typeof problem.title === "string" && typeof problem.reason === "string"
+          ? [{ title: problem.title, reason: problem.reason, kind: problem.kind === "failed" ? ("failed" as const) : ("not_matched" as const) }]
+          : [];
+      })
+    : [];
+  return {
+    titles: finiteNumberFromUnknown(record.titles),
+    asked: finiteNumberFromUnknown(record.asked),
+    coveredByReRequest: finiteNumberFromUnknown(record.coveredByReRequest),
+    notMatched: finiteNumberFromUnknown(record.notMatched),
+    failed: finiteNumberFromUnknown(record.failed),
+    problems
+  };
+}
+
+/** "Asked Radarr or Sonarr to rescan 3 titles. 1 is left to its re-request. 1 is not in Radarr or Sonarr." */
+export function arrRescanSummaryLine(summary: ArrRescanSummary): string {
+  const titles = (count: number) => `${formatNumber(count)} ${count === 1 ? "title" : "titles"}`;
+  const isAre = (count: number) => (count === 1 ? "is" : "are");
+  return [
+    summary.asked > 0 ? `Asked Radarr or Sonarr to rescan ${titles(summary.asked)}; results are in the events.` : summary.titles > 0 ? "No rescan was sent." : "No symlink was removed, so no rescan was needed.",
+    summary.coveredByReRequest > 0 ? `${titles(summary.coveredByReRequest)} ${isAre(summary.coveredByReRequest)} left to the re-request, which already clears the deleted files.` : "",
+    summary.notMatched > 0 ? `${titles(summary.notMatched)} ${isAre(summary.notMatched)} not in Radarr or Sonarr.` : "",
+    summary.failed > 0 ? `${titles(summary.failed)} could not be sent; retry them from Re-requests once the instance is resumed.` : ""
+  ].filter(Boolean).join(" ");
 }

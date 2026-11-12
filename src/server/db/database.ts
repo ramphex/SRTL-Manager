@@ -1001,6 +1001,19 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         throw error;
       }
     }
+    if (!applied.has(35)) {
+      await client.query("BEGIN");
+      try {
+        // Rescans share the re-request table so they share its pacing. Existing rows are searches; a rescan after a symlink cleanup has no purge operation.
+        await client.query(`ALTER TABLE re_requests ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'search'`);
+        await client.query(`ALTER TABLE re_requests ALTER COLUMN operation_id DROP NOT NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (35, 'arr_rescans', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
   } finally {
     await client.query("select pg_advisory_unlock($1)", [bootstrapLockKey]).catch(() => undefined);
     client.release();
