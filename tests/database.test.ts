@@ -1,7 +1,7 @@
 import { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 import { findActiveSession, hashToken } from "../src/server/auth";
-import { openDatabase } from "../src/server/db/database";
+import { currentSchemaVersion, openDatabase } from "../src/server/db/database";
 import { createTestDatabase } from "./testDb";
 
 describe("database bootstrap", () => {
@@ -544,6 +544,41 @@ describe("database bootstrap", () => {
       ]);
     } finally {
       await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("refuses a no-migrate start without migration 35, then adds the re-request action column with existing rows as searches", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const initial = await openDatabase(testDatabase.databaseUrl);
+      try {
+        const latest = await initial.pool.query<{ version: number }>(`SELECT max(version) AS version FROM schema_migrations`);
+        // The no-migrate startup check trusts this constant, so it must name the newest migration.
+        expect(Number(latest.rows[0]!.version)).toBe(currentSchemaVersion);
+        await initial.pool.query(`INSERT INTO jobs (type, status, progress, created_at) VALUES ('orphan_purge', 'completed', '{}', now()::text)`);
+        await initial.pool.query(`INSERT INTO orphan_purge_operations (job_id, storage_file_id, root_type, target_kind, file_path, size_bytes, mtime_ms, mode, stage, created_at, updated_at) SELECT id, 1, 'local', 'damaged_file', '/example/file.mkv', 1, 1, 'delete', 'deleted', now()::text, now()::text FROM jobs`);
+        await initial.pool.query(`INSERT INTO re_requests (job_id, operation_id, section, item_name, display_name, status, created_at, updated_at) SELECT job_id, id, 'movies', 'Example (2020)', 'file.mkv', 'requested', now()::text, now()::text FROM orphan_purge_operations`);
+        // Put the schema back to migration 34.
+        await initial.pool.query(`ALTER TABLE re_requests DROP COLUMN action`);
+        await initial.pool.query(`ALTER TABLE re_requests ALTER COLUMN operation_id SET NOT NULL`);
+        await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 35`);
+      } finally {
+        await initial.close();
+      }
+
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 35\b/);
+
+      const database = await openDatabase(testDatabase.databaseUrl);
+      try {
+        await expect(database.pool.query(`SELECT action FROM re_requests`)).resolves.toMatchObject({ rows: [{ action: "search" }] });
+        const nullable = await database.pool.query<{ is_nullable: string }>(`SELECT is_nullable FROM information_schema.columns WHERE table_name = 're_requests' AND column_name = 'operation_id'`);
+        expect(nullable.rows).toEqual([{ is_nullable: "YES" }]);
+      } finally {
+        await database.close();
+      }
+      await (await openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).close();
+    } finally {
       await testDatabase.cleanup();
     }
   });
