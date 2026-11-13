@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Fastify, undici, React Query, Vite, Vitest, jsdom, Playwright and other dependencies, and the pinned registry login and CodeQL actions.
+
 ## [0.1.5-beta.3] - 2026-11-11
 
 Storage policies are set per library folder, and audits are targeted: byte compare is off by default, library-wide remote and deep audits are refused, and an optional nightly local audit is added (off by default). Database migration 33 copies each title policy to every folder that holds the title, and migration 34 adds audit columns.
