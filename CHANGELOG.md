@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.4] - 2026-11-12
+
+Deletes can ask Radarr or Sonarr to rescan the affected titles, the API and worker keep running when the database drops an idle connection, and dependencies are updated. Database migration 35 adds an action column to re-requests.
+
 ### Added
 
 - **Ask Radarr/Sonarr to rescan** when removing failed-copy symlinks from a copy job's status window and when deleting from **Library > Damaged files**. Off until ticked for that delete. Once the symlinks are gone, the instance that manages each title gets one disk rescan per movie (`RescanMovie`) or series (`RescanSeries`), however many of its symlinks went, so it shows the title as missing. Rescans share the re-request pacing for each instance. The job reports how many were asked and which titles were not matched or not sent, with the reason; a paused instance never fails the delete, and its rescans can be retried once it is resumed. A title that also gets a re-request is not rescanned, since the re-request already removes the deleted file's record. The option notes that Sonarr's "Unmonitor deleted episodes" and Radarr's "Unmonitor deleted movies" can unmonitor rescanned titles, and that a re-request keeps them monitored. Database migration 35 adds an action column to re-requests.
