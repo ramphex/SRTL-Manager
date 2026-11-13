@@ -368,9 +368,17 @@ const webhookSchema = z.object({
   episodeFiles: z.array(episodeFileReference).max(1000).optional(),
   isUpgrade: z.boolean().optional(),
   deleteReason: z.string().max(200).optional(),
-  deletedFiles: z.boolean().optional(),
+  // SeriesDelete reports whether the files were deleted (a boolean); an upgrade import lists the files it replaced.
+  // The listed files are not used: the series rescan records what the folder holds after the upgrade.
+  deletedFiles: z.union([z.boolean(), z.array(z.object({ id: z.number().int().optional(), relativePath: z.string().max(4096).optional() })).max(1000)]).optional(),
   renamedEpisodeFiles: z.array(z.object({ previousRelativePath: z.string().max(4096).optional(), relativePath: z.string().max(4096).optional() })).max(1000).optional()
 });
+
+// Top-level fields SRTL does not read. They are dropped before the event is stored, so new Sonarr fields never fail a delivery.
+export function sonarrWebhookExtraFields(payload: unknown): string[] {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return [];
+  return Object.keys(payload).filter((key) => !(key in webhookSchema.shape)).sort();
+}
 
 export async function receiveSonarrWebhook(db: Db, instanceId: string, payload: unknown): Promise<{ accepted: boolean; duplicate?: boolean }> {
   const body = webhookSchema.parse(payload);
