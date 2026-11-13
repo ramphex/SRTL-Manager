@@ -684,7 +684,7 @@ test.describe("desktop disclosure compatibility", () => {
     );
     await failedDetails.getByRole("button", { name: "Remove 2 selected symlinks", exact: true }).click();
     await cleanupDialog.getByRole("button", { name: "Remove 2 symlinks", exact: true }).click();
-    expect((await cleanupRequest).postDataJSON()).toEqual({ mediaLinkIds: [101, 102] });
+    expect((await cleanupRequest).postDataJSON()).toEqual({ mediaLinkIds: [101, 102], rescan: false });
     await expect(cleanupDialog).toContainText("Symlink cleanup finished: 2 removed");
   });
 });

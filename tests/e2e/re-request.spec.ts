@@ -79,7 +79,7 @@ test("damaged files: re-request stays off unless chosen, and says what it cannot
   expect(posts.previews).toEqual([]);
   await confirm.getByRole("button", { name: "Move to holding area" }).click();
   await expect(page.getByRole("status")).toContainText("#42");
-  expect(posts.damaged).toEqual([{ storageFileIds: [1], mode: "hold", reRequest: false }]);
+  expect(posts.damaged).toEqual([{ storageFileIds: [1], mode: "hold", reRequest: false, rescan: false }]);
 
   await page.getByRole("checkbox", { name: /Alpha/ }).check();
   await page.getByRole("checkbox", { name: /Nobody/ }).check();
@@ -95,7 +95,7 @@ test("damaged files: re-request stays off unless chosen, and says what it cannot
   await confirm.getByRole("button", { name: /Delete now/ }).click();
   await confirm.getByRole("button", { name: "Delete permanently" }).click();
   await expect.poll(() => posts.damaged.length).toBe(2);
-  expect(posts.damaged[1]).toEqual({ storageFileIds: [1, 2], mode: "delete", reRequest: true });
+  expect(posts.damaged[1]).toEqual({ storageFileIds: [1, 2], mode: "delete", reRequest: true, rescan: false });
 });
 
 test("orphan purges carry the same choice, in both the confirmation and purge all", async ({ page }) => {
