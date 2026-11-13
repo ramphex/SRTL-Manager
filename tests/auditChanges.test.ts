@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
 import { Pool } from "pg";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { endPool, first, getJsonSetting, setSetting } from "../src/server/db/database";
 import { applyAuditStateMigration, withAuditByteCompareDefaultOff } from "../src/server/db/auditStateMigration";
@@ -276,37 +276,46 @@ describe("audit changes", () => {
     for (const name of ["A", "B", "C", "D", "E"]) ids.push(await insertLocalFile(name));
     const hour = 3_600_000;
     const night1 = Date.parse("2026-11-11T01:00:00.000Z");
-    const first = clockedRunner(night1, hour, (target) => target.includes("sample-B"));
-    const worker1 = new JobWorker(ctx.database.db, { workerId: "nightly-1", logger: silentLogger, auditRunner: first.runner, now: () => first.clock.now });
-    // A 2.5 hour window at one hour per file reads three files.
-    const job1 = await ctx.jobs.startRollingAudit({ windowStart: new Date(night1).toISOString(), windowEnd: new Date(night1 + 2.5 * hour).toISOString() });
-    expect(await ctx.jobs.getJob(job1)).toMatchObject({ exclusive: false });
-    expect(await runJob(job1, worker1)).toMatchObject({ status: "completed", progress: { stopReason: "window_end", checked: 3, failed: 1 } });
-    expect(first.clock.audited).toEqual(["sample-A.mkv", "sample-B.mkv", "sample-C.mkv"]);
-    const run1 = await first_(job1);
-    expect(run1).toMatchObject({ rolling: true, stopReason: "window_end", checked: 3, failed: 1, checkedBytes: 3_000_000 });
-    expect(await storageFile(ids[0]!)).toMatchObject({ auditStatus: "pass", auditMode: "fast" });
-    expect(await storageFile(ids[3]!)).toMatchObject({ auditCheckedAt: null });
-    // Only the failure is kept as an audit result row; passes live on the file.
-    const results = await ctx.database.db.select().from(schema.auditResults).where(eq(schema.auditResults.auditRunId, run1!.id));
-    expect(results.map((result) => path.basename(result.targetPath))).toEqual(["sample-B.mkv"]);
+    // Audit results are stamped with the wall clock, so pin it to each night. Otherwise the second
+    // night's due list depends on today's date.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(night1);
+      const first = clockedRunner(night1, hour, (target) => target.includes("sample-B"));
+      const worker1 = new JobWorker(ctx.database.db, { workerId: "nightly-1", logger: silentLogger, auditRunner: first.runner, now: () => first.clock.now });
+      // A 2.5 hour window at one hour per file reads three files.
+      const job1 = await ctx.jobs.startRollingAudit({ windowStart: new Date(night1).toISOString(), windowEnd: new Date(night1 + 2.5 * hour).toISOString() });
+      expect(await ctx.jobs.getJob(job1)).toMatchObject({ exclusive: false });
+      expect(await runJob(job1, worker1)).toMatchObject({ status: "completed", progress: { stopReason: "window_end", checked: 3, failed: 1 } });
+      expect(first.clock.audited).toEqual(["sample-A.mkv", "sample-B.mkv", "sample-C.mkv"]);
+      const run1 = await first_(job1);
+      expect(run1).toMatchObject({ rolling: true, stopReason: "window_end", checked: 3, failed: 1, checkedBytes: 3_000_000 });
+      expect(await storageFile(ids[0]!)).toMatchObject({ auditStatus: "pass", auditMode: "fast" });
+      expect(await storageFile(ids[3]!)).toMatchObject({ auditCheckedAt: null });
+      // Only the failure is kept as an audit result row; passes live on the file.
+      const results = await ctx.database.db.select().from(schema.auditResults).where(eq(schema.auditResults.auditRunId, run1!.id));
+      expect(results.map((result) => path.basename(result.targetPath))).toEqual(["sample-B.mkv"]);
 
-    // The failure shows up where damaged files are listed.
-    const damaged = await listDamagedFiles(ctx.database.db);
-    expect(damaged).toEqual([expect.objectContaining({ storageFileId: ids[1], integrity: "audit_failed", audit: expect.objectContaining({ status: "fail", mode: "fast" }) })]);
+      // The failure shows up where damaged files are listed.
+      const damaged = await listDamagedFiles(ctx.database.db);
+      expect(damaged).toEqual([expect.objectContaining({ storageFileId: ids[1], integrity: "audit_failed", audit: expect.objectContaining({ status: "fail", mode: "fast" }) })]);
 
-    const night2 = night1 + 24 * hour;
-    const second = clockedRunner(night2, hour);
-    const worker2 = new JobWorker(ctx.database.db, { workerId: "nightly-2", logger: silentLogger, auditRunner: second.runner, now: () => second.clock.now });
-    const job2 = await ctx.jobs.startRollingAudit({ windowStart: new Date(night2).toISOString(), windowEnd: new Date(night2 + 4 * hour).toISOString() });
-    expect(await runJob(job2, worker2)).toMatchObject({ status: "completed", progress: { stopReason: "window_end" } });
-    // Never-audited D and E come first, then the oldest checked from the night before.
-    expect(second.clock.audited).toEqual(["sample-D.mkv", "sample-E.mkv", "sample-A.mkv", "sample-B.mkv"]);
-    // B passed this time, so it leaves the Damaged files page.
-    expect(await listDamagedFiles(ctx.database.db)).toEqual([]);
+      const night2 = night1 + 24 * hour;
+      vi.setSystemTime(night2);
+      const second = clockedRunner(night2, hour);
+      const worker2 = new JobWorker(ctx.database.db, { workerId: "nightly-2", logger: silentLogger, auditRunner: second.runner, now: () => second.clock.now });
+      const job2 = await ctx.jobs.startRollingAudit({ windowStart: new Date(night2).toISOString(), windowEnd: new Date(night2 + 4 * hour).toISOString() });
+      expect(await runJob(job2, worker2)).toMatchObject({ status: "completed", progress: { stopReason: "window_end" } });
+      // Never-audited D and E come first, then the oldest checked from the night before.
+      expect(second.clock.audited).toEqual(["sample-D.mkv", "sample-E.mkv", "sample-A.mkv", "sample-B.mkv"]);
+      // B passed this time, so it leaves the Damaged files page.
+      expect(await listDamagedFiles(ctx.database.db)).toEqual([]);
 
-    const coverage = await rollingAuditCoverage(ctx.database.db, { enabled: true, startHour: 1, windowHours: 4 }, 30, new Date(night2 + 5 * hour));
-    expect(coverage).toMatchObject({ localFiles: 5, checkedFiles: 5, neverCheckedFiles: 0, failedFiles: 0, lastRun: { jobId: job2, stopReason: "window_end" } });
+      const coverage = await rollingAuditCoverage(ctx.database.db, { enabled: true, startHour: 1, windowHours: 4 }, 30, new Date(night2 + 5 * hour));
+      expect(coverage).toMatchObject({ localFiles: 5, checkedFiles: 5, neverCheckedFiles: 0, failedFiles: 0, lastRun: { jobId: job2, stopReason: "window_end" } });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("abandons a file still being read when the window ends and checks it first next night", async () => {
