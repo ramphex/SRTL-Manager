@@ -1,8 +1,56 @@
 import { Pool } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { findActiveSession, hashToken } from "../src/server/auth";
-import { openDatabase } from "../src/server/db/database";
+import { endPool, openDatabase } from "../src/server/db/database";
 import { createTestDatabase } from "./testDb";
+
+describe("database shutdown", () => {
+  it("returns from close only after every connection has disconnected", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const database = await openDatabase(testDatabase.databaseUrl);
+      // Hold several connections at once so the pool has more than one to shut down.
+      await Promise.all(Array.from({ length: 4 }, () => database.pool.query("select pg_sleep(0.05)")));
+      const connections = database.pool.totalCount;
+      expect(connections).toBeGreaterThan(1);
+      // The pool reports "remove" only once a connection's socket has actually closed.
+      let disconnected = 0;
+      database.pool.on("remove", () => { disconnected += 1; });
+      await database.close();
+      expect(disconnected).toBe(connections);
+
+      const observer = new Pool({ connectionString: testDatabase.databaseUrl });
+      try {
+        const result = await observer.query<{ count: string }>("select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+        expect(Number(result.rows[0]?.count)).toBe(0);
+      } finally {
+        await endPool(observer);
+      }
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("keeps an idle connection cut by the server from becoming an uncaught error", async () => {
+    const testDatabase = await createTestDatabase();
+    const database = await openDatabase(testDatabase.databaseUrl);
+    const killer = new Pool({ connectionString: testDatabase.databaseUrl });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await database.pool.query("select 1");
+      await killer.query("select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+      await expect.poll(() => warn.mock.calls.some(([message]) => String(message).startsWith("Database connection lost while idle"))).toBe(true);
+      // The pool has dropped the dead connection and opens a fresh one for the next query.
+      const result = await database.pool.query<{ ok: number }>("select 1 as ok");
+      expect(result.rows[0]?.ok).toBe(1);
+    } finally {
+      warn.mockRestore();
+      await endPool(killer);
+      await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+});
 
 describe("database bootstrap", () => {
   it("fails closed when production startup skips an uninitialized schema", async () => {
@@ -159,7 +207,7 @@ describe("database bootstrap", () => {
         ["2026-08-02T21:00:00.000Z", "2026-08-02T21:01:00.000Z"]
       );
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -204,7 +252,7 @@ describe("database bootstrap", () => {
         JSON.stringify({ id: 7, storagePolicy: "assign_remote", isAssignedRemote: true })
       ]);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -312,7 +360,7 @@ describe("database bootstrap", () => {
           (4, 'location_2', now()::text)
       `);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -374,7 +422,7 @@ describe("database bootstrap", () => {
           ('scan', 'running', now()::text, now()::text, 'legacy-worker', now()::text, now()::text, '{}')
       `);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -424,7 +472,7 @@ describe("database bootstrap", () => {
       await legacyPool.query(`CREATE TABLE path_migration_items (id SERIAL PRIMARY KEY)`);
       await legacyPool.query(`INSERT INTO path_migration_items DEFAULT VALUES`);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);

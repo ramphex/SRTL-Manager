@@ -5,7 +5,7 @@ import { eq } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
-import { first, getJsonSetting, setSetting } from "../src/server/db/database";
+import { endPool, first, getJsonSetting, setSetting } from "../src/server/db/database";
 import { applyAuditStateMigration, withAuditByteCompareDefaultOff } from "../src/server/db/auditStateMigration";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
@@ -183,7 +183,7 @@ describe("audit changes", () => {
       await applyAuditStateMigration(client);
     } finally {
       client.release();
-      await pool.end();
+      await endPool(pool);
     }
     expect(await getJsonSetting(ctx.database.db, "advancedSettings", {})).toEqual({ audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false }, cleanup: { holdDays: 9 } });
   });

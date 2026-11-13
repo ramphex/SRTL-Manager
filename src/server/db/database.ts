@@ -100,7 +100,42 @@ const bootstrapLockKey = 781_889_432;
 
 function createPool(databaseUrl: string): Pool {
   const config: PoolConfig = { connectionString: databaseUrl };
-  return new Pool(config);
+  const pool = new Pool(config);
+  // An idle connection can be cut by the server (a restart, an administrator, a dropped database).
+  // The pool already discards that connection and opens a new one on demand; without a listener the
+  // error would be rethrown as an uncaught exception and take the process down.
+  pool.on("error", (error) => console.warn(`Database connection lost while idle: ${error.message}`));
+  return pool;
+}
+
+const poolCloseTimeoutMs = 5000;
+
+// pool.end() resolves once the pool has let go of its connections, not once their sockets have
+// closed. Wait for each connection to finish disconnecting, so nothing that runs next (a shutdown,
+// or a test dropping its database) meets a connection that is still half open.
+export async function endPool(pool: Pool): Promise<void> {
+  let open = pool.totalCount;
+  let onRemove: () => void = () => undefined;
+  const disconnected = new Promise<void>((resolve) => {
+    if (open === 0) return resolve();
+    onRemove = () => {
+      open -= 1;
+      if (open <= 0) resolve();
+    };
+    pool.on("remove", onRemove);
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, poolCloseTimeoutMs);
+    timer.unref();
+  });
+  try {
+    await pool.end();
+    await Promise.race([disconnected, timedOut]);
+  } finally {
+    clearTimeout(timer);
+    pool.off("remove", onRemove);
+  }
 }
 
 async function initializeDatabase(pool: Pool): Promise<void> {
@@ -1032,14 +1067,14 @@ export async function openDatabase(options: DatabaseOpenOptions | string): Promi
       warn: (message) => console.warn(message)
     });
   } catch (error) {
-    if (!suppliedPool) await pool.end().catch(() => undefined);
+    if (!suppliedPool) await endPool(pool).catch(() => undefined);
     throw error;
   }
   const db = drizzle(pool, { schema });
   return {
     pool,
     db,
-    close: () => pool.end()
+    close: () => endPool(pool)
   };
 }
 

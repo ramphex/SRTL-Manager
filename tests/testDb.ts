@@ -122,9 +122,21 @@ async function createDatabase(adminDatabaseUrl: string, databaseName: string): P
   }
 }
 
+// Give connections that are already closing time to finish before forcing anything. Terminating a
+// backend that has not yet read its client's goodbye sends that client a FATAL error, which surfaces
+// as an uncaught exception in whichever test file happens to be running.
+async function waitForBackendsToLeave(pool: Pool, databaseName: string): Promise<void> {
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const result = await pool.query<{ count: string }>("SELECT count(*) FROM pg_stat_activity WHERE datname = $1", [databaseName]);
+    if (Number(result.rows[0]?.count ?? 0) === 0) return;
+    await delay(100);
+  }
+}
+
 async function dropDatabase(adminDatabaseUrl: string, databaseName: string): Promise<void> {
   const pool = new Pool({ connectionString: adminDatabaseUrl });
   try {
+    await waitForBackendsToLeave(pool, databaseName);
     await pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1", [databaseName]);
     await pool.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);
   } finally {

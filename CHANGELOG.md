@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- The API and worker no longer stop when the database closes an idle connection, for example during a database restart. The connection is replaced on the next query and a warning is logged. Closing the database now waits until every connection has disconnected.
+
 ### Changed
 
 - Updated Fastify, undici, React Query, Vite, Vitest, jsdom, Playwright and other dependencies, and the pinned registry login and CodeQL actions.

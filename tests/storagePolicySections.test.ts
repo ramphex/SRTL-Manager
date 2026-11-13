@@ -4,7 +4,7 @@ import path from "node:path";
 import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
-import { openDatabase, setSetting } from "../src/server/db/database";
+import { endPool, openDatabase, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
@@ -66,7 +66,7 @@ describe("storage policy migration 33", () => {
         await link(5, "movies", "Charlies Story (2022)", "location_2");
         await link(6, "movies", "Delta (2023)", "unassigned");
       } finally {
-        await legacy.end();
+        await endPool(legacy);
       }
 
       const migrated = await openDatabase(testDatabase.databaseUrl);
