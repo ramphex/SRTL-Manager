@@ -21,7 +21,9 @@ import {
   type CopyProgressUpdate
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
-import { executeOrphanPurgeOperation, extraSymlinksForPurge, findCameBack, KeepsComingBackError, markCameBack, maxDeleteRounds, noteListedOnly, operationsForJob, recheckCandidates, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness } from "./orphanPurge";
+import { deletedTitleLinksForJob, executeOrphanPurgeOperation, extraSymlinksForPurge, findCameBack, KeepsComingBackError, markCameBack, maxDeleteRounds, noteListedOnly, operationsForJob, recheckCandidates, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness, titleRelativePath } from "./orphanPurge";
+import { queueRescansForJob, rescanSummaryText, titlesWithReRequest, type DeletedTitleLinks } from "../lib/reRequests";
+import type { ArrRescanSummary } from "../../shared/reRequests";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
@@ -504,7 +506,7 @@ function readSymlinkCleanupOptions(job: JobRecord, frozenLinkIds?: number[]): Sy
   if (!Number.isInteger(sourceJobId) || Number(sourceJobId) < 1 || !frozenLinkIds?.length) {
     throw new Error("Symlink cleanup job is missing its immutable source job or selected links");
   }
-  return { sourceJobId: Number(sourceJobId), linkIds: frozenLinkIds };
+  return { sourceJobId: Number(sourceJobId), linkIds: frozenLinkIds, rescan: options?.rescan === true };
 }
 
 function normalizeCopyOptionsFromProgress(options: StoredCopyOptions): StoredCopyOptions {
@@ -3165,7 +3167,7 @@ export class JobRunner {
   }
 
   // Damaged files can still be linked, so this runs as an orphan purge job whose operations also remove the file's symlinks.
-  async startDamagedFilePurge(storageFileIds: number[], mode: OrphanPurgeMode, reRequest = false): Promise<number> {
+  async startDamagedFilePurge(storageFileIds: number[], mode: OrphanPurgeMode, reRequest = false, rescan = false): Promise<number> {
     const requested = [...new Set(storageFileIds)];
     if (requested.length === 0 || requested.some((id) => !Number.isInteger(id) || id < 1)) throw new AdmissionError("Choose at least one damaged file to delete");
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
@@ -3201,7 +3203,7 @@ export class JobRunner {
         claims.push({ resourceType: "media", resourceKey: String(link.id), access: "exclusive" }, { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]), access: "shared" });
       }
       const total = eligible.length;
-      const options = { rootType: "local" as const, mode, total, reRequest, source: "damaged" };
+      const options = { rootType: "local" as const, mode, total, reRequest, ...(rescan ? { rescan: true } : {}), source: "damaged" };
       return {
         progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to delete damaged files" },
         options,
@@ -3220,7 +3222,7 @@ export class JobRunner {
     });
   }
 
-  async startSymlinkCleanup(sourceJobId: number, linkIds: number[]): Promise<number> {
+  async startSymlinkCleanup(sourceJobId: number, linkIds: number[], rescan = false): Promise<number> {
     const requestedLinkIds = [...new Set(linkIds)];
     if (requestedLinkIds.length === 0 || requestedLinkIds.some((id) => !Number.isInteger(id) || id < 1)) {
       throw new ConflictError("Choose at least one identifiable failed symlink to remove");
@@ -3252,7 +3254,7 @@ export class JobRunner {
       const links = eligibleFailures.map((failure) => failure.link!);
       const paths = await getJsonSetting<PathsSettings>(transaction, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
       if (!paths.symlinkDir) throw new Error("Symlink path setting is incomplete");
-      const options: SymlinkCleanupOptions = { sourceJobId, linkIds: requestedLinkIds };
+      const options: SymlinkCleanupOptions = { sourceJobId, linkIds: requestedLinkIds, ...(rescan ? { rescan: true } : {}) };
       return {
         progress: {
           options,
@@ -3942,7 +3944,7 @@ export class JobWorker {
       return;
     }
     if (job.type === "orphan_purge") {
-      await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; source?: string }>(job) ?? {});
+      await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; rescan?: boolean; source?: string }>(job) ?? {});
       return;
     }
     if (job.type === "orphan_restore") {
@@ -4725,7 +4727,7 @@ export class JobWorker {
     }
   }
 
-  private async runOrphanPurgeJob(ctx: JobContext, jobOptions: { reRequest?: boolean; source?: string }): Promise<void> {
+  private async runOrphanPurgeJob(ctx: JobContext, jobOptions: { reRequest?: boolean; rescan?: boolean; source?: string }): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     const cleanup = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).cleanup;
     const holdDays = cleanup.holdDays;
@@ -4750,21 +4752,25 @@ export class JobWorker {
     const total = operations.length;
     const reRequest = jobOptions.reRequest === true;
     const damaged = jobOptions.source === "damaged";
+    // Orphans have no library symlink, so Radarr and Sonarr never saw them and a rescan has nothing to find.
+    const rescan = damaged && jobOptions.rescan === true;
+    let rescanSummary: ArrRescanSummary | null = null;
     const name = damaged ? "Damaged file delete" : "Orphan purge";
     const noun = damaged ? "Damaged file" : "Orphan";
     const setProgress = (stage: OrphanPurgeJobProgress["stage"], message: string) => {
       const progress: OrphanPurgeJobProgress = {
-        options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(damaged ? { source: "damaged" as const } : {}) },
+        options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(rescan ? { rescan } : {}), ...(damaged ? { source: "damaged" as const } : {}) },
         current, total, held, deleted, alreadyMissing, failed, cameBack, resurfacedDeleted, keepsComingBack, listedNotReadable, remaining: Math.max(0, total - current), stage, message,
         ...(firstError ? { firstError } : {}),
         ...(firstCameBack ? { firstCameBack } : {}),
-        ...(recheck ? { recheck } : {})
+        ...(recheck ? { recheck } : {}),
+        ...(rescanSummary ? { rescan: rescanSummary } : {})
       };
       return ctx.setProgress(progress);
     };
 
     await setProgress("preparing", `Preparing ${name.toLowerCase()}`);
-    await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest });
+    await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest, ...(rescan ? { rescan } : {}) });
     for (const operation of operations) {
       if (operation.stage !== "planned") continue;
       if (await ctx.isCancelled()) break;
@@ -4907,6 +4913,8 @@ export class JobWorker {
     // Written once the deletes and the recheck are done; the worker's re-request pass takes it from here, whatever this job's final status is.
     // Nothing is requested for a file that came back.
     if (reRequest) await ctx.withLeaseDb((leaseDb) => queueReRequestsForJob(leaseDb, ctx.jobId));
+    // A re-request already clears its file from Radarr or Sonarr, so those titles get no separate rescan.
+    if (rescan) rescanSummary = await this.queueArrRescans(ctx, (leaseDb) => deletedTitleLinksForJob(leaseDb, ctx.jobId), reRequest ? (leaseDb) => titlesWithReRequest(leaseDb, ctx.jobId) : undefined);
 
     const counts = { held, deleted, alreadyMissing, failed, cameBack, resurfacedDeleted, keepsComingBack, listedNotReadable, total };
     if (await ctx.isCancelled()) {
@@ -4933,8 +4941,21 @@ export class JobWorker {
       if (partial) throw new PartialJobFailureError(message);
       throw new Error(message);
     }
-    await setProgress("completed", `${name} finished: ${summary || "nothing to do"}`);
+    await setProgress("completed", `${name} finished: ${summary || "nothing to do"}${rescanSummary ? `. ${rescanSummaryText(rescanSummary)}` : ""}`);
     await ctx.event("info", `${name} finished`, counts);
+  }
+
+  // Queues "Ask Radarr/Sonarr to rescan" for titles whose symlinks a job removed. Whatever happens here, the delete stands.
+  private async queueArrRescans(ctx: JobContext, collect: (db: DbExecutor) => Promise<DeletedTitleLinks[]>, covered?: (db: DbExecutor) => Promise<Set<string>>): Promise<ArrRescanSummary | null> {
+    try {
+      const summary = await ctx.withLeaseDb(async (leaseDb) => queueRescansForJob(leaseDb, ctx.jobId, await collect(leaseDb), covered ? await covered(leaseDb) : undefined));
+      await ctx.event(summary.failed || summary.notMatched ? "warn" : "info", rescanSummaryText(summary), summary);
+      return summary;
+    } catch (error: unknown) {
+      if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+      await ctx.event("warn", `Radarr and Sonarr were not asked to rescan: ${errorMessage(error)}. The delete itself is done.`, {});
+      return null;
+    }
   }
 
   private async runOrphanRestoreJob(ctx: JobContext, jobOptions: { operationIds?: unknown }): Promise<void> {
@@ -5035,6 +5056,7 @@ export class JobWorker {
     let failed = operations.filter((operation) => operation.stage === "failed").length;
     let current = removed + alreadyMissing + failed;
     const total = operations.length;
+    let rescanSummary: ArrRescanSummary | null = null;
     const setProgress = (stage: string, message: string) =>
       ctx.setProgress({
         current,
@@ -5045,7 +5067,8 @@ export class JobWorker {
         remaining: Math.max(0, total - current),
         stage,
         message,
-        sourceJobId: options.sourceJobId
+        sourceJobId: options.sourceJobId,
+        ...(rescanSummary ? { rescan: rescanSummary } : {})
       });
 
     await setProgress("preparing", "Preparing failed-copy symlink cleanup");
@@ -5141,6 +5164,19 @@ export class JobWorker {
       }
     }
 
+    // Every symlink that is gone now, including one that was already missing: Radarr or Sonarr may still list its file.
+    if (options.rescan) {
+      rescanSummary = await this.queueArrRescans(ctx, async (leaseDb) => {
+        const done = await leaseDb
+          .select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, relativePath: schema.mediaLinks.relativePath })
+          .from(schema.symlinkCleanupOperations)
+          .innerJoin(schema.mediaLinks, eq(schema.mediaLinks.id, schema.symlinkCleanupOperations.mediaLinkId))
+          .where(and(eq(schema.symlinkCleanupOperations.jobId, ctx.jobId), inArray(schema.symlinkCleanupOperations.stage, ["removed", "already_missing"])));
+        return done.map((link) => ({ section: link.section, itemName: link.itemName, fileNames: [titleRelativePath(link.relativePath, link.section, link.itemName)] }));
+      });
+    }
+    const rescanNote = rescanSummary ? `. ${rescanSummaryText(rescanSummary)}` : "";
+
     if (await ctx.isCancelled()) {
       await setProgress("cancelled", "Symlink cleanup stopped; completed removals were retained");
       await ctx.event("warn", "Failed-copy symlink cleanup stopped; completed removals were retained", { removed, alreadyMissing, failed, total });
@@ -5149,14 +5185,14 @@ export class JobWorker {
     if (failed > 0) {
       const partial = removed + alreadyMissing > 0;
       const message = partial
-        ? `Symlink cleanup partially failed: ${failed} of ${total} symlinks were not removed`
+        ? `Symlink cleanup partially failed: ${failed} of ${total} symlinks were not removed${rescanNote}`
         : `Symlink cleanup failed: ${failed} of ${total} symlinks were not removed`;
       await setProgress(partial ? "partially_failed" : "failed", message);
       await ctx.event(partial ? "warn" : "error", message, { sourceJobId: options.sourceJobId, removed, alreadyMissing, failed, total });
       if (partial) throw new PartialJobFailureError(message);
       throw new Error(message);
     }
-    await setProgress("completed", `Symlink cleanup finished: ${removed} removed${alreadyMissing > 0 ? `, ${alreadyMissing} already missing` : ""}`);
+    await setProgress("completed", `Symlink cleanup finished: ${removed} removed${alreadyMissing > 0 ? `, ${alreadyMissing} already missing` : ""}${rescanNote}`);
     await ctx.event("info", "Failed-copy symlink cleanup finished", { sourceJobId: options.sourceJobId, removed, alreadyMissing, failed, total });
   }
 

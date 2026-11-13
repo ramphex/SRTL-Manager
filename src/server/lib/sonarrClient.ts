@@ -119,4 +119,10 @@ export class SonarrClient {
   async searchEpisodes(episodeIds: number[]): Promise<number> {
     return (await this.read("command", commandSchema, "POST", { name: "EpisodeSearch", episodeIds })).id;
   }
+
+  // Rescans this one series' folder on disk; Sonarr has no per-episode rescan. Without an id Sonarr rescans every series, so one is required.
+  async rescanSeries(seriesId: number): Promise<number> {
+    if (!Number.isInteger(seriesId) || seriesId < 1) throw new Error("A rescan needs the series' Sonarr id.");
+    return (await this.read("command", commandSchema, "POST", { name: "RescanSeries", seriesId })).id;
+  }
 }

@@ -66,6 +66,10 @@ Deleting a file from **Library > Damaged files** or an orphan review can also as
 - A name with no episode number, such as a daily show, needs Sonarr to still have its record. The confirmation asks Sonarr about these before the delete.
 - Only those episodes are monitored. **The series is never changed.** If the series is unmonitored, the search still runs because you asked for it, and the result says only this search will look for the episode.
 
+## Asking Sonarr To Rescan After A Delete
+
+Removing failed-copy symlinks and deleting from **Library > Damaged files** can also ask Sonarr to rescan, as [the Radarr page](radarr.md#asking-radarr-to-rescan-after-a-delete) describes. Sonarr has no per-episode rescan, so SRTL sends **one `RescanSeries` per series**, however many of its episodes' symlinks went. If Sonarr's **Unmonitor Deleted Episodes** setting is on, the rescan can unmonitor those episodes. A re-request keeps them monitored, and a series that also gets a re-request is not rescanned.
+
 ## Media Checks Before Copying
 
 Before copying an episode, SRTL asks the instance that owns the folder for that series' episode files. When the file being copied matches a Sonarr episode file by path (or, failing that, by a unique file name), Sonarr's recorded size is used to reject partial files, as Radarr's is for movies. Samples and extras have no Sonarr size and are checked as usual. Episode lists are cached for a minute, so copying a whole season asks Sonarr once.

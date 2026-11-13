@@ -202,7 +202,7 @@ export const api = {
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
   purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
-  deleteDamagedFiles: (body: { storageFileIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
+  deleteDamagedFiles: (body: { storageFileIds: number[]; mode: OrphanPurgeMode; reRequest: boolean; rescan: boolean }) =>
     request<{ jobId: number }>("/api/damaged-files/delete", { method: "POST", body: JSON.stringify(body) }),
   reRequests: () => request<ReRequestList>("/api/re-requests"),
   previewReRequests: (storageFileIds: number[]) => request<ReRequestPreview>("/api/re-requests/preview", { method: "POST", body: JSON.stringify({ storageFileIds }) }),
@@ -249,10 +249,10 @@ export const api = {
   copyRetryPlan: (id: number) => request<CopyRetryPlan>(`/api/jobs/${id}/copy-retry`),
   retryFailedCopies: (id: number, choices: { replaceExisting?: boolean; deleteRemoteSources?: boolean } = {}) =>
     request<CopyRetryStarted>(`/api/jobs/${id}/copy-retry`, { method: "POST", body: JSON.stringify(choices) }),
-  removeFailedCopySymlinks: (id: number, mediaLinkIds: number[]) =>
+  removeFailedCopySymlinks: (id: number, mediaLinkIds: number[], rescan = false) =>
     request<{ jobId: number }>(`/api/jobs/${id}/copy-failures/remove-symlinks`, {
       method: "POST",
-      body: JSON.stringify({ mediaLinkIds })
+      body: JSON.stringify({ mediaLinkIds, rescan })
     }),
   terminateJob: (id: number) => request<{ ok: true; jobId: number }>(`/api/jobs/${id}/terminate`, { method: "POST" }),
   jobEvents: (id: number, limit = 100) => request<JobEventRecord[]>(`/api/jobs/${id}/events?limit=${limit}`),

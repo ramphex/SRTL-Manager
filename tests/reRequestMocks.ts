@@ -11,8 +11,9 @@ export interface FakeArr {
   failSearch: boolean;
   offline: boolean;
 }
-export interface FakeRadarr extends FakeArr { movies: RadarrMovie[]; searches: number[][]; deletedFiles: number[] }
-export interface FakeSonarr extends FakeArr { series: SonarrSeries[]; files: SonarrEpisodeFile[]; episodes: SonarrEpisode[]; searches: number[][]; deletedFiles: number[]; monitorEdits: Array<{ episodeIds: number[]; monitored: boolean }>; seriesEdits: unknown[] }
+// `rescans` holds the id each rescan command named, or null for one that named none, which would rescan everything.
+export interface FakeRadarr extends FakeArr { movies: RadarrMovie[]; searches: number[][]; rescans: Array<number | null>; deletedFiles: number[] }
+export interface FakeSonarr extends FakeArr { series: SonarrSeries[]; files: SonarrEpisodeFile[]; episodes: SonarrEpisode[]; searches: number[][]; rescans: Array<number | null>; deletedFiles: number[]; monitorEdits: Array<{ episodeIds: number[]; monitored: boolean }>; seriesEdits: unknown[] }
 
 const servers: FastifyInstance[] = [];
 
@@ -36,7 +37,7 @@ export function mockMovie(id: number, title: string, rootFolder: string, fileNam
 export async function fakeRadarr(movies: RadarrMovie[], rootFolder: string): Promise<FakeRadarr> {
   const server = fastify();
   servers.push(server);
-  const fake: FakeRadarr = { url: "", calls: [], failSearch: false, offline: false, movies, searches: [], deletedFiles: [] };
+  const fake: FakeRadarr = { url: "", calls: [], failSearch: false, offline: false, movies, searches: [], rescans: [], deletedFiles: [] };
   guarded(server, fake);
   server.get("/api/v3/system/status", async () => ({ appName: "Radarr", version: "6.0.0" }));
   server.get("/api/v3/rootfolder", async () => [{ path: rootFolder }]);
@@ -54,7 +55,11 @@ export async function fakeRadarr(movies: RadarrMovie[], rootFolder: string): Pro
     fake.deletedFiles.push(Number(request.params.id));
     return {};
   });
-  server.post<{ Body: { name: string; movieIds: number[] } }>("/api/v3/command", async (request, reply) => {
+  server.post<{ Body: { name: string; movieIds: number[]; movieId?: number } }>("/api/v3/command", async (request, reply) => {
+    if (request.body.name === "RescanMovie") {
+      fake.rescans.push(request.body.movieId ?? null);
+      return reply.code(201).send({ id: 800 + fake.rescans.length, name: request.body.name, status: "queued" });
+    }
     if (fake.failSearch || request.body.name !== "MoviesSearch") return reply.code(500).send({ error: "nope" });
     fake.searches.push(request.body.movieIds);
     return reply.code(201).send({ id: 900 + fake.searches.length, name: request.body.name, status: "queued" });
@@ -66,7 +71,7 @@ export async function fakeRadarr(movies: RadarrMovie[], rootFolder: string): Pro
 export async function fakeSonarr(series: SonarrSeries[], rootFolder: string): Promise<FakeSonarr> {
   const server = fastify();
   servers.push(server);
-  const fake: FakeSonarr = { url: "", calls: [], failSearch: false, offline: false, series, files: [], episodes: [], searches: [], deletedFiles: [], monitorEdits: [], seriesEdits: [] };
+  const fake: FakeSonarr = { url: "", calls: [], failSearch: false, offline: false, series, files: [], episodes: [], searches: [], rescans: [], deletedFiles: [], monitorEdits: [], seriesEdits: [] };
   guarded(server, fake);
   server.get("/api/v3/system/status", async () => ({ appName: "Sonarr", version: "4.0.15" }));
   server.get("/api/v3/rootfolder", async () => [{ path: rootFolder }]);
@@ -87,7 +92,11 @@ export async function fakeSonarr(series: SonarrSeries[], rootFolder: string): Pr
     for (const episode of fake.episodes.filter((entry) => request.body.episodeIds.includes(entry.id))) episode.monitored = request.body.monitored;
     return [];
   });
-  server.post<{ Body: { name: string; episodeIds: number[] } }>("/api/v3/command", async (request, reply) => {
+  server.post<{ Body: { name: string; episodeIds: number[]; seriesId?: number } }>("/api/v3/command", async (request, reply) => {
+    if (request.body.name === "RescanSeries") {
+      fake.rescans.push(request.body.seriesId ?? null);
+      return reply.code(201).send({ id: 600 + fake.rescans.length, name: request.body.name, status: "queued" });
+    }
     if (fake.failSearch || request.body.name !== "EpisodeSearch") return reply.code(500).send({ error: "nope" });
     fake.searches.push(request.body.episodeIds);
     return reply.code(201).send({ id: 700 + fake.searches.length, name: request.body.name, status: "queued" });

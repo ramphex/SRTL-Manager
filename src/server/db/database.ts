@@ -34,7 +34,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 34;
+export const currentSchemaVersion = 35;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -1030,6 +1030,19 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // Per-file audit state for the nightly rolling audit, and byte compare off for audits that never chose it.
         await applyAuditStateMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (34, 'audit_state', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(35)) {
+      await client.query("BEGIN");
+      try {
+        // Rescans share the re-request table so they share its pacing. Existing rows are searches; a rescan after a symlink cleanup has no purge operation.
+        await client.query(`ALTER TABLE re_requests ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'search'`);
+        await client.query(`ALTER TABLE re_requests ALTER COLUMN operation_id DROP NOT NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (35, 'arr_rescans', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

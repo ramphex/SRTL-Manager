@@ -21,15 +21,16 @@ export function registerDamagedRoutes(app: FastifyInstance, db: Db, jobs: JobRun
       .object({
         storageFileIds: z.array(z.number().int().positive()).min(1, "Choose at least one damaged file to delete").max(50_000),
         mode: z.enum(["hold", "delete"]),
-        reRequest: z.boolean().default(false)
+        reRequest: z.boolean().default(false),
+        rescan: z.boolean().default(false)
       })
       .parse(request.body);
-    const jobId = await jobs.startDamagedFilePurge(body.storageFileIds, body.mode, body.reRequest);
+    const jobId = await jobs.startDamagedFilePurge(body.storageFileIds, body.mode, body.reRequest, body.rescan);
     await recordActionAudit(db, request, {
       action: body.mode === "delete" ? "damaged.delete" : "damaged.hold",
-      summary: `${body.mode === "delete" ? "Deleted" : "Held"} ${body.storageFileIds.length} damaged file(s)${body.reRequest ? " and asked to re-request them" : ""}`,
+      summary: `${body.mode === "delete" ? "Deleted" : "Held"} ${body.storageFileIds.length} damaged file(s)${body.reRequest ? " and asked to re-request them" : ""}${body.rescan ? " and asked Radarr or Sonarr to rescan" : ""}`,
       jobId,
-      targets: { jobId, mode: body.mode, reRequest: body.reRequest, storageFileIds: body.storageFileIds }
+      targets: { jobId, mode: body.mode, reRequest: body.reRequest, rescan: body.rescan, storageFileIds: body.storageFileIds }
     });
     return { jobId };
   });

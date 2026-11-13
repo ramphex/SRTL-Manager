@@ -8016,6 +8016,10 @@ button.danger-button:hover:not(:disabled) {
 .re-request-option { margin: 10px 0; }
 .re-request-option .checkbox-row { align-items: center; display: flex; gap: 8px; font-weight: 600; }
 .re-request-option .muted { margin: 4px 0 0; font-size: 13px; }
+.arr-rescan-result { margin: 10px 0 0; font-size: 13px; }
+.arr-rescan-result p { margin: 0; }
+.arr-rescan-result ul { margin: 6px 0 0; padding-left: 18px; }
+.re-request-action { margin-left: 6px; }
 .re-request-preview { margin-top: 8px; font-size: 13px; overflow-wrap: anywhere; }
 .re-request-preview p { margin: 0 0 4px; }
 .re-request-preview ul { margin: 0; padding-left: 18px; }

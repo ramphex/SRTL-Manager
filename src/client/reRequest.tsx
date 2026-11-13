@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { LoaderCircle, RotateCcw } from "lucide-react";
-import type { ReRequestPreview, ReRequestRecord, ReRequestStatus } from "../shared/reRequests";
+import type { ArrRescanSummary, ReRequestPreview, ReRequestRecord, ReRequestStatus } from "../shared/reRequests";
 import { api } from "./api";
 import { formatDate, formatNumber } from "./appShared";
+import { arrRescanSummaryLine } from "./jobPresentationUtils";
 
 const previewIdLimit = 50_000;
 
@@ -75,17 +76,56 @@ export function ReRequestOption({ storageFileIds, checked, onChange, disabled = 
   );
 }
 
+export const rescanOptionLabel = "Ask Radarr/Sonarr to rescan";
+export const rescanExplanation = "After the delete, each affected movie or series gets one disk rescan, so Radarr or Sonarr shows it as missing.";
+export const rescanUnmonitorNote = "If Sonarr's \"Unmonitor deleted episodes\" or Radarr's \"Unmonitor deleted movies\" is on, the rescan can unmonitor them. Re-request keeps them monitored.";
+export const rescanWithReRequestNote = "Titles that also get a re-request skip the rescan: the re-request already clears the deleted files from Radarr or Sonarr.";
+
+/** The per-delete choice to have Radarr or Sonarr rescan the titles whose symlinks go. Off unless ticked. */
+export function ArrRescanOption({ checked, onChange, disabled = false, withReRequest = false }: { checked: boolean; onChange: (checked: boolean) => void; disabled?: boolean; withReRequest?: boolean }) {
+  return (
+    <div className="re-request-option arr-rescan-option">
+      <label className="checkbox-row">
+        <input type="checkbox" checked={checked} disabled={disabled} onChange={(event) => onChange(event.target.checked)} />
+        <span>{rescanOptionLabel}</span>
+      </label>
+      <p className="muted">{rescanExplanation}</p>
+      <p className="muted">{rescanUnmonitorNote}</p>
+      {checked && withReRequest ? <p className="muted">{rescanWithReRequestNote}</p> : null}
+    </div>
+  );
+}
+
+/** What a finished delete job did with the rescan option, with the first titles that were not matched or not sent. */
+export function ArrRescanResult({ summary }: { summary: ArrRescanSummary }) {
+  return (
+    <div className="arr-rescan-result" role="status">
+      <p>{arrRescanSummaryLine(summary)}</p>
+      {summary.problems.length > 0 ? (
+        <ul>
+          {summary.problems.map((problem) => (
+            <li key={`${problem.kind}:${problem.title}`}>
+              <strong>{problem.title}</strong>: {problem.reason}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+    </div>
+  );
+}
+
 function ReRequestRow({ item, busy, onRetry }: { item: ReRequestRecord; busy: boolean; onRetry: (id: number) => void }) {
   return (
     <tr>
       <td>
         <strong>{item.title ?? item.displayName}</strong>
         {item.episodes ? ` ${item.episodes}` : ""}
+        {item.action === "rescan" ? <span className="pill pill-info re-request-action">Rescan</span> : null}
         <span className="orphan-path">{item.displayName}</span>
       </td>
       <td>{item.instanceName ?? "-"}</td>
       <td>
-        <span data-status={item.status}>{statusLabels[item.status]}</span>
+        <span data-status={item.status}>{item.action === "rescan" && item.status === "requested" ? "Rescan sent" : statusLabels[item.status]}</span>
         {item.message ? <span className={item.status === "failed" ? "orphan-protected re-request-error" : "orphan-path"}>{item.message}</span> : null}
         {item.previousMonitored === false && item.status === "requested" ? <span className="orphan-path">Was unmonitored; monitored now.</span> : null}
       </td>
