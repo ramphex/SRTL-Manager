@@ -478,6 +478,99 @@ describe("Sonarr webhooks", () => {
     expect((await getSonarrState(app.database.db, id)).events[0]?.jobStatus).toBe("completed");
   });
 
+  // Shaped after Sonarr v4's Download (On File Import / On File Upgrade) notification. Titles and paths are invented.
+  const fileFields = (id: number, relativePath: string, quality = "WEBDL-1080p") => ({
+    id, relativePath, path: `/tv/Alpha (2020)/${relativePath}`, quality, qualityVersion: 1, releaseGroup: "EXAMPLE", sceneName: `Alpha.S01.${quality}-EXAMPLE`, size: 16, dateAdded: "2026-01-02T03:04:05Z",
+    languages: [{ id: 1, name: "English" }], mediaInfo: { audioChannels: 5.1, audioCodec: "EAC3", audioLanguages: ["eng"], height: 1080, width: 1920, subtitles: [], videoCodec: "h264", videoDynamicRange: "", videoDynamicRangeType: "" }, sourcePath: `/downloads/Alpha.S01.${quality}-EXAMPLE/${path.posix.basename(relativePath)}`
+  });
+  const episodeFields = (episode: number) => ({ id: 100 + episode, episodeNumber: episode, seasonNumber: 1, title: `Episode ${episode}`, overview: "An invented episode.", airDate: "2020-01-0" + episode, airDateUtc: `2020-01-0${episode}T01:00:00Z`, seriesId: 1, tvdbId: 9000 + episode });
+  const v4Import = (extra: Record<string, unknown>) => ({
+    eventType: "Download", instanceName: "Sonarr", applicationUrl: "",
+    series: { id: 1, title: "Alpha", titleSlug: "alpha", path: "/tv/Alpha (2020)", tvdbId: 501, tvMazeId: 0, tmdbId: 0, imdbId: "", type: "standard", year: 2020, genres: ["Drama"], images: [], tags: ["local"], originalLanguage: { id: 1, name: "English" } },
+    isUpgrade: false, downloadClient: "Example Client", downloadClientType: "Example", downloadId: "EXAMPLEDOWNLOADID0001",
+    customFormatInfo: { customFormats: [{ id: 3, name: "Example Format" }], customFormatScore: 10 },
+    release: { quality: "Bluray-1080p", qualityVersion: 1, releaseGroup: "EXAMPLE", releaseTitle: "Alpha.S01E01.1080p.BluRay-EXAMPLE", indexer: "Example Indexer", size: 16, customFormatScore: 10, customFormats: ["Example Format"], languages: [{ id: 1, name: "English" }], indexerFlags: [] },
+    ...extra
+  });
+  // Links the last scan saw; a link that disappeared stays recorded with missingSince set.
+  const linkPaths = async () => (await app.database.db.select().from(schema.mediaLinks)).filter((link) => !link.missingSince).map((link) => link.relativePath).sort();
+  const runScans = async () => {
+    await dueEvents();
+    await processSonarrWork(app.database.db);
+    const worker = new JobWorker(app.database.db, { workerId: "sonarr-webhook-scan", logger: quiet });
+    while (await worker.runOnce()) { /* drain queued scans */ }
+  };
+
+  it("accepts an upgrade import that lists the replaced file and rescans the series", async () => {
+    const { hd, id } = await connected();
+    await episodeLink("shows", itemName, "Season 01/Alpha - S01E01.mkv");
+    const first = await post(id, v4Import({ episodes: [episodeFields(1)], episodeFile: fileFields(101, "Season 01/Alpha - S01E01.mkv") }));
+    expect(first.statusCode).toBe(202);
+    await runScans();
+    expect(await linkPaths()).toEqual([`${itemName}/Season 01/Alpha - S01E01.mkv`]);
+
+    // Sonarr replaces the file: the old one is gone, the better one has a new file id.
+    await fs.rm(path.join(root, "links", "shows", itemName, "Season 01/Alpha - S01E01.mkv"));
+    await episodeLink("shows", itemName, "Season 01/Alpha - S01E01 Bluray-1080p.mkv");
+    hd.files.splice(hd.files.findIndex((file) => file.id === 101), 1, { id: 150, seriesId: 1, relativePath: "Season 01/Alpha - S01E01 Bluray-1080p.mkv", size: 16 });
+    const upgrade = await post(id, v4Import({
+      isUpgrade: true,
+      episodes: [episodeFields(1)],
+      episodeFile: fileFields(150, "Season 01/Alpha - S01E01 Bluray-1080p.mkv", "Bluray-1080p"),
+      deletedFiles: [{ ...fileFields(101, "Season 01/Alpha - S01E01.mkv"), recycleBinPath: "" }]
+    }));
+    expect(upgrade.statusCode).toBe(202);
+    await runScans();
+    const jobs = await app.jobs.listJobs();
+    expect(jobs).toHaveLength(2);
+    expect(jobs.every((job) => job.status === "completed")).toBe(true);
+    expect(await linkPaths()).toEqual([`${itemName}/Season 01/Alpha - S01E01 Bluray-1080p.mkv`]);
+    const replaced = (await app.database.db.select().from(schema.mediaLinks)).find((link) => link.relativePath === `${itemName}/Season 01/Alpha - S01E01.mkv`);
+    expect(replaced?.missingSince).toBeTruthy();
+    expect((await getSonarrState(app.database.db, id)).events.every((event) => event.eventType === "Download" && !event.error)).toBe(true);
+  });
+
+  it("accepts one import that carries several episode files and rescans the series once", async () => {
+    const { id } = await connected();
+    await episodeLink("shows", itemName, "Season 01/Alpha - S01E01.mkv");
+    await episodeLink("shows", itemName, "Season 01/Alpha - S01E02.mkv");
+    const response = await post(id, v4Import({
+      episodes: [episodeFields(1), episodeFields(2)],
+      episodeFiles: [fileFields(101, "Season 01/Alpha - S01E01.mkv"), fileFields(102, "Season 01/Alpha - S01E02.mkv")],
+      sourcePath: "/downloads/Alpha.S01.WEBDL-1080p-EXAMPLE", destinationPath: "/tv/Alpha (2020)"
+    }));
+    expect(response.statusCode).toBe(202);
+    await runScans();
+    expect(await app.jobs.listJobs()).toHaveLength(1);
+    expect(await linkPaths()).toEqual([`${itemName}/Season 01/Alpha - S01E01.mkv`, `${itemName}/Season 01/Alpha - S01E02.mkv`]);
+  });
+
+  it("ignores unknown fields but still rejects malformed notifications", async () => {
+    const { id } = await connected();
+    await episodeLink("shows", itemName, "Season 01/Alpha - S01E01.mkv");
+    const extras = v4Import({
+      episodes: [{ ...episodeFields(1), finaleType: "season", someFutureFlag: true }],
+      episodeFile: { ...fileFields(101, "Season 01/Alpha - S01E01.mkv"), indexerFlags: 0, futureNested: { list: [1, 2, 3] } },
+      someFutureField: { nested: ["value"] }, fileCount: 1, isUpgrade: false
+    });
+    expect((await post(id, extras)).statusCode).toBe(202);
+    await runScans();
+    expect(await linkPaths()).toEqual([`${itemName}/Season 01/Alpha - S01E01.mkv`]);
+    // Series deletion still reports deletedFiles as a boolean.
+    expect((await post(id, { eventType: "SeriesDelete", series: { id: 1, title: "Alpha" }, deletedFiles: true })).statusCode).toBe(202);
+
+    const series = { id: 1, title: "Alpha" };
+    const malformed: unknown[] = [
+      [{ eventType: "Download", series }],
+      { series, episodeFile: { id: 101 } },
+      { eventType: "Download", series: { id: "1", title: "Alpha" }, episodeFile: { id: 101 } },
+      { eventType: "Download", series, episodeFile: { id: -5 } },
+      { eventType: "Download", series, episodeFile: { id: 101 }, deletedFiles: "yes" },
+      { eventType: "Download", series, episodeFile: { id: 101 }, deletedFiles: [{ id: 100, relativePath: 7 }] }
+    ];
+    for (const payload of malformed) expect((await post(id, payload)).statusCode).toBe(400);
+  });
+
   describe("title event batching", () => {
     const past = "2000-01-01T00:00:00.000Z";
     const deliver = (id: string, seriesId: number, title: string, eventType: string, extra: Record<string, unknown> = {}) => receiveSonarrWebhook(app.database.db, id, { eventType, series: { id: seriesId, title }, ...extra });

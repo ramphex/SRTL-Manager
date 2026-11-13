@@ -1,9 +1,9 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { clientBucket } from "../clientAddress";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import type { Db } from "../db/database";
 import { recordActionAudit } from "../lib/actionAudit";
-import { createSonarrInstance, getSonarrCopyDefaults, getSonarrOverview, getSonarrState, reconcileSonarrSeries, receiveSonarrWebhook, refreshSonarr, removeSonarrInstance, renameSonarrInstance, saveSonarrSettings, sonarrInstanceIdSchema, sonarrInstanceNameSchema, sonarrSettingsSchema, testSonarrConnection } from "../lib/sonarr";
+import { createSonarrInstance, getSonarrCopyDefaults, getSonarrOverview, getSonarrState, reconcileSonarrSeries, receiveSonarrWebhook, refreshSonarr, removeSonarrInstance, sonarrWebhookExtraFields, renameSonarrInstance, saveSonarrSettings, sonarrInstanceIdSchema, sonarrInstanceNameSchema, sonarrSettingsSchema, testSonarrConnection } from "../lib/sonarr";
 
 export const sonarrWebhookPath = "/api/integrations/sonarr/:instanceId/webhook";
 
@@ -49,7 +49,15 @@ export function registerSonarrRoutes(app: FastifyInstance, db: Db): void {
     return reconcileSonarrSeries(db, instanceId(request), [...new Set(input.seriesIds)], input.action);
   });
   app.post(sonarrWebhookPath, { bodyLimit: 262144, config: { rateLimit: webhookRateLimit } }, async (request, reply) => {
-    const result = await receiveSonarrWebhook(db, sonarrWebhookInstanceId(request), request.body);
-    return reply.code(202).send(result);
+    const extra = sonarrWebhookExtraFields(request.body);
+    if (extra.length) request.log.debug({ fields: extra }, "Sonarr webhook fields ignored");
+    try {
+      const result = await receiveSonarrWebhook(db, sonarrWebhookInstanceId(request), request.body);
+      return reply.code(202).send(result);
+    } catch (error) {
+      // A rejected delivery only shows up in Sonarr otherwise. Field names and messages only; values can hold paths.
+      if (error instanceof ZodError) request.log.warn({ issues: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })) }, "Sonarr webhook rejected");
+      throw error;
+    }
   });
 }

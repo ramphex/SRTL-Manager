@@ -338,6 +338,37 @@ describe("Radarr policy and webhook integration", () => {
     expect((await getRadarrState(app.database.db, instanceId)).events[0]?.jobStatus).toBe("completed");
   });
 
+  it("accepts an upgrade import that lists the replaced file and carries unknown fields", async () => {
+    await connected();
+    movies.push(movie(2, "My Second Wedding"));
+    const item = movies[1]!;
+    await symlinkFor(item);
+    // Shaped after Radarr's Download notification for an upgrade. Titles and paths are invented.
+    const fileFields = (id: number, relativePath: string, quality: string) => ({ id, relativePath, path: `/library/My Second Wedding (2020)/${relativePath}`, quality, qualityVersion: 1, releaseGroup: "EXAMPLE", sceneName: "", indexerFlags: "0", size: 16, dateAdded: "2026-01-02T03:04:05Z", languages: [{ id: 1, name: "English" }], mediaInfo: { audioCodec: "AAC", height: 1080, width: 1920, videoCodec: "h264" }, sourcePath: `/downloads/${relativePath}` });
+    const payload = {
+      eventType: "Download", instanceName: "Radarr", applicationUrl: "",
+      movie: { id: 2, title: item.title, year: 2020, releaseDate: "2020-05-01", folderPath: "/library/My Second Wedding (2020)", tmdbId: 102, imdbId: "", overview: "An invented film.", genres: ["Comedy"], images: [], tags: ["local"], originalLanguage: { id: 1, name: "English" } },
+      remoteMovie: { tmdbId: 102, imdbId: "", title: item.title, year: 2020 },
+      movieFile: fileFields(20, "My Second Wedding.mkv", "Bluray-1080p"),
+      isUpgrade: true, downloadClient: "Example Client", downloadClientType: "Example", downloadId: "EXAMPLEDOWNLOADID0002",
+      deletedFiles: [{ ...fileFields(19, "My Second Wedding WEBDL.mkv", "WEBDL-720p"), recycleBinPath: "" }],
+      customFormatInfo: { customFormats: [{ id: 3, name: "Example Format" }], customFormatScore: 10 },
+      release: { quality: "Bluray-1080p", qualityVersion: 1, releaseGroup: "EXAMPLE", releaseTitle: "My.Second.Wedding.2020.1080p.BluRay-EXAMPLE", indexer: "Example Indexer", size: 16, customFormatScore: 10, customFormats: ["Example Format"], languages: [{ id: 1, name: "English" }], indexerFlags: [] },
+      someFutureField: { nested: ["value"] }
+    };
+    const response = await app.app.inject({ method: "POST", url: `/api/integrations/radarr/${instanceId}/webhook`, headers: { "x-srtl-webhook-secret": webhookSecret }, payload });
+    expect(response.statusCode).toBe(202);
+    await dueEvents();
+    await processRadarrWork(app.database.db);
+    const jobs = await app.jobs.listJobs();
+    expect(jobs).toHaveLength(1);
+    expect(jobs[0]!.progress).toMatchObject({ options: { titleScopes: [{ section: "movies", itemName: "My Second Wedding (2020)" }] } });
+    // Malformed notifications are still refused.
+    for (const bad of [{ movie: { id: 2, title: item.title } }, { eventType: "Download", movie: { id: "2", title: item.title } }]) {
+      expect((await app.app.inject({ method: "POST", url: `/api/integrations/radarr/${instanceId}/webhook`, headers: { "x-srtl-webhook-secret": webhookSecret }, payload: bad })).statusCode).toBe(400);
+    }
+  });
+
   it("queues refresh after an active job without letting scans overlap", async () => {
     await connected();
     await symlinkFor(movies[0]!);

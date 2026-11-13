@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { clientBucket } from "../clientAddress";
-import { z } from "zod";
+import { z, ZodError } from "zod";
 import type { Db } from "../db/database";
 import { recordActionAudit } from "../lib/actionAudit";
 import { createRadarrInstance, getRadarrCopyDefaults, getRadarrOverview, getRadarrState, radarrInstanceIdSchema, radarrInstanceNameSchema, radarrSettingsSchema, receiveRadarrWebhook, reconcileRadarrMovies, refreshRadarr, removeRadarrInstance, renameRadarrInstance, saveRadarrSettings, testRadarrConnection } from "../lib/radarr";
@@ -52,8 +52,14 @@ export function registerRadarrRoutes(app: FastifyInstance, db: Db): void {
   });
   for (const url of [radarrWebhookPath, radarrInstanceWebhookPath]) {
     app.post(url, { bodyLimit: 65536, config: { rateLimit: webhookRateLimit } }, async (request, reply) => {
-      const result = await receiveRadarrWebhook(db, webhookInstanceId(request), request.body);
-      return reply.code(202).send(result);
+      try {
+        const result = await receiveRadarrWebhook(db, webhookInstanceId(request), request.body);
+        return reply.code(202).send(result);
+      } catch (error) {
+        // A rejected delivery only shows up in Radarr otherwise. Field names and messages only; values can hold paths.
+        if (error instanceof ZodError) request.log.warn({ issues: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message })) }, "Radarr webhook rejected");
+        throw error;
+      }
     });
   }
 }
