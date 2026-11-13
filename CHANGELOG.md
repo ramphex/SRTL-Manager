@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.5] - 2026-11-13
+
+Sonarr upgrade imports are now accepted by the webhook, and rejected Radarr and Sonarr notifications are logged. There is no database migration.
+
 ### Fixed
 
 - Sonarr upgrade imports were rejected by the webhook (HTTP 400) and the new file was not picked up until a later scan. Sonarr lists the replaced files in `deletedFiles` on an upgrade, which SRTL expected to be a yes/no value. Upgrades and imports that carry several episode files now queue the usual series rescan, which also marks the replaced file's link as missing. Unknown fields in Radarr and Sonarr notifications are ignored, and a rejected notification is now logged as a warning with the fields that failed.
