@@ -84,4 +84,10 @@ export class RadarrClient {
   async searchMovies(movieIds: number[]): Promise<number> {
     return (await this.read("command", commandSchema, "POST", { name: "MoviesSearch", movieIds })).id;
   }
+
+  // Rescans this one movie's folder on disk, so a deleted file shows as missing. Without an id Radarr rescans every movie, so one is required.
+  async rescanMovie(movieId: number): Promise<number> {
+    if (!Number.isInteger(movieId) || movieId < 1) throw new Error("A rescan needs the movie's Radarr id.");
+    return (await this.read("command", commandSchema, "POST", { name: "RescanMovie", movieId })).id;
+  }
 }

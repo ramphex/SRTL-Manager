@@ -546,9 +546,10 @@ export const reRequests = pgTable(
     jobId: integer("job_id")
       .notNull()
       .references(() => jobs.id, { onDelete: "cascade" }),
-    operationId: integer("operation_id")
-      .notNull()
-      .references(() => orphanPurgeOperations.id, { onDelete: "cascade" }),
+    // Empty for a rescan after a failed-copy symlink cleanup, which has no purge operation.
+    operationId: integer("operation_id").references(() => orphanPurgeOperations.id, { onDelete: "cascade" }),
+    // "search" deletes the arr's file record and searches; "rescan" asks the arr to rescan the title's folder on disk.
+    action: text("action").notNull().default("search"),
     section: text("section").notNull(),
     itemName: text("item_name").notNull(),
     // Relative to the title folder, as Radarr and Sonarr report file paths, including any symlink removed with the file.

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { copyCompletedItemSummaries, copyFailedItemSummaries, copyWorkTotalFromJob, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, orphanPurgeStatusPromptFromJob, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
+import { arrRescanSummaryFromUnknown, arrRescanSummaryLine, copyCompletedItemSummaries, copyFailedItemSummaries, copyWorkTotalFromJob, orphanPurgeCurrentFile, orphanPurgeHoldingAreaView, orphanPurgeProgressFromJob, orphanPurgeProgressPercent, orphanPurgeRateLabel, orphanPurgeRemainingLabel, orphanPurgeScopeText, orphanPurgeStageLabel, orphanPurgeStatusPromptFromJob, selectedLinkTitleSummaries, singleSelectedLinkTitle } from "../src/client/jobPresentationUtils";
 import type { JobEventRecord, JobRecord, MediaLinkRow } from "../src/shared/types";
 
 function event(id: number, message: string, data: unknown, level: JobEventRecord["level"] = "error"): JobEventRecord {
@@ -327,6 +327,17 @@ describe("orphan purge job presentation", () => {
     expect(orphanPurgeStatusPromptFromJob(held).title).toBe("Damaged file delete");
     expect(orphanPurgeHoldingAreaView(heldView.rootType)).toBe("local-orphans");
     expect(orphanPurgeHoldingAreaView("remote")).toBe("remote-orphans");
+  });
+
+  it("reads the rescan result a delete job keeps, and says it in one line", () => {
+    const rescan = { titles: 4, asked: 2, coveredByReRequest: 1, notMatched: 1, failed: 0, problems: [{ title: "Nobody (2020)", reason: "This title is not in Radarr.", kind: "not_matched" }, { bad: true }] };
+    const job = purgeJob("completed", { options: { rootType: "local", mode: "delete", total: 4, reRequest: true, rescan: true, source: "damaged" }, current: 4, total: 4, deleted: 4, remaining: 0, stage: "completed", message: "Damaged file delete finished", rescan });
+    const view = orphanPurgeProgressFromJob(job);
+    expect(view.rescan).toEqual({ ...rescan, problems: [{ title: "Nobody (2020)", reason: "This title is not in Radarr.", kind: "not_matched" }] });
+    expect(orphanPurgeScopeText(job)).toBe("4 local damaged files, deleted, re-requested, rescan asked");
+    expect(arrRescanSummaryLine(view.rescan!)).toBe("Asked Radarr or Sonarr to rescan 2 titles; results are in the events. 1 title is left to the re-request, which already clears the deleted files. 1 title is not in Radarr or Sonarr.");
+    expect(arrRescanSummaryFromUnknown(undefined)).toBeNull();
+    expect(orphanPurgeProgressFromJob(purgeJob("running", { current: 0, total: 1 })).rescan).toBeNull();
   });
 
   it("shows the wait before deleted remote files are checked again, and what came back", () => {

@@ -9,7 +9,7 @@ import { useDamagedFiles } from "./damagedFilesQuery";
 import type { DamagedFileRow, OrphanPurgeMode } from "../shared/types";
 import { StatusPill } from "./App";
 import { formatBytes, formatDate, formatNumber } from "./appShared";
-import { ReRequestActivity, ReRequestOption } from "./reRequest";
+import { ArrRescanOption, ReRequestActivity, ReRequestOption } from "./reRequest";
 import { AuditDialog } from "./jobPresentation";
 import type { AuditPrompt } from "./appShared";
 
@@ -48,7 +48,7 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
     wasRunning.current = purgeRunning;
   }, [purgeRunning, queryClient]);
   const remove = useMutation({
-    mutationFn: (input: { mode: OrphanPurgeMode; reRequest: boolean }) => api.deleteDamagedFiles({ storageFileIds: [...selected], ...input }),
+    mutationFn: (input: { mode: OrphanPurgeMode; reRequest: boolean; rescan: boolean }) => api.deleteDamagedFiles({ storageFileIds: [...selected], ...input }),
     onSuccess: () => {
       setSelected(new Set());
       setConfirming(false);
@@ -152,11 +152,12 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
   );
 }
 
-function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfirm }: { rows: DamagedFileRow[]; rootLabel: string; pending: boolean; onCancel: () => void; onConfirm: (input: { mode: OrphanPurgeMode; reRequest: boolean }) => void }) {
+function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfirm }: { rows: DamagedFileRow[]; rootLabel: string; pending: boolean; onCancel: () => void; onConfirm: (input: { mode: OrphanPurgeMode; reRequest: boolean; rescan: boolean }) => void }) {
   const advanced = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
   const holdDays = normalizeAdvancedSettings(advanced.data).cleanup.holdDays;
   const [mode, setMode] = useState<OrphanPurgeMode>("hold");
   const [reRequest, setReRequest] = useState(false);
+  const [rescan, setRescan] = useState(false);
   const count = rows.length;
   const bytes = rows.reduce((total, row) => total + row.sizeBytes, 0);
   const files = `${formatNumber(count)} ${count === 1 ? "file" : "files"}`;
@@ -180,8 +181,9 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
         {withRemote > 0 ? ` ${formatNumber(withRemote)} ${withRemote === 1 ? "has" : "have"} a remote copy, which is not touched and not linked automatically.` : ""}
       </p>
       <ReRequestOption storageFileIds={rows.map((row) => row.storageFileId)} checked={reRequest} onChange={setReRequest} disabled={pending} />
+      {linked > 0 ? <ArrRescanOption checked={rescan} onChange={setRescan} disabled={pending} withReRequest={reRequest} /> : null}
       <div className="orphan-toolbar">
-        <button type="button" disabled={pending} onClick={() => onConfirm({ mode, reRequest })}>
+        <button type="button" disabled={pending} onClick={() => onConfirm({ mode, reRequest, rescan: rescan && linked > 0 })}>
           {pending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {mode === "hold" ? "Move to holding area" : "Delete permanently"}
         </button>
         <button type="button" className="secondary" disabled={pending} onClick={onCancel}>

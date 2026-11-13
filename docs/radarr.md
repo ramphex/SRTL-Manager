@@ -76,6 +76,23 @@ Restoring a held file cancels a request that has not been sent, and puts back it
 
 Deleting and re-requesting need the owner or admin role. Removing a failed copy's symlink and discarding a partial copy do not offer a re-request.
 
+## Asking Radarr To Rescan After A Delete
+
+When SRTL removes a library symlink, Radarr still lists the file until it rescans the movie's folder. Two deletes offer **Ask Radarr/Sonarr to rescan**, off until you tick it for that delete:
+
+- **Remove failed-copy symlinks**, from the Failed list of a copy job's status window.
+- **Library > Damaged files**, when at least one selected file is in the library.
+
+Orphans have no library symlink, so Radarr never saw them and the orphan review does not offer it.
+
+Once the symlinks are gone, SRTL finds each title's instance the same way a re-request does and queues **one `RescanMovie` per movie**, however many of its symlinks went. A rescan only reads the movie's folder: Radarr then shows the movie as missing, and it can be grabbed again. Rescans share each instance's re-request pacing (**Re-request searches per minute**), so a large cleanup is spread out.
+
+The job's status window and history say how many rescans were asked and which titles were not, with the reason: a title not in Radarr, a folder no instance manages, or a paused instance. None of these fails the delete. Each rescan's result appears in the job's history and in the re-request list, marked **Rescan**; a rescan that failed or waited on a paused instance can be retried there once the instance is resumed.
+
+If Radarr's **Unmonitor Deleted Movies** setting is on, the rescan can unmonitor the movie. A re-request keeps it monitored.
+
+**With a re-request.** On Damaged files you can tick both. A title that also gets a re-request is not rescanned: a search alone does not make Radarr look at the disk, but a re-request first removes the deleted file's record from Radarr, which is what the rescan would have found, and then keeps the movie monitored.
+
 ## Configure Radarr Webhooks (Optional)
 
 Webhooks let Radarr trigger title rescans after imports. Tag synchronization and copy monitoring do not need them. Each instance has its own webhook URL, `/api/integrations/radarr/<instance id>/webhook`, and its own secret. The original URL, `/api/integrations/radarr/webhook`, keeps working for an instance migrated from the single-connection settings.

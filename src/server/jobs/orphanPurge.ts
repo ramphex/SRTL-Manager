@@ -1382,7 +1382,7 @@ export async function expireHeldOrphans(db: Db, paths: PathsSettings, now = Date
   return expired;
 }
 
-function titleRelativePath(relativePath: string, section: string, itemName: string): string {
+export function titleRelativePath(relativePath: string, section: string, itemName: string): string {
   const parts = relativePath.split("/");
   if (section && parts[0] === section) parts.shift();
   if (itemName && parts[0] === itemName) parts.shift();
@@ -1420,6 +1420,24 @@ export async function queueReRequestsForJob(db: DbExecutor, jobId: number): Prom
     });
     await db.insert(schema.reRequests).values(rows).onConflictDoNothing();
   }
+}
+
+// Titles whose library symlinks a damaged file delete removed, for "Ask Radarr/Sonarr to rescan". Files it did not delete
+// kept their symlinks, so they are left out.
+export async function deletedTitleLinksForJob(db: DbExecutor, jobId: number): Promise<Array<{ section: string; itemName: string; fileNames: string[] }>> {
+  const operations = (await operationsForJob(db, jobId)).filter((operation) => operation.targetKind !== "folder" && ["held", "deleted", "already_missing"].includes(operation.stage));
+  const titles: Array<{ section: string; itemName: string; fileNames: string[] }> = [];
+  for (let offset = 0; offset < operations.length; offset += 500) {
+    const batch = operations.slice(offset, offset + 500).filter((operation) => parseRemovedLinks(operation.removedLinks).length > 0);
+    if (!batch.length) continue;
+    const files = new Map((await db.select().from(schema.storageFiles).where(inArray(schema.storageFiles.id, batch.map((operation) => operation.storageFileId)))).map((file) => [file.id, file]));
+    for (const operation of batch) {
+      const file = files.get(operation.storageFileId);
+      if (!file?.section || !file.itemName) continue;
+      titles.push({ section: file.section, itemName: file.itemName, fileNames: parseRemovedLinks(operation.removedLinks).map((link) => titleRelativePath(link.relativePath, file.section, file.itemName)) });
+    }
+  }
+  return titles;
 }
 
 /** One deleted path the recheck found shown again. */

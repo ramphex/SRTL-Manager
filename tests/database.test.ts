@@ -1,8 +1,56 @@
 import { Pool } from "pg";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { findActiveSession, hashToken } from "../src/server/auth";
-import { openDatabase } from "../src/server/db/database";
+import { currentSchemaVersion, endPool, openDatabase } from "../src/server/db/database";
 import { createTestDatabase } from "./testDb";
+
+describe("database shutdown", () => {
+  it("returns from close only after every connection has disconnected", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const database = await openDatabase(testDatabase.databaseUrl);
+      // Hold several connections at once so the pool has more than one to shut down.
+      await Promise.all(Array.from({ length: 4 }, () => database.pool.query("select pg_sleep(0.05)")));
+      const connections = database.pool.totalCount;
+      expect(connections).toBeGreaterThan(1);
+      // The pool reports "remove" only once a connection's socket has actually closed.
+      let disconnected = 0;
+      database.pool.on("remove", () => { disconnected += 1; });
+      await database.close();
+      expect(disconnected).toBe(connections);
+
+      const observer = new Pool({ connectionString: testDatabase.databaseUrl });
+      try {
+        const result = await observer.query<{ count: string }>("select count(*) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+        expect(Number(result.rows[0]?.count)).toBe(0);
+      } finally {
+        await endPool(observer);
+      }
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("keeps an idle connection cut by the server from becoming an uncaught error", async () => {
+    const testDatabase = await createTestDatabase();
+    const database = await openDatabase(testDatabase.databaseUrl);
+    const killer = new Pool({ connectionString: testDatabase.databaseUrl });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    try {
+      await database.pool.query("select 1");
+      await killer.query("select pg_terminate_backend(pid) from pg_stat_activity where datname = current_database() and pid <> pg_backend_pid()");
+      await expect.poll(() => warn.mock.calls.some(([message]) => String(message).startsWith("Database connection lost while idle"))).toBe(true);
+      // The pool has dropped the dead connection and opens a fresh one for the next query.
+      const result = await database.pool.query<{ ok: number }>("select 1 as ok");
+      expect(result.rows[0]?.ok).toBe(1);
+    } finally {
+      warn.mockRestore();
+      await endPool(killer);
+      await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+});
 
 describe("database bootstrap", () => {
   it("fails closed when production startup skips an uninitialized schema", async () => {
@@ -51,7 +99,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -159,7 +207,7 @@ describe("database bootstrap", () => {
         ["2026-08-02T21:00:00.000Z", "2026-08-02T21:01:00.000Z"]
       );
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -204,7 +252,7 @@ describe("database bootstrap", () => {
         JSON.stringify({ id: 7, storagePolicy: "assign_remote", isAssignedRemote: true })
       ]);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -266,7 +314,8 @@ describe("database bootstrap", () => {
         { version: 31 },
         { version: 32 },
         { version: 33 },
-        { version: 34 }
+        { version: 34 },
+        { version: 35 }
       ]);
     } finally {
       await database.close();
@@ -312,7 +361,7 @@ describe("database bootstrap", () => {
           (4, 'location_2', now()::text)
       `);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -374,7 +423,7 @@ describe("database bootstrap", () => {
           ('scan', 'running', now()::text, now()::text, 'legacy-worker', now()::text, now()::text, '{}')
       `);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -424,7 +473,7 @@ describe("database bootstrap", () => {
       await legacyPool.query(`CREATE TABLE path_migration_items (id SERIAL PRIMARY KEY)`);
       await legacyPool.query(`INSERT INTO path_migration_items DEFAULT VALUES`);
     } finally {
-      await legacyPool.end();
+      await endPool(legacyPool);
     }
 
     const database = await openDatabase(testDatabase.databaseUrl);
@@ -475,7 +524,8 @@ describe("database bootstrap", () => {
         { version: 31, name: "worker_file_jobs" },
         { version: 32, name: "purge_delete_rounds" },
         { version: 33, name: "storage_policy_sections" },
-        { version: 34, name: "audit_state" }
+        { version: 34, name: "audit_state" },
+        { version: 35, name: "arr_rescans" }
       ]);
     } finally {
       await database.close();
@@ -542,6 +592,41 @@ describe("database bootstrap", () => {
       ]);
     } finally {
       await database.close();
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("refuses a no-migrate start without migration 35, then adds the re-request action column with existing rows as searches", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const initial = await openDatabase(testDatabase.databaseUrl);
+      try {
+        const latest = await initial.pool.query<{ version: number }>(`SELECT max(version) AS version FROM schema_migrations`);
+        // The no-migrate startup check trusts this constant, so it must name the newest migration.
+        expect(Number(latest.rows[0]!.version)).toBe(currentSchemaVersion);
+        await initial.pool.query(`INSERT INTO jobs (type, status, progress, created_at) VALUES ('orphan_purge', 'completed', '{}', now()::text)`);
+        await initial.pool.query(`INSERT INTO orphan_purge_operations (job_id, storage_file_id, root_type, target_kind, file_path, size_bytes, mtime_ms, mode, stage, created_at, updated_at) SELECT id, 1, 'local', 'damaged_file', '/example/file.mkv', 1, 1, 'delete', 'deleted', now()::text, now()::text FROM jobs`);
+        await initial.pool.query(`INSERT INTO re_requests (job_id, operation_id, section, item_name, display_name, status, created_at, updated_at) SELECT job_id, id, 'movies', 'Example (2020)', 'file.mkv', 'requested', now()::text, now()::text FROM orphan_purge_operations`);
+        // Put the schema back to migration 34.
+        await initial.pool.query(`ALTER TABLE re_requests DROP COLUMN action`);
+        await initial.pool.query(`ALTER TABLE re_requests ALTER COLUMN operation_id SET NOT NULL`);
+        await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 35`);
+      } finally {
+        await initial.close();
+      }
+
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 35\b/);
+
+      const database = await openDatabase(testDatabase.databaseUrl);
+      try {
+        await expect(database.pool.query(`SELECT action FROM re_requests`)).resolves.toMatchObject({ rows: [{ action: "search" }] });
+        const nullable = await database.pool.query<{ is_nullable: string }>(`SELECT is_nullable FROM information_schema.columns WHERE table_name = 're_requests' AND column_name = 'operation_id'`);
+        expect(nullable.rows).toEqual([{ is_nullable: "YES" }]);
+      } finally {
+        await database.close();
+      }
+      await (await openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).close();
+    } finally {
       await testDatabase.cleanup();
     }
   });

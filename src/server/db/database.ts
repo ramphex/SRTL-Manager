@@ -34,7 +34,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 34;
+export const currentSchemaVersion = 35;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -100,7 +100,42 @@ const bootstrapLockKey = 781_889_432;
 
 function createPool(databaseUrl: string): Pool {
   const config: PoolConfig = { connectionString: databaseUrl };
-  return new Pool(config);
+  const pool = new Pool(config);
+  // An idle connection can be cut by the server (a restart, an administrator, a dropped database).
+  // The pool already discards that connection and opens a new one on demand; without a listener the
+  // error would be rethrown as an uncaught exception and take the process down.
+  pool.on("error", (error) => console.warn(`Database connection lost while idle: ${error.message}`));
+  return pool;
+}
+
+const poolCloseTimeoutMs = 5000;
+
+// pool.end() resolves once the pool has let go of its connections, not once their sockets have
+// closed. Wait for each connection to finish disconnecting, so nothing that runs next (a shutdown,
+// or a test dropping its database) meets a connection that is still half open.
+export async function endPool(pool: Pool): Promise<void> {
+  let open = pool.totalCount;
+  let onRemove: () => void = () => undefined;
+  const disconnected = new Promise<void>((resolve) => {
+    if (open === 0) return resolve();
+    onRemove = () => {
+      open -= 1;
+      if (open <= 0) resolve();
+    };
+    pool.on("remove", onRemove);
+  });
+  let timer: NodeJS.Timeout | undefined;
+  const timedOut = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, poolCloseTimeoutMs);
+    timer.unref();
+  });
+  try {
+    await pool.end();
+    await Promise.race([disconnected, timedOut]);
+  } finally {
+    clearTimeout(timer);
+    pool.off("remove", onRemove);
+  }
 }
 
 async function initializeDatabase(pool: Pool): Promise<void> {
@@ -1001,6 +1036,19 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         throw error;
       }
     }
+    if (!applied.has(35)) {
+      await client.query("BEGIN");
+      try {
+        // Rescans share the re-request table so they share its pacing. Existing rows are searches; a rescan after a symlink cleanup has no purge operation.
+        await client.query(`ALTER TABLE re_requests ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'search'`);
+        await client.query(`ALTER TABLE re_requests ALTER COLUMN operation_id DROP NOT NULL`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (35, 'arr_rescans', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
   } finally {
     await client.query("select pg_advisory_unlock($1)", [bootstrapLockKey]).catch(() => undefined);
     client.release();
@@ -1032,14 +1080,14 @@ export async function openDatabase(options: DatabaseOpenOptions | string): Promi
       warn: (message) => console.warn(message)
     });
   } catch (error) {
-    if (!suppliedPool) await pool.end().catch(() => undefined);
+    if (!suppliedPool) await endPool(pool).catch(() => undefined);
     throw error;
   }
   const db = drizzle(pool, { schema });
   return {
     pool,
     db,
-    close: () => pool.end()
+    close: () => endPool(pool)
   };
 }
 

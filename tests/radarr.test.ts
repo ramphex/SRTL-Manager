@@ -6,7 +6,7 @@ import { eq } from "drizzle-orm";
 import { Pool } from "pg";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
-import { getJsonSetting, getSetting, setSetting } from "../src/server/db/database";
+import { endPool, getJsonSetting, getSetting, setSetting } from "../src/server/db/database";
 import * as schema from "../src/server/db/schema";
 import { JobWorker } from "../src/server/jobs/jobRunner";
 import { markOnboardingCompleteForExistingInstall, onboardingSettingKey } from "../src/server/lib/onboarding";
@@ -1192,7 +1192,7 @@ describe("multiple Radarr instances", () => {
       await pool.query(`ALTER TABLE radarr_monitor_updates DROP COLUMN previous_monitored`);
       await pool.query(`DELETE FROM schema_migrations WHERE version IN (19, 20)`);
     } finally {
-      await pool.end();
+      await endPool(pool);
     }
     app = await createApp(config);
     app.app.log.level = "silent";
@@ -1235,7 +1235,7 @@ describe("multiple Radarr instances", () => {
       }
       await pool.query(`INSERT INTO radarr_monitor_updates (instance_id, copy_job_id, movie_id, title, monitored, created_at, next_attempt_at) VALUES ($1, NULL, 1, 'Movie', false, $2, $2), ($1, NULL, 1, 'Movie', false, $2, $2)`, [instanceId, timestamp]);
     } finally {
-      await pool.end();
+      await endPool(pool);
     }
     app = await createApp(config);
     app.app.log.level = "silent";

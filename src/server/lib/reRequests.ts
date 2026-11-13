@@ -1,7 +1,7 @@
 import path from "node:path";
 import { and, asc, count, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
-import type { ReRequestList, ReRequestPreview, ReRequestRecord, ReRequestService, ReRequestStatus } from "../../shared/reRequests";
+import type { ArrRescanSummary, ReRequestAction, ReRequestList, ReRequestPreview, ReRequestRecord, ReRequestService, ReRequestStatus } from "../../shared/reRequests";
 import { getJsonSetting, nowIso, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { publicErrorMessage } from "../errors";
@@ -21,6 +21,7 @@ const listLimit = 200;
 const resolveBatchSize = 500;
 const previewExampleLimit = 10;
 const cancelledUnmonitorMessage = "Skipped: the file was deleted and re-requested.";
+const rescanProblemLimit = 20;
 
 type ReRequestRow = typeof schema.reRequests.$inferSelect;
 type Outcome = { status: ReRequestStatus; message: string | null; previousMonitored?: boolean | null; episodes?: string | null };
@@ -31,7 +32,12 @@ interface FileToMatch {
   fileNames: string[];
   wasLinked: boolean;
   displayName: string;
+  action?: ReRequestAction;
 }
+
+const actionOf = (row: { action: string }): ReRequestAction => (row.action === "rescan" ? "rescan" : "search");
+const verbOf = (action: ReRequestAction) => (action === "rescan" ? "rescan" : "re-request");
+const pausedReason = (name: string, action: ReRequestAction) => `${name} is paused. Resume it to ${verbOf(action)} this.`;
 
 type Match =
   | { matched: true; service: ReRequestService; config: ArrStoredSettings; arrItemId: number; title: string }
@@ -74,7 +80,7 @@ async function liveMediaLinks(db: Db, section: string, itemName: string) {
     .where(and(eq(schema.mediaLinks.section, section), eq(schema.mediaLinks.itemName, itemName), eq(schema.mediaLinks.isMedia, true), isNull(schema.mediaLinks.missingSince)));
 }
 
-// Decides from SRTL's own records, so it needs no Radarr or Sonarr connection. Each folder belongs to one instance at most,
+// Decides from SRTL's own records, so it needs no Radarr or Sonarr connection. Re-requests and rescans share it. Each folder belongs to one instance at most,
 // which is how a separate 4K instance gets its own titles. Tables are read once per matcher, since a selection can be very large.
 function createMatcher(db: Db): (file: FileToMatch) => Promise<Match> {
   const titleKey = (section: string, itemName: string) => `${section}\0${itemName}`;
@@ -111,7 +117,7 @@ function createMatcher(db: Db): (file: FileToMatch) => Promise<Match> {
     const owner = (await (instances ??= loadInstances())).find(({ config }) => config.mappings.some((mapping) => mapping.section === file.section));
     if (!owner) return { matched: false, reason: "No Radarr or Sonarr instance manages this folder.", retryable: false };
     const { service, config } = owner;
-    if (!config.enabled) return { matched: false, reason: `${config.name} is paused. Resume it to re-request this.`, retryable: true };
+    if (!config.enabled) return { matched: false, reason: pausedReason(config.name, file.action ?? "search"), retryable: true };
     const row = (await (catalog ??= loadCatalog())).get(`${config.id}\0${titleKey(file.section, file.itemName)}`);
     if (!row) return { matched: false, reason: `This title is not in ${config.name}.`, retryable: false };
     // A spare file of a title that still has a linked copy: the arr has what it wants and a search would find nothing to do.
@@ -185,14 +191,14 @@ async function resolveQueued(db: Db): Promise<void> {
   const rows = await db.select().from(schema.reRequests).where(eq(schema.reRequests.status, "queued")).orderBy(asc(schema.reRequests.id)).limit(resolveBatchSize);
   const matchFile = createMatcher(db);
   for (const row of rows) {
-    const match = await matchFile({ section: row.section, itemName: row.itemName, fileNames: parseNames(row.fileNames), wasLinked: row.wasLinked, displayName: row.displayName });
+    const match = await matchFile({ section: row.section, itemName: row.itemName, fileNames: parseNames(row.fileNames), wasLinked: row.wasLinked, displayName: row.displayName, action: actionOf(row) });
     const timestamp = nowIso();
     if (match.matched) {
       await db.update(schema.reRequests).set({ status: "pending", service: match.service, instanceId: match.config.id, instanceName: match.config.name, arrItemId: match.arrItemId, title: match.title, message: null, updatedAt: timestamp }).where(and(eq(schema.reRequests.id, row.id), eq(schema.reRequests.status, "queued")));
       continue;
     }
     await db.update(schema.reRequests).set({ status: match.retryable ? "failed" : "unmatched", message: match.reason, updatedAt: timestamp }).where(and(eq(schema.reRequests.id, row.id), eq(schema.reRequests.status, "queued")));
-    await jobEvent(db, row, "warn", `Not re-requested: ${row.displayName}. ${match.reason}`);
+    await jobEvent(db, row, "warn", `${actionOf(row) === "rescan" ? "Not rescanned" : "Not re-requested"}: ${row.displayName}. ${match.reason}`);
   }
 }
 
@@ -210,12 +216,39 @@ async function finish(db: Db, row: ReRequestRow, outcome: Outcome, commandId: nu
     ...(requested ? { requestedAt: timestamp } : {})
   }).where(and(eq(schema.reRequests.id, row.id), eq(schema.reRequests.status, "pending")));
   const name = `${row.title ?? row.displayName}${outcome.episodes ? ` ${outcome.episodes}` : ""}`;
-  if (requested) await jobEvent(db, row, "info", `Search sent to ${row.instanceName}: ${name}${outcome.message ? `. ${outcome.message}` : ""}`);
-  else if (outcome.status === "failed") await jobEvent(db, row, "error", `Re-request failed: ${name}. ${outcome.message}`);
-  else await jobEvent(db, row, "warn", `Not re-requested: ${name}. ${outcome.message}`);
+  const rescan = actionOf(row) === "rescan";
+  if (requested) await jobEvent(db, row, "info", `${rescan ? "Rescan" : "Search"} sent to ${row.instanceName}: ${name}${outcome.message ? `. ${outcome.message}` : ""}`);
+  else if (outcome.status === "failed") await jobEvent(db, row, "error", `${rescan ? "Rescan" : "Re-request"} failed: ${name}. ${outcome.message}`);
+  else await jobEvent(db, row, "warn", `${rescan ? "Not rescanned" : "Not re-requested"}: ${name}. ${outcome.message}`);
 }
 
-const failure = (error: unknown): Outcome => ({ status: "failed", message: publicErrorMessage(error, "The re-request could not be sent.") });
+const failure = (error: unknown, action: ReRequestAction = "search"): Outcome => ({ status: "failed", message: publicErrorMessage(error, `The ${verbOf(action)} could not be sent.`) });
+
+// One rescan command per movie or series, however many of its rows are waiting. A rescan only reads the disk, so it needs
+// no identity check beyond the title still being in SRTL's copy of the catalog.
+async function requestRescans(db: Db, service: ReRequestService, config: ArrStoredSettings, rows: ReRequestRow[]): Promise<void> {
+  const byItem = new Map<number, ReRequestRow[]>();
+  for (const row of rows) {
+    const group = byItem.get(row.arrItemId!);
+    if (group) group.push(row);
+    else byItem.set(row.arrItemId!, [row]);
+  }
+  for (const [itemId, group] of byItem) {
+    try {
+      const known = service === "radarr"
+        ? await db.select({ id: schema.radarrMovies.movieId }).from(schema.radarrMovies).where(and(eq(schema.radarrMovies.instanceId, config.id), eq(schema.radarrMovies.movieId, itemId))).limit(1)
+        : await db.select({ id: schema.sonarrSeries.seriesId }).from(schema.sonarrSeries).where(and(eq(schema.sonarrSeries.instanceId, config.id), eq(schema.sonarrSeries.seriesId, itemId))).limit(1);
+      if (!known.length) {
+        for (const row of group) await finish(db, row, { status: "failed", message: `This ${service === "radarr" ? "movie" : "series"} is no longer in ${config.name}.` });
+        continue;
+      }
+      const commandId = service === "radarr" ? await radarrClient(config).rescanMovie(itemId) : await sonarrClient(config).rescanSeries(itemId);
+      for (const row of group) await finish(db, row, { status: "requested", message: null }, commandId);
+    } catch (error) {
+      for (const row of group) await finish(db, row, failure(error, "rescan"));
+    }
+  }
+}
 
 // Removes the file record, then monitors the movie. That order matters: Radarr can be set to unmonitor a movie when its file goes.
 async function prepareMovie(db: Db, config: ArrStoredSettings, row: ReRequestRow): Promise<Outcome | { ready: true; previousMonitored: boolean | null }> {
@@ -334,19 +367,25 @@ async function requestEpisodes(db: Db, config: ArrStoredSettings, rows: ReReques
 async function processInstance(db: Db, service: ReRequestService, instanceId: string, perMinute: number, now: number): Promise<void> {
   const stored = service === "radarr" ? await radarrStoredInstances(db) : await sonarrStoredInstances(db);
   const config = stored.instances.find((instance) => instance.id === instanceId);
-  const unavailable = !config ? "This instance was removed from SRTL." : !config.enabled ? `${config.name} is paused. Resume it to re-request this.` : null;
   const pendingHere = and(eq(schema.reRequests.status, "pending"), eq(schema.reRequests.instanceId, instanceId));
-  if (unavailable) {
-    for (const row of await db.select().from(schema.reRequests).where(pendingHere).limit(resolveBatchSize)) await finish(db, row, { status: "failed", message: unavailable });
+  if (!config || !config.enabled) {
+    for (const row of await db.select().from(schema.reRequests).where(pendingHere).limit(resolveBatchSize)) {
+      await finish(db, row, { status: "failed", message: config ? pausedReason(config.name, actionOf(row)) : "This instance was removed from SRTL." });
+    }
     return;
   }
   const minuteAgo = new Date(now - 60_000).toISOString();
   const [sent] = await db.select({ value: count() }).from(schema.reRequests).where(and(eq(schema.reRequests.instanceId, instanceId), gt(schema.reRequests.requestedAt, minuteAgo)));
   const allowance = reRequestAllowance(perMinute, sent?.value ?? 0);
   if (allowance === 0) return;
+  // Searches and rescans take turns from the same allowance, oldest first.
   const rows = await db.select().from(schema.reRequests).where(pendingHere).orderBy(asc(schema.reRequests.id)).limit(allowance);
-  if (service === "radarr") await requestMovies(db, config!, rows);
-  else await requestEpisodes(db, config!, rows);
+  const rescans = rows.filter((row) => actionOf(row) === "rescan");
+  const searches = rows.filter((row) => actionOf(row) === "search");
+  if (rescans.length) await requestRescans(db, service, config, rescans);
+  if (!searches.length) return;
+  if (service === "radarr") await requestMovies(db, config, searches);
+  else await requestEpisodes(db, config, searches);
 }
 
 // Starts work for every instance with searches waiting and returns without waiting for it, so a slow or offline instance
@@ -377,7 +416,7 @@ export async function processReRequestWork(db: Db, now = Date.now()): Promise<vo
 }
 
 function toRecord(row: ReRequestRow): ReRequestRecord {
-  return { id: row.id, jobId: row.jobId, displayName: row.displayName, service: row.service as ReRequestService | null, instanceName: row.instanceName, title: row.title, episodes: row.episodes, status: row.status as ReRequestStatus, message: row.message, previousMonitored: row.previousMonitored, attempts: row.attempts, createdAt: row.createdAt, requestedAt: row.requestedAt };
+  return { id: row.id, jobId: row.jobId, action: actionOf(row), displayName: row.displayName, service: row.service as ReRequestService | null, instanceName: row.instanceName, title: row.title, episodes: row.episodes, status: row.status as ReRequestStatus, message: row.message, previousMonitored: row.previousMonitored, attempts: row.attempts, createdAt: row.createdAt, requestedAt: row.requestedAt };
 }
 
 export async function listReRequests(db: Db): Promise<ReRequestList> {
@@ -399,4 +438,80 @@ export async function retryReRequests(db: Db, ids: number[] | "all_failed"): Pro
     .where(and(eq(schema.reRequests.status, "failed"), ids === "all_failed" ? sql`true` : inArray(schema.reRequests.id, ids)))
     .returning({ id: schema.reRequests.id });
   return updated.length;
+}
+
+/** One title whose library symlinks a delete job removed. */
+export interface DeletedTitleLinks {
+  section: string;
+  itemName: string;
+  // The removed symlinks, relative to the title folder.
+  fileNames: string[];
+}
+
+const titleKeyOf = (section: string, itemName: string) => `${section}\0${itemName}`;
+
+/** Titles of a purge job that also get a re-request, which already clears their deleted files from Radarr or Sonarr. */
+export async function titlesWithReRequest(db: Db, jobId: number): Promise<Set<string>> {
+  const rows = await db.selectDistinct({ section: schema.reRequests.section, itemName: schema.reRequests.itemName }).from(schema.reRequests)
+    .where(and(eq(schema.reRequests.jobId, jobId), eq(schema.reRequests.action, "search"), inArray(schema.reRequests.status, ["queued", "pending"])));
+  return new Set(rows.map((row) => titleKeyOf(row.section, row.itemName)));
+}
+
+/**
+ * Queues one rescan for each Radarr movie or Sonarr series whose symlinks a job deleted. Matching uses the re-request matcher,
+ * so it needs no arr connection; the worker sends them with the re-request pacing. A title that is not matched or whose
+ * instance is paused is recorded with the reason and never fails the delete.
+ */
+export async function queueRescansForJob(db: Db, jobId: number, deleted: DeletedTitleLinks[], coveredByReRequest: Set<string> = new Set()): Promise<ArrRescanSummary> {
+  const titles = new Map<string, DeletedTitleLinks>();
+  for (const entry of deleted) {
+    if (!entry.section || !entry.itemName) continue;
+    const key = titleKeyOf(entry.section, entry.itemName);
+    const existing = titles.get(key);
+    if (existing) existing.fileNames = [...new Set([...existing.fileNames, ...entry.fileNames])];
+    else titles.set(key, { ...entry, fileNames: [...new Set(entry.fileNames)] });
+  }
+  const summary: ArrRescanSummary = { titles: titles.size, asked: 0, coveredByReRequest: 0, notMatched: 0, failed: 0, problems: [] };
+  const matchFile = createMatcher(db);
+  const queued = new Set<string>();
+  const timestamp = nowIso();
+  const rows: Array<typeof schema.reRequests.$inferInsert> = [];
+  for (const [key, title] of titles) {
+    if (coveredByReRequest.has(key)) {
+      summary.coveredByReRequest += 1;
+      continue;
+    }
+    const base = { jobId, operationId: null, action: "rescan", section: title.section, itemName: title.itemName, fileNames: JSON.stringify(title.fileNames), wasLinked: true, displayName: title.itemName, createdAt: timestamp, updatedAt: timestamp };
+    const match = await matchFile({ section: title.section, itemName: title.itemName, fileNames: title.fileNames, wasLinked: true, displayName: title.itemName, action: "rescan" });
+    if (!match.matched) {
+      if (match.retryable) summary.failed += 1;
+      else summary.notMatched += 1;
+      if (summary.problems.length < rescanProblemLimit) summary.problems.push({ title: title.itemName, reason: match.reason, kind: match.retryable ? "failed" : "not_matched" });
+      rows.push({ ...base, status: match.retryable ? "failed" : "unmatched", message: match.reason });
+      continue;
+    }
+    // Two folders can map to one movie or series; it still gets one rescan.
+    const arrKey = `${match.config.id}\0${match.arrItemId}`;
+    if (queued.has(arrKey)) continue;
+    queued.add(arrKey);
+    summary.asked += 1;
+    rows.push({ ...base, status: "pending", service: match.service, instanceId: match.config.id, instanceName: match.config.name, arrItemId: match.arrItemId, title: match.title });
+  }
+  for (let offset = 0; offset < rows.length; offset += 500) await db.insert(schema.reRequests).values(rows.slice(offset, offset + 500));
+  for (const row of rows) {
+    if (row.status === "pending") continue;
+    await db.insert(schema.jobEvents).values({ jobId, timestamp, level: "warn", message: `Not rescanned: ${row.displayName}. ${row.message}`, data: JSON.stringify({ service: null, title: row.itemName }) });
+  }
+  return summary;
+}
+
+/** "Rescan asked for 3 titles; 1 not in Radarr or Sonarr", for a job's final message and events. */
+export function rescanSummaryText(summary: ArrRescanSummary): string {
+  const parts = [
+    `Rescan asked for ${summary.asked} ${summary.asked === 1 ? "title" : "titles"}`,
+    summary.coveredByReRequest ? `${summary.coveredByReRequest} left to the re-request` : "",
+    summary.notMatched ? `${summary.notMatched} not in Radarr or Sonarr` : "",
+    summary.failed ? `${summary.failed} not sent (paused instance)` : ""
+  ].filter(Boolean);
+  return parts.join("; ");
 }

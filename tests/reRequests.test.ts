@@ -515,3 +515,126 @@ describe("reading episode numbers from a file name", () => {
     expect(parseEpisodeNumbers(name)).toEqual(expected);
   });
 });
+
+describe("asking Radarr or Sonarr to rescan after a delete", () => {
+  const series = (rootFolder: string): SonarrSeries => ({ id: 7, tvdbId: 77, title: "Delta", year: 2020, path: `${rootFolder}/Delta (2020)`, tags: [], monitored: true });
+
+  async function jobProgress(jobId: number) {
+    return (await app.jobs.getJob(jobId))?.progress as { message: string; rescan?: Record<string, unknown> } | undefined;
+  }
+
+  it("sends nothing when the option is off", async () => {
+    const radarr = await fakeRadarr([movie(1, "Alpha", "/m", "Alpha.mkv")], "/m");
+    const sonarr = await fakeSonarr([series("/tv")], "/tv");
+    await radarrInstance("Radarr", radarr, "/m", "movies");
+    await sonarrInstance("Sonarr", sonarr, "/tv", "shows");
+    const alpha = await localFile("movies", "Alpha (2020)", "Alpha.mkv");
+    const episode = await localFile("shows", "Delta (2020)", "Season 01/Delta - S01E01.mkv");
+    radarr.calls.length = 0;
+    sonarr.calls.length = 0;
+    const jobId = await app.jobs.startDamagedFilePurge([alpha.id, episode.id], "delete", false, false);
+    await runJobs();
+    await processReRequestWork(app.database.db);
+    expect((await app.jobs.getJob(jobId))?.status).toBe("completed");
+    expect((await jobProgress(jobId))?.rescan).toBeUndefined();
+    expect(radarr.calls).toEqual([]);
+    expect(sonarr.calls).toEqual([]);
+    expect(await rows()).toEqual([]);
+  });
+
+  it("sends one rescan per movie or series, however many of its symlinks went, within the shared pacing", async () => {
+    const radarr = await fakeRadarr([movie(1, "Alpha", "/m", "Alpha.mkv"), movie(2, "Bravo", "/m", "Bravo.mkv")], "/m");
+    const sonarr = await fakeSonarr([series("/tv")], "/tv");
+    await radarrInstance("Radarr", radarr, "/m", "movies");
+    await sonarrInstance("Sonarr", sonarr, "/tv", "shows");
+    const alpha = await localFile("movies", "Alpha (2020)", "Alpha.mkv");
+    const bravo = await localFile("movies", "Bravo (2020)", "Bravo.mkv");
+    const first = await localFile("shows", "Delta (2020)", "Season 01/Delta - S01E01.mkv");
+    const second = await localFile("shows", "Delta (2020)", "Season 01/Delta - S01E02.mkv");
+    radarr.calls.length = 0;
+    sonarr.calls.length = 0;
+    const jobId = await app.jobs.startDamagedFilePurge([alpha.id, bravo.id, first.id, second.id], "hold", false, true);
+    await runJobs();
+    // Queued by the job; nothing is sent until the worker's paced pass.
+    expect(radarr.calls).toEqual([]);
+    const progress = await jobProgress(jobId);
+    expect(progress?.rescan).toEqual({ titles: 3, asked: 3, coveredByReRequest: 0, notMatched: 0, failed: 0, problems: [] });
+    expect(progress?.message).toContain("Rescan asked for 3 titles");
+
+    // Six a minute, spread over twelve passes: one command per instance in the first pass.
+    await processReRequestWork(app.database.db);
+    expect(radarr.rescans).toEqual([1]);
+    expect(sonarr.rescans).toEqual([7]);
+    await processReRequestWork(app.database.db);
+    expect(radarr.rescans).toEqual([1, 2]);
+    expect(sonarr.rescans).toEqual([7]);
+    expect(radarr.calls.every((call) => call === "POST command")).toBe(true);
+    expect(radarr.searches).toEqual([]);
+    expect(radarr.deletedFiles).toEqual([]);
+    expect(sonarr.calls).toEqual(["POST command"]);
+    expect(await rows()).toMatchObject([
+      { action: "rescan", status: "requested", service: "radarr", title: "Alpha (2020)" },
+      { action: "rescan", status: "requested", service: "radarr", title: "Bravo (2020)" },
+      { action: "rescan", status: "requested", service: "sonarr", title: "Delta (2020)" }
+    ]);
+    const messages = await jobMessages(jobId);
+    expect(messages).toEqual(expect.arrayContaining(["Rescan sent to Radarr: Alpha (2020)", "Rescan sent to Sonarr: Delta (2020)"]));
+  });
+
+  it("leaves a title to its re-request, which already clears the deleted file", async () => {
+    const radarr = await fakeRadarr([movie(1, "Alpha", "/m", "Alpha.mkv")], "/m");
+    await radarrInstance("Radarr", radarr, "/m", "movies");
+    const alpha = await localFile("movies", "Alpha (2020)", "Alpha.mkv");
+    const jobId = await app.jobs.startDamagedFilePurge([alpha.id], "delete", true, true);
+    await runJobs();
+    expect((await jobProgress(jobId))?.rescan).toMatchObject({ titles: 1, asked: 0, coveredByReRequest: 1 });
+    await processReRequestWork(app.database.db);
+    expect(radarr.rescans).toEqual([]);
+    expect(radarr.deletedFiles).toEqual([51]);
+    expect(radarr.searches).toEqual([[1]]);
+    expect(await rows()).toMatchObject([{ action: "search", status: "requested" }]);
+  });
+
+  it("reports titles no instance knows, without calling anything", async () => {
+    const radarr = await fakeRadarr([movie(1, "Alpha", "/m", "Alpha.mkv")], "/m");
+    await radarrInstance("Radarr", radarr, "/m", "movies");
+    const notInArr = await localFile("movies", "Nobody (2020)", "Nobody.mkv");
+    const noInstance = await localFile("other", "Other (2020)", "Other.mkv");
+    radarr.calls.length = 0;
+    const jobId = await app.jobs.startDamagedFilePurge([notInArr.id, noInstance.id], "delete", false, true);
+    await runJobs();
+    await processReRequestWork(app.database.db);
+    expect((await app.jobs.getJob(jobId))?.status).toBe("completed");
+    const summary = (await jobProgress(jobId))?.rescan;
+    expect(summary).toMatchObject({ titles: 2, asked: 0, notMatched: 2, failed: 0 });
+    expect(summary?.problems).toEqual(expect.arrayContaining([
+      { title: "Nobody (2020)", reason: "This title is not in Radarr.", kind: "not_matched" },
+      { title: "Other (2020)", reason: "No Radarr or Sonarr instance manages this folder.", kind: "not_matched" }
+    ]));
+    expect(radarr.calls).toEqual([]);
+    expect((await rows()).map((row) => [row.action, row.status])).toEqual([["rescan", "unmatched"], ["rescan", "unmatched"]]);
+    expect(await jobMessages(jobId)).toContain("Not rescanned: Nobody (2020). This title is not in Radarr.");
+  });
+
+  it("keeps the delete when the instance is paused, says so, and sends the rescan on retry once resumed", async () => {
+    const radarr = await fakeRadarr([movie(1, "Alpha", "/m", "Alpha.mkv")], "/m");
+    const instanceId = await radarrInstance("Radarr", radarr, "/m", "movies");
+    const settings = (enabled: boolean, revision: number) => ({ revision, baseUrl: radarr.url, apiKey, webhookSecret: "", enabled, localTag: "local", remoteTag: "remote", monitorOnCopy: false, mappingMode: "manual" as const, mappings: [{ rootPath: "/m", section: "movies" }] });
+    await saveRadarrSettings(app.database.db, instanceId, settings(false, (await getRadarrState(app.database.db, instanceId)).settings.revision));
+    const alpha = await localFile("movies", "Alpha (2020)", "Alpha.mkv");
+    const jobId = await app.jobs.startDamagedFilePurge([alpha.id], "delete", false, true);
+    await runJobs();
+    await processReRequestWork(app.database.db);
+    expect((await app.jobs.getJob(jobId))?.status).toBe("completed");
+    await expect(fs.lstat(alpha.linkPath!)).rejects.toThrow();
+    expect((await jobProgress(jobId))?.rescan).toMatchObject({ asked: 0, failed: 1, problems: [{ title: "Alpha (2020)", reason: "Radarr is paused. Resume it to rescan this.", kind: "failed" }] });
+    expect(await rows()).toMatchObject([{ action: "rescan", status: "failed", message: "Radarr is paused. Resume it to rescan this." }]);
+    expect(radarr.rescans).toEqual([]);
+
+    await saveRadarrSettings(app.database.db, instanceId, settings(true, (await getRadarrState(app.database.db, instanceId)).settings.revision));
+    expect(await retryReRequests(app.database.db, "all_failed")).toBe(1);
+    await processReRequestWork(app.database.db);
+    expect(radarr.rescans).toEqual([1]);
+    expect(await rows()).toMatchObject([{ action: "rescan", status: "requested" }]);
+  });
+});
