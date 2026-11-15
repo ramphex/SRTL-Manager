@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.6] - 2026-11-15
+
+Scans now check that new and changed video files start with a valid container, and a slow background pass checks the rest of the library. Database migration 36 adds the check result to each storage file.
+
 ### Added
 
 - **File header check.** At the end of each scan, SRTL reads the first 64 KB of new and changed video files and checks that they start with a known video container. Files that are empty, under about 1 MB, all zeros, or start with something that is not a video are listed on **Library > Damaged files** as **Bad header**, on local or remote storage, where they can be deleted and re-requested; nothing is deleted automatically. Up to 200 files or 60 seconds are checked per scan and the rest at the end of the next one. Files already in the library are checked by a slow background pass that pauses during scans. A file whose check failed is not copied to local storage, and one never checked is checked when its copy starts. Files that passed show a small checkmark in file and link listings, Damaged files and copy progress. **Settings > Advanced > Check file headers after scans** turns it off; it is on by default. Database migration 36 adds the check result to each storage file.
