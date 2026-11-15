@@ -1,3 +1,4 @@
+import type { FileHeaderState } from "./fileHeaders";
 import type { ArrRescanSummary } from "./reRequests";
 export type LinkKind = "remote" | "local" | "broken" | "other" | "non_media";
 export type MediaLinkTreeKindFilter = LinkKind | "mixed";
@@ -238,6 +239,8 @@ export interface ScanJobBehaviorSettings {
   // Queue the remote storage scan (seconds on a FUSE mount) alongside every symlink scan.
   includeRemoteWithSymlinkScans: boolean;
   scheduledInventory: ScheduledInventorySettings;
+  // Check the header of new and changed files at the end of each scan, and of older files in the background. On by default.
+  checkFileHeaders: boolean;
 }
 
 export interface CleanupSettings {
@@ -607,6 +610,8 @@ export interface MediaLinkRow {
   storagePolicy: StoragePolicyKind;
   resolvedStorageFileId: number | null;
   sizeBytes: number | null;
+  // The header check result of the file this link resolves to, where the listing includes it.
+  header?: FileHeaderState | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -672,6 +677,8 @@ export interface StorageFileRow {
   // All-zero samples out of 24 evenly spaced 256 KB reads; null when the file was never sampled.
   zeroSamples: number | null;
   integrityCheckedAt: string | null;
+  // The file header check result; null until the file is checked.
+  header: FileHeaderState | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -704,6 +711,8 @@ export interface OrphanReviewItem {
   hollow: boolean;
   integrity: StorageIntegrity;
   zeroSamples: number | null;
+  // The file header check result; null until the file is checked.
+  header?: FileHeaderState | null;
   label: OrphanReviewLabel;
   // The library title this file's release name appears to be; a name comparison, so it can be wrong.
   matchedTitle: string | null;
@@ -1080,6 +1089,8 @@ export interface JobEventPage {
 
 export interface DamagedFileRow {
   storageFileId: number;
+  // Hollow, damaged and failed-audit files are local; a failed header check can be on either storage.
+  rootType: StorageRootType;
   section: string;
   itemName: string;
   relativePath: string;
@@ -1088,8 +1099,8 @@ export interface DamagedFileRow {
   allocatedBytes: number | null;
   // Share of the file stored on disk, 0-100.
   storedPercent: number | null;
-  // audit_failed: the last audit of this file failed; the other values come from scan sampling.
-  integrity: "hollow" | "partial_hollow" | "audit_failed";
+  // audit_failed: the last audit of this file failed. header_failed: the file header check failed. The others come from scan sampling.
+  integrity: "hollow" | "partial_hollow" | "header_failed" | "audit_failed";
   zeroSamples: number | null;
   zeroSamplesTotal: number;
   checkedAt: string | null;
@@ -1100,4 +1111,6 @@ export interface DamagedFileRow {
   protectedReason: string | null;
   // The last audit of this file, when one has run since the file last changed.
   audit: { status: string; mode: string; message: string | null; checkedAt: string } | null;
+  // The file header check result, when the file has one.
+  header: FileHeaderState | null;
 }

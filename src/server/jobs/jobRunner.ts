@@ -28,7 +28,8 @@ import { assertDestinationPathInside, assertExistingPathInside, assertPathParent
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
 import { completeOnboardingScan } from "../lib/onboarding";
-import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, type ScanActivity } from "../lib/scanner";
+import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, scanResultStorageFiles, type ScanActivity } from "../lib/scanner";
+import { copyHeaderGate, fileHeaderChecksEnabled, runScanHeaderChecks, type ScanHeaderRun } from "../lib/headerChecks";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { estimateAuditSeconds, libraryWideDeepAuditRefusal, libraryWideRemoteAuditRefusal } from "../../shared/auditEstimate";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
@@ -2089,6 +2090,7 @@ function copyProgressPayload({
     totalBytes: hasByteProgress ? (update?.totalBytes ?? update?.sizeBytes ?? link?.sizeBytes ?? null) : null,
     bytesPerSecond: hasByteProgress ? (update?.bytesPerSecond ?? null) : null,
     remainingSeconds: hasByteProgress ? (update?.remainingSeconds ?? null) : null,
+    headerCheckedAt: update?.headerCheckedAt ?? null,
     updatedAt: nowIso()
   };
 }
@@ -3187,12 +3189,16 @@ export class JobRunner {
           .from(schema.mediaLinks)
           .where(and(isNull(schema.mediaLinks.missingSince), or(inArray(schema.mediaLinks.resolvedStorageFileId, batch.map((row) => row.id)), inArray(schema.mediaLinks.targetPath, batch.map((row) => row.file_path))))));
       }
+      // Files that failed their header check can be on remote storage too; each file is claimed under its own root.
+      const remoteRows = eligible.filter((row) => row.root_type === "remote");
+      if (remoteRows.length > 0 && !paths.remoteDir) throw new AdmissionError("Storage path settings are incomplete");
       const claims: ResourceClaim[] = [
-        ...inventoryScopeResourceClaims("local", eligible.map((row) => row.section), "shared"),
+        ...inventoryScopeResourceClaims("local", eligible.filter((row) => row.root_type === "local").map((row) => row.section), "shared"),
+        ...(remoteRows.length > 0 ? inventoryScopeResourceClaims("remote", [], "shared") : []),
         ...sectionResourceClaims(links.map((link) => link.section), "shared")
       ];
       for (let offset = 0; offset < eligible.length; offset += 16) {
-        const pathClaims = await Promise.all(eligible.slice(offset, offset + 16).map((row) => managedPathResourceClaims(paths.localDir, row.file_path, "Damaged file claim", "exclusive", true)));
+        const pathClaims = await Promise.all(eligible.slice(offset, offset + 16).map((row) => managedPathResourceClaims(row.root_type === "remote" ? paths.remoteDir : paths.localDir, row.file_path, "Damaged file claim", "exclusive", true)));
         claims.push(...pathClaims.flat());
       }
       for (let offset = 0; offset < links.length; offset += 16) {
@@ -3203,7 +3209,7 @@ export class JobRunner {
         claims.push({ resourceType: "media", resourceKey: String(link.id), access: "exclusive" }, { resourceType: "title", resourceKey: JSON.stringify([link.section, link.itemName]), access: "shared" });
       }
       const total = eligible.length;
-      const options = { rootType: "local" as const, mode, total, reRequest, ...(rescan ? { rescan: true } : {}), source: "damaged" };
+      const options = { rootType: remoteRows.length === eligible.length ? ("remote" as const) : ("local" as const), mode, total, reRequest, ...(rescan ? { rescan: true } : {}), source: "damaged" };
       return {
         progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to delete damaged files" },
         options,
@@ -3212,7 +3218,7 @@ export class JobRunner {
         orphanPurgeOperations: eligible.map((row) => ({
           storageFileId: row.id,
           targetKind: "damaged_file" as const,
-          rootType: "local" as const,
+          rootType: row.root_type,
           filePath: row.file_path,
           sizeBytes: Number(row.size_bytes),
           mtimeMs: Number(row.mtime_ms),
@@ -4288,6 +4294,28 @@ export class JobWorker {
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan cancelled before inventory results were written", result.inventory));
         return;
       }
+      // The end of the scan checks the headers of new and changed files, within a per-scan budget, before the results are
+      // written; the write stores the verdicts with the files. Whatever the budget leaves stays queued for the next scan.
+      const headerChecksEnabled = await fileHeaderChecksEnabled(this.db);
+      let headerRun: ScanHeaderRun | null = null;
+      if (headerChecksEnabled) {
+        await ctx.setProgress(scanProgressPayload(normalizedOptions, "indexing", "Checking file headers of new and changed files", result.inventory));
+        headerRun = await runScanHeaderChecks(this.db, scanResultStorageFiles(result), { isCancelled: async () => ctx.signal.aborted || (await ctx.isCancelled()) });
+        const summary = headerRun.summary;
+        if (summary.due > 0) {
+          await ctx.event(summary.failed > 0 ? "warn" : "info", `Checked file headers: ${summary.passed} passed, ${summary.failed} failed${summary.retry > 0 ? `, ${summary.retry} to retry` : ""}${summary.left > 0 ? `, ${summary.left} left for the next scan` : ""}`, {
+            due: summary.due,
+            checked: summary.checked,
+            passed: summary.passed,
+            failed: summary.failed,
+            retry: summary.retry,
+            skipped: summary.skipped,
+            left: summary.left,
+            firstFailedPaths: summary.failedPaths.slice(0, 5)
+          });
+        }
+        await ctx.setProgress(scanProgressPayload(normalizedOptions, "indexing", "Writing scan results to the inventory database", result.inventory));
+      }
       let persistedInventory: InventorySummary | null = null;
       const completionMessage = isTitleRescan
         ? "Title rescan completed and symlink inventory was reconciled"
@@ -4297,7 +4325,9 @@ export class JobWorker {
         : "Manual inventory scan indexed library links and storage files";
       const finalized = await ctx.finishCompleted(async (leaseDb) => {
         if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Scan indexing was cancelled"));
-        const inventory = await persistScanResult(leaseDb, result, jobId, async () => ctx.signal.aborted);
+        const inventory = await persistScanResult(leaseDb, result, jobId, async () => ctx.signal.aborted, {
+          headerChecks: { enabled: headerChecksEnabled, results: headerRun?.results }
+        });
         if (ctx.signal.aborted) throw (ctx.signal.reason instanceof Error ? ctx.signal.reason : new Error("Scan indexing was cancelled"));
         await leaseDb.update(schema.scanRuns).set({ status: "completed", finishedAt: nowIso(), errorMessage: null, ...inventory }).where(eq(schema.scanRuns.id, scanRun.id));
         await completeOnboardingScan(leaseDb, jobId);
@@ -5442,7 +5472,18 @@ export class JobWorker {
         sourcePath: link.targetPath
       });
 
+      let headerCheckedAt: string | null = null;
       try {
+        // A file whose header check failed is not copied to local storage; one never checked is checked first.
+        if (normalizedOptions.direction === "to_local") {
+          const gate = await copyHeaderGate(this.db, link);
+          if (gate.blocked) throw new Error(gate.blocked);
+          if (gate.header?.status === "pass") {
+            headerCheckedAt = gate.header.checkedAt;
+            linkUpdate = { sourcePath: link.targetPath, linkPath: link.linkPath, sizeBytes: link.sizeBytes ?? undefined, headerCheckedAt };
+            await setCopyProgress("preparing", "File header check passed", link, linkUpdate);
+          }
+        }
         let lastProgressEventKey: string | null = null;
         const localConflict =
           normalizedOptions.direction === "to_local"
@@ -5513,7 +5554,7 @@ export class JobWorker {
             normalizedOptions.direction,
             this.copyRunner,
             async (update) => {
-              linkUpdate = update;
+              linkUpdate = headerCheckedAt ? { ...update, headerCheckedAt } : update;
               await setCopyProgress(update.stage, update.message, link, linkUpdate);
               if (update.stage === "copying" || (update.stage === "preparing" && !/retry/i.test(update.message))) return;
               const progressEventKey = `${update.stage}:${update.message}`;
@@ -5556,7 +5597,7 @@ export class JobWorker {
           copied += 1;
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, linkUpdate);
-          await ctx.event("info", copyBehavior.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName });
+          await ctx.event("info", copyBehavior.profile === "off" ? "Copy installed without verification" : "Verified copy installed", { ...result, itemName: link.itemName, ...(headerCheckedAt ? { headerCheckedAt } : {}) });
           if (result.warning) await ctx.event("warn", result.warning, { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.set(link.id, {
@@ -5571,7 +5612,7 @@ export class JobWorker {
           repointed += 1;
           linkUpdate = { ...(linkUpdate ?? {}), ...result };
           await setCopyProgress("done", result.message, link, linkUpdate);
-          await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName });
+          await ctx.event("info", "Symlink repointed to existing verified file", { ...result, itemName: link.itemName, ...(headerCheckedAt ? { headerCheckedAt } : {}) });
           if (result.warning) await ctx.event("warn", result.warning, { ...result, itemName: link.itemName });
           if (normalizedOptions.localConflictStrategy === "replace" && localConflict) {
             replacementCandidateEntries.set(link.id, {

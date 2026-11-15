@@ -548,7 +548,7 @@ describe("api app", () => {
     const defaultAdvancedSettings = await ctx.app.inject({ method: "GET", url: "/api/settings/advanced", headers: { cookie: String(setupCookie) } });
     expect(defaultAdvancedSettings.statusCode).toBe(200);
     expect(defaultAdvancedSettings.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 }, checkFileHeaders: true },
       copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: false, rolling: { enabled: false, startHour: 1, windowHours: 4 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
@@ -565,7 +565,7 @@ describe("api app", () => {
     });
     expect(saveAdvancedSettings.statusCode).toBe(200);
     expect(saveAdvancedSettings.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 }, checkFileHeaders: true },
       copy: { profile: "custom", byteCompare: false, mediaValidation: "deep" },
       audit: { defaultMode: "deep", byteCompareWhenSourceKnown: false, rolling: { enabled: false, startHour: 1, windowHours: 4 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
@@ -582,7 +582,7 @@ describe("api app", () => {
     });
     expect(disableCopyVerification.statusCode).toBe(200);
     expect(disableCopyVerification.json()).toEqual({
-      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 } },
+      scan: { symlinkFolderScheduling: "single_job", includeRemoteWithSymlinkScans: true, scheduledInventory: { enabled: true, hour: 5 }, checkFileHeaders: true },
       copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
       audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true, rolling: { enabled: true, startHour: 22, windowHours: 6 } },
       cleanup: { holdDays: 7, deleteRemoteSourceAfterCopy: false, reRequestsPerMinute: 6, purgeRecheckSeconds: 120, purgeSettleSeconds: 0 }
@@ -2864,7 +2864,9 @@ describe("api app", () => {
       headers: { cookie },
       payload: {
         copy: { profile: "deep", byteCompare: true, mediaValidation: "deep" },
-        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+        // The fixtures are a few bytes long, which the file header check would refuse to copy.
+        scan: { checkFileHeaders: false }
       }
     });
     expect(settings.statusCode).toBe(200);
@@ -2895,7 +2897,9 @@ describe("api app", () => {
       headers: { cookie },
       payload: {
         copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
-        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+        // The fixtures are a few bytes long, which the file header check would refuse to copy.
+        scan: { checkFileHeaders: false }
       }
     });
     expect(settings.statusCode).toBe(200);
@@ -2919,7 +2923,9 @@ describe("api app", () => {
       headers: { cookie },
       payload: {
         copy: { profile: "off", byteCompare: false, mediaValidation: "off" },
-        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
+        audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true },
+        // The fixtures are a few bytes long, which the file header check would refuse to copy.
+        scan: { checkFileHeaders: false }
       }
     });
     expect(settings.statusCode).toBe(200);

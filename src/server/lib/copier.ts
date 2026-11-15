@@ -53,6 +53,8 @@ export interface CopyProgressUpdate {
   totalBytes?: number;
   bytesPerSecond?: number;
   remainingSeconds?: number | null;
+  // When the source passed its file header check, for the copy progress panel.
+  headerCheckedAt?: string;
 }
 
 export type CopyProgressReporter = (update: CopyProgressUpdate) => Promise<void> | void;

@@ -26,6 +26,8 @@ export type CopyProgressView = {
   bytesPerSecond: number | null;
   remainingSeconds: number | null;
   direction: CopyOptions["direction"] | null;
+  // Set when the current file passed its header check on the way into the copy.
+  headerCheckedAt: string | null;
 };
 
 export type CopyFailedItemSummary = {
@@ -41,6 +43,8 @@ export type CopyCompletedItemSummary = {
   fileName: string | null;
   outcome: "Copied and symlinked" | "Matched existing and symlinked";
   warning?: string;
+  // When the source passed its file header check before it was copied.
+  headerCheckedAt?: string;
 };
 
 function copyFailureReason(message: string): string {
@@ -120,7 +124,8 @@ export function copyCompletedItemSummaries(events: JobEventRecord[]): CopyComple
     const title = directTitle || keys.map((key) => titlesByPath.get(key)).find(Boolean) || fileName || "Completed item";
     const key = keys[0] ?? `${title}:${fileName ?? ""}`;
     const warning = typeof data?.warning === "string" ? data.warning : undefined;
-    completed.set(key, { key, title, fileName, outcome, ...(warning ? { warning } : {}) });
+    const headerCheckedAt = typeof data?.headerCheckedAt === "string" ? data.headerCheckedAt : undefined;
+    completed.set(key, { key, title, fileName, outcome, ...(warning ? { warning } : {}), ...(headerCheckedAt ? { headerCheckedAt } : {}) });
   }
 
   return [...completed.values()].sort((left, right) => left.title.localeCompare(right.title, undefined, { sensitivity: "base" }) || (left.fileName ?? "").localeCompare(right.fileName ?? "", undefined, { sensitivity: "base" }));
@@ -151,7 +156,8 @@ export function copyProgressFromJob(job: JobRecord | null): CopyProgressView {
     totalBytes: finiteNullableNumberFromUnknown(progress?.totalBytes),
     bytesPerSecond: finiteNullableNumberFromUnknown(progress?.bytesPerSecond),
     remainingSeconds: finiteNullableNumberFromUnknown(progress?.remainingSeconds),
-    direction
+    direction,
+    headerCheckedAt: typeof progress?.headerCheckedAt === "string" ? progress.headerCheckedAt : null
   };
 }
 

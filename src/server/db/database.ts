@@ -13,6 +13,7 @@ import { applyAccountsMigration } from "./accountsMigration";
 import { applySearchTextMigration } from "./searchTextMigration";
 import { applyStoragePolicySectionMigration } from "./storagePolicySectionMigration";
 import { applyAuditStateMigration } from "./auditStateMigration";
+import { applyFileHeaderMigration } from "./fileHeaderMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -34,7 +35,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 35;
+export const currentSchemaVersion = 36;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -1043,6 +1044,19 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         await client.query(`ALTER TABLE re_requests ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'search'`);
         await client.query(`ALTER TABLE re_requests ALTER COLUMN operation_id DROP NOT NULL`);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (35, 'arr_rescans', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(36)) {
+      await client.query("BEGIN");
+      try {
+        // File header check results per storage file. Existing files start unchecked and unqueued: the slow
+        // background pass checks them, so the first scan after the upgrade does not treat the library as new.
+        await applyFileHeaderMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (36, 'file_header_checks', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { describeFileHeader } from "../shared/fileHeaders";
+import { HeaderCheckMark } from "./fileHeaderMark";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
@@ -114,6 +116,7 @@ function FileFlags({ item }: { item: OrphanReviewItem }) {
   const flags: Array<{ text: string; title: string; tone: LabelTone }> = [];
   if (item.hollow) flags.push({ text: "Hollow", title: "Almost none of this file is stored on disk", tone: "bad" });
   if (item.integrity === "partial_hollow") flags.push({ text: "Damaged", title: `${item.zeroSamples ?? "Several"} of 24 sampled regions are zero-filled`, tone: "bad" });
+  if (item.header?.status === "fail") flags.push({ text: "Bad header", title: describeFileHeader(item.header), tone: "bad" });
   if (item.episodeCoverage && item.episodeCoverage.linked < item.episodeCoverage.total)
     flags.push({ text: `${formatNumber(item.episodeCoverage.linked)} of ${formatNumber(item.episodeCoverage.total)} episodes linked`, title: `Holds ${formatNumber(item.episodeCoverage.total)} episodes, and only ${formatNumber(item.episodeCoverage.linked)} of them ${item.episodeCoverage.linked === 1 ? "has" : "have"} a linked file`, tone: "warn" });
   if (item.cameBackAfterPurge) {
@@ -609,6 +612,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                               <td className="orv-col-file">
                                 <div className="orv-name-line">
                                   <span className="orv-name">{fileName(item.relativePath)}</span>
+                                  <HeaderCheckMark header={item.header} />
                                   <FileFlags item={item} />
                                 </div>
                                 <div className="orv-sub">

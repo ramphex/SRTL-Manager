@@ -34,7 +34,8 @@ export const maxRollingAuditWindowHours = 12;
 export const defaultScanJobBehaviorSettings: ScanJobBehaviorSettings = {
   symlinkFolderScheduling: "single_job",
   includeRemoteWithSymlinkScans: true,
-  scheduledInventory: { enabled: true, hour: 5 }
+  scheduledInventory: { enabled: true, hour: 5 },
+  checkFileHeaders: true
 };
 
 export const defaultCleanupSettings: CleanupSettings = {
@@ -107,7 +108,8 @@ function normalizeScanBehavior(value: unknown): ScanJobBehaviorSettings {
     scheduledInventory: {
       enabled: scheduled.enabled !== false,
       hour: Number.isInteger(hour) && hour >= 0 && hour <= 23 ? hour : defaultScanJobBehaviorSettings.scheduledInventory.hour
-    }
+    },
+    checkFileHeaders: record.checkFileHeaders !== false
   };
 }
 
