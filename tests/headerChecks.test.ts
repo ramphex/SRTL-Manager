@@ -261,8 +261,12 @@ describe("the background header check", () => {
     await scan();
     // 24 a minute over five-second passes is two files per pass.
     headerCheckLimits.backfillRemotePerMinute = 24;
-    expect(await runHeaderBackfillPass(ctx.database.db)).toEqual({ ran: true, checked: 2, failed: 0 });
-    expect(await runHeaderBackfillPass(ctx.database.db)).toEqual({ ran: true, checked: 2, failed: 1 });
+    // Which pass meets the broken file depends on directory order, which differs between filesystems.
+    const first = await runHeaderBackfillPass(ctx.database.db);
+    const second = await runHeaderBackfillPass(ctx.database.db);
+    expect(first).toMatchObject({ ran: true, checked: 2 });
+    expect(second).toMatchObject({ ran: true, checked: 2 });
+    expect(first.failed + second.failed).toBe(1);
     expect(await runHeaderBackfillPass(ctx.database.db)).toEqual({ ran: true, checked: 0, failed: 0 });
     const rows = await headerRows();
     expect(Object.values(rows).map((row) => row.status).sort()).toEqual(["fail", "pass", "pass", "pass"]);
