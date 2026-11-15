@@ -11,6 +11,9 @@ import { StatusPill } from "./App";
 import { formatBytes, formatDate, formatNumber } from "./appShared";
 import { ArrRescanOption, ReRequestActivity, ReRequestOption } from "./reRequest";
 import { AuditDialog } from "./jobPresentation";
+import { describeFileHeader } from "../shared/fileHeaders";
+import { HeaderCheckMark } from "./fileHeaderMark";
+import { storageLocationName, useStorageLocations } from "./appShared";
 import type { AuditPrompt } from "./appShared";
 
 export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
@@ -21,6 +24,7 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
   const rows = damaged.data ?? [];
   const hollow = rows.filter((row) => row.integrity === "hollow").length;
   const auditFailed = rows.filter((row) => row.integrity === "audit_failed").length;
+  const headerFailed = rows.filter((row) => row.integrity === "header_failed").length;
   const [auditPrompt, setAuditPrompt] = useState<AuditPrompt | null>(null);
   // A deep audit decodes every frame, so it is started for these files only, never library-wide.
   const openDeepAudit = (targets: DamagedFileRow[]) => {
@@ -78,15 +82,15 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
         </div>
       </div>
       <p className="panel-message">
-        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit. Files are only sampled when a scan sees them change. A failed audit stays listed until a later audit passes or the file changes.
+        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit, and files on either storage whose header is not a video (bad header). Files are only sampled and header-checked when a scan sees them new or changed. A failed audit stays listed until a later audit passes or the file changes.
       </p>
       {damaged.error ? <p className="panel-message error">{damaged.error.message}</p> : null}
       {damaged.isLoading ? <p className="panel-message">Loading…</p> : null}
-      {damaged.data && rows.length === 0 ? <p className="panel-message">No hollow or damaged files were found by the last scans, and no audit has failed.</p> : null}
+      {damaged.data && rows.length === 0 ? <p className="panel-message">No hollow, damaged or bad-header files were found by the last scans, and no audit has failed.</p> : null}
       {rows.length > 0 ? (
         <>
           <p className="panel-message">
-            {formatNumber(rows.length)} files: {formatNumber(hollow)} hollow, {formatNumber(rows.length - hollow - auditFailed)} damaged, {formatNumber(auditFailed)} failed an audit, {formatBytes(rows.reduce((total, row) => total + row.sizeBytes, 0))} in total.
+            {formatNumber(rows.length)} files: {formatNumber(hollow)} hollow, {formatNumber(rows.length - hollow - auditFailed - headerFailed)} damaged, {formatNumber(headerFailed)} with a bad header, {formatNumber(auditFailed)} failed an audit, {formatBytes(rows.reduce((total, row) => total + row.sizeBytes, 0))} in total.
           </p>
           {canDelete ? (
             <div className="orphan-toolbar damaged-files-actions">
@@ -163,6 +167,9 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
   const files = `${formatNumber(count)} ${count === 1 ? "file" : "files"}`;
   const linked = rows.filter((row) => row.linked).length;
   const withRemote = rows.filter((row) => row.remoteCopyExists).length;
+  const remoteName = storageLocationName(useStorageLocations(), "remote");
+  const remoteRows = rows.filter((row) => row.rootType === "remote").length;
+  const where = remoteRows === 0 ? rootLabel : remoteRows === count ? remoteName : `${rootLabel} and ${remoteName}`;
   return (
     <div className="orphan-confirmation damaged-confirmation" role="group" aria-label="Confirm damaged file delete">
       <div className="segmented" role="group" aria-label="Delete mode">
@@ -175,8 +182,8 @@ function DamagedDeleteConfirmation({ rows, rootLabel, pending, onCancel, onConfi
       </div>
       <p>
         {mode === "hold"
-          ? `Move ${files} (${formatBytes(bytes)}) on ${rootLabel} to the holding area? They can be restored for ${holdDays} days, then they are permanently deleted.`
-          : `Permanently delete ${files} (${formatBytes(bytes)}) on ${rootLabel}? This cannot be undone.`}
+          ? `Move ${files} (${formatBytes(bytes)}) on ${where} to the holding area? They can be restored for ${holdDays} days, then they are permanently deleted.`
+          : `Permanently delete ${files} (${formatBytes(bytes)}) on ${where}? This cannot be undone.`}
         {linked > 0 ? ` ${formatNumber(linked)} ${linked === 1 ? "is" : "are"} in the library: ${linked === 1 ? "its symlink is" : "their symlinks are"} removed too, so ${linked === 1 ? "that title" : "those titles"} will show as missing until replaced.` : ""}
         {withRemote > 0 ? ` ${formatNumber(withRemote)} ${withRemote === 1 ? "has" : "have"} a remote copy, which is not touched and not linked automatically.` : ""}
       </p>
@@ -203,6 +210,7 @@ function DamagedFileTableRow({
   selection: { checked: boolean; disabled: boolean; onChange: (checked: boolean) => void } | null;
   onAudit: (() => void) | null;
 }) {
+  const remoteName = storageLocationName(useStorageLocations(), "remote");
   return (
     <tr>
       {selection ? (
@@ -212,18 +220,20 @@ function DamagedFileTableRow({
       ) : null}
       <td>
         <strong>{row.itemName || row.relativePath}</strong>
+        <HeaderCheckMark header={row.header} />
+        {row.rootType === "remote" ? <span className="damaged-storage-tag">on {remoteName}</span> : null}
         <span className="orphan-path">{row.relativePath}</span>
         {selection && row.protectedReason ? <span className="orphan-protected">Protected: {row.protectedReason}</span> : null}
       </td>
       <td>
-        <DamageIntegrityPill integrity={row.integrity} />
+        <DamageIntegrityPill integrity={row.integrity} headerDetail={row.header ? describeFileHeader(row.header) : undefined} />
       </td>
       <td className="orphan-nowrap">{formatBytes(row.sizeBytes)}</td>
       <td className="orphan-nowrap">{row.storedPercent == null ? "-" : `${row.storedPercent}%`}</td>
       <td className="orphan-nowrap">{row.zeroSamples == null ? "-" : `${row.zeroSamples} / ${row.zeroSamplesTotal}`}</td>
       <td>{row.linked ? "Linked" : "Orphan"}</td>
-      <td>{row.remoteCopyExists ? "Yes" : "No"}</td>
-      <td className="orphan-nowrap">{row.checkedAt ? formatDate(row.checkedAt) : "-"}</td>
+      <td>{row.rootType === "remote" ? "-" : row.remoteCopyExists ? "Yes" : "No"}</td>
+      <td className="orphan-nowrap">{row.integrity === "header_failed" && row.header ? formatDate(row.header.checkedAt) : row.checkedAt ? formatDate(row.checkedAt) : "-"}</td>
       <td>
         {row.audit ? (
           <span className="damaged-audit" title={row.audit.message ?? undefined}>
@@ -245,7 +255,8 @@ function DamagedFileTableRow({
   );
 }
 
-export function DamageIntegrityPill({ integrity }: { integrity: "ok" | "hollow" | "partial_hollow" | "unknown" | "audit_failed" }) {
+export function DamageIntegrityPill({ integrity, headerDetail }: { integrity: "ok" | "hollow" | "partial_hollow" | "unknown" | "audit_failed" | "header_failed"; headerDetail?: string }) {
+  if (integrity === "header_failed") return <span title={headerDetail ?? "The file header check found no video data at the start of this file"}><StatusPill value="Bad header" toneValue="damaged" /></span>;
   if (integrity === "audit_failed") return <span title="The last audit of this file failed; open the audit history for the reason"><StatusPill value="Failed audit" /></span>;
   if (integrity === "hollow") return <span title="Almost none of this file is stored on disk; it may be a placeholder or an interrupted copy"><StatusPill value="Hollow" /></span>;
   if (integrity === "partial_hollow") return <span title="Sampling found zero-filled gaps inside this file"><StatusPill value="Damaged" /></span>;

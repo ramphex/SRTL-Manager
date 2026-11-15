@@ -8685,3 +8685,20 @@ button.danger-button:hover:not(:disabled) {
 .damaged-audit { display: grid; gap: 2px; white-space: nowrap; }
 .damaged-audit small { color: var(--muted); font-size: 12px; }
 .rolling-audit-coverage { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
+
+/* File header check: a small checkmark beside files whose header check passed. */
+.header-check-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+  border-radius: 50%;
+  color: var(--good);
+  background: color-mix(in srgb, var(--good) 14%, transparent);
+  vertical-align: -2px;
+  cursor: default;
+}
+.damaged-storage-tag { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 400; }

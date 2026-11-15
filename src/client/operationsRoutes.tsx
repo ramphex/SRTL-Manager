@@ -913,6 +913,17 @@ function AdvancedSettingsPanel() {
                 <small>Scans all symlink folders, local folders, and remote storage once a day, using the scheduling above.</small>
               </span>
             </label>
+            <label className="advanced-toggle">
+              <input
+                type="checkbox"
+                checked={draft.scan.checkFileHeaders}
+                onChange={(event) => updateScan({ checkFileHeaders: event.target.checked })}
+              />
+              <span>
+                <strong>Check file headers after scans</strong>
+                <small>Reads the first 64 KB of new and changed files at the end of each scan, and of older files slowly in the background. Files that are empty, zero-filled or not a video are listed on Damaged files and are not copied to local storage.</small>
+              </span>
+            </label>
             <label className="advanced-field">
               <span>Daily scan starts after (server time)</span>
               <select

@@ -317,6 +317,15 @@ export const storageFiles = pgTable(
     auditStatus: text("audit_status"),
     auditMode: text("audit_mode"),
     auditMessage: text("audit_message"),
+    // File header check: pass | fail | retry | skipped, null until checked. The reason is the container found, why it
+    // failed, or why it could not run. The size and mtime are the ones the verdict describes; a scan that sees either
+    // change clears the result. queued_at marks a new or changed file the end of a scan still has to check.
+    headerStatus: text("header_status"),
+    headerReason: text("header_reason"),
+    headerCheckedAt: text("header_checked_at"),
+    headerCheckedSizeBytes: bigint("header_checked_size_bytes", { mode: "number" }),
+    headerCheckedMtimeMs: bigint("header_checked_mtime_ms", { mode: "number" }),
+    headerQueuedAt: text("header_queued_at"),
     firstSeenAt: text("first_seen_at").notNull(),
     lastSeenAt: text("last_seen_at").notNull(),
     lastChangedAt: text("last_changed_at").notNull(),

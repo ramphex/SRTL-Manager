@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
+import { HeaderCheckedAtMark } from "./fileHeaderMark";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
 import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
@@ -914,8 +915,16 @@ export function CopyProgressPanel({
       <div className="copy-current-file">
         <File size={15} />
         <span>
-          <strong>{currentItem.title}</strong>
-          {currentItem.fileName ? <small className="copy-current-file-name">{currentItem.fileName}</small> : null}
+          <strong>
+            {currentItem.title}
+            {currentItem.fileName ? null : <HeaderCheckedAtMark checkedAt={progress.headerCheckedAt} />}
+          </strong>
+          {currentItem.fileName ? (
+            <small className="copy-current-file-name">
+              {currentItem.fileName}
+              <HeaderCheckedAtMark checkedAt={progress.headerCheckedAt} />
+            </small>
+          ) : null}
           <small>{currentItem.detail}</small>
         </span>
       </div>
@@ -989,6 +998,7 @@ type CopyItemDetail = {
   statusDetail?: string;
   mediaLinkId?: number | null;
   removable?: boolean;
+  headerCheckedAt?: string;
 };
 
 function CopyCompletedItemsTooltip({ count, events, loading, error }: { count: number; events: JobEventRecord[]; loading: boolean; error?: string | null }) {
@@ -1411,8 +1421,16 @@ function CopyItemDetailsTooltip({
             {items.map((item) => (
               <li key={item.key} className={itemControls ? "has-actions" : undefined}>
                 <div className="copy-item-details-copy">
-                  <strong>{item.title}</strong>
-                  {item.fileName ? <span>{item.fileName}</span> : null}
+                  <strong>
+                    {item.title}
+                    {item.fileName ? null : <HeaderCheckedAtMark checkedAt={item.headerCheckedAt} />}
+                  </strong>
+                  {item.fileName ? (
+                    <span>
+                      {item.fileName}
+                      <HeaderCheckedAtMark checkedAt={item.headerCheckedAt} />
+                    </span>
+                  ) : null}
                   <small>{item.detail}</small>
                   {item.statusDetail ? <small className="copy-item-details-status">{item.statusDetail}</small> : null}
                 </div>

@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { headerStateOf } from "../lib/headerChecks";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { HeldOrphanFile, OrphanCameBackAfterPurge, OrphanCategory, OrphanPurgeItem, OrphanPurgeItemOutcome, OrphanPurgeItemPage, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
@@ -40,6 +41,10 @@ type OrphanRow = {
   integrity: string | null;
   integrity_zero_samples: number | null;
   audit_status?: string | null;
+  header_status?: string | null;
+  header_reason?: string | null;
+  header_checked_at?: string | null;
+  root_type?: string;
   copy_leftover: boolean;
   active_copy: boolean;
 };
@@ -91,7 +96,7 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
         from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
         where ${unfinishedCopyCondition} and p is not null
       )
-      select sf.id, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples, sf.audit_status,
+      select sf.id, sf.root_type, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples, sf.audit_status, sf.header_status, sf.header_reason, sf.header_checked_at,
         cs.path is not null as copy_leftover,
         ap.path is not null as active_copy
       from storage_files sf
@@ -204,8 +209,11 @@ function integrityOf(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "in
   return effectiveIntegrity(Number(row.size_bytes), row.allocated_bytes == null ? null : Number(row.allocated_bytes), row.integrity);
 }
 
-// Damaged files listed on the Damaged files page: hollow or zero-filled by sampling, or failed their last audit.
-function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity" | "audit_status">): boolean {
+// Damaged files listed on the Damaged files page: hollow or zero-filled by sampling, failed their last audit, or
+// failed the file header check. Sampling and audits only cover local files; a header check covers both roots.
+function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity" | "audit_status" | "header_status" | "root_type">): boolean {
+  if (row.header_status === "fail") return true;
+  if (row.root_type === "remote") return false;
   const integrity = integrityOf(row);
   return integrity === "hollow" || integrity === "partial_hollow" || row.audit_status === "fail";
 }
@@ -442,6 +450,7 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
       hollow: integrityOf(row) === "hollow",
       integrity: integrityOf(row),
       zeroSamples: row.integrity_zero_samples,
+      header: headerStateOf({ headerStatus: row.header_status ?? null, headerReason: row.header_reason ?? null, headerCheckedAt: row.header_checked_at ?? null }),
       label,
       matchedTitle,
       releaseName,
@@ -525,9 +534,12 @@ export async function extraSymlinksForPurge(db: DbExecutor, paths: PathsSettings
 }
 
 // Recomputed under the job's admission transaction, like purgeableOrphans. A damaged file may have library symlinks: they go with it.
-export async function purgeableDamagedFiles(db: DbExecutor, storageFileIds: number[], now = Date.now()): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
-  const found = new Map((await orphanRows(db, "local", storageFileIds, true)).map((row) => [row.id, row]));
-  const eligible: OrphanRow[] = [];
+export async function purgeableDamagedFiles(db: DbExecutor, storageFileIds: number[], now = Date.now()): Promise<{ eligible: Array<OrphanRow & { root_type: StorageRootType }>; rejected: string[] }> {
+  const local = (await orphanRows(db, "local", storageFileIds, true)).map((row) => ({ ...row, root_type: "local" as const }));
+  // Remote files only reach Damaged files through a failed header check; isDamaged rejects any other remote row.
+  const remote = (await orphanRows(db, "remote", storageFileIds, true)).map((row) => ({ ...row, root_type: "remote" as const }));
+  const found = new Map([...local, ...remote].map((row) => [row.id, row]));
+  const eligible: Array<OrphanRow & { root_type: StorageRootType }> = [];
   const rejected: string[] = [];
   for (const id of storageFileIds) {
     const row = found.get(id);
@@ -1196,7 +1208,7 @@ async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
   )[0];
   if (!storageFile || path.resolve(storageFile.filePath) !== path.resolve(operation.filePath)) throw new Error("Inventory record changed after the delete was queued; rescan before deleting");
-  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity, audit_status: storageFile.auditStatus }))
+  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity, audit_status: storageFile.auditStatus, header_status: storageFile.headerStatus, root_type: storageFile.rootType }))
     throw new Error("A later scan or audit found this file healthy; nothing was deleted");
   if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
 

@@ -21,6 +21,7 @@ import { runWatchSyncWork } from "./lib/watchSyncEngine";
 import { configureExtraSymlinkFolders } from "./lib/extraSymlinkFolders";
 import { configureOutboundPolicy } from "./lib/outboundPolicy";
 import { loadAndInstallSecretKey } from "./lib/secretBox";
+import { headerCheckLimits, runHeaderBackfillPass } from "./lib/headerChecks";
 
 // Media outputs must remain readable by services running under a different account.
 process.umask(0o022);
@@ -120,6 +121,8 @@ let reRequestTimer: NodeJS.Timeout | null = null;
 let reRequestRun: Promise<void> | null = null;
 // One entry per Radarr or Sonarr instance with searches being sent.
 const reRequestInstanceRuns = new Map<string, Promise<void>>();
+let headerBackfillTimer: NodeJS.Timeout | null = null;
+let headerBackfillRun: Promise<void> | null = null;
 let watchSyncTimer: NodeJS.Timeout | null = null;
 let watchSyncRun: Promise<void> | null = null;
 let scheduledScanTimer: NodeJS.Timeout | null = null;
@@ -164,6 +167,15 @@ try {
         .finally(() => { reRequestRun = null; });
     }, reRequestPassMs);
     reRequestTimer.unref();
+    // Checks the headers of files that were in the library before the check existed, a few per pass.
+    headerBackfillTimer = setInterval(() => {
+      if (shuttingDown || headerBackfillRun) return;
+      headerBackfillRun = runHeaderBackfillPass(database.db)
+        .then(() => undefined)
+        .catch((error: unknown) => { console.error("A file header check pass could not finish; it will be retried.", error); })
+        .finally(() => { headerBackfillRun = null; });
+    }, headerCheckLimits.backfillPassMs);
+    headerBackfillTimer.unref();
     // Each pair keeps its own interval; this only checks what is due.
     watchSyncTimer = setInterval(() => {
       if (shuttingDown || watchSyncRun) return;
@@ -244,6 +256,7 @@ try {
   if (sonarrTimer) clearInterval(sonarrTimer);
   if (reRequestTimer) clearInterval(reRequestTimer);
   if (watchSyncTimer) clearInterval(watchSyncTimer);
+  if (headerBackfillTimer) clearInterval(headerBackfillTimer);
   if (scheduledScanTimer) clearInterval(scheduledScanTimer);
   if (scheduledBackupTimer) clearInterval(scheduledBackupTimer);
   if (scheduledAuditTimer) clearInterval(scheduledAuditTimer);
@@ -260,6 +273,7 @@ try {
   await scheduledBackupRun;
   await scheduledAuditRun;
   await watchSyncRun;
+  await headerBackfillRun;
   await recordHeartbeat("stopped").catch((error: unknown) => {
     console.error("Unable to record stopped worker status", error);
   });

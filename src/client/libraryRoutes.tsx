@@ -14,6 +14,7 @@ import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, OrphanPurgeStatusDialog, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { DamageIntegrityPill, DamagedFilesPanel } from "./damagedFiles";
+import { HeaderCheckMark, HeaderFailedPill } from "./fileHeaderMark";
 import { useDamagedFiles } from "./damagedFilesQuery";
 import { useAccess } from "./access";
 import { NotAllowed } from "./notAllowed";
@@ -1415,6 +1416,8 @@ function RemoteWorkLinksTable({
                                     <span className="actionable-episode-name">
                                       <FileText size={15} />
                                       <span className="actionable-title-text">{episode.episodeName}</span>
+                                      <HeaderCheckMark header={episode.link.header} />
+                                      <HeaderFailedPill header={episode.link.header} />
                                       <SourceTitleRiskBadge risk={sourceRisk} />
                                     </span>
                                     <FutureActions
@@ -1471,6 +1474,8 @@ function RemoteWorkLinksTable({
                     <td className="mobile-card-primary" data-label="Title">
                       <span className="actionable-title-with-risk">
                         <strong className="actionable-title-text">{link.itemName}</strong>
+                        <HeaderCheckMark header={link.header} />
+                        <HeaderFailedPill header={link.header} />
                         <SourceTitleRiskBadge risk={sourceRisk} />
                       </span>
                     </td>
@@ -2476,6 +2481,7 @@ function SymlinkTreeRow({
         <span className="tree-file-name">
           <File size={15} />
           <span className="tree-file-label">{node.name}</span>
+          <HeaderCheckMark header={node.link?.header} />
         </span>
       </td>
       {isShowSection ? (
@@ -2488,6 +2494,7 @@ function SymlinkTreeRow({
       )}
       <td className="mobile-card-status" data-label="Status">
         <LinkCountPills node={node} section={section} onWorkSelect={onWorkSelect} />
+        <HeaderFailedPill header={node.link?.header} />
       </td>
       {showTargetPath ? <td className="mono narrow mobile-card-detail" data-label="Target / path">{node.link?.targetPath ?? node.path}</td> : null}
     </tr>
@@ -2672,6 +2679,7 @@ function StorageFileTreeRow({ node, showFullPath, onOpen }: { node: StorageFileT
         <span className="tree-file-name">
           <File size={15} />
           <span className="tree-file-label">{node.name}</span>
+          <HeaderCheckMark header={file?.header} />
         </span>
         <div className="storage-mobile-status">
           <StorageFileStatus file={file ?? null} fallbackLinked={node.linkedFiles > 0} />
@@ -2738,6 +2746,11 @@ function StorageFileStatus({ file, fallbackLinked }: { file: StorageFileRow | nu
       {file && (file.integrity === "hollow" || file.integrity === "partial_hollow") ? (
         <span className="status-count">
           <DamageIntegrityPill integrity={file.integrity} />
+        </span>
+      ) : null}
+      {file?.header?.status === "fail" ? (
+        <span className="status-count">
+          <HeaderFailedPill header={file.header} />
         </span>
       ) : null}
     </div>

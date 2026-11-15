@@ -54,7 +54,8 @@ const advancedSettingsSchema = z.object({
           enabled: z.boolean().default(true),
           hour: z.number().int().min(0).max(23).default(5)
         })
-        .default(defaultScanJobBehaviorSettings.scheduledInventory)
+        .default(defaultScanJobBehaviorSettings.scheduledInventory),
+      checkFileHeaders: z.boolean().default(true)
     })
     .default(defaultScanJobBehaviorSettings),
   copy: z

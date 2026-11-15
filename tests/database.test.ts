@@ -99,7 +99,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -315,7 +315,8 @@ describe("database bootstrap", () => {
         { version: 32 },
         { version: 33 },
         { version: 34 },
-        { version: 35 }
+        { version: 35 },
+        { version: 36 }
       ]);
     } finally {
       await database.close();
@@ -525,7 +526,8 @@ describe("database bootstrap", () => {
         { version: 32, name: "purge_delete_rounds" },
         { version: 33, name: "storage_policy_sections" },
         { version: 34, name: "audit_state" },
-        { version: 35, name: "arr_rescans" }
+        { version: 35, name: "arr_rescans" },
+        { version: 36, name: "file_header_checks" }
       ]);
     } finally {
       await database.close();
@@ -622,6 +624,43 @@ describe("database bootstrap", () => {
         await expect(database.pool.query(`SELECT action FROM re_requests`)).resolves.toMatchObject({ rows: [{ action: "search" }] });
         const nullable = await database.pool.query<{ is_nullable: string }>(`SELECT is_nullable FROM information_schema.columns WHERE table_name = 're_requests' AND column_name = 'operation_id'`);
         expect(nullable.rows).toEqual([{ is_nullable: "YES" }]);
+      } finally {
+        await database.close();
+      }
+      await (await openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).close();
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("refuses a no-migrate start without migration 36, then adds header check columns with every existing file unchecked and unqueued", async () => {
+    const testDatabase = await createTestDatabase();
+    const headerColumns = ["header_status", "header_reason", "header_checked_at", "header_checked_size_bytes", "header_checked_mtime_ms", "header_queued_at"];
+    try {
+      const initial = await openDatabase(testDatabase.databaseUrl);
+      try {
+        await initial.pool.query(`
+          INSERT INTO storage_files (root_type, root_path, section, item_name, relative_path, file_path, size_bytes, mtime_ms, first_seen_at, last_seen_at, last_changed_at, last_seen_job_id, updated_at)
+          VALUES ('remote', '/example/remote', 'movies', 'Example Film (2020)', 'movies/Example Film (2020)/film.mkv', '/example/remote/movies/Example Film (2020)/film.mkv', 2000000, 1, now()::text, now()::text, now()::text, 1, now()::text)
+        `);
+        // Put the schema back to migration 35.
+        for (const column of headerColumns) await initial.pool.query(`ALTER TABLE storage_files DROP COLUMN ${column}`);
+        await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 36`);
+      } finally {
+        await initial.close();
+      }
+
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 36\b/);
+
+      const database = await openDatabase(testDatabase.databaseUrl);
+      try {
+        expect(currentSchemaVersion).toBe(36);
+        const columns = await database.pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'storage_files'`);
+        expect(columns.rows.map((row) => row.column_name)).toEqual(expect.arrayContaining(headerColumns));
+        // A file that was there before the upgrade is for the background pass, never the end of a scan.
+        await expect(database.pool.query(`SELECT header_status, header_queued_at FROM storage_files`)).resolves.toMatchObject({ rows: [{ header_status: null, header_queued_at: null }] });
+        const indexes = await database.pool.query<{ indexname: string }>(`SELECT indexname FROM pg_indexes WHERE tablename = 'storage_files'`);
+        expect(indexes.rows.map((row) => row.indexname)).toEqual(expect.arrayContaining(["storage_files_header_pending_idx", "storage_files_header_queued_idx", "storage_files_header_failed_idx"]));
       } finally {
         await database.close();
       }

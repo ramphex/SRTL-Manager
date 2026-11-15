@@ -18,6 +18,8 @@ import { effectiveIntegrity } from "./mediaIntegrity";
 import { matchesNormalizedSearch, searchPrefilter } from "./textSearch";
 import { parseSearchQuery, type SearchTerm } from "../../shared/search";
 import { assessLocalIntegrity, integrityStateEqual, integrityStateOf, type ZeroSampler } from "./storageIntegrity";
+import { headerCheckDue, headerQueueRoots, headerStateOf, recordHeaderResults } from "./headerChecks";
+import type { HeaderCheckResult } from "./fileHeaders";
 import type {
   InventorySummary,
   InventoryScanTimestamps,
@@ -1013,21 +1015,45 @@ function excludedColumns(table: PgTable, keep: string[] = []): Record<string, SQ
 export interface PersistScanOptions {
   zeroSampler?: ZeroSampler;
   integrityConcurrency?: number;
+  // File header checks: whether new and changed files are queued for one, and the verdicts the end of the scan reached.
+  headerChecks?: { enabled: boolean; results?: Array<{ filePath: string; result: HeaderCheckResult }> };
 }
+
+/** The storage files a scan result accounts for: walked files, plus files seen only through a link that could be read. */
+export function scanResultStorageFiles(result: ScanResult): ClassifiedStorageFile[] {
+  const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
+  const unreadablePaths = new Set((result.unreadableStorageFiles ?? []).map((file) => file.filePath));
+  // Walked files carry storage-derived metadata, so they win over the same file seen through a link.
+  return uniqueStorageFiles([
+    ...result.storageFiles,
+    ...result.reconciledStorageFiles.filter((file) => !seenStorageFilePaths.has(file.filePath) && !unreadablePaths.has(file.filePath))
+  ]);
+}
+
+// A header verdict describes the bytes it read, so it is kept only while the size and modification time stay the same.
+const sameStoredContents = sql.raw(`storage_files.size_bytes = excluded.size_bytes and storage_files.mtime_ms = excluded.mtime_ms`);
+const headerColumnNames = {
+  headerStatus: "header_status",
+  headerReason: "header_reason",
+  headerCheckedAt: "header_checked_at",
+  headerCheckedSizeBytes: "header_checked_size_bytes",
+  headerCheckedMtimeMs: "header_checked_mtime_ms",
+  headerQueuedAt: "header_queued_at"
+} as const;
+// Upserts never copy a header verdict from the row read at the start of the scan: a background check may have stored
+// a newer one since. Unchanged contents keep what is in the table; changed contents take the cleared values.
+const headerUpsertColumns: Record<string, SQL> = Object.fromEntries(
+  Object.entries(headerColumnNames).map(([key, column]) => [key, sql`case when ${sameStoredContents} then ${sql.raw(`storage_files.${column}`)} else ${sql.raw(`excluded.${column}`)} end`])
+);
 
 export async function persistScanResult(db: Db, result: ScanResult, jobId: number, isCancelled?: ScanCancellationCheck, persistOptions: PersistScanOptions = {}): Promise<InventorySummary> {
   await throwIfPersistenceCancelled(isCancelled);
   const timestamp = nowIso();
   const seenStorageFilePaths = new Set(result.storageFiles.map((file) => file.filePath));
-  // A file the walk listed but could not open is not revived through a link to it either, and one whose state is
-  // unknown keeps the state it had: present stays present, missing stays missing.
-  const unreadablePaths = new Set((result.unreadableStorageFiles ?? []).map((file) => file.filePath));
+  // A file the walk listed but could not open is not revived through a link to it either (scanResultStorageFiles leaves
+  // it out), and one whose state is unknown keeps the state it had: present stays present, missing stays missing.
   const keptStatePaths = new Set((result.unreadableStorageFiles ?? []).filter((file) => file.keptPreviousState).map((file) => file.filePath));
-  // Walked files carry storage-derived metadata, so they win over the same file seen through a link.
-  const filesToReconcile = uniqueStorageFiles([
-    ...result.storageFiles,
-    ...result.reconciledStorageFiles.filter((file) => !seenStorageFilePaths.has(file.filePath) && !unreadablePaths.has(file.filePath))
-  ]);
+  const filesToReconcile = scanResultStorageFiles(result);
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
   const scannedSymlinkSections = scopedSectionSet(result.options.symlinkSections ?? result.options.sections);
@@ -1044,6 +1070,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   if (result.options.scanRemote) scannedStorageRootTypes.add("remote");
   const existingStorageFiles = await db.select().from(schema.storageFiles);
   const existingStorageFileByPath = new Map(existingStorageFiles.map((file) => [file.filePath, file]));
+  const headerQueue = persistOptions.headerChecks?.enabled ? headerQueueRoots(existingStorageFiles) : null;
 
   // Only files the storage walk just read are classified; link-only sightings keep the verdict they have.
   const integrityByPath = await assessLocalIntegrity(
@@ -1077,6 +1104,13 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     storageFileWrites.push({
       ...persistedFile,
       ...integrity,
+      // New and changed contents lose their header verdict; with the check on they are queued for the end of a scan.
+      headerStatus: null,
+      headerReason: null,
+      headerCheckedAt: null,
+      headerCheckedSizeBytes: null,
+      headerCheckedMtimeMs: null,
+      headerQueuedAt: headerQueue && headerCheckDue(existing, persistedFile, headerQueue) ? timestamp : null,
       auditCheckedAt: contentChanged ? null : existing.auditCheckedAt,
       auditStatus: contentChanged ? null : existing.auditStatus,
       auditMode: contentChanged ? null : existing.auditMode,
@@ -1095,7 +1129,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
     const persisted = await db
       .insert(schema.storageFiles)
       .values(batch)
-      .onConflictDoUpdate({ target: schema.storageFiles.filePath, set: excludedColumns(schema.storageFiles, ["firstSeenAt"]) })
+      .onConflictDoUpdate({ target: schema.storageFiles.filePath, set: { ...excludedColumns(schema.storageFiles, ["firstSeenAt"]), ...headerUpsertColumns } })
       .returning({ id: schema.storageFiles.id });
     for (const row of persisted) affectedStorageFilePolicyIds.add(row.id);
   }
@@ -1125,6 +1159,12 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   for (const batch of persistChunks(missingStorageFileIds)) {
     await throwIfPersistenceCancelled(isCancelled);
     await db.update(schema.storageFiles).set({ missingSince: timestamp, updatedAt: timestamp }).where(idInList(schema.storageFiles.id, batch));
+  }
+
+  const headerResults = persistOptions.headerChecks?.results ?? [];
+  if (headerResults.length > 0) {
+    await throwIfPersistenceCancelled(isCancelled);
+    await recordHeaderResults(db, headerResults, timestamp);
   }
 
   if (result.options.scanLocal || result.options.scanRemote) {
@@ -1425,6 +1465,18 @@ function serializeMediaLink(row: typeof schema.mediaLinks.$inferSelect): MediaLi
   };
 }
 
+// Pages of links show the header check of each link's file; the whole-library listings used by jobs leave it out.
+async function withLinkHeaders(db: Db, rows: MediaLinkRow[]): Promise<MediaLinkRow[]> {
+  const ids = [...new Set(rows.map((row) => row.resolvedStorageFileId).filter((id): id is number => id != null))];
+  if (ids.length === 0) return rows.map((row) => ({ ...row, header: null }));
+  const headers = await db
+    .select({ id: schema.storageFiles.id, headerStatus: schema.storageFiles.headerStatus, headerReason: schema.storageFiles.headerReason, headerCheckedAt: schema.storageFiles.headerCheckedAt })
+    .from(schema.storageFiles)
+    .where(inArray(schema.storageFiles.id, ids));
+  const byId = new Map(headers.map((row) => [row.id, headerStateOf(row)]));
+  return rows.map((row) => ({ ...row, header: row.resolvedStorageFileId == null ? null : byId.get(row.resolvedStorageFileId) ?? null }));
+}
+
 type MediaLinkStatusFilter = "current" | "missing" | "all";
 
 type MediaLinkListFilters = {
@@ -1469,10 +1521,10 @@ export async function listMediaLinksByIds(db: Db, ids: number[]): Promise<MediaL
 
   const rows = await db.select().from(schema.mediaLinks).where(inArray(schema.mediaLinks.id, uniqueIds));
   const rowById = new Map(rows.map((row) => [row.id, row]));
-  return uniqueIds
+  return withLinkHeaders(db, uniqueIds
     .map((id) => rowById.get(id))
     .filter((row): row is typeof schema.mediaLinks.$inferSelect => Boolean(row))
-    .map(serializeMediaLink);
+    .map(serializeMediaLink));
 }
 
 export function listMediaLinksPage(
@@ -1504,7 +1556,7 @@ async function listMediaLinksPageRows(
     : await first(db.select({ value: count() }).from(schema.mediaLinks).limit(1));
   const total = Number(totalRow?.value ?? 0);
   return {
-    rows: rows.map(serializeMediaLink),
+    rows: await withLinkHeaders(db, rows.map(serializeMediaLink)),
     total,
     limit: options.limit,
     offset: options.offset,
@@ -1550,7 +1602,7 @@ async function listSearchedMediaLinksPage(
   const rowById = new Map(rows.map((row) => [row.id, row]));
   const pageRows = pageIds.map((id) => rowById.get(id)).filter((row): row is typeof schema.mediaLinks.$inferSelect => Boolean(row));
   return {
-    rows: pageRows.map(serializeMediaLink),
+    rows: await withLinkHeaders(db, pageRows.map(serializeMediaLink)),
     total: matchingIds.length,
     limit: options.limit,
     offset: options.offset,
@@ -1617,6 +1669,9 @@ type RawMediaLinkRow = {
   storagePolicy: string | null;
   resolvedStorageFileId: number | null;
   sizeBytes: number | null;
+  headerStatus?: string | null;
+  headerReason?: string | null;
+  headerCheckedAt?: string | null;
   firstSeenAt: string | null;
   lastSeenAt: string | null;
   lastChangedAt: string | null;
@@ -1638,6 +1693,7 @@ function serializeRawMediaLink(row: RawMediaLinkRow): MediaLinkRow {
     storagePolicy: normalizeStoragePolicy(row.storagePolicy),
     resolvedStorageFileId: row.resolvedStorageFileId,
     sizeBytes: row.sizeBytes,
+    header: headerStateOf({ headerStatus: row.headerStatus ?? null, headerReason: row.headerReason ?? null, headerCheckedAt: row.headerCheckedAt ?? null }),
     firstSeenAt: row.firstSeenAt ?? row.updatedAt,
     lastSeenAt: row.lastSeenAt ?? row.updatedAt,
     lastChangedAt: row.lastChangedAt ?? row.updatedAt,
@@ -1723,8 +1779,12 @@ async function listMediaLinkTreeRows(
       ml.last_seen_at as "lastSeenAt",
       ml.last_changed_at as "lastChangedAt",
       ml.missing_since as "missingSince",
-      ml.updated_at as "updatedAt"
+      ml.updated_at as "updatedAt",
+      hf.header_status as "headerStatus",
+      hf.header_reason as "headerReason",
+      hf.header_checked_at as "headerCheckedAt"
     from media_links ml
+    left join storage_files hf on hf.id = ml.resolved_storage_file_id
     where ${where}
       and position('/' in ${remaining}) = 0
     order by lower(${remaining})
@@ -1788,6 +1848,7 @@ export async function listStorageFiles(db: Db, rootType?: StorageRootType, orpha
         integrity: effectiveIntegrity(row.sizeBytes, row.allocatedBytes, row.integrity),
         zeroSamples: row.integrityZeroSamples,
         integrityCheckedAt: row.integrityCheckedAt,
+        header: headerStateOf(row),
         firstSeenAt: row.firstSeenAt,
         lastSeenAt: row.lastSeenAt,
         lastChangedAt: row.lastChangedAt,
@@ -1831,6 +1892,9 @@ type RawStorageFileRow = {
   integrity: string | null;
   integrityZeroSamples: number | null;
   integrityCheckedAt: string | null;
+  headerStatus: string | null;
+  headerReason: string | null;
+  headerCheckedAt: string | null;
   firstSeenAt: string;
   lastSeenAt: string;
   lastChangedAt: string;
@@ -1858,6 +1922,7 @@ function serializeRawStorageFile(row: RawStorageFileRow): StorageFileRow {
     integrity: effectiveIntegrity(Number(row.sizeBytes), allocatedBytes, row.integrity),
     zeroSamples: row.integrityZeroSamples == null ? null : Number(row.integrityZeroSamples),
     integrityCheckedAt: row.integrityCheckedAt,
+    header: headerStateOf(row),
     firstSeenAt: row.firstSeenAt,
     lastSeenAt: row.lastSeenAt,
     lastChangedAt: row.lastChangedAt,
@@ -1964,6 +2029,9 @@ async function listStorageFileTreeRows(
       sf.integrity,
       sf.integrity_zero_samples as "integrityZeroSamples",
       sf.integrity_checked_at as "integrityCheckedAt",
+      sf.header_status as "headerStatus",
+      sf.header_reason as "headerReason",
+      sf.header_checked_at as "headerCheckedAt",
       sf.first_seen_at as "firstSeenAt",
       sf.last_seen_at as "lastSeenAt",
       sf.last_changed_at as "lastChangedAt",
