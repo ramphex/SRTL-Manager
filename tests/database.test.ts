@@ -99,7 +99,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }, { version: 37 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -316,7 +316,8 @@ describe("database bootstrap", () => {
         { version: 33 },
         { version: 34 },
         { version: 35 },
-        { version: 36 }
+        { version: 36 },
+        { version: 37 }
       ]);
     } finally {
       await database.close();
@@ -527,7 +528,8 @@ describe("database bootstrap", () => {
         { version: 33, name: "storage_policy_sections" },
         { version: 34, name: "audit_state" },
         { version: 35, name: "arr_rescans" },
-        { version: 36, name: "file_header_checks" }
+        { version: 36, name: "file_header_checks" },
+        { version: 37, name: "header_archive_recheck" }
       ]);
     } finally {
       await database.close();
@@ -654,7 +656,7 @@ describe("database bootstrap", () => {
 
       const database = await openDatabase(testDatabase.databaseUrl);
       try {
-        expect(currentSchemaVersion).toBe(36);
+        expect(currentSchemaVersion).toBeGreaterThanOrEqual(36);
         const columns = await database.pool.query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'storage_files'`);
         expect(columns.rows.map((row) => row.column_name)).toEqual(expect.arrayContaining(headerColumns));
         // A file that was there before the upgrade is for the background pass, never the end of a scan.
@@ -665,6 +667,61 @@ describe("database bootstrap", () => {
         await database.close();
       }
       await (await openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).close();
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+
+  it("refuses a no-migrate start without migration 37, then queues linked 'not a video' failures for a new check", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const initial = await openDatabase(testDatabase.databaseUrl);
+      try {
+        const file = (name: string, status: string, reason: string, missing = false) => initial.pool.query(
+          `INSERT INTO storage_files (root_type, root_path, section, item_name, relative_path, file_path, size_bytes, mtime_ms, first_seen_at, last_seen_at, last_changed_at, missing_since, last_seen_job_id, updated_at,
+             header_status, header_reason, header_checked_at, header_checked_size_bytes, header_checked_mtime_ms)
+           VALUES ('local', '/example/local', 'movies', $1, 'movies/' || $1 || '/film.mkv', '/example/local/movies/' || $1 || '/film.mkv', 2000000, 1, 't', 't', 't', $4, 1, 't', $2, $3, 't', 2000000, 1)
+           RETURNING id`,
+          [name, status, reason, missing ? "t" : null]
+        );
+        const link = (name: string, fileId: number) => initial.pool.query(
+          `INSERT INTO media_links (section, item_name, relative_path, link_path, target_path, kind, target_exists, is_media, resolved_storage_file_id, updated_at)
+           VALUES ('movies', $1, $1 || '/film.mkv', '/example/links/movies/' || $1 || '/film.mkv', '/example/local/movies/' || $1 || '/film.mkv', 'local', true, true, $2, 't')`,
+          [name, fileId]
+        );
+        for (const [name, status, reason, linked, missing] of [
+          ["Linked Unknown Film", "fail", "not_video", true, false],
+          ["Linked Zero Film", "fail", "zeros", true, false],
+          ["Linked Good Film", "pass", "matroska", true, false],
+          ["Orphan Unknown Film", "fail", "not_video", false, false],
+          ["Gone Unknown Film", "fail", "not_video", true, true]
+        ] as const) {
+          const inserted = await file(name, status, reason, missing);
+          if (linked) await link(name, Number(inserted.rows[0]!.id));
+        }
+        await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 37`);
+      } finally {
+        await initial.close();
+      }
+
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 37\b/);
+
+      const database = await openDatabase(testDatabase.databaseUrl);
+      try {
+        expect(currentSchemaVersion).toBe(37);
+        const rows = await database.pool.query<{ item_name: string; header_status: string; header_reason: string; queued: boolean }>(
+          `SELECT item_name, header_status, header_reason, header_queued_at IS NOT NULL AS queued FROM storage_files`
+        );
+        const byName = Object.fromEntries(rows.rows.map((row) => [row.item_name, row]));
+        // Only the linked, present "not a video" failure is queued; every result is kept as it was.
+        expect(byName["Linked Unknown Film"]).toMatchObject({ header_status: "fail", header_reason: "not_video", queued: true });
+        expect(byName["Linked Zero Film"]).toMatchObject({ header_status: "fail", header_reason: "zeros", queued: false });
+        expect(byName["Linked Good Film"]).toMatchObject({ header_status: "pass", queued: false });
+        expect(byName["Orphan Unknown Film"]).toMatchObject({ header_status: "fail", header_reason: "not_video", queued: false });
+        expect(byName["Gone Unknown Film"]).toMatchObject({ header_status: "fail", header_reason: "not_video", queued: false });
+      } finally {
+        await database.close();
+      }
     } finally {
       await testDatabase.cleanup();
     }

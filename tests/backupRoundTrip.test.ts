@@ -4,7 +4,7 @@ import path from "node:path";
 import { spawn } from "node:child_process";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { nowIso, openDatabase, setSetting, type DatabaseContext } from "../src/server/db/database";
+import { currentSchemaVersion, nowIso, openDatabase, setSetting, type DatabaseContext } from "../src/server/db/database";
 import { JobRunner, JobWorker } from "../src/server/jobs/jobRunner";
 import { listBackups, pgConnectionEnvironment, type BackupRuntime } from "../src/server/lib/backups";
 import { activeSecretBox, secretPurposes } from "../src/server/lib/secretBox";
@@ -79,7 +79,7 @@ describe("a real backup, restored", () => {
     expect((await fs.stat(directory)).mode & 0o777).toBe(0o700);
     const sets = await listBackups(directory);
     expect(sets).toHaveLength(1);
-    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: 36 } });
+    expect(sets[0]).toMatchObject({ owned: true, entry: { verified: true, migration: currentSchemaVersion } });
     expect(sets[0]!.entry.sizeBytes).toBeGreaterThan(1_000);
     const dumpPath = path.join(directory, `${sets[0]!.entry.name}.dump`);
     expect((await fs.stat(dumpPath)).mode & 0o777).toBe(0o600);

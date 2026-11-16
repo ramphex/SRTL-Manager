@@ -13,7 +13,7 @@ import { applyAccountsMigration } from "./accountsMigration";
 import { applySearchTextMigration } from "./searchTextMigration";
 import { applyStoragePolicySectionMigration } from "./storagePolicySectionMigration";
 import { applyAuditStateMigration } from "./auditStateMigration";
-import { applyFileHeaderMigration } from "./fileHeaderMigration";
+import { applyFileHeaderMigration, applyHeaderArchiveRecheckMigration } from "./fileHeaderMigration";
 import { encryptStoredSecrets, verifySecretKey } from "./secretMigration";
 import { activeSecretBox } from "../lib/secretBox";
 
@@ -35,7 +35,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 36;
+export const currentSchemaVersion = 37;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -1057,6 +1057,18 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // background pass checks them, so the first scan after the upgrade does not treat the library as new.
         await applyFileHeaderMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (36, 'file_header_checks', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(37)) {
+      await client.query("BEGIN");
+      try {
+        // Linked files that failed as "not a video" are checked again at the end of the next scan, so archives get their own reason.
+        await applyHeaderArchiveRecheckMigration(client, nowIso());
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (37, 'header_archive_recheck', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");
