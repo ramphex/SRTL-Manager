@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **The file header check only reads files linked from the library.** A storage file that no library symlink links to is an orphan and is left to **Orphan review**: neither the end of a scan nor the background pass reads it, so orphaned remote copies that cannot be read no longer sit waiting on a retry. A file that loses its last link leaves the queue and any retry; a file that gains a link, new or relinked, is queued like a new file unless it already has a result for its current contents. **Library > Damaged files** lists **Bad header** only for linked files, and the checkmark only shows on linked files; results recorded for files that are now orphans are kept but hidden. Orphan review no longer shows header results. There is no database migration.
+
 ## [0.1.5-beta.6] - 2026-11-15
 
 Scans now check that new and changed video files start with a valid container, and a slow background pass checks the rest of the library. Database migration 36 adds the check result to each storage file.

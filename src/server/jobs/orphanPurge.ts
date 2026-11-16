@@ -1,5 +1,5 @@
 import fs from "node:fs/promises";
-import { headerStateOf } from "../lib/headerChecks";
+import { linkedFileCondition } from "../lib/headerChecks";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
 import type { HeldOrphanFile, OrphanCameBackAfterPurge, OrphanCategory, OrphanPurgeItem, OrphanPurgeItemOutcome, OrphanPurgeItemPage, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
@@ -42,9 +42,9 @@ type OrphanRow = {
   integrity_zero_samples: number | null;
   audit_status?: string | null;
   header_status?: string | null;
-  header_reason?: string | null;
-  header_checked_at?: string | null;
   root_type?: string;
+  // Whether the file has a live library link; only read for Damaged files, where a failed header check needs one.
+  linked?: boolean;
   copy_leftover: boolean;
   active_copy: boolean;
 };
@@ -96,9 +96,9 @@ async function orphanRows(db: DbExecutor, rootType: StorageRootType, storageFile
         from copy_operations, unnest(array[copy_operations.source_path, copy_operations.destination_path, copy_operations.temp_path, copy_operations.displaced_path]) as p
         where ${unfinishedCopyCondition} and p is not null
       )
-      select sf.id, sf.root_type, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples, sf.audit_status, sf.header_status, sf.header_reason, sf.header_checked_at,
+      select sf.id, sf.root_type, sf.relative_path, sf.file_path, sf.section, sf.item_name, sf.size_bytes, sf.mtime_ms, sf.allocated_bytes, sf.integrity, sf.integrity_zero_samples, sf.audit_status, sf.header_status,
         cs.path is not null as copy_leftover,
-        ap.path is not null as active_copy
+        ap.path is not null as active_copy${includeLinked ? sql`, ${linkedFileCondition("sf")} as linked` : sql``}
       from storage_files sf
       left join committed_sources cs on cs.path = sf.file_path
       left join active_paths ap on ap.path = sf.file_path
@@ -210,9 +210,10 @@ function integrityOf(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "in
 }
 
 // Damaged files listed on the Damaged files page: hollow or zero-filled by sampling, failed their last audit, or
-// failed the file header check. Sampling and audits only cover local files; a header check covers both roots.
-function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity" | "audit_status" | "header_status" | "root_type">): boolean {
-  if (row.header_status === "fail") return true;
+// failed the file header check. Sampling and audits only cover local files; a header check covers both roots, and
+// only counts while the file is linked from the library (an orphan's old header result is not shown).
+function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "integrity" | "audit_status" | "header_status" | "root_type" | "linked">): boolean {
+  if (row.header_status === "fail" && row.linked) return true;
   if (row.root_type === "remote") return false;
   const integrity = integrityOf(row);
   return integrity === "hollow" || integrity === "partial_hollow" || row.audit_status === "fail";
@@ -450,7 +451,6 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
       hollow: integrityOf(row) === "hollow",
       integrity: integrityOf(row),
       zeroSamples: row.integrity_zero_samples,
-      header: headerStateOf({ headerStatus: row.header_status ?? null, headerReason: row.header_reason ?? null, headerCheckedAt: row.header_checked_at ?? null }),
       label,
       matchedTitle,
       releaseName,
@@ -1208,7 +1208,8 @@ async function executeDamagedFilePurge(db: DbExecutor, operation: PurgeOperation
     await db.select().from(schema.storageFiles).where(eq(schema.storageFiles.id, operation.storageFileId)).for("update").limit(1)
   )[0];
   if (!storageFile || path.resolve(storageFile.filePath) !== path.resolve(operation.filePath)) throw new Error("Inventory record changed after the delete was queued; rescan before deleting");
-  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity, audit_status: storageFile.auditStatus, header_status: storageFile.headerStatus, root_type: storageFile.rootType }))
+  const linked = (await db.select({ id: schema.mediaLinks.id }).from(schema.mediaLinks).where(and(eq(schema.mediaLinks.resolvedStorageFileId, storageFile.id), isNull(schema.mediaLinks.missingSince))).limit(1)).length > 0;
+  if (!isDamaged({ size_bytes: storageFile.sizeBytes, allocated_bytes: storageFile.allocatedBytes, integrity: storageFile.integrity, audit_status: storageFile.auditStatus, header_status: storageFile.headerStatus, root_type: storageFile.rootType, linked }))
     throw new Error("A later scan or audit found this file healthy; nothing was deleted");
   if (await hasUnfinishedCopy(db, operation.filePath)) throw new Error("This file is part of an unfinished copy");
 

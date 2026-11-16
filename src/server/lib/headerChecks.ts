@@ -9,6 +9,9 @@ import { withFilesystemTimeout } from "./filesystemSafety";
 import { checkFileHeader, checkFileHeaders, headerCheckTimeoutMs, type HeaderBatchOptions, type HeaderCheckOptions, type HeaderCheckResult, type HeaderCheckTarget } from "./fileHeaders";
 
 /**
+ * Only files with a live link from the library symlink tree are ever checked. A file nothing in the library links to is
+ * an orphan: it belongs to orphan review, is never read here, and its stored result is not shown anywhere.
+ *
  * How much header checking happens where. The end of a scan checks new and changed files, at most perScanFiles of
  * them or for perScanMs, whichever comes first; the rest are checked at the end of the next scan. Files that were in
  * the library before the check existed are covered by the background pass, which reads a few per pass so it never
@@ -53,6 +56,33 @@ interface ScanFile {
   mtimeMs: number;
 }
 
+/**
+ * The links a scan walked, for deciding which files are linked before the scan's results are stored. Within what the
+ * scan covered, its own links replace the stored ones (a stored link it did not see is gone); elsewhere the stored links
+ * still count.
+ */
+export interface ScanLinkCoverage {
+  targetPaths: Iterable<string>;
+  covers: (link: { section: string; itemName: string }) => boolean;
+}
+
+// The SQL condition "this storage file has a live link from the library", for a storage_files row under the given alias.
+export function linkedFileCondition(alias: string) {
+  return sql.raw(`exists (select 1 from media_links hl where hl.missing_since is null and hl.resolved_storage_file_id = ${alias}.id)`);
+}
+
+async function linkedFilePaths(db: DbExecutor, coverage?: ScanLinkCoverage): Promise<Set<string>> {
+  const stored = await dbAll<{ section: string; itemName: string; filePath: string }>(db as Db, sql`
+    select ml.section, ml.item_name as "itemName", sf.file_path as "filePath"
+    from media_links ml
+    join storage_files sf on sf.id = ml.resolved_storage_file_id
+    where ml.missing_since is null
+  `);
+  const linked = new Set(stored.filter((link) => !coverage?.covers(link)).map((link) => link.filePath));
+  for (const target of coverage?.targetPaths ?? []) linked.add(target);
+  return linked;
+}
+
 type StoredHeaderRow = {
   filePath: string;
   rootType: string;
@@ -81,9 +111,14 @@ export function headerCheckDue(existing: { sizeBytes: number; mtimeMs: number } 
 
 /**
  * What the end of a scan checks: files queued by earlier scans first (oldest first, files waiting on a retry last),
- * then the new and changed files this scan found, up to the per-scan cap.
+ * then the new and changed files this scan found, up to the per-scan cap. Only linked files are planned.
  */
-export async function planScanHeaderChecks(db: DbExecutor, scannedFiles: ScanFile[], limit = headerCheckLimits.perScanFiles): Promise<{ targets: HeaderTarget[]; due: number }> {
+export async function planScanHeaderChecks(
+  db: DbExecutor,
+  scannedFiles: ScanFile[],
+  limit = headerCheckLimits.perScanFiles,
+  coverage?: ScanLinkCoverage
+): Promise<{ targets: HeaderTarget[]; due: number }> {
   const rows = await dbAll<StoredHeaderRow>(db as Db, sql`
     select file_path as "filePath", root_type as "rootType", size_bytes as "sizeBytes", mtime_ms as "mtimeMs", missing_since as "missingSince",
       header_status as "headerStatus", header_queued_at as "headerQueuedAt"
@@ -91,9 +126,10 @@ export async function planScanHeaderChecks(db: DbExecutor, scannedFiles: ScanFil
   `);
   const byPath = new Map(rows.map((row) => [row.filePath, { ...row, sizeBytes: Number(row.sizeBytes), mtimeMs: Number(row.mtimeMs) }]));
   const queueRoots = headerQueueRoots(rows);
+  const linked = await linkedFilePaths(db, coverage);
   const scannedByPath = new Map(scannedFiles.map((file) => [file.filePath, file]));
   const carried = rows
-    .filter((row) => row.headerQueuedAt && !row.missingSince)
+    .filter((row) => row.headerQueuedAt && !row.missingSince && linked.has(row.filePath))
     .map((row) => byPath.get(row.filePath)!)
     // A queued file this scan saw with new contents is checked as the scan sees it, below.
     .filter((row) => {
@@ -104,7 +140,7 @@ export async function planScanHeaderChecks(db: DbExecutor, scannedFiles: ScanFil
     .map((row): HeaderTarget => ({ rootType: row.rootType as StorageRootType, filePath: row.filePath, sizeBytes: row.sizeBytes, mtimeMs: row.mtimeMs }));
   const carriedPaths = new Set(carried.map((target) => target.filePath));
   const fresh = scannedFiles
-    .filter((file) => !carriedPaths.has(file.filePath) && headerCheckDue(byPath.get(file.filePath), file, queueRoots))
+    .filter((file) => linked.has(file.filePath) && !carriedPaths.has(file.filePath) && headerCheckDue(byPath.get(file.filePath), file, queueRoots))
     .map((file): HeaderTarget => ({ rootType: file.rootType, filePath: file.filePath, sizeBytes: file.sizeBytes, mtimeMs: file.mtimeMs }));
   const all = [...carried, ...fresh];
   return { targets: all.slice(0, Math.max(0, limit)), due: all.length };
@@ -174,12 +210,13 @@ export interface ScanHeaderRun {
 }
 
 /** The end-of-scan step: reads the planned files within the per-scan budget. The scan's own write stores the verdicts. */
-export async function runScanHeaderChecks(db: DbExecutor, scannedFiles: ScanFile[], options: HeaderBatchOptions = {}): Promise<ScanHeaderRun> {
-  const plan = await planScanHeaderChecks(db, scannedFiles);
+export async function runScanHeaderChecks(db: DbExecutor, scannedFiles: ScanFile[], options: HeaderBatchOptions & { links?: ScanLinkCoverage } = {}): Promise<ScanHeaderRun> {
+  const { links, ...batchOptions } = options;
+  const plan = await planScanHeaderChecks(db, scannedFiles, headerCheckLimits.perScanFiles, links);
   const checked = await checkFileHeaders(plan.targets, {
     concurrency: headerCheckLimits.scanConcurrency,
     deadlineMs: headerCheckLimits.perScanMs,
-    ...options
+    ...batchOptions
   });
   return { results: checked.map(({ target, result }) => ({ filePath: target.filePath, result })), summary: summarize(plan.due, checked) };
 }
@@ -196,10 +233,58 @@ async function pendingBackfillRows(db: Db, rootType: StorageRootType, limit: num
     from storage_files
     where root_type = ${rootType} and missing_since is null and header_queued_at is null
       and (header_status is null or (header_status = 'retry' and header_checked_at < ${retryBefore}))
+      and ${linkedFileCondition("storage_files")}
     order by id
     limit ${limit}
   `);
   return rows.map((row) => ({ rootType: row.rootType, filePath: row.filePath, sizeBytes: Number(row.sizeBytes), mtimeMs: Number(row.mtimeMs) }));
+}
+
+/** The ids of storage files that have a live link from the library. */
+export async function linkedStorageFileIds(db: DbExecutor): Promise<Set<number>> {
+  const rows = await dbAll<{ id: number }>(db as Db, sql`
+    select distinct resolved_storage_file_id as id from media_links where missing_since is null and resolved_storage_file_id is not null
+  `);
+  return new Set(rows.map((row) => Number(row.id)));
+}
+
+/**
+ * Brings the header queue in line with the library after a scan stored its links. A file that lost its last link leaves
+ * the queue, so a retry stops with it. A file that gained a link since linkedBefore was taken is queued like a new
+ * file, unless it already has a verdict for its current size and modification time, or its root was never scanned
+ * before (the background pass covers those).
+ */
+export async function syncHeaderQueueWithLinks(
+  db: DbExecutor,
+  linkedBefore: Set<number>,
+  queueRoots: Set<StorageRootType> | null,
+  timestamp = nowIso()
+): Promise<{ dropped: number; queued: number }> {
+  const dropped = await dbAll<{ id: number }>(db as Db, sql`
+    update storage_files sf set header_queued_at = null
+    where sf.header_queued_at is not null and not ${linkedFileCondition("sf")}
+    returning sf.id
+  `);
+  if (!queueRoots || queueRoots.size === 0) return { dropped: dropped.length, queued: 0 };
+  const gained = [...(await linkedStorageFileIds(db))].filter((id) => !linkedBefore.has(id));
+  let queued = 0;
+  for (let offset = 0; offset < gained.length; offset += 500) {
+    const batch = gained.slice(offset, offset + 500);
+    const rows = await dbAll<{ id: number }>(db as Db, sql`
+      update storage_files sf set header_queued_at = ${timestamp}
+      where sf.id in (select jsonb_array_elements_text(${JSON.stringify(batch)}::jsonb)::integer)
+        and sf.missing_since is null and sf.header_queued_at is null
+        and sf.root_type in (select jsonb_array_elements_text(${JSON.stringify([...queueRoots])}::jsonb))
+        and not coalesce(
+          sf.header_status in ('pass', 'fail', 'skipped')
+            and sf.header_checked_size_bytes = sf.size_bytes and sf.header_checked_mtime_ms = sf.mtime_ms,
+          false
+        )
+      returning sf.id
+    `);
+    queued += rows.length;
+  }
+  return { dropped: dropped.length, queued };
 }
 
 async function scanRunning(db: Db): Promise<boolean> {

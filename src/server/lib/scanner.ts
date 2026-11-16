@@ -18,7 +18,7 @@ import { effectiveIntegrity } from "./mediaIntegrity";
 import { matchesNormalizedSearch, searchPrefilter } from "./textSearch";
 import { parseSearchQuery, type SearchTerm } from "../../shared/search";
 import { assessLocalIntegrity, integrityStateEqual, integrityStateOf, type ZeroSampler } from "./storageIntegrity";
-import { headerCheckDue, headerQueueRoots, headerStateOf, recordHeaderResults } from "./headerChecks";
+import { headerCheckDue, headerQueueRoots, headerStateOf, linkedStorageFileIds, recordHeaderResults, syncHeaderQueueWithLinks, type ScanLinkCoverage } from "./headerChecks";
 import type { HeaderCheckResult } from "./fileHeaders";
 import type {
   InventorySummary,
@@ -982,6 +982,19 @@ function scopedSectionSet(selectedSections: string[] | undefined): Set<string> |
   return selectedSections && selectedSections.length > 0 ? new Set(selectedSections) : null;
 }
 
+// Whether a stored link lies inside the library folders a symlink scan walked.
+function symlinkScanCovers(options: ScanOptions): (link: { section: string; itemName: string }) => boolean {
+  const sections = scopedSectionSet(options.symlinkSections ?? options.sections);
+  const titles = options.titleScopes?.length ? new Set(options.titleScopes.map((scope) => scanTitleScopeKey(scope.section, scope.itemName))) : null;
+  return (link) => (titles ? titles.has(scanTitleScopeKey(link.section, link.itemName)) : !sections || sections.has(link.section));
+}
+
+/** The library links a scan result settles, for the header check at the end of the scan. Undefined when it walked no links. */
+export function scanLinkCoverage(result: ScanResult): ScanLinkCoverage | undefined {
+  if (!result.options.scanSymlinks) return undefined;
+  return { targetPaths: result.links.map((link) => link.targetPath), covers: symlinkScanCovers(result.options) };
+}
+
 function isInsideUnscannedStorageDirectory(file: typeof schema.storageFiles.$inferSelect, issues: StorageScanIssue[]): boolean {
   return issues.some((issue) => issue.rootType === file.rootType && isPathInside(issue.directoryPath, file.filePath));
 }
@@ -1057,9 +1070,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   const seenLinkPaths = new Set(result.links.map((link) => link.linkPath));
   const scannedStorageRootTypes = new Set<StorageRootType>();
   const scannedSymlinkSections = scopedSectionSet(result.options.symlinkSections ?? result.options.sections);
-  const scannedSymlinkTitles = result.options.titleScopes?.length
-    ? new Set(result.options.titleScopes.map((scope) => scanTitleScopeKey(scope.section, scope.itemName)))
-    : null;
+  const symlinkScanCovered = symlinkScanCovers(result.options);
   const scannedLocalSections = scopedSectionSet(result.options.localSections ?? result.options.sections);
   const affectedStorageFilePolicyIds = new Set<number>();
   const newTitles: DefaultPolicyTitle[] = [];
@@ -1071,6 +1082,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
   const existingStorageFiles = await db.select().from(schema.storageFiles);
   const existingStorageFileByPath = new Map(existingStorageFiles.map((file) => [file.filePath, file]));
   const headerQueue = persistOptions.headerChecks?.enabled ? headerQueueRoots(existingStorageFiles) : null;
+  // Which files were linked before this scan, so files that gain a link can be queued for a header check.
+  const linkedBefore = await linkedStorageFileIds(db);
 
   // Only files the storage walk just read are classified; link-only sightings keep the verdict they have.
   const integrityByPath = await assessLocalIntegrity(
@@ -1231,9 +1244,7 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
 
     const missingLinkIds: number[] = [];
     for (const link of existingMediaLinks) {
-      const scannedLinkScope = scannedSymlinkTitles
-        ? scannedSymlinkTitles.has(scanTitleScopeKey(link.section, link.itemName))
-        : !scannedSymlinkSections || scannedSymlinkSections.has(link.section);
+      const scannedLinkScope = symlinkScanCovered(link);
       if (scannedLinkScope && link.resolvedStorageFileId != null) affectedStorageFilePolicyIds.add(link.resolvedStorageFileId);
       if (!link.missingSince && scannedLinkScope && !seenLinkPaths.has(link.linkPath)) missingLinkIds.push(link.id);
     }
@@ -1275,6 +1286,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         }
   );
   await throwIfPersistenceCancelled(isCancelled);
+  // Only linked files are header-checked: orphans leave the queue, newly linked files join it.
+  await syncHeaderQueueWithLinks(db, linkedBefore, headerQueue, timestamp);
   // A saved policy whose title had no folder yet is placed first, so it wins over a folder default.
   if (result.options.scanSymlinks) await resolveUnplacedStoragePolicies(db, timestamp);
   if (!(await applyPendingOnboardingPolicy(db, jobId))) await applyDefaultPoliciesToNewTitles(db, newTitles, jobId);
@@ -1848,7 +1861,8 @@ export async function listStorageFiles(db: Db, rootType?: StorageRootType, orpha
         integrity: effectiveIntegrity(row.sizeBytes, row.allocatedBytes, row.integrity),
         zeroSamples: row.integrityZeroSamples,
         integrityCheckedAt: row.integrityCheckedAt,
-        header: headerStateOf(row),
+        // Only linked files are header-checked; an orphan's old result is not shown.
+        header: linkCount > 0 ? headerStateOf(row) : null,
         firstSeenAt: row.firstSeenAt,
         lastSeenAt: row.lastSeenAt,
         lastChangedAt: row.lastChangedAt,
@@ -1922,7 +1936,8 @@ function serializeRawStorageFile(row: RawStorageFileRow): StorageFileRow {
     integrity: effectiveIntegrity(Number(row.sizeBytes), allocatedBytes, row.integrity),
     zeroSamples: row.integrityZeroSamples == null ? null : Number(row.integrityZeroSamples),
     integrityCheckedAt: row.integrityCheckedAt,
-    header: headerStateOf(row),
+    // Only linked files are header-checked; an orphan's old result is not shown.
+    header: linkCount > 0 ? headerStateOf(row) : null,
     firstSeenAt: row.firstSeenAt,
     lastSeenAt: row.lastSeenAt,
     lastChangedAt: row.lastChangedAt,

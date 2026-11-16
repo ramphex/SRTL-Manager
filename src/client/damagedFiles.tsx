@@ -82,7 +82,7 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
         </div>
       </div>
       <p className="panel-message">
-        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit, and files on either storage whose header is not a video (bad header). Files are only sampled and header-checked when a scan sees them new or changed. A failed audit stays listed until a later audit passes or the file changes.
+        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit, and files on either storage whose header is not a video (bad header). Files are only sampled and header-checked when a scan sees them new or changed, and only files linked from the library are header-checked. A failed audit stays listed until a later audit passes or the file changes.
       </p>
       {damaged.error ? <p className="panel-message error">{damaged.error.message}</p> : null}
       {damaged.isLoading ? <p className="panel-message">Loading…</p> : null}

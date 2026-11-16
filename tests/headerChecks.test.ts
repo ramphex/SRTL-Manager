@@ -45,8 +45,8 @@ function content(kind: Kind): { head: Buffer; size: number } {
   return { head: Buffer.alloc(0), size: 0 };
 }
 
-/** A made-up title on remote storage, with a library symlink to it. */
-async function addRemoteTitle(title: string, kind: Kind, options: { daysOld?: number } = {}): Promise<string> {
+/** A made-up title on remote storage, with a library symlink to it unless linked is false. */
+async function addRemoteTitle(title: string, kind: Kind, options: { daysOld?: number; linked?: boolean } = {}): Promise<string> {
   const extension = kind === "stub" ? "mp4" : "mkv";
   const relativePath = path.join("movies", title, `${title.toLowerCase().replace(/[^a-z0-9]+/g, "-")}.${extension}`);
   const filePath = path.join(root, "remote", relativePath);
@@ -58,10 +58,22 @@ async function addRemoteTitle(title: string, kind: Kind, options: { daysOld?: nu
     const when = new Date(Date.now() - options.daysOld * 86_400_000);
     await fs.utimes(filePath, when, when);
   }
-  const linkPath = path.join(root, "links", relativePath);
+  if (options.linked !== false) await linkFile(filePath);
+  return filePath;
+}
+
+function linkPathOf(filePath: string): string {
+  return path.join(root, "links", path.relative(path.join(root, "remote"), filePath));
+}
+
+async function linkFile(filePath: string): Promise<void> {
+  const linkPath = linkPathOf(filePath);
   await fs.mkdir(path.dirname(linkPath), { recursive: true });
   await fs.symlink(filePath, linkPath);
-  return filePath;
+}
+
+async function unlinkFile(filePath: string): Promise<void> {
+  await fs.rm(linkPathOf(filePath));
 }
 
 function copyRunner(): CopyCommandRunner {
@@ -351,5 +363,102 @@ describe("deleting files with a bad header", () => {
     await expect(fs.stat(broken)).rejects.toMatchObject({ code: "ENOENT" });
     const [operation] = await ctx.database.db.select().from(schema.orphanPurgeOperations).where(eq(schema.orphanPurgeOperations.jobId, jobId));
     expect(operation).toMatchObject({ rootType: "remote", stage: "held" });
+  });
+});
+
+describe("only files linked from the library", () => {
+  it("never reads an orphan, at the end of a scan or in the background", async () => {
+    await addRemoteTitle("Seed Film", "good");
+    await addRemoteTitle("Early Orphan Film", "good", { linked: false });
+    await scan();
+    await addRemoteTitle("Linked New Film", "garbage");
+    await addRemoteTitle("Orphan New Film", "garbage", { linked: false });
+    const second = await scan();
+    expect(await headerEvents(second)).toEqual(["Checked file headers: 0 passed, 1 failed"]);
+
+    headerCheckLimits.backfillRemotePerMinute = 600;
+    while ((await runHeaderBackfillPass(ctx.database.db)).checked > 0);
+    const rows = await headerRows();
+    expect(rows["Seed Film"]).toMatchObject({ status: "pass" });
+    expect(rows["Linked New Film"]).toMatchObject({ status: "fail", reason: "not_video" });
+    expect(rows["Early Orphan Film"]).toEqual({ status: null, reason: null, queued: false, checkedAt: null });
+    expect(rows["Orphan New Film"]).toEqual({ status: null, reason: null, queued: false, checkedAt: null });
+    expect((await listDamagedFiles(ctx.database.db)).map((row) => row.itemName)).toEqual(["Linked New Film"]);
+  });
+
+  it("drops a file that loses its last link from the queue and from retries", async () => {
+    await addRemoteTitle("Seed Film", "good");
+    await scan();
+    expect(await runHeaderBackfillPass(ctx.database.db)).toMatchObject({ checked: 1 });
+    const filePath = await addRemoteTitle("Unlinked Retry Film", "good");
+    await scan();
+    // As if the end of a scan could not read it: waiting on a retry, still queued.
+    const stuckAt = new Date(Date.now() - 2 * headerCheckLimits.retryAfterMs).toISOString();
+    await ctx.database.db
+      .update(schema.storageFiles)
+      .set({ headerStatus: "retry", headerReason: "EIO", headerCheckedAt: stuckAt, headerQueuedAt: stuckAt })
+      .where(eq(schema.storageFiles.filePath, filePath));
+
+    await unlinkFile(filePath);
+    const later = await scan();
+    expect(await headerEvents(later)).toEqual([]);
+    expect((await headerRows())["Unlinked Retry Film"]).toEqual({ status: "retry", reason: "EIO", queued: false, checkedAt: stuckAt });
+    // The background pass does not retry it either, however long it waits.
+    const muchLater = Date.now() + 10 * headerCheckLimits.retryAfterMs;
+    expect(await runHeaderBackfillPass(ctx.database.db, { now: () => muchLater })).toEqual({ ran: true, checked: 0, failed: 0 });
+    expect((await headerRows())["Unlinked Retry Film"]).toMatchObject({ status: "retry", checkedAt: stuckAt });
+  });
+
+  it("queues a file that gains a link, unless it already has a result for its current contents", async () => {
+    await addRemoteTitle("Seed Film", "good");
+    await scan();
+    const orphan = await addRemoteTitle("Relinked Orphan Film", "good", { linked: false });
+    const checked = await addRemoteTitle("Relinked Checked Film", "good");
+    await scan();
+    expect((await headerRows())["Relinked Orphan Film"]).toEqual({ status: null, reason: null, queued: false, checkedAt: null });
+    expect((await headerRows())["Relinked Checked Film"]).toMatchObject({ status: "pass", queued: false });
+    await unlinkFile(checked);
+    await scan();
+
+    // Nothing is read at the end of these scans, so what the scan queued shows.
+    headerCheckLimits.perScanFiles = 0;
+    await linkFile(orphan);
+    await linkFile(checked);
+    await scan();
+    let rows = await headerRows();
+    expect(rows["Relinked Orphan Film"]).toMatchObject({ status: null, queued: true });
+    expect(rows["Relinked Checked Film"]).toMatchObject({ status: "pass", queued: false });
+
+    headerCheckLimits.perScanFiles = originalLimits.perScanFiles;
+    const last = await scan();
+    rows = await headerRows();
+    expect(rows["Relinked Orphan Film"]).toMatchObject({ status: "pass", reason: "matroska", queued: false });
+    expect(await headerEvents(last)).toEqual(["Checked file headers: 1 passed, 0 failed"]);
+  });
+
+  it("hides the results of orphans from Damaged files and listings without deleting them", async () => {
+    await addRemoteTitle("Seed Film", "good");
+    await scan();
+    const broken = await addRemoteTitle("Orphaned Broken Film", "zeros", { daysOld: 3 });
+    const fine = await addRemoteTitle("Orphaned Good Film", "good");
+    await scan();
+    const listed = (await listDamagedFiles(ctx.database.db)).find((row) => row.itemName === "Orphaned Broken Film")!;
+    expect(listed).toMatchObject({ integrity: "header_failed", linked: true });
+
+    await unlinkFile(broken);
+    await unlinkFile(fine);
+    await scan();
+    expect((await listDamagedFiles(ctx.database.db)).map((row) => row.itemName)).toEqual([]);
+    await expect(purgeableDamagedFiles(ctx.database.db, [listed.storageFileId])).resolves.toMatchObject({ eligible: [], rejected: [expect.stringContaining("healthy")] });
+    // The stored results stay, and the files stay where they are.
+    const rows = await headerRows();
+    expect(rows["Orphaned Broken Film"]).toMatchObject({ status: "fail", reason: "zeros" });
+    expect(rows["Orphaned Good Film"]).toMatchObject({ status: "pass" });
+    await expect(fs.stat(broken)).resolves.toBeTruthy();
+    const files = await listStorageFiles(ctx.database.db, "remote");
+    expect(files.filter((file) => !file.linked).map((file) => [file.itemName, file.header]).sort()).toEqual([
+      ["Orphaned Broken Film", null],
+      ["Orphaned Good Film", null]
+    ]);
   });
 });
