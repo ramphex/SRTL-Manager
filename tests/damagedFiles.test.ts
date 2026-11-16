@@ -267,7 +267,7 @@ describe("scan integrity persistence", () => {
 describe("csv escaping", () => {
   it("quotes commas and neutralises spreadsheet formulas in file names", () => {
     const csv = damagedFilesCsv([
-      { storageFileId: 1, rootType: "local", header: null, section: "movies", itemName: "=HYPERLINK(\"x\")", relativePath: "a,b.mkv", filePath: "/l/a,b.mkv", sizeBytes: 1, allocatedBytes: null, storedPercent: null, integrity: "hollow", zeroSamples: null, zeroSamplesTotal: 24, checkedAt: null, linked: false, remoteCopyExists: false, protectedReason: null, audit: null }
+      { storageFileId: 1, rootType: "local", header: null, section: "movies", itemName: "=HYPERLINK(\"x\")", relativePath: "a,b.mkv", filePath: "/l/a,b.mkv", sizeBytes: 1, allocatedBytes: null, storedPercent: null, integrity: "hollow", zeroSamples: null, zeroSamplesTotal: 24, checkedAt: null, linked: false, remoteCopyExists: false, protectedReason: null, audit: null, headerFailReason: null }
     ]);
     expect(csv).toContain("\"'=HYPERLINK(\"\"x\"\")\"");
     expect(csv).toContain("\"/l/a,b.mkv\"");

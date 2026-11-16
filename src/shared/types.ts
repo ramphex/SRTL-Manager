@@ -1111,4 +1111,6 @@ export interface DamagedFileRow {
   audit: { status: string; mode: string; message: string | null; checkedAt: string } | null;
   // The file header check result, when the file has one.
   header: FileHeaderState | null;
+  // For a Bad header row: why, in plain words (for example "Too small to be a video"). Null on other rows.
+  headerFailReason: string | null;
 }

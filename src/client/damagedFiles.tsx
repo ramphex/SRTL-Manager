@@ -227,9 +227,17 @@ function DamagedFileTableRow({
       </td>
       <td>
         <DamageIntegrityPill integrity={row.integrity} headerDetail={row.header ? describeFileHeader(row.header) : undefined} />
+        {row.headerFailReason ? <span className="damaged-reason">{row.headerFailReason}</span> : null}
       </td>
       <td className="orphan-nowrap">{formatBytes(row.sizeBytes)}</td>
-      <td className="orphan-nowrap">{row.storedPercent == null ? "-" : `${row.storedPercent}%`}</td>
+      <td className="orphan-nowrap">
+        {/* A bad header is about the start of the file, not how much of it is stored, so the share would mislead here. */}
+        {row.integrity === "header_failed" || row.storedPercent == null ? (
+          <span className="damaged-muted" title={row.integrity === "header_failed" ? "Not relevant: the header check reads the start of the file, not how much of it is stored" : undefined}>-</span>
+        ) : (
+          `${row.storedPercent}%`
+        )}
+      </td>
       <td className="orphan-nowrap">{row.zeroSamples == null ? "-" : `${row.zeroSamples} / ${row.zeroSamplesTotal}`}</td>
       <td>{row.linked ? "Linked" : "Orphan"}</td>
       <td>{row.rootType === "remote" ? "-" : row.remoteCopyExists ? "Yes" : "No"}</td>

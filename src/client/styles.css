@@ -8684,6 +8684,8 @@ button.danger-button:hover:not(:disabled) {
 .audit-refusal p { margin: 0; }
 .damaged-audit { display: grid; gap: 2px; white-space: nowrap; }
 .damaged-audit small { color: var(--muted); font-size: 12px; }
+.damaged-reason { display: block; margin-top: 4px; max-width: 280px; color: var(--muted); font-size: 12px; white-space: normal; }
+.damaged-muted { color: var(--muted); }
 .rolling-audit-coverage { color: var(--muted); font-size: 13px; margin: 8px 0 0; }
 
 /* File header check: a small checkmark beside files whose header check passed. */

@@ -1,7 +1,7 @@
 import { sql } from "drizzle-orm";
 import { dbAll, type Db } from "../db/database";
 import type { DamagedFileRow, StorageRootType } from "../../shared/types";
-import { describeFileHeader } from "../../shared/fileHeaders";
+import { describeFileHeader, fileHeaderFailLabel } from "../../shared/fileHeaders";
 import { headerStateOf, linkedFileCondition } from "./headerChecks";
 import { effectiveIntegrity, hollowAllocationRatio, hollowMinimumBytes, zeroSampleCount } from "./mediaIntegrity";
 import { purgeGraceMs, unfinishedCopyCondition } from "../jobs/orphanPurge";
@@ -115,7 +115,8 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
         remoteCopyExists: rootType === "local" && Boolean(row.remoteCopyExists),
         protectedReason: row.activeCopy ? "Part of an unfinished copy" : now - Number(row.mtimeMs) < purgeGraceMs ? "Modified in the last 24 hours" : null,
         audit: row.auditCheckedAt && row.auditStatus ? { status: row.auditStatus, mode: row.auditMode ?? "fast", message: row.auditMessage, checkedAt: row.auditCheckedAt } : null,
-        header
+        header,
+        headerFailReason: integrity === "header_failed" ? fileHeaderFailLabel(header?.reason) : null
       }
     ];
   });

@@ -26,7 +26,7 @@ let root: string;
 let ctx: AppContext;
 let testDatabase: TestDatabaseHandle;
 
-type Kind = "good" | "zeros" | "garbage" | "stub" | "empty";
+type Kind = "good" | "zeros" | "garbage" | "stub" | "empty" | "archive";
 
 function content(kind: Kind): { head: Buffer; size: number } {
   if (kind === "good") return { head: Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), randomBytes(headerReadBytes - 4)]), size: twoMb };
@@ -36,6 +36,7 @@ function content(kind: Kind): { head: Buffer; size: number } {
     for (let index = 0; index < bytes.length; index += 1) if (bytes[index] === 0 || bytes[index] === 0x47) bytes[index] = 0x33;
     return { head: bytes, size: twoMb + 1 };
   }
+  if (kind === "archive") return { head: Buffer.concat([Buffer.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00]), randomBytes(headerReadBytes - 8)]), size: twoMb };
   if (kind === "stub") {
     const stub = Buffer.alloc(258, 0x41);
     stub.writeUInt32BE(0x20, 0);
@@ -161,6 +162,7 @@ describe("the end-of-scan header check", () => {
     await addRemoteTitle("New Garbage Film", "garbage");
     await addRemoteTitle("New Stub Film", "stub");
     await addRemoteTitle("New Empty Film", "empty");
+    await addRemoteTitle("New Packed Film", "archive");
     const second = await scan();
     const rows = await headerRows();
     expect(rows["Existing Good Film"]).toMatchObject({ status: null, queued: false });
@@ -170,15 +172,17 @@ describe("the end-of-scan header check", () => {
     expect(rows["New Garbage Film"]).toMatchObject({ status: "fail", reason: "not_video", queued: false });
     expect(rows["New Stub Film"]).toMatchObject({ status: "fail", reason: "too_small", queued: false });
     expect(rows["New Empty Film"]).toMatchObject({ status: "fail", reason: "empty", queued: false });
-    expect(await headerEvents(second)).toEqual(["Checked file headers: 1 passed, 4 failed"]);
+    expect(rows["New Packed Film"]).toMatchObject({ status: "fail", reason: "archive", queued: false });
+    expect(await headerEvents(second)).toEqual(["Checked file headers: 1 passed, 5 failed"]);
 
     // Failures are listed on Damaged files with the new reason, wherever the file is.
     const damaged = await listDamagedFiles(ctx.database.db);
-    expect(damaged.map((row) => [row.itemName, row.rootType, row.integrity, row.header?.reason]).sort()).toEqual([
-      ["New Empty Film", "remote", "header_failed", "empty"],
-      ["New Garbage Film", "remote", "header_failed", "not_video"],
-      ["New Stub Film", "remote", "header_failed", "too_small"],
-      ["New Zero Film", "remote", "header_failed", "zeros"]
+    expect(damaged.map((row) => [row.itemName, row.rootType, row.integrity, row.header?.reason, row.headerFailReason]).sort()).toEqual([
+      ["New Empty Film", "remote", "header_failed", "empty", "Empty file: 0 bytes"],
+      ["New Garbage Film", "remote", "header_failed", "not_video", "Not a video file: the start of the file isn't any known video format"],
+      ["New Packed Film", "remote", "header_failed", "archive", "Archive, not a video: the download was never unpacked"],
+      ["New Stub Film", "remote", "header_failed", "too_small", "Too small to be a video"],
+      ["New Zero Film", "remote", "header_failed", "zeros", "Starts with zeros: no video data"]
     ]);
 
     // Listings carry the result, for the checkmark.
@@ -187,6 +191,19 @@ describe("the end-of-scan header check", () => {
     const page = await listMediaLinksPage(ctx.database.db, { limit: 50, offset: 0, section: "movies" });
     expect(page.rows.find((row) => row.itemName === "New Good Film")?.header).toMatchObject({ status: "pass" });
     expect(page.rows.find((row) => row.itemName === "Existing Good Film")?.header).toBeNull();
+  });
+
+  it("gives a file that failed as not a video before archives were named its archive reason at the next scan", async () => {
+    await addRemoteTitle("Seed Film", "good");
+    await scan();
+    const packed = await addRemoteTitle("Earlier Packed Film", "archive");
+    await scan();
+    // As the result looked before archives had their own reason, queued again as the upgrade does.
+    await ctx.database.db.update(schema.storageFiles).set({ headerReason: "not_video", headerQueuedAt: new Date().toISOString() }).where(eq(schema.storageFiles.filePath, packed));
+    expect((await listDamagedFiles(ctx.database.db)).find((row) => row.itemName === "Earlier Packed Film")?.headerFailReason).toBe("Not a video file: the start of the file isn't any known video format");
+    await scan();
+    expect((await headerRows())["Earlier Packed Film"]).toMatchObject({ status: "fail", reason: "archive", queued: false });
+    expect((await listDamagedFiles(ctx.database.db)).find((row) => row.itemName === "Earlier Packed Film")?.headerFailReason).toBe("Archive, not a video: the download was never unpacked");
   });
 
   it("checks at most the per-scan cap and carries the rest over to the next scan", async () => {
