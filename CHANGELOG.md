@@ -4,6 +4,18 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+The file header check only reads files linked from the library, names archives that were never unpacked, and shows why each Bad header file failed. Database migration 37 queues earlier "not a video" failures for a new check.
+
+### Added
+
+- **Archives are named.** A video file that starts with a RAR, 7z or ZIP header now fails the header check as **Archive, not a video: the download was never unpacked**, instead of "not a video". Database migration 37 queues linked files that already failed as "not a video" for the end of the next scan, so those that are archives get the new reason; they stay listed with their old result until then.
+
+### Changed
+
+- **Damaged files says why a header failed.** Bad header rows show the reason in plain words under the status ("Too small to be a video", "Starts with zeros: no video data", "Not a video file: the start of the file isn't any known video format", or the archive reason), and the **Stored** column shows a dash for them instead of a misleading 100%. The Damaged files API returns the same text as `headerFailReason`.
+
+- **The file header check only reads files linked from the library.** A storage file that no library symlink links to is an orphan and is left to **Orphan review**: neither the end of a scan nor the background pass reads it, so orphaned remote copies that cannot be read no longer sit waiting on a retry. A file that loses its last link leaves the queue and any retry; a file that gains a link, new or relinked, is queued like a new file unless it already has a result for its current contents. **Library > Damaged files** lists **Bad header** only for linked files, and the checkmark only shows on linked files; results recorded for files that are now orphans are kept but hidden. Orphan review no longer shows header results. There is no database migration.
+
 ## [0.1.5-beta.6] - 2026-11-15
 
 Scans now check that new and changed video files start with a valid container, and a slow background pass checks the rest of the library. Database migration 36 adds the check result to each storage file.

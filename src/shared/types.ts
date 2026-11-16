@@ -711,8 +711,6 @@ export interface OrphanReviewItem {
   hollow: boolean;
   integrity: StorageIntegrity;
   zeroSamples: number | null;
-  // The file header check result; null until the file is checked.
-  header?: FileHeaderState | null;
   label: OrphanReviewLabel;
   // The library title this file's release name appears to be; a name comparison, so it can be wrong.
   matchedTitle: string | null;
@@ -1113,4 +1111,6 @@ export interface DamagedFileRow {
   audit: { status: string; mode: string; message: string | null; checkedAt: string } | null;
   // The file header check result, when the file has one.
   header: FileHeaderState | null;
+  // For a Bad header row: why, in plain words (for example "Too small to be a video"). Null on other rows.
+  headerFailReason: string | null;
 }

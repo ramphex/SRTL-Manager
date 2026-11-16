@@ -82,7 +82,7 @@ export function DamagedFilesPanel({ rootLabel }: { rootLabel: string }) {
         </div>
       </div>
       <p className="panel-message">
-        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit, and files on either storage whose header is not a video (bad header). Files are only sampled and header-checked when a scan sees them new or changed. A failed audit stays listed until a later audit passes or the file changes.
+        {rootLabel} files that are hollow (almost nothing stored), damaged (zero-filled gaps found by sampling 24 spots in the file), or failed their last audit, and files on either storage whose header is not a video (bad header). Files are only sampled and header-checked when a scan sees them new or changed, and only files linked from the library are header-checked. A failed audit stays listed until a later audit passes or the file changes.
       </p>
       {damaged.error ? <p className="panel-message error">{damaged.error.message}</p> : null}
       {damaged.isLoading ? <p className="panel-message">Loading…</p> : null}
@@ -227,9 +227,17 @@ function DamagedFileTableRow({
       </td>
       <td>
         <DamageIntegrityPill integrity={row.integrity} headerDetail={row.header ? describeFileHeader(row.header) : undefined} />
+        {row.headerFailReason ? <span className="damaged-reason">{row.headerFailReason}</span> : null}
       </td>
       <td className="orphan-nowrap">{formatBytes(row.sizeBytes)}</td>
-      <td className="orphan-nowrap">{row.storedPercent == null ? "-" : `${row.storedPercent}%`}</td>
+      <td className="orphan-nowrap">
+        {/* A bad header is about the start of the file, not how much of it is stored, so the share would mislead here. */}
+        {row.integrity === "header_failed" || row.storedPercent == null ? (
+          <span className="damaged-muted" title={row.integrity === "header_failed" ? "Not relevant: the header check reads the start of the file, not how much of it is stored" : undefined}>-</span>
+        ) : (
+          `${row.storedPercent}%`
+        )}
+      </td>
       <td className="orphan-nowrap">{row.zeroSamples == null ? "-" : `${row.zeroSamples} / ${row.zeroSamplesTotal}`}</td>
       <td>{row.linked ? "Linked" : "Orphan"}</td>
       <td>{row.rootType === "remote" ? "-" : row.remoteCopyExists ? "Yes" : "No"}</td>

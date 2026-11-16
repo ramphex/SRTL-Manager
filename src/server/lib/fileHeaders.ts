@@ -40,6 +40,18 @@ const mp4LeadingBoxes = new Set(["ftyp", "moov", "mdat", "free", "wide", "skip",
 const volumeDescriptorIds = new Set(["CD001", "BEA01", "NSR02", "NSR03"]);
 const volumeDescriptorOffsets = [0x8001, 0x8801, 0x9001];
 
+// Archives that start a "video" file: a download that was never unpacked. RAR 4 and 5 share the first six bytes.
+const archiveSignatures = [
+  [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07],
+  [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c],
+  [0x50, 0x4b, 0x03, 0x04]
+];
+
+/** True when the bytes start with a RAR, 7z or ZIP signature. */
+export function startsWithArchive(bytes: Uint8Array): boolean {
+  return archiveSignatures.some((signature) => startsWith(bytes, signature));
+}
+
 /** The container whose signature starts these bytes, whatever the file is called; null when none matches. */
 export function detectHeaderContainer(bytes: Uint8Array): string | null {
   if (startsWith(bytes, [0x1a, 0x45, 0xdf, 0xa3])) return "matroska";
@@ -86,6 +98,7 @@ export function classifyFileHeader(filePath: string, sizeBytes: number, head: Ui
   if (bySize) return bySize;
   const container = detectHeaderContainer(head);
   if (container) return { status: "pass", reason: container };
+  if (startsWithArchive(head)) return fail("archive");
   if (head.length > 0 && isAllZero(head)) return fail("zeros");
   const extension = path.extname(filePath).toLowerCase();
   if (discImageExtensions.has(extension) || dvdMenuExtensions.has(extension)) return { status: "skipped", reason: null };

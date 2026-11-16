@@ -28,7 +28,7 @@ import { assertDestinationPathInside, assertExistingPathInside, assertPathParent
 import { isMediaFile, isPathInside } from "../lib/media";
 import { isPathConfigurationBlocked, runPathMigration } from "../lib/pathConfiguration";
 import { completeOnboardingScan } from "../lib/onboarding";
-import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, scanResultStorageFiles, type ScanActivity } from "../lib/scanner";
+import { defaultScanOptions, getStoragePolicyMap, listMediaLinks, persistScanResult, requiredStorageRootsForScan, scanLibrary, scanLinkCoverage, scanResultStorageFiles, type ScanActivity } from "../lib/scanner";
 import { copyHeaderGate, fileHeaderChecksEnabled, runScanHeaderChecks, type ScanHeaderRun } from "../lib/headerChecks";
 import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { estimateAuditSeconds, libraryWideDeepAuditRefusal, libraryWideRemoteAuditRefusal } from "../../shared/auditEstimate";
@@ -4294,13 +4294,17 @@ export class JobWorker {
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "cancelled", "Scan cancelled before inventory results were written", result.inventory));
         return;
       }
-      // The end of the scan checks the headers of new and changed files, within a per-scan budget, before the results are
+      // The end of the scan checks the headers of new and changed linked files, within a per-scan budget, before the results are
       // written; the write stores the verdicts with the files. Whatever the budget leaves stays queued for the next scan.
       const headerChecksEnabled = await fileHeaderChecksEnabled(this.db);
       let headerRun: ScanHeaderRun | null = null;
       if (headerChecksEnabled) {
         await ctx.setProgress(scanProgressPayload(normalizedOptions, "indexing", "Checking file headers of new and changed files", result.inventory));
-        headerRun = await runScanHeaderChecks(this.db, scanResultStorageFiles(result), { isCancelled: async () => ctx.signal.aborted || (await ctx.isCancelled()) });
+        // Only files linked from the library are checked; the links this scan walked count before they are stored.
+        headerRun = await runScanHeaderChecks(this.db, scanResultStorageFiles(result), {
+          links: scanLinkCoverage(result),
+          isCancelled: async () => ctx.signal.aborted || (await ctx.isCancelled())
+        });
         const summary = headerRun.summary;
         if (summary.due > 0) {
           await ctx.event(summary.failed > 0 ? "warn" : "info", `Checked file headers: ${summary.passed} passed, ${summary.failed} failed${summary.retry > 0 ? `, ${summary.retry} to retry` : ""}${summary.left > 0 ? `, ${summary.left} left for the next scan` : ""}`, {

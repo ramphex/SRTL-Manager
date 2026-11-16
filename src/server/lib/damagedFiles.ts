@@ -1,8 +1,8 @@
 import { sql } from "drizzle-orm";
 import { dbAll, type Db } from "../db/database";
 import type { DamagedFileRow, StorageRootType } from "../../shared/types";
-import { describeFileHeader } from "../../shared/fileHeaders";
-import { headerStateOf } from "./headerChecks";
+import { describeFileHeader, fileHeaderFailLabel } from "../../shared/fileHeaders";
+import { headerStateOf, linkedFileCondition } from "./headerChecks";
 import { effectiveIntegrity, hollowAllocationRatio, hollowMinimumBytes, zeroSampleCount } from "./mediaIntegrity";
 import { purgeGraceMs, unfinishedCopyCondition } from "../jobs/orphanPurge";
 
@@ -34,7 +34,8 @@ type RawDamagedRow = {
 // Block counts on the remote mount are meaningless, so only local files are classified by sampling and audits.
 // Hollow and damaged come from scan sampling; a failed audit (manual or nightly) also lists the file until a later
 // audit passes or a scan sees its contents change. A failed file header check lists a file on either storage, until
-// a scan sees its contents change and a new check passes.
+// a scan sees its contents change and a new check passes, and only while the file is linked from the library: only
+// linked files are checked, and an orphan's old result stays in the table but is not shown.
 export async function listDamagedFiles(db: Db, now = Date.now()): Promise<DamagedFileRow[]> {
   const rows = await dbAll<RawDamagedRow>(db, sql`
     select
@@ -70,7 +71,7 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
     from storage_files sf
     where sf.missing_since is null
       and (
-        sf.header_status = 'fail'
+        (sf.header_status = 'fail' and ${linkedFileCondition("sf")})
         or (sf.root_type = 'local' and (
           sf.integrity in ('hollow', 'partial_hollow')
           or sf.audit_status = 'fail'
@@ -83,11 +84,13 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
     const sizeBytes = Number(row.sizeBytes);
     const rootType: StorageRootType = row.rootType === "remote" ? "remote" : "local";
     const allocatedBytes = rootType === "remote" || row.allocatedBytes == null ? null : Number(row.allocatedBytes);
+    const linked = Number(row.linkCount) > 0;
+    const header = linked ? headerStateOf(row) : null;
     const sampled = rootType === "local" ? effectiveIntegrity(sizeBytes, allocatedBytes, row.integrity) : null;
     const integrity =
       sampled === "hollow" || sampled === "partial_hollow"
         ? sampled
-        : row.headerStatus === "fail"
+        : header?.status === "fail"
           ? "header_failed"
           : rootType === "local" && row.auditStatus === "fail"
             ? "audit_failed"
@@ -108,11 +111,12 @@ export async function listDamagedFiles(db: Db, now = Date.now()): Promise<Damage
         zeroSamples: row.zeroSamples,
         zeroSamplesTotal: zeroSampleCount,
         checkedAt: row.checkedAt,
-        linked: Number(row.linkCount) > 0,
+        linked,
         remoteCopyExists: rootType === "local" && Boolean(row.remoteCopyExists),
         protectedReason: row.activeCopy ? "Part of an unfinished copy" : now - Number(row.mtimeMs) < purgeGraceMs ? "Modified in the last 24 hours" : null,
         audit: row.auditCheckedAt && row.auditStatus ? { status: row.auditStatus, mode: row.auditMode ?? "fast", message: row.auditMessage, checkedAt: row.auditCheckedAt } : null,
-        header: headerStateOf(row)
+        header,
+        headerFailReason: integrity === "header_failed" ? fileHeaderFailLabel(header?.reason) : null
       }
     ];
   });

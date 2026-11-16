@@ -3,12 +3,13 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { describeFileHeader } from "../src/shared/fileHeaders";
+import { describeFileHeader, fileHeaderFailLabel } from "../src/shared/fileHeaders";
 import {
   checkFileHeader,
   checkFileHeaders,
   classifyFileHeader,
   detectHeaderContainer,
+  startsWithArchive,
   headerMinimumBytes,
   headerReadBytes,
   readFileHead,
@@ -116,10 +117,42 @@ describe("broken files", () => {
     expect(reads).toBe(0);
   });
 
+  it("tells an archive that was never unpacked apart from other non-video files", () => {
+    const rar4 = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+    const rar5 = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+    const sevenZip = [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+    const zip = [0x50, 0x4b, 0x03, 0x04];
+    for (const signature of [rar4, rar5, sevenZip, zip]) {
+      expect(startsWithArchive(withSignature(signature))).toBe(true);
+      expect(classifyFileHeader("/media/film.mkv", size, withSignature(signature))).toEqual({ status: "fail", reason: "archive" });
+      // An archive named like a disc image is still an archive, not an unrecognised image.
+      expect(classifyFileHeader("/media/disc.iso", size, withSignature(signature))).toEqual({ status: "fail", reason: "archive" });
+    }
+    // Near misses are not archives: a different RAR byte, a ZIP end record, and a signature that is not at byte 0.
+    for (const bytes of [withSignature([0x52, 0x61, 0x72, 0x21, 0x1a, 0x08]), withSignature([0x50, 0x4b, 0x05, 0x06]), withSignature(zip, 1)]) {
+      expect(startsWithArchive(bytes)).toBe(false);
+      expect(classifyFileHeader("/media/film.mkv", size, bytes)).toEqual({ status: "fail", reason: "not_video" });
+    }
+    // A video container still wins, and a tiny archive fails on its size before its bytes are looked at.
+    expect(classifyFileHeader("/media/film.mkv", size, withSignature([0x1a, 0x45, 0xdf, 0xa3]))).toEqual({ status: "pass", reason: "matroska" });
+    expect(classifyFileHeader("/media/film.mkv", 4096, withSignature(rar5).subarray(0, 4096))).toEqual({ status: "fail", reason: "too_small" });
+  });
+
+  it("gives every failure a plain reason for Damaged files", () => {
+    expect(fileHeaderFailLabel("not_video")).toBe("Not a video file: the start of the file isn't any known video format");
+    expect(fileHeaderFailLabel("zeros")).toBe("Starts with zeros: no video data");
+    expect(fileHeaderFailLabel("too_small")).toBe("Too small to be a video");
+    expect(fileHeaderFailLabel("archive")).toBe("Archive, not a video: the download was never unpacked");
+    expect(fileHeaderFailLabel("empty")).toBe("Empty file: 0 bytes");
+    expect(fileHeaderFailLabel("something new")).toBe("Not a video file");
+    expect(fileHeaderFailLabel(null)).toBe("Not a video file");
+  });
+
   it("describes every verdict in plain words", () => {
     expect(describeFileHeader({ status: "pass", reason: "matroska" })).toBe("Header check passed (Matroska/WebM)");
     expect(describeFileHeader({ status: "fail", reason: "zeros" })).toBe("Header check failed: the file starts with zeros, so it holds no video data");
     expect(describeFileHeader({ status: "fail", reason: "not_video" })).toBe("Header check failed: not a valid video file: no known container header");
+    expect(describeFileHeader({ status: "fail", reason: "archive" })).toBe("Header check failed: an archive, not a video: the download was never unpacked");
     expect(describeFileHeader({ status: "retry", reason: "timed out" })).toBe("Header check could not run (timed out); it will be tried again");
   });
 });
