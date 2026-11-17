@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.8] - 2026-11-17
+
+Recent jobs on the Dashboard shows ten at a time with Show more and a search, Now Playing cards fold to one line and can be filtered by server, and adding a Plex server leads with Sign in with Plex. There is no database migration.
+
 ### Changed
 
 - **Recent jobs shows ten at a time, with a search.** The Dashboard list starts with the newest ten jobs (running and queued jobs first, as before) and **Show more** under the list loads ten more each time. The magnifying glass in the list header opens a search box that looks through every job, not only the loaded ones or the **Finished within** window: by id (`#123` for one job), type, status, and the folders and titles a job covers. Results page ten at a time the same way, a search that matches nothing says so, and Escape or the X closes the search and clears it. Running jobs and status changes keep updating in place. The list reads from the new `GET /api/jobs/page` endpoint (`offset`, `limit` up to 50, `q`, `completedWithinMinutes`), which says whether more jobs exist; `GET /api/jobs` is unchanged.
