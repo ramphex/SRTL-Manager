@@ -151,6 +151,7 @@ const routeTable: readonly RouteEntry[] = [
   { methods: ["GET"], url: "/api/audits/:id", permission: "library.view" },
   { methods: ["GET"], url: "/api/audits/:id/results/page", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs", permission: "library.view" },
+  { methods: ["GET"], url: "/api/jobs/page", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/events", permission: "library.view" },
   { methods: ["GET"], url: "/api/jobs/:id/events/page", permission: "library.view" },

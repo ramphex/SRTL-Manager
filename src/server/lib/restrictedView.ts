@@ -243,6 +243,9 @@ export function isRestrictedRequest(request: FastifyRequest): boolean {
 // Their logs are about backup folders, path moves and media server connections, which have nothing else to show.
 const settingsJobTypes: ReadonlySet<JobType> = new Set(["backup", "path_migration", "watch_sync"]);
 
+/** Job types whose options and titles a restricted account may not see, so its job search must not match them either. */
+export const detailHiddenJobTypes: readonly JobType[] = [...settingsJobTypes];
+
 export function jobDetailsHidden(type: JobType): boolean {
   return settingsJobTypes.has(type);
 }

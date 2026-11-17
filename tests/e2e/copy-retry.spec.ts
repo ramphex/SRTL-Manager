@@ -65,7 +65,8 @@ async function mockApi(page: Page, { role = "owner", jobs, plans = {}, onRetry }
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.4", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.4", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
-    } else if (url.pathname === "/api/jobs") body = jobs;
+    } else if (url.pathname === "/api/jobs/page") body = { jobs, hasMore: false, nextOffset: jobs.length };
+    else if (url.pathname === "/api/jobs") body = jobs;
     else if (url.pathname.endsWith("/events/page")) body = { events: [], total: 0, hasOlder: false };
     else if (url.pathname.endsWith("/copy-failures")) body = { jobId: 0, totalFailures: 0, eligibleCount: 0, unidentifiedCount: 0, items: [] };
     await route.fulfill({ json: body });

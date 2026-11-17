@@ -54,6 +54,7 @@ async function fixture(page: Page, options: Options = {}) {
     else if (url.pathname === "/api/settings/scan") body = { scanSymlinks: true, scanLocal: true, scanRemote: true };
     else if (url.pathname === "/api/settings/audit") body = { sections: [], targets: ["local", "remote"] };
     else if (url.pathname === "/api/settings/advanced") body = {};
+    else if (url.pathname === "/api/jobs/page") body = { jobs: [], hasMore: false, nextOffset: 0 };
     else if (url.pathname === "/api/jobs") body = [];
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };

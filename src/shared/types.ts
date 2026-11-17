@@ -1079,6 +1079,15 @@ export interface JobEventRecord {
   data: unknown;
 }
 
+/** One page of the Recent jobs list: active jobs first, then newest first. */
+export interface JobPage {
+  jobs: JobRecord[];
+  /** True when at least one more job matches past this page. */
+  hasMore: boolean;
+  /** The offset that asks for the next page. */
+  nextOffset: number;
+}
+
 export interface JobEventPage {
   events: JobEventRecord[];
   total: number;

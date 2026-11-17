@@ -25,6 +25,7 @@ async function mockApi(page: Page, job: Record<string, unknown>, responses: Reco
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
     } else if (url.pathname === `/api/jobs/${String(job.id)}`) body = job;
+    else if (url.pathname === "/api/jobs/page") body = { jobs: [job], hasMore: false, nextOffset: 1 };
     else if (url.pathname === "/api/jobs") body = [job];
     else if (url.pathname in responses) body = responses[url.pathname];
     await route.fulfill({ json: body });

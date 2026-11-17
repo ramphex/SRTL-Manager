@@ -8707,3 +8707,58 @@ button.danger-button:hover:not(:disabled) {
   cursor: default;
 }
 .damaged-storage-tag { display: inline-block; margin-left: 6px; color: var(--muted); font-size: 12px; font-weight: 400; }
+
+/* Recent jobs: search in the header, Show more under the list. */
+.recent-jobs-actions {
+  align-items: center;
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.recent-jobs-search {
+  align-items: center;
+  color: var(--muted);
+  display: inline-flex;
+  gap: 6px;
+  position: relative;
+}
+
+.recent-jobs-search > svg {
+  left: 9px;
+  pointer-events: none;
+  position: absolute;
+}
+
+.recent-jobs-search input {
+  font-size: 13px;
+  min-height: 30px;
+  padding-left: 30px;
+  width: 210px;
+}
+
+.recent-jobs-search .icon-only,
+.recent-jobs-actions > .icon-only {
+  min-height: 30px;
+  min-width: 30px;
+}
+
+.recent-jobs-more {
+  display: flex;
+  justify-content: center;
+  padding: 10px 14px 14px;
+}
+
+@media (max-width: 820px) {
+  .recent-jobs-search input {
+    min-height: 44px;
+    width: min(210px, 52vw);
+  }
+
+  .recent-jobs-search .icon-only,
+  .recent-jobs-actions > .icon-only {
+    min-height: 44px;
+    min-width: 44px;
+  }
+}

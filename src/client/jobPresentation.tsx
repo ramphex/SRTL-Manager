@@ -2,7 +2,7 @@ import { Fragment, useEffect, useId, useMemo, useRef, useState, type ReactNode }
 import { HeaderCheckedAtMark } from "./fileHeaderMark";
 import { createPortal } from "react-dom";
 import { Link } from "@tanstack/react-router";
-import { useInfiniteQuery, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, useInfiniteQuery, type InfiniteData, useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, Archive, CheckCircle2, ChevronDown, ChevronRight, Copy, File, FileText, Folder, Info, ListChecks, OctagonX, Play, RotateCcw, Search, Trash2, TriangleAlert, X } from "lucide-react";
 import { api } from "./api";
 import { defaultAdvancedSettings, normalizeAdvancedSettings } from "../shared/advancedSettings";
@@ -10,9 +10,10 @@ import { eventDataChips, formatEventLevel, formatJobType, formatLogData, hasLogD
 import { auditOptionsFromJob, copyOptionsFromJob, scanOptionsFromJob } from "./jobScopeLocks";
 import { jobEventCountLabel } from "./jobEvents";
 import { groupAdjacentJobs } from "./jobGrouping";
-import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions, visibleDashboardJobs } from "./recentJobs";
+import { normalizeRecentJobsCompletedWindowMinutes, recentJobsCompletedWindowOptions } from "./recentJobs";
+import { jobPageSize, maxJobSearchLength } from "../shared/jobLabels";
 import { roughDuration } from "../shared/auditEstimate";
-import { type AuditEstimate, type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
+import { type AuditEstimate, type AuditMode, type AuditResultRecord, type AuditRunRecord, type CopyConflictPreview, type CopyFailureItem, type CopyRetryPlan, type CopyRetryStarted, type JobEventRecord, type JobPage, type JobRecord, type JobSelectionSummary, type CopyLocalConflictStrategy, type MediaLinkRow, type OrphanPurgeItem, type OrphanPurgeItemOutcome, type TimeFormatPreference } from "../shared/types";
 import { JobStatusTerminateAction, LogChipList, Panel, ScanProgressPanel, StatusPill, TerminateJobDialog } from "./App";
 import { useAccess } from "./access";
 import { ArrRescanOption, ArrRescanResult } from "./reRequest";
@@ -2360,15 +2361,16 @@ function CopyRetryOptionsDialog({
   );
 }
 
+/** How long the Recent jobs search waits after the last keystroke before it asks the server. */
+export const recentJobsSearchDebounceMs = 300;
+
 export function JobsTable({
-  jobs,
   sections,
   onScanJobSelect,
   onAuditJobSelect,
   onCopyJobSelect,
   onPurgeJobSelect
 }: {
-  jobs: JobRecord[];
   sections: Array<{ section: string; title?: string | null }>;
   onScanJobSelect?: (job: JobRecord) => void;
   onAuditJobSelect?: (job: JobRecord) => void;
@@ -2389,7 +2391,56 @@ export function JobsTable({
     }
   });
   const completedWindowMinutes = normalizeRecentJobsCompletedWindowMinutes(preferences.recentJobsCompletedWindowMinutes);
-  const visibleJobs = visibleDashboardJobs(jobs, completedWindowMinutes);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [searchInput, setSearchInput] = useState("");
+  const [search, setSearch] = useState("");
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const next = searchInput.trim();
+    if (next === search) return;
+    const timer = window.setTimeout(() => setSearch(next), recentJobsSearchDebounceMs);
+    return () => window.clearTimeout(timer);
+  }, [searchInput, search]);
+  useEffect(() => {
+    if (searchOpen) searchInputRef.current?.focus();
+  }, [searchOpen]);
+  const closeSearch = () => {
+    setSearchOpen(false);
+    setSearchInput("");
+    setSearch("");
+  };
+  // Each refetch reloads every page shown, so new jobs and status changes reach the whole folded list.
+  const jobPages = useInfiniteQuery({
+    queryKey: ["jobs", "recent-page", search ? null : completedWindowMinutes, search],
+    queryFn: ({ pageParam }) =>
+      api.jobPage({ offset: pageParam, limit: jobPageSize, search: search || undefined, completedWithinMinutes: search ? undefined : completedWindowMinutes }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage) => (lastPage?.hasMore ? lastPage.nextOffset : undefined),
+    placeholderData: keepPreviousData,
+    refetchInterval: 3000
+  });
+  // Coming back to the Dashboard starts folded again, at the newest ten. A refetch still running would put the
+  // other pages back when it lands, so it is cancelled first; the cancel restores the data at once, so the fold
+  // is in place before the list can mount again.
+  useEffect(
+    () => () => {
+      const queryKey = ["jobs", "recent-page"];
+      void queryClient.cancelQueries({ queryKey });
+      queryClient.setQueriesData<InfiniteData<JobPage>>({ queryKey }, (data) =>
+        data && data.pages.length > 1 ? { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) } : data
+      );
+    },
+    [queryClient]
+  );
+  const visibleJobs = useMemo(() => {
+    // A job queued between two page loads shifts the offsets, so one row can arrive twice.
+    const seen = new Set<number>();
+    return (jobPages.data?.pages ?? []).flatMap((page) => (Array.isArray(page?.jobs) ? page.jobs : [])).filter((job) => {
+      if (seen.has(job.id)) return false;
+      seen.add(job.id);
+      return true;
+    });
+  }, [jobPages.data]);
   const jobEntries = useMemo(() => groupAdjacentJobs(visibleJobs), [visibleJobs]);
   const selectedJobLinkIds = useMemo(() => selectedLinkIdsFromJobs(visibleJobs), [visibleJobs]);
   const selectedJobLinkRows = useQuery({
@@ -2476,28 +2527,61 @@ export function JobsTable({
       title="Recent Jobs"
       icon={<Activity size={18} />}
       actions={
-        <label className="recent-jobs-filter">
-          <span>Finished within</span>
-          <select
-            value={completedWindowMinutes}
-            disabled={saveRecentJobsFilter.isPending}
-            onChange={(event) => {
-              saveRecentJobsFilter.mutate({
-                ...preferences,
-                recentJobsCompletedWindowMinutes: normalizeRecentJobsCompletedWindowMinutes(Number(event.currentTarget.value))
-              });
-            }}
-          >
-            {recentJobsCompletedWindowOptions.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-        </label>
+        <span className="recent-jobs-actions">
+          {searchOpen ? (
+            <span className="recent-jobs-search">
+              <Search size={15} aria-hidden />
+              <input
+                ref={searchInputRef}
+                type="search"
+                aria-label="Search jobs"
+                placeholder="Search all jobs"
+                maxLength={maxJobSearchLength}
+                value={searchInput}
+                onChange={(event) => setSearchInput(event.currentTarget.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Escape") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeSearch();
+                }}
+              />
+              <button type="button" className="icon-only secondary" title="Close search" aria-label="Close search" onClick={closeSearch}>
+                <X size={15} />
+              </button>
+            </span>
+          ) : (
+            <button type="button" className="icon-only secondary" title="Search jobs" aria-label="Search jobs" onClick={() => setSearchOpen(true)}>
+              <Search size={15} />
+            </button>
+          )}
+          <label className="recent-jobs-filter">
+            <span>Finished within</span>
+            <select
+              value={completedWindowMinutes}
+              disabled={saveRecentJobsFilter.isPending || Boolean(search)}
+              title={search ? "A search covers every job, however long ago it finished" : undefined}
+              onChange={(event) => {
+                saveRecentJobsFilter.mutate({
+                  ...preferences,
+                  recentJobsCompletedWindowMinutes: normalizeRecentJobsCompletedWindowMinutes(Number(event.currentTarget.value))
+                });
+              }}
+            >
+              {recentJobsCompletedWindowOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+        </span>
       }
     >
-      {visibleJobs.length === 0 ? <p className="panel-message">No active jobs or finished jobs in the selected window.</p> : null}
+      {jobPages.error ? <p className="panel-message action-error">{jobPages.error.message}</p> : null}
+      {visibleJobs.length === 0 && !jobPages.isPending && !jobPages.error ? (
+        <p className="panel-message">{search ? `No jobs match \u201c${search}\u201d.` : "No active jobs or finished jobs in the selected window."}</p>
+      ) : null}
       {saveRecentJobsFilter.error ? <p className="panel-message action-error">{saveRecentJobsFilter.error.message}</p> : null}
       {visibleJobs.length > 0 ? (
         <table className="responsive-table mobile-card-table recent-jobs-table" aria-label="Recent jobs">
@@ -2559,6 +2643,13 @@ export function JobsTable({
             })}
           </tbody>
         </table>
+      ) : null}
+      {jobPages.hasNextPage && visibleJobs.length > 0 ? (
+        <div className="recent-jobs-more">
+          <button className="secondary" type="button" disabled={jobPages.isFetchingNextPage} onClick={() => void jobPages.fetchNextPage()}>
+            {jobPages.isFetchingNextPage ? "Loading..." : "Show more"}
+          </button>
+        </div>
       ) : null}
       <TerminateJobDialog
         job={terminatePrompt}

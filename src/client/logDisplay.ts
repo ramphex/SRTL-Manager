@@ -1,5 +1,6 @@
 import type { JobEventRecord, JobRecord, JobStatus, JobType } from "../shared/types";
 import { createSearchMatcher } from "../shared/search";
+import { jobTypeLabels } from "../shared/jobLabels";
 
 export type JobStatusFilter = JobStatus | "all";
 export type JobTypeFilter = JobType | "all";
@@ -150,17 +151,7 @@ const chipPriority = [
 ];
 
 export function formatJobType(type: JobType): string {
-  if (type === "scan") return "Inventory scan";
-  if (type === "audit") return "Audit";
-  if (type === "copy") return "Copy";
-  if (type === "symlink_cleanup") return "Symlink cleanup";
-  if (type === "orphan_purge") return "Orphan purge";
-  if (type === "orphan_restore") return "Held file restore";
-  if (type === "partial_copy_discard") return "Partial copy discard";
-  if (type === "path_migration") return "Path migration";
-  if (type === "watch_sync") return "Watch sync";
-  if (type === "backup") return "Database backup";
-  return "Integration sync";
+  return jobTypeLabels[type] ?? "Integration sync";
 }
 
 export function formatEventLevel(level: JobEventRecord["level"]): string {

@@ -34,6 +34,8 @@ import { normalizeAdvancedSettings } from "../../shared/advancedSettings";
 import { estimateAuditSeconds, libraryWideDeepAuditRefusal, libraryWideRemoteAuditRefusal } from "../../shared/auditEstimate";
 import { evaluateSourceTitleRisk } from "../../shared/sourceTitleRisk";
 import { CopyTransferLimiter } from "./copyLimiter";
+import { jobPageConditions, type JobPageQuery } from "./jobPage";
+import { jobPageSize, maxJobPageSize } from "../../shared/jobLabels";
 import { runKeyedPool } from "./copyPool";
 import { isCopySourceLink, planCopyRetry, type CopyRetryPlanning, type CopyRetryResult } from "./copyRetry";
 import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresolvedCopyReconciliation } from "./copyReconciliation";
@@ -59,6 +61,7 @@ import type {
   InventorySummary,
   JobEventPage,
   JobEventRecord,
+  JobPage,
   JobRecord,
   CopyReconciliationState,
   PartialCopyDiscardPreview,
@@ -2628,6 +2631,20 @@ export class JobRunner {
           .orderBy(desc(schema.jobs.id))
           .limit(limit);
     return attachJobSelections(this.db, [...activeRows, ...terminalRows].sort((a, b) => b.id - a.id).map(toJobRecord));
+  }
+
+  /** One page of the Recent jobs list. It asks for one row more than the page, to say whether another page exists. */
+  async listJobPage(query: JobPageQuery = {}): Promise<JobPage> {
+    const limit = Math.min(Math.max(Math.trunc(query.limit ?? jobPageSize), 1), maxJobPageSize);
+    const offset = Math.max(Math.trunc(query.offset ?? 0), 0);
+    const { where, orderBy } = jobPageConditions(query);
+    const rows = await this.db.select().from(schema.jobs).where(where).orderBy(...orderBy).limit(limit + 1).offset(offset);
+    const pageRows = rows.slice(0, limit);
+    return {
+      jobs: await attachJobSelections(this.db, pageRows.map(toJobRecord)),
+      hasMore: rows.length > limit,
+      nextOffset: offset + pageRows.length
+    };
   }
 
   async getJob(jobId: number): Promise<JobRecord | null> {

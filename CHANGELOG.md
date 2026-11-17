@@ -6,6 +6,8 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ### Changed
 
+- **Recent jobs shows ten at a time, with a search.** The Dashboard list starts with the newest ten jobs (running and queued jobs first, as before) and **Show more** under the list loads ten more each time. The magnifying glass in the list header opens a search box that looks through every job, not only the loaded ones or the **Finished within** window: by id (`#123` for one job), type, status, and the folders and titles a job covers. Results page ten at a time the same way, a search that matches nothing says so, and Escape or the X closes the search and clears it. Running jobs and status changes keep updating in place. The list reads from the new `GET /api/jobs/page` endpoint (`offset`, `limit` up to 50, `q`, `completedWithinMinutes`), which says whether more jobs exist; `GET /api/jobs` is unchanged.
+
 - **Adding a Plex server leads with Sign in with Plex.** The add form explains that signing in connects automatically, and **Add and sign in with Plex** adds the server and opens the plex.tv window right away. Pasting a token moved under **Or enter a token manually**, with where to find your own account token and the warning never to use the server's `PlexOnlineToken`. On a connected server, **Sign in with Plex again** now says that it reconnects the server.
 
 ### Fixed
