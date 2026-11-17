@@ -1177,6 +1177,9 @@ test("recent jobs identifies a targeted scan by title instead of only its parent
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
   });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
+  });
   await page.route("**/api/settings/sections", async (route) => {
     await route.fulfill({
       status: 200,
@@ -1267,6 +1270,9 @@ test("recent copy jobs show a single link title directly and retain title inspec
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(jobs) });
   });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: jobs, hasMore: false, nextOffset: jobs.length }) });
+  });
   await page.route("**/api/media-links/by-ids", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(links) });
   });
@@ -1356,6 +1362,9 @@ test("job progress shows the complete event timeline and opens the selected full
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
   });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
+  });
 
   await page.goto(baseUrl!);
   const progressButton = page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true });
@@ -1424,6 +1433,9 @@ test("copy progress opens a persistent, scrollable failed item summary", async (
   });
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
   await page.goto(baseUrl!);
@@ -1507,6 +1519,9 @@ test("copy progress exposes details for a single failed item", async ({ page }) 
   });
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
   await page.goto(baseUrl!);
@@ -1594,6 +1609,9 @@ test("failed copy items require explicit review before symlink cleanup is queued
   });
   await page.route("**/api/jobs?*", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify([job]) });
+  });
+  await page.route("**/api/jobs/page*", async (route) => {
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
   await page.goto(baseUrl!);
@@ -1730,6 +1748,7 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
       };
     }
     else if (url.pathname === `/api/jobs/${jobId}`) body = job;
+    else if (url.pathname === "/api/jobs/page") body = { jobs: [job], hasMore: false, nextOffset: 1 };
     else if (url.pathname === "/api/jobs") body = [job];
     else if (url.pathname === "/api/settings/sections") body = { sections: [], sectionTitles: {}, sectionTypes: {} };
     else if (url.pathname === "/api/settings/paths") body = { symlinkDir: "/mnt/links", localDir: "/mnt/local", remoteDir: "/mnt/remote" };

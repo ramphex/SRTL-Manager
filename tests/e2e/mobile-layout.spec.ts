@@ -153,8 +153,8 @@ async function mockPopulatedDashboard(
         localSections: { shows: null, movies: null, anime: null },
         remoteRoot: null
       };
-    } else if (url.pathname === "/api/jobs") {
-      body = [
+    } else if (url.pathname === "/api/jobs" || url.pathname === "/api/jobs/page") {
+      const jobs = [
         {
           id: 702,
           type: "scan",
@@ -200,6 +200,7 @@ async function mockPopulatedDashboard(
           progress: { stage: "partially_failed", total: 3, current: 3, copied: 0, repointed: 0, conflicts: 0, failed: 3, options: { direction: "to_local" } }
         }
       ];
+      body = url.pathname === "/api/jobs/page" ? { jobs, hasMore: false, nextOffset: jobs.length } : jobs;
     } else if (url.pathname === "/api/jobs/702/events/page") {
       body = {
         events: [{ id: 9001, jobId: 702, timestamp, level: "info", message: "Mobile layout scan completed", data: null }],
