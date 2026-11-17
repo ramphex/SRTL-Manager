@@ -94,6 +94,10 @@ describe("Now Playing stream card", () => {
     expect(footer.querySelector(".np-footer-user")?.textContent).toBe("Usersam");
     expect(footer.querySelector(".np-footer-server .np-footer-text")?.textContent).toBe("Home Plex");
     expect(footer.querySelector(".np-footer-server svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
+    const player = footer.querySelector(".np-footer-player dd")!;
+    expect(player.textContent).toBe("Plex for Android (TV) · Living Room");
+    expect(player.getAttribute("title")).toBe("Plex for Android (TV) · Living Room · SHIELD · Android");
+    expect(card.querySelector(".np-card-player")).toBeNull();
     const location = footer.querySelector(".np-footer-location")!;
     const trigger = location.querySelector<HTMLButtonElement>("button")!;
     expect(trigger.textContent).toBe("WAN · Example City, Netherlands");

@@ -8379,7 +8379,6 @@ button.danger-button:hover:not(:disabled) {
 .np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--muted); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
 .np-stop-button:hover,
 .np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); color: var(--bad); }
-.np-card-player { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-badges { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; }
 .np-badge { align-items: center; background: var(--pill-neutral-bg); border-radius: 999px; color: var(--pill-neutral-text); box-sizing: border-box; display: inline-flex; font-size: 11px; gap: 4px; height: 20px; line-height: 1; padding: 0 8px; white-space: nowrap; }
 .np-badge svg { flex: none; }
@@ -8415,6 +8414,7 @@ button.danger-button:hover:not(:disabled) {
 .np-card-footer { border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px 14px; grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
 .np-card-footer > div { min-width: 0; }
 .np-card-footer > .np-footer-location { margin-left: auto; }
+.np-card-footer > .np-footer-player { flex: 1 0 100%; }
 .np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
 .np-card-footer svg { color: var(--muted); flex: none; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

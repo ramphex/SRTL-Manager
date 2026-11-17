@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
+import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, playerLabels, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingMediaInfo } from "../src/shared/nowPlaying";
 
 const sample = (at: number): NowPlayingHostSample => ({ at: new Date(at).toISOString(), cpuPercent: 10, memoryUsedBytes: 1, memoryTotalBytes: 2, networkInBps: 1, networkOutBps: 1, gpus: null });
@@ -28,6 +28,13 @@ describe("Now Playing presentation", () => {
     expect(playMethodLabel({ playMethod: "transcode", transcode: null })).toBe("Transcode");
     expect(playMethodLabel({ playMethod: "directStream", transcode: null })).toBe("Direct stream");
     expect(videoLabel({ container: "mkv", videoCodec: "hevc", resolution: "4K", width: 3840, height: 2160, dynamicRange: "Dolby Vision", audioCodec: null, audioChannels: null, bitrateKbps: null })).toBe("HEVC 4K Dolby Vision");
+  });
+
+  it("shortens the player to app and name, keeping the rest for the hover", () => {
+    expect(playerLabels({ name: "Firefox", device: null, platform: null, product: "Jellyfin Web", version: "10.10.3" })).toEqual({ short: "Jellyfin Web · Firefox", full: "Jellyfin Web · Firefox" });
+    expect(playerLabels({ name: "Chrome", device: "Chrome", platform: "chrome", product: "Plex Web", version: null })).toEqual({ short: "Plex Web · Chrome", full: "Plex Web · Chrome" });
+    expect(playerLabels({ name: null, device: "Roku Ultra", platform: "Roku", product: "Plex for Roku", version: null })).toEqual({ short: "Plex for Roku · Roku Ultra", full: "Plex for Roku · Roku Ultra · Roku" });
+    expect(playerLabels({ name: null, device: null, platform: null, product: null, version: "1" })).toBeNull();
   });
 
   it("orders the pills and shows a count only when it is not 0", () => {

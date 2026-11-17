@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, MonitorSmartphone, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, UserRound, X } from "lucide-react";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
 import { nowPlayingDefaultStopMessage, summarizeStreams } from "../shared/nowPlaying";
 import type { UserPreferences } from "../shared/types";
@@ -25,6 +25,7 @@ import {
   formatKbps,
   livePosition,
   playMethodLabel,
+  playerLabels,
   sparklinePoints,
   streamLocationLabel,
   streamSummaryLine,
@@ -301,7 +302,7 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
   const title = streamTitle(stream);
   const position = livePosition(stream, now);
   const percent = stream.durationMs ? Math.min(100, (position / stream.durationMs) * 100) : 0;
-  const player = [stream.player.product, stream.player.name, stream.player.platform && stream.player.platform !== stream.player.name ? stream.player.platform : null].filter(Boolean).join(" · ");
+  const player = playerLabels(stream.player);
   const methodClass = stream.playMethod === "transcode" ? `np-method-transcode np-engine-${stream.transcode?.engine ?? "unknown"}` : `np-method-${stream.playMethod}`;
   return (
     <article className={`np-card np-state-${stream.state}`} aria-label={`${title.primary} — ${stream.user.name}`}>
@@ -320,7 +321,6 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
             </button>
           ) : null}
         </header>
-        {player ? <div className="np-card-player" title={player}>{player}</div> : null}
         <div className="np-badges">
           <span className={`np-badge np-badge-state np-badge-${stream.state}`}>
             {stream.state === "paused" ? <Pause size={12} /> : stream.state === "buffering" ? <LoaderCircle size={12} /> : <Play size={12} />}
@@ -351,6 +351,7 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
         <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
         <div className="np-footer-server"><dt className="sr-only">Server</dt><dd title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></dd></div>
         <div className="np-footer-location"><dt className="sr-only">Location</dt><dd><StreamLocation network={stream.network} /></dd></div>
+        {player ? <div className="np-footer-player"><dt className="sr-only">Player</dt><dd title={player.full}><MonitorSmartphone size={13} aria-hidden="true" /><span className="np-footer-text">{player.short}</span></dd></div> : null}
       </dl>
     </article>
   );

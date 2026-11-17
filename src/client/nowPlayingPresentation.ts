@@ -153,6 +153,17 @@ export function streamTitle(stream: Pick<NowPlayingStream, "mediaType" | "title"
   return { primary: stream.title, secondary: stream.year ? String(stream.year) : null };
 }
 
+// The card shows the app and the player's name; the hover adds the device and platform when they say something new.
+export function playerLabels(player: NowPlayingStream["player"]): { short: string; full: string } | null {
+  const parts: string[] = [];
+  for (const part of [player.product, player.name, player.device, player.platform]) {
+    const text = part?.trim();
+    if (text && !parts.some((seen) => seen.toLowerCase() === text.toLowerCase())) parts.push(text);
+  }
+  if (!parts.length) return null;
+  return { short: parts.slice(0, 2).join(" · "), full: parts.join(" · ") };
+}
+
 type PillTone = "total" | "hw" | "cpu" | "unknown" | "stream" | "play" | "paused" | "bandwidth";
 
 // Total streams first, then each play method and paused only when its count is not 0, then bandwidth.
