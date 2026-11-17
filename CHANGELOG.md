@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **Adding a Plex server leads with Sign in with Plex.** The add form explains that signing in connects automatically, and **Add and sign in with Plex** adds the server and opens the plex.tv window right away. Pasting a token moved under **Or enter a token manually**, with where to find your own account token and the warning never to use the server's `PlexOnlineToken`. On a connected server, **Sign in with Plex again** now says that it reconnects the server.
+
+### Fixed
+
+- **No false error after signing in with Plex.** A check that arrived while the sign-in was still being saved could show "This Plex sign-in is no longer pending" next to a successful connection. Checks no longer overlap, they stop once the sign-in is approved, and a late check for the sign-in that just finished reads as signed in. A sign-in that really expired or was replaced by a newer one still says so and asks you to start it again.
+
 ## [0.1.5-beta.7] - 2026-11-16
 
 The file header check only reads files linked from the library, names archives that were never unpacked, and shows why each Bad header file failed. Database migration 37 queues earlier "not a video" failures for a new check.

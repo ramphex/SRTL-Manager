@@ -8244,6 +8244,9 @@ button.danger-button:hover:not(:disabled) {
 .media-server-facts dt { color: var(--muted); font-size: 12px; }
 .media-server-facts dd { margin: 2px 0 0; color: var(--text-strong); overflow-wrap: anywhere; }
 .media-server-card .watch-sync-signin { margin: 0; }
+.media-server-manual-token { margin: 0; }
+.media-server-manual-token .radarr-field { margin-top: 10px; max-width: 75ch; }
+.media-server-manual-token .radarr-field p { margin: 6px 0 0; }
 .media-server-edit { display: grid; gap: 14px; border-top: 1px solid var(--border); padding-top: 12px; }
 .media-servers-required { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 8px 14px; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; padding: 18px 20px; color: var(--muted); }
 .media-servers-required h2 { margin: 0 0 4px; font-size: 16px; color: var(--text-strong); }
