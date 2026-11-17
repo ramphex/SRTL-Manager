@@ -13,9 +13,19 @@ A strip pinned to the top of the page stays visible while you scroll through the
 
 Sparkline history is kept in memory while someone has the page open and is lost when everyone leaves or SRTL restarts.
 
+## Servers
+
+Below the strip, each connected server is a toggle with its type icon (Plex or Jellyfin) and its connection status. All servers are on by default. Turning one off hides its streams and leaves them out of the pills; the host cards are never filtered. The choice is saved with your account, so it follows you to other browsers, and a server added later starts on. With every server off, the page says "No servers selected".
+
 ## Stream cards
 
-Each stream shows the user, the server, the title (show, season, and episode for TV), the poster, and the player, device, and platform; the position and whether it is playing, paused, or buffering; and:
+Each stream shows the title (show, season, and episode for TV), the poster, the player, device, and platform, the SRTL source, and the position and whether it is playing, paused, or buffering.
+
+Below that, the stream's technical details are folded into one line: the play method, the bandwidth, and the quality, such as **Transcode (HW)** `10.5 Mbps · 4K → 1080p`. Quality is a resolution label (4K, 1440p, 1080p, 720p, or SD for anything smaller); the arrow appears when a transcode changes it. The chevron next to the line shows the full details below and hides the line; it works with the keyboard too. Each card remembers whether it is expanded until the browser tab is closed, and new cards start folded.
+
+The bottom row of each card shows the **user**, the **server** with its type icon, and the **location**: LAN or WAN, and the city and country from plex.tv when the lookup is on. The client address is not printed on the card; hover over, focus, or tap the location to see it.
+
+In detail:
 
 - **Play method**:
   - Plex: any transcoded stream makes it a transcode; otherwise any copied stream makes it a direct stream; otherwise it is a direct play. A transcode that converts only the audio is still a transcode, and it always runs on the CPU. A video transcode counts as hardware when Plex reports a hardware encoder.
@@ -23,14 +33,14 @@ Each stream shows the user, the server, the title (show, season, and episode for
 - **Source and output**: codec, resolution, and HDR format of the original file and of what the player receives, subtitles (and whether they are burned in), and the container.
 - **Why it transcodes**: Jellyfin reports its reasons. Plex does not, so SRTL derives them from the source and output streams and labels them "derived". Plex streams also show the transcoder speed and whether it is throttled.
 - **Bandwidth**: Plex's reserved bandwidth for the stream, or an estimate from the bitrate (labelled). Placeholder values such as 2,147,483,647 are shown as unknown.
-- **LAN or WAN** and the client address. Behind a reverse proxy, Jellyfin reports the proxy's address unless Jellyfin's known proxies are configured.
+- **LAN or WAN** and the client address, in the bottom row (the address in the location's tooltip). Behind a reverse proxy, Jellyfin reports the proxy's address unless Jellyfin's known proxies are configured.
 - **SRTL source**: whether the file plays from local storage (Location 1) or remote storage (Location 2), using the location names from Settings. SRTL maps the server's file path through the server's path prefix mappings to its symlink, then reads its own link and storage records. If a card says "Source unknown" or "Not in SRTL", check the mappings in Settings > Media servers. Nothing is read from disk; each file is looked up once and cached.
 
 Posters load through SRTL, so Plex tokens and Jellyfin API keys never reach the browser.
 
 ## Stopping a stream
 
-Owners and admins can stop a stream; moderators can only watch this page. **Stop** asks for confirmation with an editable message, sends it, and then checks whether the server still lists the stream. If it does, the dialog says so: some players ignore the request.
+Owners and admins can stop a stream; moderators can only watch this page. The red X at the top right of a card (**Terminate the stream**) asks for confirmation with an editable message, sends it, and then checks whether the server still lists the stream. If it does, the dialog says so: some players ignore the request.
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.
@@ -77,3 +87,7 @@ The GPU card appears when `nvidia-smi` runs inside the API container. With the N
 or, with the older runtime setting, `runtime: nvidia` plus the environment variables `NVIDIA_VISIBLE_DEVICES=all` and `NVIDIA_DRIVER_CAPABILITIES=utility`. SRTL never transcodes, so it does not need the `video` or `compute` capabilities. `nvidia-smi` runs once per sample (every 3 seconds) with a 2.5-second timeout, only while the page is open. When it is missing or fails, the card is hidden and SRTL checks again ten minutes later.
 
 The GPU figures cover the whole GPU, so they include Plex, Jellyfin, and anything else using it.
+
+## Credits
+
+The server type icons are the Plex and Jellyfin glyphs from [Simple Icons](https://simpleicons.org) (CC0). Plex and Jellyfin names and logos are trademarks of their respective owners, used only to identify the server type.

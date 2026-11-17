@@ -1563,7 +1563,7 @@ describe("api app", () => {
 
     const defaults = await ctx.app.inject({ method: "GET", url: "/api/settings/user-preferences", headers: { cookie } });
     expect(defaults.statusCode).toBe(200);
-    expect(defaults.json()).toEqual({ timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 });
+    expect(defaults.json()).toEqual({ timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] });
 
     const saved = await ctx.app.inject({
       method: "PUT",
@@ -1572,20 +1572,23 @@ describe("api app", () => {
       payload: { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 60 }
     });
     expect(saved.statusCode).toBe(200);
-    expect(saved.json()).toEqual({ timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 60 });
+    expect(saved.json()).toEqual({ timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 60, nowPlayingHiddenServers: [] });
 
     const persisted = await ctx.app.inject({ method: "GET", url: "/api/settings/user-preferences", headers: { cookie } });
     expect(persisted.statusCode).toBe(200);
-    expect(persisted.json()).toEqual({ timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 60 });
+    expect(persisted.json()).toEqual({ timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 60, nowPlayingHiddenServers: [] });
 
     const updatedAgain = await ctx.app.inject({
       method: "PUT",
       url: "/api/settings/user-preferences",
       headers: { cookie },
-      payload: { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 360 }
+      payload: { timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 360, nowPlayingHiddenServers: ["jf1", "jf1", "plex2"] }
     });
     expect(updatedAgain.statusCode).toBe(200);
-    expect(updatedAgain.json()).toEqual({ timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 360 });
+    // Now Playing's hidden servers are kept per account, without duplicates.
+    expect(updatedAgain.json()).toEqual({ timeFormat: "12h", autoOpenTaskStatus: true, recentJobsCompletedWindowMinutes: 360, nowPlayingHiddenServers: ["jf1", "plex2"] });
+    const persistedHidden = await ctx.app.inject({ method: "GET", url: "/api/settings/user-preferences", headers: { cookie } });
+    expect(persistedHidden.json<{ nowPlayingHiddenServers: string[] }>().nowPlayingHiddenServers).toEqual(["jf1", "plex2"]);
 
     const invalid = await ctx.app.inject({
       method: "PUT",

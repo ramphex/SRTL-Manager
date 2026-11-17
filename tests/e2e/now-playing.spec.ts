@@ -88,6 +88,7 @@ function restrictedSnapshot(value: NowPlayingSnapshot): NowPlayingSnapshot {
 
 async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean } = {}) {
   const stops: unknown[] = [];
+  let preferences: Record<string, unknown> = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -105,7 +106,10 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     else if (url.pathname === "/api/system/path-migration") response = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") response = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Remote storage", path: "/remote" }] };
-    else if (url.pathname === "/api/settings/user-preferences") response = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/user-preferences") {
+      if (request.method() === "PUT") preferences = request.postDataJSON() as Record<string, unknown>;
+      response = preferences;
+    }
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.3", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       response = { currentVersion: "0.1.4-beta.3", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
@@ -117,7 +121,7 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     }
     await route.fulfill({ status: 200, json: response });
   });
-  return { stops };
+  return { stops, preferences: () => preferences };
 }
 
 async function openNowPlaying(page: Page) {
@@ -161,48 +165,104 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(cards).toHaveCount(4);
   const hw = page.getByRole("article", { name: "Example Show — sam" });
   await expect(hw).toContainText("S02E05 · The Fifth One");
-  await expect(hw).toContainText("Transcode (HW)");
-  await expect(hw).toContainText("HEVC 4K HDR10 → H.264 1080p");
-  await expect(hw).toContainText("burned in");
-  await expect(hw).toContainText("GPU (nvdec decode, nvenc encode) · 3.4x");
-  await expect(hw).toContainText("Why (derived)");
-  await expect(hw).toContainText("198.51.100.23");
-  await expect(hw).toContainText("Example City, Netherlands");
+  // Cards start folded: one line with the play method, bandwidth and quality.
+  await expect(hw.locator(".np-summary-line")).toHaveText("Transcode (HW)10.5 Mbps · 4K → 1080p");
+  const details = hw.locator(".np-details");
+  await expect(details).toBeHidden();
+  const toggle = hw.getByRole("button", { name: "Stream details" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.focus();
+  await page.keyboard.press("Enter");
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  await expect(hw.locator(".np-summary-line")).toHaveCount(0);
+  await expect(details).toBeVisible();
+  await expect(details).toContainText("Transcode (HW)");
+  await expect(details).toContainText("HEVC 4K HDR10 → H.264 1080p");
+  await expect(details).toContainText("burned in");
+  await expect(details).toContainText("GPU (nvdec decode, nvenc encode) · 3.4x");
+  await expect(details).toContainText("Why (derived)");
   await expect(hw).toContainText("Remote storage");
-  await expect(hw).toContainText("WAN");
+  // The bottom row holds the user, the server and the location; the address only shows in a tooltip.
+  const footer = hw.locator(".np-card-footer");
+  await expect(footer).toContainText("sam");
+  await expect(footer).toContainText("Home Plex");
+  const location = footer.getByRole("button", { name: "WAN · Example City, Netherlands" });
+  const tooltip = footer.getByRole("tooltip");
+  await expect(tooltip).toBeHidden();
+  await location.focus();
+  await expect(tooltip).toBeVisible();
+  await expect(tooltip).toHaveText("Client IP 198.51.100.23");
+  await expect(location).toHaveAccessibleDescription("Client IP 198.51.100.23");
+  // The choice survives a reload within the session.
+  await page.reload();
+  await expect(page.getByRole("article", { name: "Example Show — sam" }).getByRole("button", { name: "Stream details" })).toHaveAttribute("aria-expanded", "true");
   const cpu = page.getByRole("article", { name: "Big Film — alex_03" });
-  await expect(cpu).toContainText("Transcode (CPU)");
+  await expect(cpu.locator(".np-summary-line")).toHaveText("Transcode (CPU)12.5 Mbps · 4K");
   await expect(cpu).toContainText("Paused");
-  await expect(cpu).toContainText("throttled");
-  await expect(cpu).toContainText("(paused, not counted)");
-  await expect(page.getByRole("article", { name: "Old Film — alex_03" })).toContainText("Direct stream");
+  await cpu.getByRole("button", { name: "Stream details" }).click();
+  await expect(cpu.locator(".np-details")).toContainText("throttled");
+  await expect(cpu.locator(".np-details")).toContainText("(paused, not counted)");
+  await expect(page.getByRole("article", { name: "Old Film — alex_03" }).locator(".np-summary-line")).toHaveText("Direct stream12.5 Mbps · SD");
   const direct = page.getByRole("article", { name: "Example Movie — alex_03" });
-  await expect(direct).toContainText("Direct play");
+  await expect(direct.locator(".np-summary-line")).toHaveText("Direct play≈ 54.0 Mbps · 1080p");
   await expect(direct).toContainText("Home NAS");
-  await expect(direct).toContainText("(estimate)");
+  await expect(direct.locator(".np-card-footer")).toContainText("LAN");
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Home Plex");
+});
+
+test("filters streams by server, with type icons, and keeps the choice", async ({ page }) => {
+  const { preferences } = await fixture(page);
+  await openNowPlaying(page);
+  const list = page.getByRole("list", { name: "Media servers" });
+  const plex = list.getByRole("button", { name: /Home Plex/ });
+  const jellyfin = list.getByRole("button", { name: /Jellyfin/ });
+  await expect(plex.getByRole("img", { name: "Plex" })).toBeVisible();
+  await expect(jellyfin.getByRole("img", { name: "Jellyfin" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).locator(".np-card-footer").getByRole("img", { name: "Jellyfin" })).toBeVisible();
+  await expect(plex).toHaveAttribute("aria-pressed", "true");
+  await expect(jellyfin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("article")).toHaveCount(4);
+
+  await jellyfin.focus();
+  await page.keyboard.press("Enter");
+  await expect(jellyfin).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("article")).toHaveCount(3);
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Quick glance" }).getByLabel("Direct play: 0", { exact: true })).toBeVisible();
+  await expect.poll(() => preferences().nowPlayingHiddenServers).toEqual(["jf1"]);
+
+  await page.reload();
+  await expect(page.getByRole("list", { name: "Media servers" }).getByRole("button", { name: /Jellyfin/ })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("article")).toHaveCount(3);
+
+  await page.getByRole("list", { name: "Media servers" }).getByRole("button", { name: /Home Plex/ }).click();
+  await expect(page.getByRole("article")).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "No servers selected" })).toBeVisible();
+  // Host load is never filtered.
+  await expect(page.getByRole("region", { name: "CPU" })).toBeVisible();
 });
 
 test("shows a moderator the viewer, with no address, location or Stop", async ({ page }) => {
   await fixture(page, { moderator: true });
   await openNowPlaying(page);
   const hw = page.getByRole("article", { name: "Example Show — sam" });
-  await expect(hw).toContainText("sam");
+  await expect(hw.locator(".np-card-footer")).toContainText("sam");
   await expect(hw).toContainText("Transcode (HW)");
   await expect(hw).not.toContainText("198.51.100.23");
   await expect(hw.getByText("Address", { exact: true })).toHaveCount(0);
-  await expect(hw.getByText("Location", { exact: true })).toHaveCount(0);
+  // LAN or WAN only: no plex.tv location and no address tooltip.
+  await expect(hw.locator(".np-location")).toHaveText("WAN");
+  await expect(hw.getByRole("tooltip")).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("Example City");
   await expect(page.locator("body")).not.toContainText("Netherlands");
-  await expect(hw.locator(".np-geo")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: /Stop stream/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
   await expect(page.locator("body")).not.toContainText("192.168.1.40");
 });
 
 test("stops a stream after confirming an edited message", async ({ page }) => {
   const { stops } = await fixture(page);
   await openNowPlaying(page);
-  await page.getByRole("button", { name: "Stop stream for sam" }).click();
+  await page.getByRole("article", { name: "Example Show — sam" }).getByRole("button", { name: "Terminate the stream" }).click();
   const dialog = page.getByRole("dialog", { name: "Stop sam's stream?" });
   await expect(dialog).toBeVisible();
   const message = dialog.getByRole("textbox");
@@ -219,10 +279,10 @@ test("hides Stop on Plex streams without Plex Pass", async ({ page }) => {
   await fixture(page, { plexPass: false });
   await openNowPlaying(page);
   await expect(page.getByRole("article")).toHaveCount(4);
-  await expect(page.getByRole("button", { name: "Stop stream for sam" })).toHaveCount(0);
-  await expect(page.getByRole("article", { name: "Big Film — alex_03" }).getByRole("button", { name: /Stop/ })).toHaveCount(0);
+  await expect(page.getByRole("article", { name: "Example Show — sam" }).getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
+  await expect(page.getByRole("article", { name: "Big Film — alex_03" }).getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
   // Jellyfin streams keep their Stop button.
-  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).getByRole("button", { name: /Stop stream/ })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).getByRole("button", { name: "Terminate the stream" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Stop needs Plex Pass");
 });
 
@@ -233,4 +293,9 @@ test("fits a phone screen without horizontal scrolling", async ({ page }) => {
   await expect(page.getByRole("article")).toHaveCount(4);
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+  // A tap on the location shows the client IP on screen, above the bottom navigation.
+  const card = page.getByRole("article", { name: "Example Show — sam" });
+  await card.getByRole("button", { name: "WAN · Example City, Netherlands" }).click();
+  await expect(card.getByRole("tooltip")).toBeInViewport();
+  await expect(card.getByRole("tooltip")).toHaveText("Client IP 198.51.100.23");
 });

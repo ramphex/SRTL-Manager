@@ -95,7 +95,8 @@ const advancedSettingsSchema = z.object({
 const userPreferencesSchema = z.object({
   timeFormat: z.enum(["12h", "24h"]).default("12h"),
   autoOpenTaskStatus: z.boolean().default(false),
-  recentJobsCompletedWindowMinutes: z.union([z.literal(15), z.literal(60), z.literal(360), z.literal(1440), z.literal(10080)]).default(1440)
+  recentJobsCompletedWindowMinutes: z.union([z.literal(15), z.literal(60), z.literal(360), z.literal(1440), z.literal(10080)]).default(1440),
+  nowPlayingHiddenServers: z.array(z.string().min(1).max(200)).max(100).default([]).transform((ids) => [...new Set(ids)])
 });
 
 function normalizeSettingsSections(selectedSections: string[] | undefined, configuredSections: string[]): string[] {

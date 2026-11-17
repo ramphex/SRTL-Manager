@@ -165,7 +165,8 @@ export const symlinkKindFilterLabels: Record<SymlinkKindFilter, string> = {
 export const defaultUserPreferences: UserPreferences = {
   timeFormat: "12h",
   autoOpenTaskStatus: false,
-  recentJobsCompletedWindowMinutes: defaultRecentJobsCompletedWindowMinutes
+  recentJobsCompletedWindowMinutes: defaultRecentJobsCompletedWindowMinutes,
+  nowPlayingHiddenServers: []
 };
 
 export const defaultStorageLocations: StorageLocationsSettings = {

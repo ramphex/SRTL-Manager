@@ -1,15 +1,18 @@
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, CircleAlert, Cloud, Cpu, Film, Globe, HardDrive, LoaderCircle, MemoryStick, Microchip, MonitorPlay, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, X } from "lucide-react";
-import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream } from "../shared/nowPlaying";
-import { nowPlayingDefaultStopMessage } from "../shared/nowPlaying";
+import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, UserRound, X } from "lucide-react";
+import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
+import { nowPlayingDefaultStopMessage, summarizeStreams } from "../shared/nowPlaying";
+import type { UserPreferences } from "../shared/types";
 import type { StoragePolicyKind } from "../shared/types";
 import { Page } from "./App";
-import { request } from "./api";
-import { storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations } from "./appShared";
+import { api, request } from "./api";
+import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations } from "./appShared";
 import { useAccess } from "./access";
 import { mediaServerApi, mediaServersKey } from "./mediaServerApi";
 import { MediaServersRequired } from "./mediaServersRequired";
+import { MediaServerIcon } from "./serverIcons";
+import { TextTooltip } from "./tooltip";
 import {
   applyHostEvent,
   audioLabel,
@@ -20,10 +23,11 @@ import {
   formatClock,
   formatGigabytes,
   formatKbps,
-  geoLabel,
   livePosition,
   playMethodLabel,
   sparklinePoints,
+  streamLocationLabel,
+  streamSummaryLine,
   streamTitle,
   summaryPills,
   videoLabel,
@@ -127,8 +131,8 @@ function HostCards({ host, servers }: { host: HostState; servers: NowPlayingServ
   );
 }
 
-function QuickGlance({ snapshot, host, connection }: { snapshot: NowPlayingSnapshot | null; host: HostState; connection: Connection }) {
-  const pills = snapshot ? summaryPills(snapshot.summary) : [];
+function QuickGlance({ snapshot, summary, host, connection }: { snapshot: NowPlayingSnapshot | null; summary: NowPlayingSummary | null; host: HostState; connection: Connection }) {
+  const pills = summary ? summaryPills(summary) : [];
   return (
     <div className="np-strip" role="region" aria-label="Quick glance">
       <div className="np-pills">
@@ -137,7 +141,7 @@ function QuickGlance({ snapshot, host, connection }: { snapshot: NowPlayingSnaps
             <span>{pill.label}</span><strong>{pill.value}</strong>
           </span>
         ))}
-        {snapshot?.summary.paused ? <span className="np-pill np-pill-paused" aria-label={`Paused: ${snapshot.summary.paused}`}><span>Paused</span><strong>{snapshot.summary.paused}</strong></span> : null}
+        {summary?.paused ? <span className="np-pill np-pill-paused" aria-label={`Paused: ${summary.paused}`}><span>Paused</span><strong>{summary.paused}</strong></span> : null}
         <span className={`np-connection np-connection-${connection}`} role="status">
           {connection === "open" ? <><span className="np-live-dot" aria-hidden="true" />Live</> : connection === "connecting" ? <><LoaderCircle className="is-spinning" size={13} />Connecting</> : <><RefreshCw className="is-spinning" size={13} />Reconnecting</>}
         </span>
@@ -151,13 +155,40 @@ const serverStatusLabels: Record<NowPlayingServerState["status"], string> = {
   connecting: "Connecting", live: "Live", polling: "Polling", unreachable: "Unreachable", unauthorized: "Sign-in needed", notConnected: "Not connected"
 };
 
-function ServerStatusList({ servers }: { servers: NowPlayingServerState[] }) {
+// Which servers' streams show on Now Playing, saved with the signed-in account's preferences.
+// The preference lists hidden servers, so a server added later starts shown.
+function useServerFilter() {
+  const queryClient = useQueryClient();
+  const preferences = useQuery({ queryKey: ["user-preferences"], queryFn: api.getUserPreferences });
+  const hidden = useMemo(() => new Set(preferences.data?.nowPlayingHiddenServers ?? []), [preferences.data]);
+  const { mutate: save, error } = useMutation({
+    mutationFn: api.saveUserPreferences,
+    onSuccess: (saved) => queryClient.setQueryData(["user-preferences"], saved),
+    onError: () => void queryClient.invalidateQueries({ queryKey: ["user-preferences"] })
+  });
+  const toggle = useCallback((serverId: string) => {
+    const current = queryClient.getQueryData<UserPreferences>(["user-preferences"]) ?? defaultUserPreferences;
+    const ids = new Set(current.nowPlayingHiddenServers ?? []);
+    if (!ids.delete(serverId)) ids.add(serverId);
+    const next: UserPreferences = { ...defaultUserPreferences, ...current, nowPlayingHiddenServers: [...ids] };
+    // Show the change at once; the saved answer replaces it.
+    queryClient.setQueryData(["user-preferences"], next);
+    save(next);
+  }, [queryClient, save]);
+  return { hidden, toggle, error };
+}
+
+function ServerStatusList({ servers, hidden, onToggle }: { servers: NowPlayingServerState[]; hidden: Set<string>; onToggle: (serverId: string) => void }) {
   if (!servers.length) return null;
   return (
     <ul className="np-servers" aria-label="Media servers">
       {servers.map((server) => (
-        <li key={server.id} className={`np-server np-server-${server.status}`}>
-          <strong>{server.name}</strong>
+        <li key={server.id} className={`np-server np-server-${server.status}${hidden.has(server.id) ? " is-hidden" : ""}`}>
+          <button type="button" className="np-server-toggle" aria-pressed={!hidden.has(server.id)} title={hidden.has(server.id) ? `Show streams from ${server.name}` : `Hide streams from ${server.name}`} onClick={() => onToggle(server.id)}>
+            <span className="np-server-check" aria-hidden="true">{hidden.has(server.id) ? null : <Check size={11} strokeWidth={3} />}</span>
+            <MediaServerIcon kind={server.kind} />
+            <strong>{server.name}</strong>
+          </button>
           <span className="np-server-status">{serverStatusLabels[server.status]}</span>
           {server.status === "polling" ? <span className="np-server-note">no live socket, checking every few seconds</span> : null}
           {server.kind === "plex" && server.plexPass === false && server.status !== "unauthorized" ? <span className="np-server-note">Stop needs Plex Pass</span> : null}
@@ -185,18 +216,93 @@ function MediaIcon({ type }: { type: NowPlayingStream["mediaType"] }) {
   return <Film size={28} />;
 }
 
-function StreamCard({ stream, now, onStop }: { stream: NowPlayingStream; now: number; onStop: (stream: NowPlayingStream) => void }) {
-  const canStop = useAccess().can("streams.stop");
-  const [posterFailed, setPosterFailed] = useState(false);
-  const title = streamTitle(stream);
-  const position = livePosition(stream, now);
-  const percent = stream.durationMs ? Math.min(100, (position / stream.durationMs) * 100) : 0;
-  const player = [stream.player.product, stream.player.name, stream.player.platform && stream.player.platform !== stream.player.name ? stream.player.platform : null].filter(Boolean).join(" · ");
+const expandedStorageKey = "srtl-now-playing-expanded";
+const expandedLimit = 50;
+
+function readExpanded(): Set<string> {
+  try {
+    const value: unknown = JSON.parse(window.sessionStorage.getItem(expandedStorageKey) ?? "[]");
+    return new Set(Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+// Which cards show their full details, per stream, for this browser session. Cards start folded.
+function useExpandedStreams() {
+  const [expanded, setExpanded] = useState<Set<string>>(readExpanded);
+  const toggle = useCallback((id: string) => {
+    setExpanded((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      const kept = [...next].slice(-expandedLimit);
+      try {
+        window.sessionStorage.setItem(expandedStorageKey, JSON.stringify(kept));
+      } catch {
+        // Storage can be unavailable in private windows; the state still holds for this page.
+      }
+      return new Set(kept);
+    });
+  }, []);
+  return { expanded, toggle };
+}
+
+function StreamDetails({ stream, id, hidden }: { stream: NowPlayingStream; id: string; hidden: boolean }) {
   const sourceVideo = videoLabel(stream.source);
   const outputVideo = videoLabel(stream.output);
   const sourceAudio = audioLabel(stream.source);
   const outputAudio = audioLabel(stream.output);
-  const geo = geoLabel(stream.network.geo);
+  return (
+    <dl className="np-details" id={id} hidden={hidden}>
+      <div><dt>Play method</dt><dd>{playMethodLabel(stream)}</dd></div>
+      {sourceVideo ? (
+        <div><dt>Video</dt><dd>{sourceVideo}{stream.videoDecision === "transcode" && outputVideo ? <> → {outputVideo}</> : stream.videoDecision ? <span className="np-decision"> ({decisionLabel(stream.videoDecision)})</span> : null}</dd></div>
+      ) : null}
+      {sourceAudio ? (
+        <div><dt>Audio</dt><dd>{sourceAudio}{stream.audioDecision === "transcode" && outputAudio ? <> → {outputAudio}</> : stream.audioDecision ? <span className="np-decision"> ({decisionLabel(stream.audioDecision)})</span> : null}</dd></div>
+      ) : null}
+      {stream.subtitle ? (
+        <div><dt>Subtitles</dt><dd>{[codecLabel(stream.subtitle.codec), stream.subtitle.language].filter(Boolean).join(" ") || "On"}{stream.subtitle.decision === "burn" ? <strong className="np-burn"> burned in</strong> : null}</dd></div>
+      ) : null}
+      {stream.output?.container && stream.source.container && stream.output.container !== stream.source.container ? (
+        <div><dt>Container</dt><dd>{stream.source.container.toUpperCase()} → {stream.output.container.toUpperCase()}</dd></div>
+      ) : null}
+      {stream.playMethod === "transcode" && stream.transcode ? (
+        <div><dt>Transcoder</dt><dd>
+          {stream.transcode.engine === "hardware" ? `GPU (${[stream.transcode.hardwareDecode && `${stream.transcode.hardwareDecode} decode`, stream.transcode.hardwareEncode && `${stream.transcode.hardwareEncode} encode`].filter(Boolean).join(", ")})`
+            : stream.transcode.engine === "cpu" ? (stream.transcode.hardwareDecode ? `CPU encode, ${stream.transcode.hardwareDecode} decode` : "CPU")
+              : "Not reported by the server"}
+          {stream.transcode.speed !== null ? ` · ${stream.transcode.speed.toFixed(1)}x` : ""}
+          {stream.transcode.throttled ? " · throttled" : ""}
+        </dd></div>
+      ) : null}
+      {stream.transcode?.reasons.length ? (
+        <div><dt>{stream.transcode.reasonsDerived ? "Why (derived)" : "Why"}</dt><dd>{stream.transcode.reasons.join("; ")}</dd></div>
+      ) : null}
+      <div><dt>Bandwidth</dt><dd>{stream.bandwidth.kbps === null ? "Unknown" : `${stream.bandwidth.kind === "estimate" ? "≈ " : ""}${formatKbps(stream.bandwidth.kbps)}`}{stream.bandwidth.kind === "estimate" && stream.bandwidth.kbps !== null ? <span className="np-decision"> (estimate)</span> : null}{stream.state === "paused" ? <span className="np-decision"> (paused, not counted)</span> : null}</dd></div>
+    </dl>
+  );
+}
+
+function StreamLocation({ network }: { network: NowPlayingStream["network"] }) {
+  const text = <><MapPin size={13} aria-hidden="true" /><span className="np-footer-text">{streamLocationLabel(network)}</span></>;
+  // The client address stays out of the visible text; hover, focus or a tap shows it.
+  if (!network.ip) return <span className={`np-location np-location-${network.location ?? "unknown"}`}>{text}</span>;
+  return (
+    <TextTooltip className={`np-location np-location-${network.location ?? "unknown"}`} trigger={text}>
+      Client IP {network.ip}
+    </TextTooltip>
+  );
+}
+
+export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream: NowPlayingStream; now: number; expanded: boolean; onToggle: (id: string) => void; onStop: (stream: NowPlayingStream) => void }) {
+  const canStop = useAccess().can("streams.stop");
+  const [posterFailed, setPosterFailed] = useState(false);
+  const detailsId = useId();
+  const title = streamTitle(stream);
+  const position = livePosition(stream, now);
+  const percent = stream.durationMs ? Math.min(100, (position / stream.durationMs) * 100) : 0;
+  const player = [stream.player.product, stream.player.name, stream.player.platform && stream.player.platform !== stream.player.name ? stream.player.platform : null].filter(Boolean).join(" · ");
   const methodClass = stream.playMethod === "transcode" ? `np-method-transcode np-engine-${stream.transcode?.engine ?? "unknown"}` : `np-method-${stream.playMethod}`;
   return (
     <article className={`np-card np-state-${stream.state}`} aria-label={`${title.primary} — ${stream.user.name}`}>
@@ -210,60 +316,43 @@ function StreamCard({ stream, now, onStop }: { stream: NowPlayingStream; now: nu
             {title.secondary ? <p title={title.secondary}>{title.secondary}</p> : null}
           </div>
           {stream.stop.available && canStop ? (
-            <button type="button" className="np-stop-button" onClick={() => onStop(stream)} aria-label={`Stop stream for ${stream.user.name}`}>
-              <OctagonX size={15} />Stop
+            <button type="button" className="np-stop-button" onClick={() => onStop(stream)} aria-label="Terminate the stream" title="Terminate the stream">
+              <CircleX size={20} aria-hidden="true" />
             </button>
           ) : null}
         </header>
-        <div className="np-card-who">
-          <strong>{stream.user.name}</strong>
-          <span>on {stream.serverName}</span>
-          {player ? <span className="np-player">{player}</span> : null}
-        </div>
+        {player ? <div className="np-card-player" title={player}>{player}</div> : null}
         <div className="np-badges">
-          <span className={`np-badge np-method ${methodClass}`}>{playMethodLabel(stream)}</span>
           <span className={`np-badge np-badge-state np-badge-${stream.state}`}>
             {stream.state === "paused" ? <Pause size={12} /> : stream.state === "buffering" ? <LoaderCircle size={12} /> : <Play size={12} />}
             {stream.state === "paused" ? "Paused" : stream.state === "buffering" ? "Buffering" : "Playing"}
           </span>
-          {stream.network.location ? <span className={`np-badge np-badge-${stream.network.location}`}>{stream.network.location.toUpperCase()}{stream.network.relayed ? " relay" : ""}</span> : null}
           <SourceBadge stream={stream} />
         </div>
         <div className="np-progress" role="progressbar" aria-label="Playback position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
           <span style={{ width: `${percent}%` }} />
         </div>
         <div className="np-progress-times"><span>{formatClock(position)}</span><span>{formatClock(stream.durationMs)}</span></div>
-        <dl className="np-details">
-          {sourceVideo ? (
-            <div><dt>Video</dt><dd>{sourceVideo}{stream.videoDecision === "transcode" && outputVideo ? <> → {outputVideo}</> : stream.videoDecision ? <span className="np-decision"> ({decisionLabel(stream.videoDecision)})</span> : null}</dd></div>
-          ) : null}
-          {sourceAudio ? (
-            <div><dt>Audio</dt><dd>{sourceAudio}{stream.audioDecision === "transcode" && outputAudio ? <> → {outputAudio}</> : stream.audioDecision ? <span className="np-decision"> ({decisionLabel(stream.audioDecision)})</span> : null}</dd></div>
-          ) : null}
-          {stream.subtitle ? (
-            <div><dt>Subtitles</dt><dd>{[codecLabel(stream.subtitle.codec), stream.subtitle.language].filter(Boolean).join(" ") || "On"}{stream.subtitle.decision === "burn" ? <strong className="np-burn"> burned in</strong> : null}</dd></div>
-          ) : null}
-          {stream.output?.container && stream.source.container && stream.output.container !== stream.source.container ? (
-            <div><dt>Container</dt><dd>{stream.source.container.toUpperCase()} → {stream.output.container.toUpperCase()}</dd></div>
-          ) : null}
-          {stream.playMethod === "transcode" && stream.transcode ? (
-            <div><dt>Transcoder</dt><dd>
-              {stream.transcode.engine === "hardware" ? `GPU (${[stream.transcode.hardwareDecode && `${stream.transcode.hardwareDecode} decode`, stream.transcode.hardwareEncode && `${stream.transcode.hardwareEncode} encode`].filter(Boolean).join(", ")})`
-                : stream.transcode.engine === "cpu" ? (stream.transcode.hardwareDecode ? `CPU encode, ${stream.transcode.hardwareDecode} decode` : "CPU")
-                  : "Not reported by the server"}
-              {stream.transcode.speed !== null ? ` · ${stream.transcode.speed.toFixed(1)}x` : ""}
-              {stream.transcode.throttled ? " · throttled" : ""}
-            </dd></div>
-          ) : null}
-          {stream.transcode?.reasons.length ? (
-            <div><dt>{stream.transcode.reasonsDerived ? "Why (derived)" : "Why"}</dt><dd>{stream.transcode.reasons.join("; ")}</dd></div>
-          ) : null}
-          <div><dt>Bandwidth</dt><dd>{stream.bandwidth.kbps === null ? "Unknown" : `${stream.bandwidth.kind === "estimate" ? "≈ " : ""}${formatKbps(stream.bandwidth.kbps)}`}{stream.bandwidth.kind === "estimate" && stream.bandwidth.kbps !== null ? <span className="np-decision"> (estimate)</span> : null}{stream.state === "paused" ? <span className="np-decision"> (paused, not counted)</span> : null}</dd></div>
-          {stream.network.ip ? (
-            <div><dt>Address</dt><dd>{stream.network.ip}{geo ? <span className="np-geo"><Globe size={12} />{geo}</span> : null}</dd></div>
-          ) : null}
-        </dl>
+        <div className={`np-summary${expanded ? " is-expanded" : ""}`}>
+          {expanded ? (
+            <span className="np-summary-heading">Details</span>
+          ) : (
+            <span className="np-summary-line">
+              <span className={`np-badge np-method ${methodClass}`}>{playMethodLabel(stream)}</span>
+              <span className="np-summary-text">{streamSummaryLine(stream)}</span>
+            </span>
+          )}
+          <button type="button" className="np-details-toggle" aria-expanded={expanded} aria-controls={detailsId} aria-label="Stream details" title={expanded ? "Hide details" : "Show details"} onClick={() => onToggle(stream.id)}>
+            <ChevronDown size={16} aria-hidden="true" />
+          </button>
+        </div>
+        <StreamDetails stream={stream} id={detailsId} hidden={!expanded} />
       </div>
+      <dl className="np-card-footer">
+        <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
+        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></dd></div>
+        <div className="np-footer-location"><dt className="sr-only">Location</dt><dd><StreamLocation network={stream.network} /></dd></div>
+      </dl>
     </article>
   );
 }
@@ -334,19 +423,28 @@ function LiveNowPlaying() {
   const canManageSettings = useAccess().can("settings.manage");
   const { snapshot, host, connection } = useNowPlayingEvents();
   const [stopping, setStopping] = useState<NowPlayingStream | null>(null);
-  const streams = useMemo(() => snapshot?.streams ?? [], [snapshot]);
+  const { expanded, toggle } = useExpandedStreams();
+  const serverFilter = useServerFilter();
+  const servers = useMemo(() => snapshot?.servers ?? [], [snapshot]);
+  const shownServers = servers.filter((server) => !serverFilter.hidden.has(server.id));
+  const streams = useMemo(() => (snapshot?.streams ?? []).filter((stream) => !serverFilter.hidden.has(stream.serverId)), [snapshot, serverFilter.hidden]);
+  // The pills count only the servers shown; host CPU, memory, network and GPU stay whole.
+  const summary = useMemo(() => snapshot ? (streams.length === snapshot.streams.length ? snapshot.summary : summarizeStreams(streams)) : null, [snapshot, streams]);
   const now = useLiveTimestamp(streams.some((stream) => stream.state === "playing"), 1000);
   return (
     <>
-      <QuickGlance snapshot={snapshot} host={host} connection={connection} />
-      <ServerStatusList servers={snapshot?.servers ?? []} />
-      {snapshot === null || (streams.length === 0 && snapshot.servers.some((server) => server.status === "connecting")) ? (
+      <QuickGlance snapshot={snapshot} summary={summary} host={host} connection={connection} />
+      <ServerStatusList servers={servers} hidden={serverFilter.hidden} onToggle={serverFilter.toggle} />
+      {serverFilter.error ? <p className="panel-message action-error" role="alert">{serverFilter.error instanceof Error ? serverFilter.error.message : "The server choice could not be saved."}</p> : null}
+      {snapshot !== null && servers.length > 0 && shownServers.length === 0 ? (
+        <section className="np-empty" role="status"><MonitorPlay size={22} /><p>No servers selected. Turn on a server above to see its streams.</p></section>
+      ) : snapshot === null || (streams.length === 0 && shownServers.some((server) => server.status === "connecting")) ? (
         <p className="panel-message" role="status"><LoaderCircle className="is-spinning" size={16} /> Connecting to your media servers</p>
       ) : streams.length === 0 ? (
-        <section className="np-empty" role="status"><MonitorPlay size={22} /><p>Nothing is playing right now.</p></section>
+        <section className="np-empty" role="status"><MonitorPlay size={22} /><p>{shownServers.length < servers.length ? "Nothing is playing on the selected servers." : "Nothing is playing right now."}</p></section>
       ) : (
         <div className="np-cards" aria-label="Streams">
-          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} onStop={setStopping} />)}
+          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} expanded={expanded.has(stream.id)} onToggle={toggle} onStop={setStopping} />)}
         </div>
       )}
       {canManageSettings ? <GeoSetting /> : null}
