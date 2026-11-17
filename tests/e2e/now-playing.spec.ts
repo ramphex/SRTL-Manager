@@ -142,7 +142,10 @@ test("pins the quick-glance strip with stream pills and host cards", async ({ pa
   await fixture(page);
   await openNowPlaying(page);
   const strip = page.getByRole("region", { name: "Quick glance" });
-  for (const label of ["HW transcode: 1", "CPU transcode: 1", "Direct stream: 1", "Direct play: 1", "Bandwidth (est.): ≈ 77.0 Mbps", "Paused: 1"]) {
+  await expect(page.locator(".page-header")).toHaveCount(0);
+  await expect(strip.locator(".np-pill").first()).toHaveAttribute("aria-label", "Streams: 4");
+  await expect(strip.locator(".np-pill").last()).toHaveAttribute("aria-label", "Bandwidth (est.): ≈ 77.0 Mbps");
+  for (const label of ["Streams: 4", "HW transcode: 1", "CPU transcode: 1", "Direct stream: 1", "Direct play: 1", "Bandwidth (est.): ≈ 77.0 Mbps", "Paused: 1"]) {
     await expect(strip.getByLabel(label, { exact: true })).toBeVisible();
   }
   await expect(strip.getByRole("region", { name: "CPU" })).toContainText("Plex reports host 21%");

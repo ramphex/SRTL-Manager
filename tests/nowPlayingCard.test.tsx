@@ -235,6 +235,7 @@ describe("Now Playing page", () => {
     expect(serverToggle("Jellyfin").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Jellyfin");
     const footers = [...container.querySelectorAll(".np-footer-server svg[role=img]")].map((icon) => icon.getAttribute("aria-label"));
     expect(footers).toEqual(["Plex", "Plex", "Jellyfin"]);
+    expect(pill("Streams")).toBe("Streams: 3");
     expect(pill("Direct play")).toBe("Direct play: 1");
   });
 
@@ -247,7 +248,9 @@ describe("Now Playing page", () => {
     expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("false");
     expect(cardTitles()).toEqual(["Example Show", "Big Film"]);
     // The pills count only the servers shown.
-    expect(pill("Direct play")).toBe("Direct play: 0");
+    expect(pill("Streams")).toBe("Streams: 2");
+    // A count of 0 hides its pill.
+    expect(pill("Direct play")).toBeUndefined();
     expect(pill("Bandwidth")).toBe("Bandwidth: 21.0 Mbps");
     expect(preferences.saves).toEqual([expect.objectContaining({ timeFormat: "12h", nowPlayingHiddenServers: ["jf1"] })]);
 

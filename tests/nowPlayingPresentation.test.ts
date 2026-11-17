@@ -30,9 +30,11 @@ describe("Now Playing presentation", () => {
     expect(videoLabel({ container: "mkv", videoCodec: "hevc", resolution: "4K", width: 3840, height: 2160, dynamicRange: "Dolby Vision", audioCodec: null, audioChannels: null, bitrateKbps: null })).toBe("HEVC 4K Dolby Vision");
   });
 
-  it("shows the unconfirmed-engine pill only when needed", () => {
+  it("orders the pills and shows a count only when it is not 0", () => {
     const base = { transcodeHardware: 1, transcodeCpu: 0, transcodeUnknown: 0, directStream: 0, directPlay: 2, paused: 0, totalKbps: 20_000, totalIsEstimate: false };
-    expect(summaryPills(base).map((pill) => pill.key)).toEqual(["hw", "cpu", "stream", "play", "bandwidth"]);
+    expect(summaryPills(base).map((pill) => `${pill.key}=${pill.value}`)).toEqual(["total=3", "hw=1", "play=2", "bandwidth=20.0 Mbps"]);
+    expect(summaryPills({ ...base, transcodeCpu: 1, directStream: 1, paused: 1 }).map((pill) => pill.key)).toEqual(["total", "hw", "cpu", "stream", "play", "paused", "bandwidth"]);
+    expect(summaryPills({ ...base, transcodeHardware: 0, directPlay: 0, totalKbps: 0 }).map((pill) => `${pill.key}=${pill.value}`)).toEqual(["total=0", "bandwidth=0 kbps"]);
     expect(summaryPills({ ...base, transcodeUnknown: 1, totalIsEstimate: true }).map((pill) => `${pill.label}=${pill.value}`)).toContain("Transcode, engine not reported=1");
     expect(summaryPills({ ...base, totalIsEstimate: true }).at(-1)).toMatchObject({ label: "Bandwidth (est.)", value: "≈ 20.0 Mbps" });
   });

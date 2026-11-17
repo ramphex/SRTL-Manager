@@ -8324,6 +8324,7 @@ button.danger-button:hover:not(:disabled) {
 .np-pill-cpu { border-color: color-mix(in srgb, var(--warn) 50%, var(--border-soft)); }
 .np-pill-unknown { border-style: dashed; }
 .np-pill-bandwidth { background: var(--secondary-bg); }
+.np-pill-total strong { font-weight: 800; }
 .np-connection { align-items: center; color: var(--muted); display: inline-flex; font-size: 12px; gap: 6px; margin-left: auto; }
 .np-connection-reconnecting { color: var(--warn); }
 .np-live-dot { background: var(--good); border-radius: 50%; box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); height: 8px; width: 8px; }

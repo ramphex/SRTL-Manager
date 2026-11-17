@@ -141,7 +141,6 @@ function QuickGlance({ snapshot, summary, host, connection }: { snapshot: NowPla
             <span>{pill.label}</span><strong>{pill.value}</strong>
           </span>
         ))}
-        {summary?.paused ? <span className="np-pill np-pill-paused" aria-label={`Paused: ${summary.paused}`}><span>Paused</span><strong>{summary.paused}</strong></span> : null}
         <span className={`np-connection np-connection-${connection}`} role="status">
           {connection === "open" ? <><span className="np-live-dot" aria-hidden="true" />Live</> : connection === "connecting" ? <><LoaderCircle className="is-spinning" size={13} />Connecting</> : <><RefreshCw className="is-spinning" size={13} />Reconnecting</>}
         </span>
@@ -459,7 +458,8 @@ export function NowPlayingPage() {
   const servers = useQuery({ queryKey: mediaServersKey, queryFn: mediaServerApi.list, enabled: canManageServers });
   const connected = servers.data?.servers.some((server) => server.hasToken) ?? false;
   return (
-    <Page title="Now Playing" subtitle="Live streams on your Plex and Jellyfin servers, with host load. Nothing here is recorded.">
+    <Page title="Now Playing" subtitle="" hideHeader>
+      <h1 className="sr-only">Now Playing</h1>
       {!canManageServers ? (
         <LiveNowPlaying />
       ) : servers.isLoading ? (

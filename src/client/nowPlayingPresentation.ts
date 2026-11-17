@@ -153,14 +153,24 @@ export function streamTitle(stream: Pick<NowPlayingStream, "mediaType" | "title"
   return { primary: stream.title, secondary: stream.year ? String(stream.year) : null };
 }
 
-export function summaryPills(summary: NowPlayingSummary): Array<{ key: string; label: string; value: string; tone: "hw" | "cpu" | "unknown" | "stream" | "play" | "bandwidth" }> {
+type PillTone = "total" | "hw" | "cpu" | "unknown" | "stream" | "play" | "paused" | "bandwidth";
+
+// Total streams first, then each play method and paused only when its count is not 0, then bandwidth.
+// Paused streams are also counted under their play method.
+export function summaryPills(summary: NowPlayingSummary): Array<{ key: string; label: string; value: string; tone: PillTone }> {
+  const total = summary.transcodeHardware + summary.transcodeCpu + summary.transcodeUnknown + summary.directStream + summary.directPlay;
+  const counts: Array<{ key: string; label: string; count: number; tone: PillTone }> = [
+    { key: "hw", label: "HW transcode", count: summary.transcodeHardware, tone: "hw" },
+    { key: "cpu", label: "CPU transcode", count: summary.transcodeCpu, tone: "cpu" },
+    { key: "unknown", label: "Transcode, engine not reported", count: summary.transcodeUnknown, tone: "unknown" },
+    { key: "stream", label: "Direct stream", count: summary.directStream, tone: "stream" },
+    { key: "play", label: "Direct play", count: summary.directPlay, tone: "play" },
+    { key: "paused", label: "Paused", count: summary.paused, tone: "paused" }
+  ];
   return [
-    { key: "hw", label: "HW transcode", value: String(summary.transcodeHardware), tone: "hw" as const },
-    { key: "cpu", label: "CPU transcode", value: String(summary.transcodeCpu), tone: "cpu" as const },
-    ...(summary.transcodeUnknown > 0 ? [{ key: "unknown", label: "Transcode, engine not reported", value: String(summary.transcodeUnknown), tone: "unknown" as const }] : []),
-    { key: "stream", label: "Direct stream", value: String(summary.directStream), tone: "stream" as const },
-    { key: "play", label: "Direct play", value: String(summary.directPlay), tone: "play" as const },
-    { key: "bandwidth", label: summary.totalIsEstimate ? "Bandwidth (est.)" : "Bandwidth", value: `${summary.totalIsEstimate ? "≈ " : ""}${formatKbps(summary.totalKbps)}`, tone: "bandwidth" as const }
+    { key: "total", label: "Streams", value: String(total), tone: "total" },
+    ...counts.filter((pill) => pill.count > 0).map(({ count, ...pill }) => ({ ...pill, value: String(count) })),
+    { key: "bandwidth", label: summary.totalIsEstimate ? "Bandwidth (est.)" : "Bandwidth", value: `${summary.totalIsEstimate ? "≈ " : ""}${formatKbps(summary.totalKbps)}`, tone: "bandwidth" }
   ];
 }
 
