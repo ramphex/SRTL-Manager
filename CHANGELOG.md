@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Maintenance
+
+- **The container build no longer downloads the PostgreSQL signing key.** The PostgreSQL project's public apt signing key is now stored in the repository (`docker/apt.postgresql.org.asc`) and copied into the image, so a slow or unreachable postgresql.org can no longer fail the build. The build still checks the file against its pinned sha256.
+
 ## [0.1.5-beta.8] - 2026-11-17
 
 Recent jobs on the Dashboard shows ten at a time with Show more and a search, Now Playing cards fold to one line and can be filtered by server, and adding a Plex server leads with Sign in with Plex. There is no database migration.

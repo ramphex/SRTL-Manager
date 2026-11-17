@@ -22,13 +22,18 @@ ENV NODE_ENV=production \
 LABEL org.opencontainers.image.source="https://github.com/ramphex/SRTL-Manager"
 
 # pg_dump must be at least as new as the database, and Debian's own client is
-# older, so it comes from the PostgreSQL project's repository. The signing key's
-# hash is pinned here; its fingerprint is B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8.
+# older, so it comes from the PostgreSQL project's repository. The public
+# signing key is kept in the repo (docker/apt.postgresql.org.asc) so the build
+# does not depend on postgresql.org being reachable; its hash is pinned here and
+# checked after the copy. Fingerprint:
+# B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8. To refresh it, download
+# https://www.postgresql.org/media/keys/ACCC4CF8.asc, compare the fingerprint
+# with the one published at https://www.postgresql.org/download/linux/debian/,
+# replace the file and update the sha256 below.
+COPY docker/apt.postgresql.org.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 RUN set -eu \
     && apt-get update \
     && apt-get install --no-install-recommends -y ca-certificates ffmpeg tini \
-    && install -d /usr/share/postgresql-common/pgdg \
-    && node -e 'fetch("https://www.postgresql.org/media/keys/ACCC4CF8.asc").then(async (r) => { if (!r.ok) throw new Error(String(r.status)); require("node:fs").writeFileSync("/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc", await r.text()); })' \
     && echo "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76  /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" | sha256sum -c - \
     && . /etc/os-release \
     && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
