@@ -223,10 +223,65 @@ describe("media servers API", () => {
     mock.requests = [];
     const polled = await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`);
     expect(polled.statusCode).toBe(409);
-    expect(polled.json().error).toContain("Start it again");
+    expect(polled.json().error).toContain("Select Sign in with Plex to start again");
     expect((await app.database.db.select().from(schema.mediaServers).where(eq(schema.mediaServers.id, id)))[0]).toMatchObject({ url: newUrl, token: "", pendingPin: null });
     expect(await app.database.db.select().from(schema.watchSyncUsers).where(eq(schema.watchSyncUsers.serverId, id))).toEqual([]);
     expect(mock.requests.filter((request) => request.includes("/moved"))).toEqual([]);
+  });
+
+  it("answers a poll that arrives after the sign-in finished as signed in, without asking plex.tv again", async () => {
+    const created = await call("POST", "/api/media-servers", { kind: "plex", name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [] });
+    const id = (created.json() as MediaServerList).servers[0]!.id;
+    const other = ((await call("POST", "/api/media-servers", { kind: "plex", name: "Other Plex", url: `${mock.base}/pms`, prefixMappings: [] })).json() as MediaServerList).servers
+      .find((server) => server.name === "Other Plex")!.id;
+    mock.pinAuthorizedAfter = 1;
+    const pin = (await call("POST", `/api/media-servers/${id}/plex-pin`)).json() as { pinId: number };
+    expect((await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`)).json()).toMatchObject({ status: "authorized" });
+    const polls = mock.pinPolls;
+
+    const late = await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`);
+    expect(late.statusCode).toBe(200);
+    expect(late.json()).toMatchObject({ status: "authorized", servers: { servers: expect.arrayContaining([expect.objectContaining({ id, hasToken: true, accountName: "alex_03" })]) } });
+    expect(late.body).not.toContain(mock.ownerToken);
+    expect(mock.pinPolls).toBe(polls);
+
+    // Nothing is learned about other sign-ins: another pin, or the same pin on another server, reads as no longer pending.
+    for (const [serverId, pinId] of [[id, pin.pinId + 1], [other, pin.pinId]] as const) {
+      const response = await call("POST", `/api/media-servers/${serverId}/plex-pin/${pinId}`);
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toBe("This Plex sign-in expired or a newer one replaced it. Select Sign in with Plex to start again.");
+    }
+
+    // A new address signs the server out, so the finished sign-in no longer counts.
+    await call("PUT", `/api/media-servers/${id}`, { name: "Home Plex", url: `${mock.base}/moved`, prefixMappings: [] });
+    const afterMove = await call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`);
+    expect(afterMove.statusCode).toBe(400);
+    expect(afterMove.json().error).toContain("Select Sign in with Plex to start again");
+  });
+
+  it("treats two overlapping polls of the same sign-in as one success", async () => {
+    const created = await call("POST", "/api/media-servers", { kind: "plex", name: "Home Plex", url: `${mock.base}/pms`, prefixMappings: [] });
+    const id = (created.json() as MediaServerList).servers[0]!.id;
+    mock.pinAuthorizedAfter = 1;
+    const pin = (await call("POST", `/api/media-servers/${id}/plex-pin`)).json() as { pinId: number };
+    // Both polls read the pending sign-in before plex.tv answers either of them, so both get the token.
+    let arrived = 0;
+    let release!: () => void;
+    const bothArrived = new Promise<void>((resolve) => { release = resolve; });
+    mock.beforeReply = async (request) => {
+      if (request !== `GET /plextv/api/v2/pins/${pin.pinId}`) return;
+      arrived += 1;
+      if (arrived === 2) release();
+      await bothArrived;
+    };
+    const polls = await Promise.all([1, 2].map(() => call("POST", `/api/media-servers/${id}/plex-pin/${pin.pinId}`)));
+    mock.beforeReply = undefined;
+    expect(arrived).toBe(2);
+    for (const polled of polls) {
+      expect(polled.statusCode).toBe(200);
+      expect(polled.json()).toMatchObject({ status: "authorized" });
+    }
+    expect((await call("GET", "/api/media-servers")).json().servers[0]).toMatchObject({ id, hasToken: true });
   });
 
   it("blocks removing a server while watch sync pairs use it, naming the pairs", async () => {

@@ -279,7 +279,27 @@ export async function testMediaServer(db: Db, serverId: string): Promise<MediaSe
   return getMediaServer(db, serverId);
 }
 
-interface PendingPin { id: number; code: string; expiresAt: string }
+// completedAt marks the sign-in that saved the current token. A poll that was already on its way when the token was
+// saved finds it and reads as signed in instead of failing. A new address, a pasted token, or a new sign-in clears it.
+interface PendingPin { id: number; code: string; expiresAt: string; completedAt?: string }
+
+const pinNoLongerPending = "This Plex sign-in expired or a newer one replaced it. Select Sign in with Plex to start again.";
+
+function parsePendingPin(stored: string | null): PendingPin | null {
+  if (!stored) return null;
+  try {
+    const value = JSON.parse(stored) as Partial<PendingPin> | null;
+    return value && typeof value.id === "number" ? value as PendingPin : null;
+  } catch {
+    return null;
+  }
+}
+
+async function readSignIn(db: Db, serverId: string) {
+  const row = (await db.select({ pendingPin: schema.mediaServers.pendingPin, token: schema.mediaServers.token, url: schema.mediaServers.url }).from(schema.mediaServers)
+    .where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
+  return { storedPin: row?.pendingPin ?? null, pending: parsePendingPin(row?.pendingPin ?? null), hasToken: Boolean(row?.token && openToken(row.token)), url: row?.url ?? null };
+}
 
 // Plex sign-in: SRTL asks plex.tv for a PIN, the admin approves it at plex.tv, and SRTL polls until the PIN carries a token.
 export async function startPlexSignIn(db: Db, serverId: string): Promise<MediaServerPlexPin> {
@@ -292,11 +312,11 @@ export async function startPlexSignIn(db: Db, serverId: string): Promise<MediaSe
 
 export async function checkPlexSignIn(db: Db, serverId: string, pinId: number, afterSignIn?: (serverId: string) => Promise<unknown>): Promise<MediaServerPinStatus> {
   const server = await getMediaServer(db, serverId, "plex");
-  const row = (await db.select({ pendingPin: schema.mediaServers.pendingPin }).from(schema.mediaServers).where(eq(schema.mediaServers.id, serverId)).limit(1))[0];
-  const storedPin = row?.pendingPin ?? null;
-  let pending: PendingPin | null;
-  try { pending = storedPin ? JSON.parse(storedPin) as PendingPin : null; } catch { pending = null; }
-  if (!storedPin || !pending || pending.id !== pinId) throw new WatchSyncError("This Plex sign-in is no longer pending. Start it again.");
+  const { storedPin, pending, hasToken } = await readSignIn(db, serverId);
+  // This exact sign-in already saved the server's current token, so a poll that overlapped it or came late is answered
+  // the same way. Any other pin, including one for another server, gets the same neutral error as an expired one.
+  if (pending?.id === pinId && pending.completedAt && hasToken) return { status: "authorized", servers: await listMediaServers(db) };
+  if (!storedPin || !pending || pending.id !== pinId || pending.completedAt) throw new WatchSyncError(pinNoLongerPending);
   // Only the sign-in checked here, still for the address it was started at: a new address or a new sign-in meanwhile wins.
   const unchanged = and(eq(schema.mediaServers.id, serverId), eq(schema.mediaServers.pendingPin, storedPin), eq(schema.mediaServers.url, server.url));
   const pin = await new PlexTvClient(await mediaServerClientIdentifier(db)).checkPin(pinId);
@@ -308,10 +328,16 @@ export async function checkPlexSignIn(db: Db, serverId: string, pinId: number, a
     }
     return { status: "waiting" };
   }
+  const completed = JSON.stringify({ ...pending, completedAt: nowIso() } satisfies PendingPin);
   const saved = await db.update(schema.mediaServers).set({
-    token: sealToken(pin.authToken), pendingPin: null, machineIdentifier: null, accountName: null, accountId: null, lastError: null, updatedAt: nowIso()
+    token: sealToken(pin.authToken), pendingPin: completed, machineIdentifier: null, accountName: null, accountId: null, lastError: null, updatedAt: nowIso()
   }).where(unchanged).returning({ id: schema.mediaServers.id });
-  if (!saved.length) throw new MediaServerChanged("The server changed or a new Plex sign-in started while this one was waiting. Start it again.");
+  if (!saved.length) {
+    // Another poll for the same pin saved the token first, for the same address: that is a success, not a conflict.
+    const now = await readSignIn(db, serverId);
+    if (now.pending?.id === pinId && now.pending.completedAt && now.hasToken && now.url === server.url) return { status: "authorized", servers: await listMediaServers(db) };
+    throw new MediaServerChanged("The server's address changed or a newer Plex sign-in started while this one was waiting. Select Sign in with Plex to start again.");
+  }
   await testMediaServer(db, serverId).catch(() => undefined);
   if (afterSignIn) await afterSignIn(serverId).catch(() => undefined);
   return { status: "authorized", servers: await listMediaServers(db) };

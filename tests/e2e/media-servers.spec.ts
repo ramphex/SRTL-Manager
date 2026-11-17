@@ -14,6 +14,7 @@ function servers(): MediaServer[] {
 async function fixture(page: Page) {
   const list: MediaServerList = { servers: servers(), limit: 10 };
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  let pinChecks = 0;
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -36,6 +37,15 @@ async function fixture(page: Page) {
       const input = body as { kind: "plex" | "jellyfin"; name: string; url: string; token?: string };
       list.servers = [...list.servers, { id: "jf2", kind: input.kind, name: input.name, url: input.url, hasToken: Boolean(input.token), prefixMappings: [], machineIdentifier: null, accountName: null, version: null, lastCheckedAt: null, lastError: null }];
       response = list;
+    } else if (url.pathname === "/api/media-servers/jf2/plex-pin" && method === "POST") {
+      response = { pinId: 77, code: "WXYZ", authUrl: "about:blank#plex-sign-in", expiresAt: "2026-11-02T10:00:00.000Z" };
+    } else if (url.pathname === "/api/media-servers/jf2/plex-pin/77" && method === "POST") {
+      pinChecks += 1;
+      // The sign-in completes on the second check; any later check would be a late poll.
+      if (pinChecks >= 2) {
+        list.servers = list.servers.map((server) => server.id === "jf2" ? { ...server, hasToken: true, accountName: "alex_03", version: "1.43.0", lastCheckedAt: "2026-11-02T09:00:00.000Z" } : server);
+        response = { status: "authorized", servers: list };
+      } else response = { status: "waiting" };
     } else if (url.pathname === "/api/media-servers/jf1/test") {
       list.servers = list.servers.map((server) => server.id === "jf1" ? { ...server, version: "10.10.0", lastCheckedAt: "2026-11-02T09:00:00.000Z" } : server);
       response = list;
@@ -49,7 +59,7 @@ async function fixture(page: Page) {
     }
     await route.fulfill({ status, json: response });
   });
-  return { list, calls };
+  return { list, calls, pinChecks: () => pinChecks };
 }
 
 async function openMediaServers(page: Page) {
@@ -95,6 +105,31 @@ test("adds and edits a server without ever showing the saved key", async ({ page
   await edit.getByRole("button", { name: "Save" }).click();
   await expect(page.getByRole("region", { name: "Jellyfin server Living room" })).toBeVisible();
   expect(calls.find((call) => call.method === "PUT")?.body).toEqual({ name: "Living room", url: "http://jellyfin:8096", token: "", prefixMappings: [] });
+});
+
+test("adds a Plex server by signing in with Plex, with pasting a token as the secondary option", async ({ page }) => {
+  const { calls, pinChecks } = await fixture(page);
+  await openMediaServers(page);
+  await page.getByRole("button", { name: "Add Plex server" }).click();
+  const form = page.getByRole("form", { name: "Add Plex server" });
+  await expect(form).toContainText("Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.");
+  await expect(form.getByLabel("Plex token")).toBeHidden();
+  await form.getByText("Or enter a token manually").click();
+  await expect(form.getByLabel("Plex token")).toBeVisible();
+  await expect(form).toContainText("Never use the PlexOnlineToken");
+  await form.getByLabel("Name", { exact: true }).fill("Basement Plex");
+  await form.getByLabel("Server URL").fill("http://basement:32400");
+  const popup = page.waitForEvent("popup");
+  await form.getByRole("button", { name: "Add and sign in with Plex" }).click();
+  await popup;
+  const card = page.getByRole("region", { name: "Plex server Basement Plex" });
+  await expect(card).toContainText("Signed in with Plex.", { timeout: 15_000 });
+  await expect(card).toContainText("alex_03");
+  await page.waitForTimeout(4000);
+  expect(pinChecks()).toBe(2);
+  await expect(card.locator(".error")).toHaveCount(0);
+  expect(calls.find((call) => call.method === "POST" && call.path === "/api/media-servers")?.body).toMatchObject({ kind: "plex", name: "Basement Plex", token: "" });
+  await expect(card.getByRole("button", { name: "Sign in with Plex again" })).toBeVisible();
 });
 
 test("explains which watch sync pairs block removing a server", async ({ page }) => {

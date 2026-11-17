@@ -12,7 +12,7 @@ import {
 } from "../shared/mediaServers";
 import { InfoTooltip } from "./App";
 import { formatDate } from "./appShared";
-import { mediaServerApi, mediaServersKey, mediaServerStatus } from "./mediaServerApi";
+import { mediaServerApi, mediaServersKey, mediaServerStatus, openPlexWindow, pollPlexPin, type PlexWindow } from "./mediaServerApi";
 
 // Watch sync (and later Now Playing and invitations) read these connections, so their views refresh with the list.
 function useListUpdate() {
@@ -44,6 +44,8 @@ function Section({ title, help, actions, children }: { title: string; help?: Rea
 export function MediaServerSettingsPanel() {
   const query = useQuery({ queryKey: mediaServersKey, queryFn: mediaServerApi.list });
   const [adding, setAdding] = useState<MediaServerKind | null>(null);
+  // A Plex server added without a token starts signing in right away; its card picks the sign-in up when it appears.
+  const [startedSignIn, setStartedSignIn] = useState<StartedSignIn | null>(null);
   if (query.isLoading) return <p role="status">Loading media servers...</p>;
   if (!query.data) return <p className="error" role="alert">{query.error?.message ?? "Media servers unavailable."}</p>;
   const { servers, limit } = query.data;
@@ -55,11 +57,11 @@ export function MediaServerSettingsPanel() {
     </>}>
       <p className="radarr-lede">Add each server once here; watch sync and other features use the same connection. If a server sees the library under a different folder than SRTL does, add a path prefix mapping, for example <code>/data/media</code> on the server is <code>/mnt/plex</code> in SRTL.</p>
       {query.error ? <p className="error" role="alert">{query.error.message}</p> : null}
-      {adding ? <ServerForm kind={adding} onDone={() => setAdding(null)} /> : null}
+      {adding ? <ServerForm kind={adding} onDone={() => setAdding(null)} onSignInStarted={setStartedSignIn} /> : null}
       {!servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex or Jellyfin server to start.</p> : null}
       {full ? <p className="muted">SRTL supports up to {limit} media servers.</p> : null}
     </Section>
-    {servers.length ? <div className="media-server-list">{servers.map((server) => <ServerCard key={server.id} server={server} />)}</div> : null}
+    {servers.length ? <div className="media-server-list">{servers.map((server) => <ServerCard key={server.id} server={server} startedSignIn={startedSignIn?.serverId === server.id ? startedSignIn : undefined} onStartedSignInSeen={() => setStartedSignIn(null)} />)}</div> : null}
     <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored encrypted on the SRTL server and are never shown again.</p>
   </div>;
 }
@@ -77,21 +79,28 @@ function PrefixMappings({ value, onChange, disabled }: { value: MediaServerPrefi
   </div>;
 }
 
+const plexTokenNote = <>Use the token of the Plex account that owns this server. To find it, open any item in Plex Web, choose <strong>Get Info</strong> &gt; <strong>View XML</strong>, and copy the <code>X-Plex-Token</code> value from the address bar. Never use the <code>PlexOnlineToken</code> from the server&apos;s Preferences.xml.</>;
+
 function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: MediaServerKind; draft: MediaServerInput; setDraft: (draft: MediaServerInput) => void; hasToken: boolean; disabled: boolean }) {
   const tokenId = useId();
-  const tokenLabel = kind === "plex" ? "Plex token (optional)" : "API key";
-  const tokenHelp = kind === "plex"
-    ? "Use Sign in with Plex instead when you can. If you paste a token, use your account's token, never the PlexOnlineToken from the server's Preferences.xml."
-    : "Create one in Jellyfin under Dashboard > API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.";
+  const tokenNoteId = useId();
+  const tokenInput = <input id={tokenId} type="password" autoComplete="off" aria-describedby={kind === "plex" ? tokenNoteId : undefined} value={draft.token ?? ""} placeholder={hasToken ? "Saved. Leave empty to keep it." : ""} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />;
   return <fieldset className="radarr-fields" disabled={disabled}>
     <div className="radarr-grid">
       <label>Name<input required maxLength={60} value={draft.name} placeholder={kind === "plex" ? "Home Plex" : "Jellyfin"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
       <label>Server URL<input required value={draft.url} placeholder={kind === "plex" ? "http://192.168.1.10:32400" : "http://192.168.1.10:8096"} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
     </div>
-    <div className="radarr-field">
-      <div className="radarr-field-label"><label htmlFor={tokenId}>{tokenLabel}</label><InfoTooltip label={`About the ${tokenLabel}`}>{tokenHelp}</InfoTooltip></div>
-      <input id={tokenId} type="password" autoComplete="off" value={draft.token ?? ""} placeholder={hasToken ? "Saved. Leave empty to keep it." : ""} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />
-    </div>
+    {kind === "plex" ? <details className="radarr-setup media-server-manual-token">
+      <summary>Or enter a token manually</summary>
+      <div className="radarr-field">
+        <label htmlFor={tokenId}>Plex token</label>
+        {tokenInput}
+        <p id={tokenNoteId} className="muted">{plexTokenNote}</p>
+      </div>
+    </details> : <div className="radarr-field">
+      <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</InfoTooltip></div>
+      {tokenInput}
+    </div>}
     <PrefixMappings value={draft.prefixMappings} onChange={(prefixMappings) => setDraft({ ...draft, prefixMappings })} />
   </fieldset>;
 }
@@ -100,66 +109,112 @@ function cleanMappings(draft: MediaServerInput): MediaServerInput {
   return { ...draft, prefixMappings: draft.prefixMappings.filter((mapping) => mapping.serverPrefix.trim() || mapping.srtlPrefix.trim()) };
 }
 
-function ServerForm({ kind, onDone }: { kind: MediaServerKind; onDone: () => void }) {
+// A sign-in the add form started, or the reason it could not start, for the new server's card to show.
+interface StartedSignIn { serverId: string; pin?: MediaServerPlexPin; error?: string }
+
+const errorText = (error: unknown, fallback: string) => error instanceof Error ? error.message : fallback;
+
+function ServerForm({ kind, onDone, onSignInStarted }: { kind: MediaServerKind; onDone: () => void; onSignInStarted: (signIn: StartedSignIn) => void }) {
   const setList = useListUpdate();
   const [draft, setDraft] = useState<MediaServerInput>({ name: "", url: "", token: "", prefixMappings: [] });
-  const add = useMutation({ mutationFn: () => mediaServerApi.add(kind, cleanMappings(draft)), onSuccess: (list) => { setList(list); onDone(); } });
-  const submit = (event: FormEvent) => { event.preventDefault(); if (!add.isPending) add.mutate(); };
+  // Plex connects through plex.tv unless a token was pasted under "Or enter a token manually".
+  const signIn = kind === "plex" && !draft.token?.trim();
+  const add = useMutation({
+    mutationFn: async (plexWindow: PlexWindow | null) => {
+      const input = cleanMappings(draft);
+      const list = await mediaServerApi.add(kind, input);
+      if (!plexWindow) return { list };
+      // Names are unique, so the new server is the one with this name.
+      const server = list.servers.find((entry) => entry.kind === "plex" && entry.name.toLowerCase() === input.name.trim().toLowerCase());
+      if (!server) { plexWindow.close(); return { list }; }
+      try {
+        const pin = await mediaServerApi.startPin(server.id);
+        plexWindow.show(pin.authUrl);
+        return { list, started: { serverId: server.id, pin } };
+      } catch (error) {
+        plexWindow.close();
+        return { list, started: { serverId: server.id, error: errorText(error, "Sign in with Plex could not start.") } };
+      }
+    },
+    onSuccess: ({ list, started }) => {
+      if (started) onSignInStarted(started);
+      setList(list);
+      onDone();
+    },
+    onError: (_error, plexWindow) => plexWindow?.close()
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (add.isPending) return;
+    add.mutate(signIn ? openPlexWindow() : null);
+  };
   return <form className="watch-sync-card" aria-label={`Add ${mediaServerKindLabels[kind]} server`} onSubmit={submit}>
     <h3>Add a {mediaServerKindLabels[kind]} server</h3>
+    {kind === "plex"
+      ? <p className="muted">Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.</p>
+      : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
     <ServerFields kind={kind} draft={draft} setDraft={setDraft} hasToken={false} disabled={add.isPending} />
-    {kind === "plex" ? <p className="muted">After adding it, use <strong>Sign in with Plex</strong> to connect as the server owner.</p> : null}
     <div className="radarr-toolbar">
-      <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />}Add server</button>
+      <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : signIn ? <LogIn size={16} /> : <Check size={16} />}{signIn ? "Add and sign in with Plex" : "Add server"}</button>
       <button type="button" className="secondary" disabled={add.isPending} onClick={onDone}><X size={16} />Cancel</button>
     </div>
+    {signIn ? <p className="muted">A plex.tv window opens. Approve SRTL there as the account that owns this server, then come back here.</p> : null}
     {add.error ? <p className="error" role="alert">{add.error.message}</p> : null}
   </form>;
 }
 
-function PlexSignIn({ server }: { server: MediaServer }) {
+function PlexSignIn({ server, started, onStartedSeen }: { server: MediaServer; started?: StartedSignIn; onStartedSeen?: () => void }) {
   const setList = useListUpdate();
-  const [pin, setPin] = useState<MediaServerPlexPin | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [pin, setPin] = useState<MediaServerPlexPin | null>(started?.pin ?? null);
+  const [message, setMessage] = useState<{ text: string; ok: boolean } | null>(started?.error ? { text: started.error, ok: false } : null);
+  // The add form's sign-in is taken over once; later renders of this card start their own.
+  useEffect(() => { if (started) onStartedSeen?.(); }, [started, onStartedSeen]);
   const start = useMutation({
-    mutationFn: () => mediaServerApi.startPin(server.id),
+    mutationFn: async (plexWindow: PlexWindow) => {
+      try {
+        const created = await mediaServerApi.startPin(server.id);
+        plexWindow.show(created.authUrl);
+        return created;
+      } catch (error) {
+        plexWindow.close();
+        throw error;
+      }
+    },
     onSuccess: (created) => {
       setPin(created);
       setMessage(null);
-      window.open(created.authUrl, "_blank", "noopener");
     }
   });
   useEffect(() => {
     if (!pin) return undefined;
-    let stopped = false;
-    const timer = window.setInterval(() => {
-      mediaServerApi.checkPin(server.id, pin.pinId).then((status) => {
-        if (stopped) return;
-        if (status.status === "authorized") {
-          if (status.servers) setList(status.servers);
-          setPin(null);
-          setMessage("Signed in with Plex.");
-        } else if (status.status === "expired") {
-          setPin(null);
-          setMessage("The sign-in expired. Start it again.");
-        }
-      }).catch((error: unknown) => {
-        if (stopped) return;
+    return pollPlexPin(() => mediaServerApi.checkPin(server.id, pin.pinId), (update) => {
+      if ("error" in update) {
         setPin(null);
-        setMessage(error instanceof Error ? error.message : "Sign-in failed.");
-      });
-    }, 3000);
-    return () => { stopped = true; window.clearInterval(timer); };
+        setMessage({ text: errorText(update.error, "Sign in with Plex failed. Select Sign in with Plex to try again."), ok: false });
+      } else if (update.status.status === "authorized") {
+        if (update.status.servers) setList(update.status.servers);
+        setPin(null);
+        setMessage({ text: "Signed in with Plex.", ok: true });
+      } else if (update.status.status === "expired") {
+        setPin(null);
+        setMessage({ text: "The Plex sign-in expired before it was approved. Select Sign in with Plex to start again.", ok: false });
+      }
+    });
   }, [pin, server.id, setList]);
+  const reconnect = server.hasToken;
+  const hintId = useId();
   return <div className="watch-sync-signin">
-    <button type="button" disabled={start.isPending || Boolean(pin)} onClick={() => start.mutate()}>{pin ? <LoaderCircle size={16} className="spin-icon" /> : <LogIn size={16} />}{server.hasToken ? "Sign in with Plex again" : "Sign in with Plex"}</button>
+    <button type="button" className={reconnect ? "secondary" : undefined} aria-describedby={hintId} disabled={start.isPending || Boolean(pin)} onClick={() => { start.reset(); start.mutate(openPlexWindow()); }}>{pin || start.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <LogIn size={16} />}{reconnect ? "Sign in with Plex again" : "Sign in with Plex"}</button>
+    <p id={hintId} className="muted">{reconnect
+      ? "Reconnects this server through plex.tv, for example after a Plex password change or when the connection stops working."
+      : "Not connected yet. Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you."}</p>
     {pin ? <p className="muted" role="status">Waiting for plex.tv. Approve the sign-in in the window that opened, or <a href={pin.authUrl} target="_blank" rel="noopener noreferrer">open it here</a> (code {pin.code}).</p> : null}
-    {message ? <p className={message.startsWith("Signed in") ? "success" : "error"} role="status">{message}</p> : null}
+    {message ? <p className={message.ok ? "success" : "error"} role="status">{message.text}</p> : null}
     {start.error ? <p className="error" role="alert">{start.error.message}</p> : null}
   </div>;
 }
 
-function ServerCard({ server }: { server: MediaServer }) {
+function ServerCard({ server, startedSignIn, onStartedSignInSeen }: { server: MediaServer; startedSignIn?: StartedSignIn; onStartedSignInSeen?: () => void }) {
   const setList = useListUpdate();
   const refresh = useRefresh();
   const initialDraft = (): MediaServerInput => ({ name: server.name, url: server.url, token: "", prefixMappings: server.prefixMappings });
@@ -193,10 +248,10 @@ function ServerCard({ server }: { server: MediaServer }) {
       <button type="button" className="secondary icon-only" aria-label={`Remove ${server.name}`} disabled={busy} onClick={() => setConfirmRemove(true)}><Trash2 size={16} /></button>
     </div>
     {test.isSuccess && !server.lastError ? <p className="success" role="status">Connected{server.version ? ` to ${kind} ${server.version}` : ""}.</p> : null}
-    {server.kind === "plex" ? <PlexSignIn server={server} /> : null}
+    {server.kind === "plex" ? <PlexSignIn server={server} started={startedSignIn} onStartedSeen={onStartedSignInSeen} /> : null}
     {editing ? <form className="media-server-edit" aria-label={`Edit ${server.name}`} onSubmit={(event) => { event.preventDefault(); if (!busy) save.mutate(); }}>
       <ServerFields kind={server.kind} draft={draft} setDraft={setDraft} hasToken={server.hasToken} disabled={busy} />
-      {server.kind === "plex" && server.hasToken && addressChanged && !draft.token?.trim() ? <p className="muted" role="note">Saving a new address signs this server out of Plex, so its token is never sent to the new address. Use <strong>Sign in with Plex</strong> again afterwards, or paste a token above.</p> : null}
+      {server.kind === "plex" && server.hasToken && addressChanged && !draft.token?.trim() ? <p className="muted" role="note">Saving a new address signs this server out of Plex, so its token is never sent to the new address. Use <strong>Sign in with Plex</strong> afterwards, or enter a token manually above.</p> : null}
       <div className="radarr-toolbar">
         <button type="submit" disabled={busy || !changed}>{save.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Save size={16} />}Save</button>
         <button type="button" className="secondary" disabled={save.isPending} onClick={() => setEditing(false)}><X size={16} />Cancel</button>

@@ -6,10 +6,12 @@ Each server shows its type, URL, status (connected, error, not checked, or not s
 
 ## Add a server
 
-- **Plex**: select **Add Plex server**, enter a name and the server URL (for example `http://192.168.1.10:32400`), and add it. Then select **Sign in with Plex**. A plex.tv window opens; sign in as the account that **owns** the server and approve "SRTL Manager". Two-factor authentication works as usual. SRTL notices the approval within a few seconds, stores the account token, and tests the connection. If the window was blocked, use the "open it here" link; a sign-in that is not approved in about 15 minutes expires.
+- **Plex**: select **Add Plex server**, enter a name and the server URL (for example `http://192.168.1.10:32400`), and select **Add and sign in with Plex**. SRTL adds the server and opens a plex.tv window straight away; sign in as the account that **owns** the server and approve "SRTL Manager". Two-factor authentication works as usual. SRTL notices the approval within a few seconds, stores the account token, and tests the connection. If the window was blocked, use the "open it here" link on the server's card; a sign-in that is not approved in about 15 minutes expires, and **Sign in with Plex** on the card starts a new one.
 - **Jellyfin**: create an API key in Jellyfin under **Dashboard > API Keys**, then select **Add Jellyfin server** with a name, the URL (for example `http://192.168.1.10:8096`), and the key.
 
-If you cannot use the Plex PIN sign-in, paste your Plex account token into **Edit > Plex token** instead. Use your own account's token, never the `PlexOnlineToken` from the server's `Preferences.xml`. SRTL always identifies itself to Plex and Jellyfin as its own client ("SRTL Manager") with a stable client identifier.
+If you cannot use the Plex sign-in, open **Or enter a token manually** in the add form (or in **Edit**) and paste your Plex account token; the button then reads **Add server** and no plex.tv window opens. To find your token, open any item in Plex Web, choose **Get Info > View XML**, and copy the `X-Plex-Token` value from the address bar. Use your own account's token, never the `PlexOnlineToken` from the server's `Preferences.xml`. SRTL always identifies itself to Plex and Jellyfin as its own client ("SRTL Manager") with a stable client identifier.
+
+**Sign in with Plex again** on a connected server's card reconnects it through plex.tv, for example after a Plex password change or when the connection stops working.
 
 ## Test, edit, and remove
 
