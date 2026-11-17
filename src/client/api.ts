@@ -17,6 +17,7 @@ import type {
   InventorySummary,
   InventoryScanTimestamps,
   JobEventPage,
+  JobPage,
   JobEventRecord,
   JobRecord,
   LinkKind,
@@ -241,6 +242,14 @@ export const api = {
     if (options.completedWithinMinutes) search.set("completedWithinMinutes", String(options.completedWithinMinutes));
     if (options.limit) search.set("limit", String(options.limit));
     return request<JobRecord[]>(`/api/jobs${search.size > 0 ? `?${search.toString()}` : ""}`);
+  },
+  jobPage: (options: { offset?: number; limit?: number; search?: string; completedWithinMinutes?: number } = {}) => {
+    const search = new URLSearchParams();
+    if (options.offset) search.set("offset", String(options.offset));
+    if (options.limit) search.set("limit", String(options.limit));
+    if (options.search?.trim()) search.set("q", options.search.trim());
+    if (options.completedWithinMinutes) search.set("completedWithinMinutes", String(options.completedWithinMinutes));
+    return request<JobPage>(`/api/jobs/page${search.size > 0 ? `?${search.toString()}` : ""}`);
   },
   job: (id: number) => request<JobRecord>(`/api/jobs/${id}`),
   copyFailures: (id: number) => request<CopyFailureList>(`/api/jobs/${id}/copy-failures`),

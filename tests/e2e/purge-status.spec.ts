@@ -143,7 +143,8 @@ async function mockApi(page: Page) {
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.6", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.6", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
-    } else if (url.pathname === "/api/jobs") body = [runningPurge, finishedPurge, cameBackPurge];
+    } else if (url.pathname === "/api/jobs/page") body = { jobs: [runningPurge, finishedPurge, cameBackPurge], hasMore: false, nextOffset: 3 };
+    else if (url.pathname === "/api/jobs") body = [runningPurge, finishedPurge, cameBackPurge];
     else if (job && !jobMatch?.[2]) body = job;
     else if (job && jobMatch?.[2] === "/events/page") {
       body = job.id === runningPurge.id

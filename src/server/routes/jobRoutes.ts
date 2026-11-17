@@ -3,12 +3,13 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { Db } from "../db/database";
 import type { JobRunner } from "../jobs/jobRunner";
 import { recordActionAudit } from "../lib/actionAudit";
-import { emptyEventPage, isRestrictedRequest, jobDetailsHidden, restrictedJob } from "../lib/restrictedView";
+import { detailHiddenJobTypes, emptyEventPage, isRestrictedRequest, jobDetailsHidden, restrictedJob } from "../lib/restrictedView";
 import { requestHasPermission, requirePermission } from "../routeAccess";
 import { requireCopyPermissions } from "./libraryRoutes";
 import { listPurgeJobItems } from "../jobs/orphanPurge";
 import { jobStoppableWithoutDeleting } from "../../shared/permissions";
-import type { CopyRetryStarted, JobEventRecord } from "../../shared/types";
+import { jobPageSize, maxJobPageSize, maxJobSearchLength } from "../../shared/jobLabels";
+import type { CopyRetryStarted, JobEventRecord, JobPage } from "../../shared/types";
 
 export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db): void {
   // A restricted account sees that a settings job ran, but none of what its log says.
@@ -38,6 +39,27 @@ export function registerJobRoutes(app: FastifyInstance, jobs: JobRunner, db: Db)
     const completedSince = query.completedWithinMinutes ? new Date(Date.now() - query.completedWithinMinutes * 60_000).toISOString() : undefined;
     const rows = await jobs.listJobs({ activeOnly: query.activeOnly, completedSince, limit: query.limit });
     return isRestrictedRequest(request) ? rows.map(restrictedJob) : rows;
+  });
+
+  // The Dashboard's Recent jobs list, a page at a time. A search covers every job, not only the recent window.
+  app.get("/api/jobs/page", async (request): Promise<JobPage> => {
+    const query = z
+      .object({
+        offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+        limit: z.coerce.number().int().min(1).max(maxJobPageSize).default(jobPageSize),
+        q: z.string().max(maxJobSearchLength).optional(),
+        completedWithinMinutes: z.coerce.number().int().min(1).max(10080).optional()
+      })
+      .parse(request.query);
+    const restricted = isRestrictedRequest(request);
+    const page = await jobs.listJobPage({
+      offset: query.offset,
+      limit: query.limit,
+      search: query.q,
+      completedSince: query.completedWithinMinutes ? new Date(Date.now() - query.completedWithinMinutes * 60_000).toISOString() : undefined,
+      detailHiddenTypes: restricted ? detailHiddenJobTypes : []
+    });
+    return restricted ? { ...page, jobs: page.jobs.map(restrictedJob) } : page;
   });
 
   app.get("/api/jobs/:id", async (request, reply) => {

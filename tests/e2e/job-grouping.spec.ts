@@ -28,7 +28,8 @@ async function mockApi(page: Page, jobs: JobRecord[]) {
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.1", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       body = { currentVersion: "0.1.4-beta.1", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
-    } else if (url.pathname === "/api/jobs") body = jobs;
+    } else if (url.pathname === "/api/jobs/page") body = { jobs, hasMore: false, nextOffset: jobs.length };
+    else if (url.pathname === "/api/jobs") body = jobs;
     await route.fulfill({ json: body });
   });
 }

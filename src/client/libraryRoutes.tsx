@@ -75,7 +75,7 @@ function ActionToast({ message, tone }: { message: string | null; tone: "success
 
 export function DashboardPage() {
   const queryClient = useQueryClient();
-  const { autoOpenTaskStatus, recentJobsCompletedWindowMinutes } = useUserPreferences();
+  const { autoOpenTaskStatus } = useUserPreferences();
   const storageLocations = useStorageLocations();
   const localName = storageLocationName(storageLocations, "local");
   const remoteName = storageLocationName(storageLocations, "remote");
@@ -101,11 +101,8 @@ export function DashboardPage() {
   const advancedSettings = useQuery({ queryKey: ["advanced-settings"], queryFn: api.getAdvancedSettings });
   const inventory = useQuery({ queryKey: ["inventory-summary"], queryFn: api.inventorySummary, refetchInterval: 5000 });
   const scanTimestamps = useQuery({ queryKey: ["inventory-scan-timestamps"], queryFn: api.inventoryScanTimestamps, refetchInterval: 60000 });
-  const jobs = useQuery({
-    queryKey: ["jobs", "recent", recentJobsCompletedWindowMinutes],
-    queryFn: () => api.jobs({ completedWithinMinutes: recentJobsCompletedWindowMinutes }),
-    refetchInterval: 3000
-  });
+  // Running scans lock their folders here; the Recent jobs list loads its own pages.
+  const jobs = useQuery({ queryKey: ["jobs", "active"], queryFn: () => api.jobs({ activeOnly: true }), refetchInterval: 3000 });
   const saveScanSettings = useMutation({
     mutationFn: api.saveScanSettings,
     onSuccess: (settings) => queryClient.setQueryData(["scan-settings"], settings)
@@ -675,7 +672,6 @@ export function DashboardPage() {
       />
       <div className="dashboard-detail-region">
         <JobsTable
-          jobs={jobs.data ?? []}
           sections={availableScanSections}
           onScanJobSelect={(job) => setScanStatusPrompt(scanStatusPromptFromJob(job, availableScanSections))}
           onAuditJobSelect={(job) => setAuditStatusPrompt(auditStatusPromptFromJob(job, availableScanSections))}

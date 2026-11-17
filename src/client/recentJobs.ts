@@ -27,19 +27,3 @@ export function inventoryJobRefreshKey(jobs: JobRecord[]): string {
     .sort()
     .join("|");
 }
-
-export function visibleDashboardJobs(jobs: JobRecord[], completedWindowMinutes: number, now: Date = new Date()): JobRecord[] {
-  const normalizedWindowMinutes = normalizeRecentJobsCompletedWindowMinutes(completedWindowMinutes);
-  const cutoffMs = now.getTime() - normalizedWindowMinutes * 60 * 1000;
-  const visibleJobs = jobs.filter((job) => {
-    if (isActiveDashboardJob(job)) return true;
-    if (!job.finishedAt) return false;
-    const finishedAtMs = Date.parse(job.finishedAt);
-    return Number.isFinite(finishedAtMs) && finishedAtMs >= cutoffMs;
-  });
-  return visibleJobs.sort((a, b) => {
-    const activeDelta = Number(isActiveDashboardJob(b)) - Number(isActiveDashboardJob(a));
-    if (activeDelta !== 0) return activeDelta;
-    return b.id - a.id;
-  });
-}
