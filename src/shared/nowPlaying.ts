@@ -183,3 +183,26 @@ export interface NowPlayingStopResult {
 }
 
 export const nowPlayingDefaultStopMessage = "This stream was stopped by the server administrator.";
+
+// Counts streams by play method and sums the bandwidth of those that are not paused.
+export function summarizeStreams(streams: Array<Pick<NowPlayingStream, "playMethod" | "transcode" | "state" | "bandwidth">>): NowPlayingSummary {
+  const summary: NowPlayingSummary = { transcodeHardware: 0, transcodeCpu: 0, transcodeUnknown: 0, directStream: 0, directPlay: 0, paused: 0, totalKbps: 0, totalIsEstimate: false };
+  for (const stream of streams) {
+    if (stream.playMethod === "transcode") {
+      const engine = stream.transcode?.engine ?? "unknown";
+      if (engine === "hardware") summary.transcodeHardware += 1;
+      else if (engine === "cpu") summary.transcodeCpu += 1;
+      else summary.transcodeUnknown += 1;
+    } else if (stream.playMethod === "directStream") summary.directStream += 1;
+    else summary.directPlay += 1;
+    if (stream.state === "paused") {
+      summary.paused += 1;
+      continue;
+    }
+    if (stream.bandwidth.kbps !== null) {
+      summary.totalKbps += stream.bandwidth.kbps;
+      if (stream.bandwidth.kind === "estimate") summary.totalIsEstimate = true;
+    }
+  }
+  return summary;
+}

@@ -11,6 +11,7 @@ vi.mock("../src/client/App", () => ({ Page: ({ children }: { children: ReactNode
 vi.mock("../src/client/access", () => ({ useAccess: () => ({ can: (permission: string) => permission === "streams.stop" ? access.canStop : false }) }));
 vi.mock("../src/client/mediaServersRequired", () => ({ MediaServersRequired: () => null }));
 vi.mock("../src/client/appShared", () => ({
+  defaultUserPreferences: { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] },
   storagePolicyLabel: (policy: string) => policy,
   useLiveTimestamp: () => Date.parse("2026-11-02T10:00:00.000Z"),
   useModalLifecycle: () => ({ current: null }),
@@ -91,7 +92,8 @@ describe("Now Playing stream card", () => {
     const card = renderCard(stream(), true);
     const footer = card.querySelector(".np-card-footer")!;
     expect(footer.querySelector(".np-footer-user")?.textContent).toBe("Usersam");
-    expect(footer.querySelector(".np-footer-server")?.textContent).toBe("ServerHome Plex");
+    expect(footer.querySelector(".np-footer-server .np-footer-text")?.textContent).toBe("Home Plex");
+    expect(footer.querySelector(".np-footer-server svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
     const location = footer.querySelector(".np-footer-location")!;
     const trigger = location.querySelector<HTMLButtonElement>("button")!;
     expect(trigger.textContent).toBe("WAN · Example City, Netherlands");
@@ -143,33 +145,145 @@ class FakeEventSource {
   emit(type: string, data: unknown) { for (const listener of this.listeners.get(type) ?? []) listener({ data: JSON.stringify(data) } as MessageEvent<string>); }
 }
 
+const servers: NowPlayingSnapshot["servers"] = [
+  { id: "plex1", name: "Home Plex", kind: "plex", status: "live", message: null, transport: "socket", plexPass: true, bandwidth: null, resources: null, lastUpdatedAt: null },
+  { id: "jf1", name: "Jellyfin", kind: "jellyfin", status: "live", message: null, transport: "socket", plexPass: null, bandwidth: null, resources: null, lastUpdatedAt: null }
+];
+
+function pageSnapshot(extra: { servers?: NowPlayingSnapshot["servers"]; streams?: NowPlayingStream[] } = {}): NowPlayingSnapshot {
+  const streams = [
+    stream(),
+    stream({ id: "plex1:16", sessionKey: "16", title: "Big Film", mediaType: "movie", grandparentTitle: null, episodeLabel: null }),
+    stream({ id: "jf1:a", serverId: "jf1", serverKind: "jellyfin", serverName: "Jellyfin", sessionKey: "a", title: "Example Movie", mediaType: "movie", grandparentTitle: null, episodeLabel: null, playMethod: "directPlay", videoDecision: "directPlay", audioDecision: "directPlay", output: null, transcode: null, bandwidth: { kbps: 20_000, kind: "estimate" } }),
+    ...(extra.streams ?? [])
+  ];
+  return {
+    generatedAt: "2026-11-02T10:00:00.000Z", servers: [...servers, ...(extra.servers ?? [])], streams,
+    summary: { transcodeHardware: 2, transcodeCpu: 0, transcodeUnknown: 0, directStream: 0, directPlay: 1, paused: 0, totalKbps: 41_000, totalIsEstimate: true }
+  };
+}
+
+// A stand-in for the preferences route that keeps what was saved, like the signed-in account's settings.
+function preferencesServer(initial: Record<string, unknown> = { timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] }) {
+  let stored = initial;
+  const saves: unknown[] = [];
+  const fetchMock = vi.fn(async (path: string, init?: RequestInit) => {
+    const json = (value: unknown) => new Response(JSON.stringify(value), { status: 200, headers: { "Content-Type": "application/json" } });
+    if (path === "/api/settings/user-preferences") {
+      if (init?.method === "PUT") {
+        stored = JSON.parse(String(init.body)) as Record<string, unknown>;
+        saves.push(stored);
+      }
+      return json(stored);
+    }
+    return json({});
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  return { saves, get stored() { return stored; } };
+}
+
+function mountPage(snapshot: NowPlayingSnapshot) {
+  act(() => root.render(<QueryClientProvider client={new QueryClient()}><NowPlayingPage /></QueryClientProvider>));
+  act(() => FakeEventSource.instance!.emit("sessions", snapshot));
+}
+
+async function settle() {
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+}
+
+const cardTitles = () => [...container.querySelectorAll("article h3")].map((heading) => heading.textContent);
+const serverToggle = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".np-server-toggle")].find((button) => button.textContent?.includes(name))!;
+const pill = (label: string) => container.querySelector(`[aria-label^="${label}:"]`)?.getAttribute("aria-label");
+
+function remount() {
+  act(() => root.unmount());
+  root = createRoot(container);
+}
+
 describe("Now Playing page", () => {
-  it("remembers which cards are expanded for the session, folded by default", () => {
-    vi.stubGlobal("EventSource", FakeEventSource);
-    vi.stubGlobal("fetch", vi.fn(async () => new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } })));
-    const snapshot: NowPlayingSnapshot = {
-      generatedAt: "2026-11-02T10:00:00.000Z",
-      servers: [{ id: "plex1", name: "Home Plex", kind: "plex", status: "live", message: null, transport: "socket", plexPass: true, bandwidth: null, resources: null, lastUpdatedAt: null }],
-      streams: [stream(), stream({ id: "plex1:16", sessionKey: "16", title: "Big Film", mediaType: "movie", grandparentTitle: null, episodeLabel: null })],
-      summary: { transcodeHardware: 2, transcodeCpu: 0, transcodeUnknown: 0, directStream: 0, directPlay: 0, paused: 0, totalKbps: 21_000, totalIsEstimate: false }
-    };
-    const mount = () => {
-      act(() => root.render(<QueryClientProvider client={new QueryClient()}><NowPlayingPage /></QueryClientProvider>));
-      act(() => FakeEventSource.instance!.emit("sessions", snapshot));
-      return [...container.querySelectorAll<HTMLButtonElement>(".np-details-toggle")];
-    };
-    let toggles = mount();
-    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "false"]);
+  beforeEach(() => { vi.stubGlobal("EventSource", FakeEventSource); });
+
+  it("remembers which cards are expanded for the session, folded by default", async () => {
+    preferencesServer();
+    mountPage(pageSnapshot());
+    await settle();
+    let toggles = [...container.querySelectorAll<HTMLButtonElement>(".np-details-toggle")];
+    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "false", "false"]);
     act(() => toggles[1]!.click());
-    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "true"]);
+    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "true", "false"]);
     expect(JSON.parse(window.sessionStorage.getItem("srtl-now-playing-expanded")!)).toEqual(["plex1:16"]);
 
     // Leaving the page and coming back keeps the choice.
-    act(() => root.unmount());
-    root = createRoot(container);
-    toggles = mount();
-    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "true"]);
+    remount();
+    mountPage(pageSnapshot());
+    await settle();
+    toggles = [...container.querySelectorAll<HTMLButtonElement>(".np-details-toggle")];
+    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "true", "false"]);
     act(() => toggles[1]!.click());
-    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "false"]);
+    expect(toggles.map((toggle) => toggle.getAttribute("aria-expanded"))).toEqual(["false", "false", "false"]);
+  });
+
+  it("shows every server by default, each as a pressed toggle with its server type icon", async () => {
+    preferencesServer({ timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 });
+    mountPage(pageSnapshot());
+    await settle();
+    expect(cardTitles()).toEqual(["Example Show", "Big Film", "Example Movie"]);
+    expect(serverToggle("Home Plex").getAttribute("aria-pressed")).toBe("true");
+    expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("true");
+    expect(serverToggle("Home Plex").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
+    expect(serverToggle("Jellyfin").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Jellyfin");
+    const footers = [...container.querySelectorAll(".np-footer-server svg[role=img]")].map((icon) => icon.getAttribute("aria-label"));
+    expect(footers).toEqual(["Plex", "Plex", "Jellyfin"]);
+    expect(pill("Direct play")).toBe("Direct play: 1");
+  });
+
+  it("hides a server's streams when it is turned off, and keeps that choice for the account", async () => {
+    const preferences = preferencesServer();
+    mountPage(pageSnapshot());
+    await settle();
+    act(() => serverToggle("Jellyfin").click());
+    await settle();
+    expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("false");
+    expect(cardTitles()).toEqual(["Example Show", "Big Film"]);
+    // The pills count only the servers shown.
+    expect(pill("Direct play")).toBe("Direct play: 0");
+    expect(pill("Bandwidth")).toBe("Bandwidth: 21.0 Mbps");
+    expect(preferences.saves).toEqual([expect.objectContaining({ timeFormat: "12h", nowPlayingHiddenServers: ["jf1"] })]);
+
+    // A new visit reads the account's saved choice.
+    remount();
+    mountPage(pageSnapshot());
+    await settle();
+    expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("false");
+    expect(cardTitles()).toEqual(["Example Show", "Big Film"]);
+
+    act(() => serverToggle("Jellyfin").click());
+    await settle();
+    expect(cardTitles()).toEqual(["Example Show", "Big Film", "Example Movie"]);
+    expect(preferences.stored).toMatchObject({ nowPlayingHiddenServers: [] });
+  });
+
+  it("starts a server added later as shown", async () => {
+    preferencesServer({ timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: ["jf1"] });
+    const added = { ...servers[0]!, id: "plex2", name: "Cabin Plex" };
+    mountPage(pageSnapshot({ servers: [added], streams: [stream({ id: "plex2:1", serverId: "plex2", serverName: "Cabin Plex", sessionKey: "1", title: "Cabin Film", mediaType: "movie", grandparentTitle: null, episodeLabel: null })] }));
+    await settle();
+    expect(serverToggle("Cabin Plex").getAttribute("aria-pressed")).toBe("true");
+    expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("false");
+    expect(cardTitles()).toEqual(["Example Show", "Big Film", "Cabin Film"]);
+  });
+
+  it("says no servers are selected when every server is off", async () => {
+    preferencesServer({ timeFormat: "12h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: ["plex1"] });
+    mountPage(pageSnapshot());
+    await settle();
+    expect(container.querySelector(".np-empty")).toBeNull();
+    act(() => serverToggle("Jellyfin").click());
+    await settle();
+    expect(container.querySelectorAll("article")).toHaveLength(0);
+    expect(container.querySelector(".np-empty")?.textContent).toContain("No servers selected");
+    // Host load is not filtered.
+    expect(container.querySelector("[aria-label='Quick glance']")).not.toBeNull();
   });
 });

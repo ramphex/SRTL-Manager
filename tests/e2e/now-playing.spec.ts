@@ -88,6 +88,7 @@ function restrictedSnapshot(value: NowPlayingSnapshot): NowPlayingSnapshot {
 
 async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean } = {}) {
   const stops: unknown[] = [];
+  let preferences: Record<string, unknown> = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] };
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -105,7 +106,10 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     else if (url.pathname === "/api/system/path-migration") response = { status: "ready", blocking: false, activePaths: {}, detectedPaths: {}, environmentErrors: [], changes: [], migration: null };
     else if (url.pathname === "/api/onboarding") response = { required: false, phase: "completed" };
     else if (url.pathname === "/api/settings/storage-locations") response = { locations: [{ key: "location_1", rootType: "local", displayName: "Home NAS", path: "/local" }, { key: "location_2", rootType: "remote", displayName: "Remote storage", path: "/remote" }] };
-    else if (url.pathname === "/api/settings/user-preferences") response = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440 };
+    else if (url.pathname === "/api/settings/user-preferences") {
+      if (request.method() === "PUT") preferences = request.postDataJSON() as Record<string, unknown>;
+      response = preferences;
+    }
     else if (url.pathname === "/api/system/version") {
       const release = { latestVersion: "0.1.4-beta.3", updateAvailable: false, status: "up_to_date", releaseUrl: null };
       response = { currentVersion: "0.1.4-beta.3", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
@@ -117,7 +121,7 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     }
     await route.fulfill({ status: 200, json: response });
   });
-  return { stops };
+  return { stops, preferences: () => preferences };
 }
 
 async function openNowPlaying(page: Page) {
@@ -204,6 +208,38 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(direct).toContainText("Home NAS");
   await expect(direct.locator(".np-card-footer")).toContainText("LAN");
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Home Plex");
+});
+
+test("filters streams by server, with type icons, and keeps the choice", async ({ page }) => {
+  const { preferences } = await fixture(page);
+  await openNowPlaying(page);
+  const list = page.getByRole("list", { name: "Media servers" });
+  const plex = list.getByRole("button", { name: /Home Plex/ });
+  const jellyfin = list.getByRole("button", { name: /Jellyfin/ });
+  await expect(plex.getByRole("img", { name: "Plex" })).toBeVisible();
+  await expect(jellyfin.getByRole("img", { name: "Jellyfin" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).locator(".np-card-footer").getByRole("img", { name: "Jellyfin" })).toBeVisible();
+  await expect(plex).toHaveAttribute("aria-pressed", "true");
+  await expect(jellyfin).toHaveAttribute("aria-pressed", "true");
+  await expect(page.getByRole("article")).toHaveCount(4);
+
+  await jellyfin.focus();
+  await page.keyboard.press("Enter");
+  await expect(jellyfin).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("article")).toHaveCount(3);
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Quick glance" }).getByLabel("Direct play: 0", { exact: true })).toBeVisible();
+  await expect.poll(() => preferences().nowPlayingHiddenServers).toEqual(["jf1"]);
+
+  await page.reload();
+  await expect(page.getByRole("list", { name: "Media servers" }).getByRole("button", { name: /Jellyfin/ })).toHaveAttribute("aria-pressed", "false");
+  await expect(page.getByRole("article")).toHaveCount(3);
+
+  await page.getByRole("list", { name: "Media servers" }).getByRole("button", { name: /Home Plex/ }).click();
+  await expect(page.getByRole("article")).toHaveCount(0);
+  await expect(page.getByRole("status").filter({ hasText: "No servers selected" })).toBeVisible();
+  // Host load is never filtered.
+  await expect(page.getByRole("region", { name: "CPU" })).toBeVisible();
 });
 
 test("shows a moderator the viewer, with no address, location or Stop", async ({ page }) => {

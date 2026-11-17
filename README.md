@@ -208,6 +208,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CHANGEL
 
 SRTL Manager is available under the [MIT License](LICENSE). Contributions are accepted under the same license.
 
+Plex and Jellyfin names and logos are trademarks of their respective owners, used only to identify the server type.
+
 ## Roadmap
 
 - Additional external metadata and automation adapters.

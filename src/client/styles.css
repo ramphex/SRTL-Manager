@@ -53,6 +53,8 @@
     #d9dee6;
   --good: #1f7a4d;
   --warn: #a25d16;
+  --server-plex: #9a7200;
+  --server-jellyfin: #00739c;
   --bad: #b42318;
   --neutral: #42526a;
   --pill-remote-bg: #fff2df;
@@ -115,6 +117,8 @@
     #090f16;
   --good: #46b47f;
   --warn: #d78d3f;
+  --server-plex: #ebaf00;
+  --server-jellyfin: #00a4dc;
   --bad: #e96c62;
   --neutral: #8f9daf;
   --pill-remote-bg: #3a2814;
@@ -8340,6 +8344,20 @@ button.danger-button:hover:not(:disabled) {
 .np-out { color: var(--warn); }
 .np-servers { display: flex; flex-wrap: wrap; gap: 6px 14px; list-style: none; margin: 0; padding: 0; }
 .np-server { align-items: baseline; display: flex; flex-wrap: wrap; font-size: 13px; gap: 4px 8px; min-width: 0; }
+.np-server { align-items: center; }
+.np-server-toggle { background: var(--surface); border: 1px solid var(--border-soft); border-radius: 999px; color: var(--text-strong); font-size: 13px; gap: 6px; min-height: 28px; padding: 0 10px 0 6px; }
+.np-server-toggle:hover { background: var(--secondary-hover); }
+.np-server-toggle strong { font-weight: 600; }
+.np-server-check { align-items: center; background: var(--selected-accent); border: 1.5px solid var(--selected-accent); border-radius: 50%; box-sizing: border-box; color: var(--surface); display: inline-flex; flex: none; height: 16px; justify-content: center; width: 16px; }
+.np-server-toggle[aria-pressed="false"] { background: transparent; border-style: dashed; color: var(--muted); }
+.np-server-toggle[aria-pressed="false"] .np-server-check { background: transparent; border-color: var(--muted); }
+.np-server-toggle[aria-pressed="false"] .server-kind-icon { opacity: 0.6; }
+.np-server-toggle[aria-pressed="false"] strong { text-decoration: line-through; text-decoration-color: color-mix(in srgb, currentColor 60%, transparent); }
+.np-server.is-hidden .np-server-status,
+.np-server.is-hidden .np-server-note { opacity: 0.6; }
+.server-kind-icon { flex: none; }
+.server-kind-icon.server-kind-plex { color: var(--server-plex); }
+.server-kind-icon.server-kind-jellyfin { color: var(--server-jellyfin); }
 .np-server-status { border-radius: 999px; font-size: 11px; padding: 1px 7px; background: var(--pill-neutral-bg); color: var(--pill-neutral-text); }
 .np-server-live .np-server-status { background: var(--pill-local-bg); color: var(--pill-local-text); }
 .np-server-polling .np-server-status { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
@@ -8448,6 +8466,7 @@ button.danger-button:hover:not(:disabled) {
 }
 
 @media (max-width: 520px) {
+  .np-server-toggle { min-height: 36px; }
   .np-card { grid-template-columns: 64px minmax(0, 1fr); padding: 10px; }
   .np-poster { width: 64px; }
   .np-details > div { grid-template-columns: 76px minmax(0, 1fr); }

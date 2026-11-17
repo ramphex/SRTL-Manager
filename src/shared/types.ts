@@ -47,6 +47,8 @@ export interface UserPreferences {
   timeFormat: TimeFormatPreference;
   autoOpenTaskStatus: boolean;
   recentJobsCompletedWindowMinutes: number;
+  // Now Playing hides streams from these media server ids. Servers are shown unless listed, so new ones start shown.
+  nowPlayingHiddenServers: string[];
 }
 
 export interface PathsSettings {
