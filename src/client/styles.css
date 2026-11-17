@@ -8357,11 +8357,10 @@ button.danger-button:hover:not(:disabled) {
 .np-card-title { min-width: 0; }
 .np-card-title h3 { font-size: 15px; line-height: 1.3; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-card-title p { color: var(--muted-strong); font-size: 13px; margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.np-stop-button { background: var(--secondary-bg); border-color: color-mix(in srgb, var(--bad), var(--border) 58%); color: var(--bad); flex: none; font-size: 13px; gap: 5px; min-height: 30px; padding: 0 9px; }
-.np-stop-button:hover { background: color-mix(in srgb, var(--bad), var(--surface) 88%); }
-.np-card-who { align-items: baseline; display: flex; flex-wrap: wrap; font-size: 13px; gap: 2px 8px; min-width: 0; }
-.np-card-who span { color: var(--muted); }
-.np-player { overflow-wrap: anywhere; }
+.np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--bad); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
+.np-stop-button:hover,
+.np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); }
+.np-card-player { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-badges { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; }
 .np-badge { align-items: center; background: var(--pill-neutral-bg); border-radius: 999px; color: var(--pill-neutral-text); box-sizing: border-box; display: inline-flex; font-size: 11px; gap: 4px; height: 20px; line-height: 1; padding: 0 8px; white-space: nowrap; }
 .np-badge svg { flex: none; }
@@ -8377,13 +8376,39 @@ button.danger-button:hover:not(:disabled) {
 .np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; }
 .np-progress span { background: var(--selected-accent); display: block; height: 100%; transition: width 1s linear; }
 .np-progress-times { color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
-.np-details { display: grid; font-size: 12px; gap: 3px; margin: 2px 0 0; }
+.np-summary { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-height: 26px; min-width: 0; }
+.np-summary-line { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
+.np-summary-line .np-badge { flex: none; }
+.np-summary-text { font-size: 12px; font-variant-numeric: tabular-nums; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-summary-heading { color: var(--muted); font-size: 12px; }
+.np-details-toggle { background: transparent; border: 1px solid transparent; border-radius: 6px; color: var(--muted-strong); flex: none; height: 26px; justify-content: center; min-height: 26px; padding: 0; width: 26px; }
+.np-details-toggle:hover,
+.np-details-toggle:focus-visible { background: var(--secondary-hover); color: var(--text-strong); }
+.np-details-toggle svg { transition: transform 160ms ease; }
+.np-details-toggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.np-details { display: grid; font-size: 12px; gap: 3px; margin: 0; }
+.np-details[hidden] { display: none; }
 .np-details > div { display: grid; gap: 8px; grid-template-columns: 92px minmax(0, 1fr); }
 .np-details dt { color: var(--muted); }
 .np-details dd { margin: 0; overflow-wrap: anywhere; }
 .np-decision { color: var(--muted); }
 .np-burn { color: var(--warn); font-weight: 600; }
-.np-geo { align-items: center; color: var(--muted-strong); display: inline-flex; gap: 3px; margin-left: 8px; }
+.np-card-footer { border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px 14px; grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
+.np-card-footer > div { min-width: 0; }
+.np-card-footer > .np-footer-location { margin-left: auto; }
+.np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
+.np-card-footer svg { color: var(--muted); flex: none; }
+.np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
+.np-location-wan { color: var(--warn); }
+.np-location-wan svg { color: currentColor; }
+.text-tooltip { max-width: 100%; }
+.text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: help; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
+.text-tooltip-trigger:hover { background: transparent; }
+/* Phones keep the shared tooltip placement: a panel fixed above the bottom navigation. */
+@media (min-width: 821px) {
+  .np-location .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; white-space: nowrap; width: max-content; }
+}
 .np-empty { align-items: center; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); display: flex; gap: 10px; padding: 18px 20px; }
 .np-empty p { margin: 0; }
 .np-setting { align-items: start; color: var(--muted); display: flex; flex-wrap: wrap; font-size: 12px; gap: 8px; }
@@ -8396,6 +8421,7 @@ button.danger-button:hover:not(:disabled) {
 
 @media (prefers-reduced-motion: reduce) {
   .np-progress span { transition: none; }
+  .np-details-toggle svg { transition: none; }
 }
 
 @media (max-width: 1080px) {
@@ -8425,6 +8451,9 @@ button.danger-button:hover:not(:disabled) {
   .np-card { grid-template-columns: 64px minmax(0, 1fr); padding: 10px; }
   .np-poster { width: 64px; }
   .np-details > div { grid-template-columns: 76px minmax(0, 1fr); }
+  .np-card-footer { gap: 4px 10px; }
+  .np-stop-button { height: 36px; min-height: 36px; width: 36px; margin: -6px -6px 0 0; }
+  .np-details-toggle { height: 32px; min-height: 32px; width: 32px; }
 }
 
 .security-settings {

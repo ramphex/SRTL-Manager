@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, livePosition, playMethodLabel, sparklinePoints, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
-import type { NowPlayingHostEvent, NowPlayingHostSample } from "../src/shared/nowPlaying";
+import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, livePosition, playMethodLabel, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
+import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingMediaInfo } from "../src/shared/nowPlaying";
 
 const sample = (at: number): NowPlayingHostSample => ({ at: new Date(at).toISOString(), cpuPercent: 10, memoryUsedBytes: 1, memoryTotalBytes: 2, networkInBps: 1, networkOutBps: 1, gpus: null });
 const info: NowPlayingHostEvent["info"] = { networkScope: "host", interfaces: ["eth0"], gpuAvailable: false, sampleIntervalMs: 3000 };
@@ -50,5 +50,45 @@ describe("Now Playing presentation", () => {
   it("draws sparkline points across the full width", () => {
     expect(sparklinePoints([0, 50, 100], 100)).toBe("0.0,32.0 60.0,16.0 120.0,0.0");
     expect(sparklinePoints([5], 100)).toBe("");
+  });
+
+  it("buckets resolutions into the quality labels of the folded card line", () => {
+    const at = (resolution: string | null, width: number | null = null, height: number | null = null) => qualityLabel({ resolution, width, height });
+    expect(at("4K")).toBe("4K");
+    expect(at("2160p")).toBe("4K");
+    expect(at("1080p")).toBe("1080p");
+    expect(at("1080")).toBe("1080p");
+    expect(at("720p")).toBe("720p");
+    expect(at("576p")).toBe("SD");
+    expect(at("480")).toBe("SD");
+    expect(at("SD")).toBe("SD");
+    // Letterboxed films report a short height, so the width decides.
+    expect(at(null, 1920, 800)).toBe("1080p");
+    expect(at(null, 3840, 1600)).toBe("4K");
+    expect(at(null, 640, 360)).toBe("SD");
+    expect(at(null)).toBeNull();
+    expect(qualityLabel(null)).toBeNull();
+  });
+
+  it("folds bandwidth and quality into one line, with an arrow when a transcode changes the resolution", () => {
+    const media = (overrides: Partial<NowPlayingMediaInfo>): NowPlayingMediaInfo => ({ container: "mkv", videoCodec: "h264", resolution: "1080p", width: 1920, height: 1080, dynamicRange: null, audioCodec: "aac", audioChannels: 2, bitrateKbps: null, ...overrides });
+    const direct = { bandwidth: { kbps: 8_200, kind: "nominal" as const }, source: media({}), output: null, videoDecision: "directPlay" as const };
+    expect(streamSummaryLine(direct)).toBe("8.2 Mbps · 1080p");
+    const transcode = { bandwidth: { kbps: 10_500, kind: "nominal" as const }, source: media({ resolution: "4K", width: 3840, height: 2160 }), output: media({}), videoDecision: "transcode" as const };
+    expect(streamQuality(transcode)).toBe("4K → 1080p");
+    expect(streamSummaryLine(transcode)).toBe("10.5 Mbps · 4K → 1080p");
+    // A transcode that keeps the resolution shows it once; a copied video ignores the output.
+    expect(streamQuality({ ...transcode, source: media({}) })).toBe("1080p");
+    expect(streamQuality({ ...transcode, videoDecision: "copy", output: media({ resolution: "720p" }) })).toBe("4K");
+    expect(streamSummaryLine({ ...direct, bandwidth: { kbps: 54_000, kind: "estimate" } })).toBe("≈ 54.0 Mbps · 1080p");
+    expect(streamSummaryLine({ ...direct, bandwidth: { kbps: null, kind: "nominal" } })).toBe("Bandwidth unknown · 1080p");
+    // Music has no video, so the line names the audio format instead.
+    expect(streamSummaryLine({ ...direct, source: media({ videoCodec: null, resolution: null, width: null, height: null, audioCodec: "flac" }) })).toBe("8.2 Mbps · FLAC Stereo");
+  });
+
+  it("labels the card's location from LAN or WAN and the plex.tv location, never the address", () => {
+    expect(streamLocationLabel({ location: "lan", relayed: false, geo: null })).toBe("LAN");
+    expect(streamLocationLabel({ location: "wan", relayed: true, geo: { city: "Example City", region: null, country: "Netherlands", code: "NL" } })).toBe("WAN relay · Example City, Netherlands");
+    expect(streamLocationLabel({ location: null, relayed: false })).toBe("Unknown");
   });
 });

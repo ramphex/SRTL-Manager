@@ -83,6 +83,55 @@ export function geoLabel(geo: NowPlayingGeo | null): string | null {
   return [geo.city, geo.region, geo.country].filter(Boolean).join(", ") || null;
 }
 
+// One resolution bucket for the folded card line: 4K, 1440p, 1080p, 720p, or SD for anything below 720p.
+export function qualityLabel(info: Pick<NowPlayingMediaInfo, "resolution" | "width" | "height"> | null): string | null {
+  if (!info) return null;
+  const hint = info.resolution?.trim().toLowerCase() ?? "";
+  let height: number | null = null;
+  if (hint === "4k" || hint === "uhd") return "4K";
+  if (hint === "sd") return "SD";
+  const numeric = /^(\d{3,4})p?$/.exec(hint);
+  if (numeric) height = Number(numeric[1]);
+  else if (info.width || info.height) {
+    const w = info.width ?? 0;
+    const h = info.height ?? 0;
+    // Widescreen films are letterboxed, so the width decides as often as the height.
+    height = w >= 3200 || h >= 1800 ? 2160 : w >= 1800 || h >= 1000 ? 1080 : w >= 1200 || h >= 700 ? 720 : Math.max(h, 1);
+  }
+  if (height === null) return null;
+  if (height >= 1800) return "4K";
+  if (height >= 1300) return "1440p";
+  if (height >= 1000) return "1080p";
+  if (height >= 700) return "720p";
+  return "SD";
+}
+
+// "4K → 1080p" when a video transcode changes the resolution bucket, otherwise the one label.
+export function streamQuality(stream: Pick<NowPlayingStream, "source" | "output" | "videoDecision">): string | null {
+  const source = qualityLabel(stream.source);
+  const output = stream.videoDecision === "transcode" ? qualityLabel(stream.output) : null;
+  if (source && output && source !== output) return `${source} → ${output}`;
+  return source ?? output;
+}
+
+export function streamBandwidthLabel(stream: Pick<NowPlayingStream, "bandwidth">): string {
+  if (stream.bandwidth.kbps === null) return "Bandwidth unknown";
+  return `${stream.bandwidth.kind === "estimate" ? "≈ " : ""}${formatKbps(stream.bandwidth.kbps)}`;
+}
+
+// The folded detail line on a stream card: bandwidth and quality side by side, such as "8.2 Mbps · 1080p".
+// Audio-only streams fall back to the audio format.
+export function streamSummaryLine(stream: Pick<NowPlayingStream, "bandwidth" | "source" | "output" | "videoDecision">): string {
+  const quality = streamQuality(stream) ?? audioLabel(stream.output) ?? audioLabel(stream.source);
+  return [streamBandwidthLabel(stream), quality].filter(Boolean).join(" · ");
+}
+
+// LAN or WAN with the plex.tv location when there is one. The client address is never part of this text.
+export function streamLocationLabel(network: Pick<NowPlayingStream["network"], "location" | "relayed"> & { geo?: NowPlayingGeo | null }): string {
+  const scope = network.location ? `${network.location.toUpperCase()}${network.relayed ? " relay" : ""}` : null;
+  return [scope, geoLabel(network.geo ?? null)].filter(Boolean).join(" · ") || "Unknown";
+}
+
 export function streamTitle(stream: Pick<NowPlayingStream, "mediaType" | "title" | "grandparentTitle" | "episodeLabel" | "year">): { primary: string; secondary: string | null } {
   if (stream.mediaType === "episode" && stream.grandparentTitle) {
     return { primary: stream.grandparentTitle, secondary: [stream.episodeLabel, stream.title].filter(Boolean).join(" · ") };

@@ -1,8 +1,9 @@
-import { useEffect, useId, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type FormEvent, type ReactNode } from "react";
 import { createRootRoute, createRoute, createRouter, lazyRouteComponent, Link, Outlet, redirect, RouterProvider, useLocation } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Activity, ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CheckCircle2, ChevronRight, Database, FileText, Gauge, HardDrive, HardDriveDownload, Info, Library, Link2, ListChecks, LogIn, LogOut, Menu, MonitorPlay, OctagonX, Plus, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, X, UserCog, UserPlus } from "lucide-react";
 import { useAccess } from "./access";
+import { useTooltipState } from "./tooltipState";
 import { cacheAccount, clearAccountData, showSignedOut } from "./accountCache";
 import { api } from "./api";
 import { BackupAlertBanner } from "./backupSettings";
@@ -153,25 +154,7 @@ export function StatCard({ label, value, detail, tone = "neutral" }: { label: st
 }
 
 export function InfoTooltip({ label, children }: { label: string; children: ReactNode }) {
-  const [open, setOpen] = useState(false);
-  const tooltipId = useId();
-  const tooltipRef = useRef<HTMLSpanElement>(null);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    const handlePointerDown = (event: PointerEvent) => {
-      if (!tooltipRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", handlePointerDown);
-    document.addEventListener("keydown", handleKeyDown);
-    return () => {
-      document.removeEventListener("pointerdown", handlePointerDown);
-      document.removeEventListener("keydown", handleKeyDown);
-    };
-  }, [open]);
+  const { open, setOpen, tooltipId, tooltipRef } = useTooltipState();
 
   return (
     <span ref={tooltipRef} className={`info-tooltip${open ? " is-open" : ""}`}>
