@@ -8375,9 +8375,9 @@ button.danger-button:hover:not(:disabled) {
 .np-card-title { min-width: 0; }
 .np-card-title h3 { font-size: 15px; line-height: 1.3; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-card-title p { color: var(--muted-strong); font-size: 13px; margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--bad); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
+.np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--muted); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
 .np-stop-button:hover,
-.np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); }
+.np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); color: var(--bad); }
 .np-card-player { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-badges { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; }
 .np-badge { align-items: center; background: var(--pill-neutral-bg); border-radius: 999px; color: var(--pill-neutral-text); box-sizing: border-box; display: inline-flex; font-size: 11px; gap: 4px; height: 20px; line-height: 1; padding: 0 8px; white-space: nowrap; }
@@ -8418,8 +8418,6 @@ button.danger-button:hover:not(:disabled) {
 .np-card-footer svg { color: var(--muted); flex: none; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
-.np-location-wan { color: var(--warn); }
-.np-location-wan svg { color: currentColor; }
 .text-tooltip { max-width: 100%; }
 .text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: help; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
 .text-tooltip-trigger:hover { background: transparent; }
