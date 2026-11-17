@@ -243,6 +243,24 @@ describe("Now Playing page", () => {
     expect(pill("Direct play")).toBe("Direct play: 1");
   });
 
+  it("shows only the server icon while each kind has one server, and names every card once a kind has two", async () => {
+    preferencesServer();
+    mountPage(pageSnapshot());
+    await settle();
+    const serverCells = () => [...container.querySelectorAll(".np-footer-server")];
+    expect(container.querySelectorAll(".np-server-name")).toHaveLength(0);
+    const trigger = serverCells()[0]!.querySelector<HTMLButtonElement>(".np-server-tooltip button")!;
+    expect(trigger.querySelector(".sr-only")?.textContent).toBe("Home Plex");
+    expect(document.getElementById(trigger.getAttribute("aria-describedby")!)?.textContent).toBe("Home Plex");
+
+    remount();
+    preferencesServer();
+    mountPage(pageSnapshot({ servers: [{ ...servers[0]!, id: "plex2", name: "Cabin Plex" }] }));
+    await settle();
+    expect(serverCells().map((cell) => cell.querySelector(".np-server-name .np-footer-text")?.textContent)).toEqual(["Home Plex", "Home Plex", "Jellyfin"]);
+    expect(container.querySelectorAll(".np-server-tooltip")).toHaveLength(0);
+  });
+
   it("hides a server's streams when it is turned off, and keeps that choice for the account", async () => {
     const preferences = preferencesServer();
     mountPage(pageSnapshot());

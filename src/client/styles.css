@@ -8417,6 +8417,8 @@ button.danger-button:hover:not(:disabled) {
 .np-card-footer > .np-footer-player { flex: 1 0 100%; }
 .np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
 .np-card-footer svg { color: var(--muted); flex: none; }
+.np-server-name { align-items: center; display: flex; gap: 4px; min-width: 0; }
+.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; min-width: 20px; justify-content: center; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
 .text-tooltip { max-width: 100%; }
@@ -8425,6 +8427,7 @@ button.danger-button:hover:not(:disabled) {
 /* Phones keep the shared tooltip placement: a panel fixed above the bottom navigation. */
 @media (min-width: 821px) {
   .np-location .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; white-space: nowrap; width: max-content; }
+  .np-server-tooltip .info-tooltip-panel { bottom: calc(100% + 6px); left: 0; max-width: calc(100vw - 48px); right: auto; top: auto; white-space: nowrap; width: max-content; }
 }
 .np-empty { align-items: center; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); display: flex; gap: 10px; padding: 18px 20px; }
 .np-empty p { margin: 0; }

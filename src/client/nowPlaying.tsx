@@ -295,7 +295,7 @@ function StreamLocation({ network }: { network: NowPlayingStream["network"] }) {
   );
 }
 
-export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream: NowPlayingStream; now: number; expanded: boolean; onToggle: (id: string) => void; onStop: (stream: NowPlayingStream) => void }) {
+export function StreamCard({ stream, now, expanded, onToggle, onStop, showServerName = true }: { stream: NowPlayingStream; now: number; expanded: boolean; onToggle: (id: string) => void; onStop: (stream: NowPlayingStream) => void; showServerName?: boolean }) {
   const canStop = useAccess().can("streams.stop");
   const [posterFailed, setPosterFailed] = useState(false);
   const detailsId = useId();
@@ -349,7 +349,10 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
       </div>
       <dl className="np-card-footer">
         <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
-        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></dd></div>
+        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd>{showServerName ? <span className="np-server-name" title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></span> : (
+          // One server of each kind: the icon is enough, and hover, focus or a tap shows the name.
+          <TextTooltip className="np-server-tooltip" trigger={<><MediaServerIcon kind={stream.serverKind} size={13} /><span className="sr-only">{stream.serverName}</span></>}>{stream.serverName}</TextTooltip>
+        )}</dd></div>
         <div className="np-footer-location"><dt className="sr-only">Location</dt><dd><StreamLocation network={stream.network} /></dd></div>
         {player ? <div className="np-footer-player"><dt className="sr-only">Player</dt><dd title={player.full}><MonitorSmartphone size={13} aria-hidden="true" /><span className="np-footer-text">{player.short}</span></dd></div> : null}
       </dl>
@@ -427,6 +430,9 @@ function LiveNowPlaying() {
   const serverFilter = useServerFilter();
   const servers = useMemo(() => snapshot?.servers ?? [], [snapshot]);
   const shownServers = servers.filter((server) => !serverFilter.hidden.has(server.id));
+  // Cards name their server only when the icon alone could mean more than one server.
+  // All servers count, not just the ones shown, so turning one off does not change the cards.
+  const showServerNames = useMemo(() => servers.some((server, index) => servers.findIndex((other) => other.kind === server.kind) !== index), [servers]);
   const streams = useMemo(() => (snapshot?.streams ?? []).filter((stream) => !serverFilter.hidden.has(stream.serverId)), [snapshot, serverFilter.hidden]);
   // The pills count only the servers shown; host CPU, memory, network and GPU stay whole.
   const summary = useMemo(() => snapshot ? (streams.length === snapshot.streams.length ? snapshot.summary : summarizeStreams(streams)) : null, [snapshot, streams]);
@@ -444,7 +450,7 @@ function LiveNowPlaying() {
         <section className="np-empty" role="status"><MonitorPlay size={22} /><p>{shownServers.length < servers.length ? "Nothing is playing on the selected servers." : "Nothing is playing right now."}</p></section>
       ) : (
         <div className="np-cards" aria-label="Streams">
-          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} expanded={expanded.has(stream.id)} onToggle={toggle} onStop={setStopping} />)}
+          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} expanded={expanded.has(stream.id)} onToggle={toggle} onStop={setStopping} showServerName={showServerNames} />)}
         </div>
       )}
       {canManageSettings ? <GeoSetting /> : null}

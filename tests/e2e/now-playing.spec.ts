@@ -188,9 +188,13 @@ test("shows one card per stream with play method, source badge, and details", as
   // The bottom row holds the user, the server and the location; the address only shows in a tooltip.
   const footer = hw.locator(".np-card-footer");
   await expect(footer).toContainText("sam");
-  await expect(footer).toContainText("Home Plex");
+  // One server of each kind: the icon stands alone and its tooltip names the server.
+  const server = footer.locator(".np-footer-server").getByRole("button", { name: /Home Plex/ });
+  await server.focus();
+  await expect(footer.locator(".np-footer-server").getByRole("tooltip")).toHaveText("Home Plex");
+  await server.blur();
   const location = footer.getByRole("button", { name: "WAN · Example City, Netherlands" });
-  const tooltip = footer.getByRole("tooltip");
+  const tooltip = footer.locator(".np-footer-location").getByRole("tooltip");
   await expect(tooltip).toBeHidden();
   await location.focus();
   await expect(tooltip).toBeVisible();
