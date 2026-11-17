@@ -8388,7 +8388,6 @@ button.danger-button:hover:not(:disabled) {
 .np-method-transcode.np-engine-hardware { background: color-mix(in srgb, var(--good) 16%, var(--surface)); color: var(--good); }
 .np-badge-local { background: var(--pill-local-bg); color: var(--pill-local-text); }
 .np-badge-remote { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
-.np-badge-bad { background: var(--pill-bad-bg); color: var(--pill-bad-text); }
 .np-badge-wan { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
 .np-badge-paused { background: var(--secondary-bg); }
 .np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; }

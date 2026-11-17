@@ -88,6 +88,16 @@ describe("Now Playing stream card", () => {
     expect(onToggle).toHaveBeenCalledWith("plex1:15");
   });
 
+  it("shows the SRTL source badge only for files on local or remote storage", () => {
+    expect(renderCard(stream()).querySelector(".np-badge-remote")?.textContent).toBe("Remote storage");
+    expect(renderCard(stream({ srtl: { status: "local", locationName: "Home NAS", policy: null } })).querySelector(".np-badge-local")?.textContent).toBe("Home NAS");
+    for (const status of ["unlinked", "broken", "unknown"] as const) {
+      const card = renderCard(stream({ srtl: { status, locationName: null, policy: null } }));
+      expect(card.querySelectorAll(".np-badges .np-badge")).toHaveLength(1);
+      expect(card.querySelector(".np-badge-state")).not.toBeNull();
+    }
+  });
+
   it("puts user, server and location in the bottom row, with the client IP only in a tooltip", () => {
     const card = renderCard(stream(), true);
     const footer = card.querySelector(".np-card-footer")!;

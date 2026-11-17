@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, MonitorSmartphone, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, MonitorSmartphone, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, UserRound, X } from "lucide-react";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
 import { nowPlayingDefaultStopMessage, summarizeStreams } from "../shared/nowPlaying";
 import type { UserPreferences } from "../shared/types";
@@ -205,9 +205,8 @@ function SourceBadge({ stream }: { stream: NowPlayingStream }) {
   const policyText = policy ? ` · policy ${storagePolicyLabel(policy as StoragePolicyKind, locations)}` : "";
   if (status === "local") return <span className="np-badge np-badge-local" title={`Playing from local storage${policyText}`}><HardDrive size={12} />{locationName ?? "Local"}</span>;
   if (status === "remote") return <span className="np-badge np-badge-remote" title={`Playing from remote storage${policyText}`}><Cloud size={12} />{locationName ?? "Remote"}</span>;
-  if (status === "broken") return <span className="np-badge np-badge-bad" title="SRTL's link for this file is broken"><Unlink size={12} />Broken link</span>;
-  if (status === "unlinked") return <span className="np-badge np-badge-neutral" title="This file is not one of SRTL's links">Not in SRTL</span>;
-  return <span className="np-badge np-badge-neutral" title="Check the media server's path mappings in Settings > Media servers">Source unknown</span>;
+  // Only files SRTL places on local or remote storage get a badge; anything else shows none.
+  return null;
 }
 
 function MediaIcon({ type }: { type: NowPlayingStream["mediaType"] }) {
