@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **Now Playing shows a shorter location.** A client in the United States reads "City, State" and every other client reads "City, Country", instead of city, region and country together. Missing parts are left out, so a client with no known city shows the state and country, or just the country.
+
 ## [0.1.5-beta.8] - 2026-11-17
 
 Recent jobs on the Dashboard shows ten at a time with Show more and a search, Now Playing cards fold to one line and can be filtered by server, and adding a Plex server leads with Sign in with Plex. There is no database migration.

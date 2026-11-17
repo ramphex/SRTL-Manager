@@ -23,7 +23,7 @@ Each stream shows the title (show, season, and episode for TV), the poster, the 
 
 Below that, the stream's technical details are folded into one line: the play method, the bandwidth, and the quality, such as **Transcode (HW)** `10.5 Mbps · 4K → 1080p`. Quality is a resolution label (4K, 1440p, 1080p, 720p, or SD for anything smaller); the arrow appears when a transcode changes it. The chevron next to the line shows the full details below and hides the line; it works with the keyboard too. Each card remembers whether it is expanded until the browser tab is closed, and new cards start folded.
 
-The bottom row of each card shows the **user**, the **server** with its type icon, and the **location**: LAN or WAN, and the city and country from plex.tv when the lookup is on. The client address is not printed on the card; hover over, focus, or tap the location to see it.
+The bottom row of each card shows the **user**, the **server** with its type icon, and the **location**: LAN or WAN, and the place from plex.tv when the lookup is on: "City, State" for a client in the United States (such as "Austin, Texas") and "City, Country" for everyone else. When a part is unknown it is left out, down to just the state and country, or the country alone. The client address is not printed on the card; hover over, focus, or tap the location to see it.
 
 In detail:
 

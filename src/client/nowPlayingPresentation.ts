@@ -78,9 +78,22 @@ export function decisionLabel(decision: NowPlayingStream["videoDecision"]): stri
   return decision === "transcode" ? "Transcode" : decision === "copy" ? "Copy" : decision === "directPlay" ? "Direct" : "—";
 }
 
+// "City, State" for a client in the US, "City, Country" everywhere else. Missing parts drop out, so a US client
+// without a city reads "State, United States" and the label is never empty or left with a dangling comma.
 export function geoLabel(geo: NowPlayingGeo | null): string | null {
   if (!geo) return null;
-  return [geo.city, geo.region, geo.country].filter(Boolean).join(", ") || null;
+  const clean = (value: string | null | undefined) => value?.trim() || null;
+  const city = clean(geo.city);
+  const region = clean(geo.region);
+  const country = clean(geo.country);
+  const code = clean(geo.code);
+  const inUS = code ? code.toUpperCase() === "US" : country?.toLowerCase() === "united states";
+  if (inUS) {
+    // Without a city the state keeps the country beside it; without a state the country stands in for it.
+    if (city) return `${city}, ${region ?? "United States"}`;
+    return region ? `${region}, United States` : "United States";
+  }
+  return [city, country].filter(Boolean).join(", ") || region;
 }
 
 // One resolution bucket for the folded card line: 4K, 1440p, 1080p, 720p, or SD for anything below 720p.

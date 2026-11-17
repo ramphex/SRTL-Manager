@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, livePosition, playMethodLabel, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
+import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingMediaInfo } from "../src/shared/nowPlaying";
 
 const sample = (at: number): NowPlayingHostSample => ({ at: new Date(at).toISOString(), cpuPercent: 10, memoryUsedBytes: 1, memoryTotalBytes: 2, networkInBps: 1, networkOutBps: 1, gpus: null });
@@ -90,5 +90,26 @@ describe("Now Playing presentation", () => {
     expect(streamLocationLabel({ location: "lan", relayed: false, geo: null })).toBe("LAN");
     expect(streamLocationLabel({ location: "wan", relayed: true, geo: { city: "Example City", region: null, country: "Netherlands", code: "NL" } })).toBe("WAN relay · Example City, Netherlands");
     expect(streamLocationLabel({ location: null, relayed: false })).toBe("Unknown");
+  });
+
+  it("shows City, State for US clients and City, Country for everyone else", () => {
+    const label = (geo: { city: string | null; region: string | null; country: string | null; code: string | null }) => geoLabel(geo);
+    // US: the state replaces the country, and the region never appears next to a non-US country.
+    expect(label({ city: "Sample Town", region: "Texas", country: "United States", code: "US" })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: "Texas", country: "United States", code: null })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: "Texas", country: null, code: "US" })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: null, country: "United States", code: "US" })).toBe("Sample Town, United States");
+    expect(label({ city: null, region: "Texas", country: "United States", code: "US" })).toBe("Texas, United States");
+    expect(label({ city: null, region: null, country: "United States", code: "US" })).toBe("United States");
+    expect(label({ city: null, region: null, country: null, code: "US" })).toBe("United States");
+    // Outside the US: the region is left out.
+    expect(label({ city: "Example City", region: "Example Province", country: "Netherlands", code: "NL" })).toBe("Example City, Netherlands");
+    expect(label({ city: null, region: "Example Province", country: "Netherlands", code: "NL" })).toBe("Netherlands");
+    expect(label({ city: "Example City", region: null, country: null, code: null })).toBe("Example City");
+    // A known non-US code wins over a stray US-looking country, and nothing produces an empty label.
+    expect(label({ city: "Example City", region: "Example Province", country: "United States", code: "NL" })).toBe("Example City, United States");
+    expect(label({ city: null, region: null, country: null, code: null })).toBeNull();
+    expect(geoLabel(null)).toBeNull();
+    expect(streamLocationLabel({ location: "wan", relayed: false, geo: { city: "Sample Town", region: "Texas", country: "United States", code: "US" } })).toBe("WAN · Sample Town, Texas");
   });
 });
