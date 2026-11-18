@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **Orphan purges no longer offer a re-request.** An orphan has no library link, so its title is either linked to another file or already shown as missing in Radarr or Sonarr, and asking for a new copy could only bring in a duplicate. The option is gone from the selection bar and from Purge all. Damaged files keeps it, since deleting a damaged file removes a linked copy.
+
 ## [0.1.5-beta.8] - 2026-11-17
 
 Recent jobs on the Dashboard shows ten at a time with Show more and a search, Now Playing cards fold to one line and can be filtered by server, and adding a Plex server leads with Sign in with Plex. There is no database migration.
