@@ -8390,12 +8390,13 @@ button.danger-button:hover:not(:disabled) {
 .np-badge-remote { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
 .np-badge-wan { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
 .np-badge-paused { background: var(--secondary-bg); }
-.np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; position: relative; }
+.np-progress { background: color-mix(in srgb, var(--selected-accent) 14%, transparent); border-radius: 999px; height: 5px; overflow: hidden; position: relative; }
 .np-progress span { display: block; height: 100%; left: 0; position: absolute; top: 0; transition: width 1s linear; }
-/* What the server has ready sits behind the played part, in a lighter shade of the same accent. */
-.np-progress .np-progress-buffer { background: color-mix(in srgb, var(--selected-accent) 35%, transparent); }
+/* Three shades of one accent: the whole length very light, what the server has ready medium, what has played full. */
+.np-progress .np-progress-buffer { background: color-mix(in srgb, var(--selected-accent) 45%, transparent); }
 .np-progress .np-progress-played { background: var(--selected-accent); }
 .np-progress-times { align-items: center; color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
+.np-time-left .text-tooltip-trigger { text-decoration: none; }
 .np-time-left .info-tooltip-panel > span { display: block; white-space: nowrap; }
 .np-summary { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-height: 26px; min-width: 0; }
 .np-summary-line { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
@@ -8425,7 +8426,7 @@ button.danger-button:hover:not(:disabled) {
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
 .text-tooltip { max-width: 100%; }
-.text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: help; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
+.text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: default; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
 .text-tooltip-trigger:hover { background: transparent; }
 /* Phones keep the shared tooltip placement: a panel fixed above the bottom navigation. */
 @media (min-width: 821px) {

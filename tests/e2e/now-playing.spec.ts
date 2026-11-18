@@ -237,7 +237,7 @@ test("filters streams by server, with type icons, and keeps the choice", async (
   const jellyfin = list.getByRole("button", { name: /Jellyfin/ });
   await expect(plex.getByRole("img", { name: "Plex" })).toBeVisible();
   await expect(jellyfin.getByRole("img", { name: "Jellyfin" })).toBeVisible();
-  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).locator(".np-card-footer").getByRole("img", { name: "Jellyfin" })).toBeVisible();
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).locator(".np-card-footer svg.server-kind-jellyfin")).toBeVisible();
   await expect(plex).toHaveAttribute("aria-pressed", "true");
   await expect(jellyfin).toHaveAttribute("aria-pressed", "true");
   await expect(page.getByRole("article")).toHaveCount(4);

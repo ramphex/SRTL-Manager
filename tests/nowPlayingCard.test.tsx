@@ -128,7 +128,10 @@ describe("Now Playing stream card", () => {
     const footer = card.querySelector(".np-card-footer")!;
     expect(footer.querySelector(".np-footer-user")?.textContent).toBe("Usersam");
     expect(footer.querySelector(".np-footer-server .np-footer-text")?.textContent).toBe("Home Plex");
-    expect(footer.querySelector(".np-footer-server svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
+    // The server is named in text, so its icon is decorative and adds no hover tooltip of its own.
+    const icon = footer.querySelector(".np-footer-server svg.server-kind-plex")!;
+    expect(icon.getAttribute("aria-hidden")).toBe("true");
+    expect(icon.querySelector("title")).toBeNull();
     const player = footer.querySelector(".np-footer-player dd")!;
     expect(player.textContent).toBe("Plex for Android (TV) · Living Room");
     expect(player.getAttribute("title")).toBe("Plex for Android (TV) · Living Room · SHIELD · Android");
@@ -272,8 +275,9 @@ describe("Now Playing page", () => {
     expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("true");
     expect(serverToggle("Home Plex").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
     expect(serverToggle("Jellyfin").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Jellyfin");
-    const footers = [...container.querySelectorAll(".np-footer-server svg[role=img]")].map((icon) => icon.getAttribute("aria-label"));
-    expect(footers).toEqual(["Plex", "Plex", "Jellyfin"]);
+    const footers = [...container.querySelectorAll(".np-footer-server svg")].map((icon) => icon.getAttribute("class"));
+    expect(footers).toEqual(["server-kind-icon server-kind-plex", "server-kind-icon server-kind-plex", "server-kind-icon server-kind-jellyfin"]);
+    expect(container.querySelector(".np-footer-server title")).toBeNull();
     expect(pill("Streams")).toBe("Streams: 3");
     expect(pill("Direct play")).toBe("Direct play: 1");
   });

@@ -365,9 +365,9 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop, showServer
       </div>
       <dl className="np-card-footer">
         <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
-        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd>{showServerName ? <span className="np-server-name" title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></span> : (
+        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd>{showServerName ? <span className="np-server-name"><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="np-footer-text">{stream.serverName}</span></span> : (
           // One server of each kind: the icon is enough, and hover, focus or a tap shows the name.
-          <TextTooltip className="np-server-tooltip" trigger={<><MediaServerIcon kind={stream.serverKind} size={13} /><span className="sr-only">{stream.serverName}</span></>}>{stream.serverName}</TextTooltip>
+          <TextTooltip className="np-server-tooltip" trigger={<><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="sr-only">{stream.serverName}</span></>}>{stream.serverName}</TextTooltip>
         )}</dd></div>
         <div className="np-footer-location"><dt className="sr-only">Location</dt><dd><StreamLocation network={stream.network} /></dd></div>
         {player ? <div className="np-footer-player"><dt className="sr-only">Player</dt><dd title={player.full}><MonitorSmartphone size={13} aria-hidden="true" /><span className="np-footer-text">{player.short}</span></dd></div> : null}

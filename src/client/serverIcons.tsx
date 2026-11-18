@@ -18,11 +18,13 @@ const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: st
   }
 };
 
-export function MediaServerIcon({ kind, size = 14 }: { kind: MediaServerKind; size?: number }) {
+// `decorative` drops the name and the browser's own hover tooltip, for icons that already sit inside a labelled tooltip.
+export function MediaServerIcon({ kind, size = 14, decorative = false }: { kind: MediaServerKind; size?: number; decorative?: boolean }) {
   const glyph = glyphs[kind];
+  const naming = decorative ? { "aria-hidden": true } : { role: "img", "aria-label": glyph.label };
   return (
-    <svg className={`server-kind-icon server-kind-${kind}`} viewBox={glyph.viewBox} width={Math.round(size * glyph.aspect)} height={size} role="img" aria-label={glyph.label} fill="currentColor">
-      <title>{glyph.label}</title>
+    <svg className={`server-kind-icon server-kind-${kind}`} viewBox={glyph.viewBox} width={Math.round(size * glyph.aspect)} height={size} {...naming} fill="currentColor">
+      {decorative ? null : <title>{glyph.label}</title>}
       <path d={glyph.path} />
     </svg>
   );
