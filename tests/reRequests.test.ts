@@ -466,7 +466,7 @@ describe("permissions", () => {
       ["GET", "/api/re-requests"],
       ["POST", "/api/re-requests/preview", { storageFileIds: [file.id] }],
       ["POST", "/api/re-requests/retry", { ids: "all_failed" }],
-      ["POST", "/api/orphans/purge", { rootType: "local", storageFileIds: [file.id], mode: "delete", reRequest: true }]
+      ["POST", "/api/orphans/purge", { rootType: "local", storageFileIds: [file.id], mode: "delete" }]
     ];
     for (const [method, url, payload] of refused) {
       const response = await app.app.inject({ method, url, headers: { cookie: moderator }, ...(payload ? { payload } : {}) });

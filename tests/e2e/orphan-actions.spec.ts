@@ -48,7 +48,7 @@ function failedPurgeJob(kind: "progress" | "events") {
 }
 
 async function fixture(page: Page, options: FixtureOptions = {}) {
-  const purges: Array<{ rootType: string; storageFileIds: number[]; folderIds: number[]; mode: string; reRequest?: boolean }> = [];
+  const purges: Array<{ rootType: string; storageFileIds: number[]; folderIds: number[]; mode: string }> = [];
   const restores: unknown[] = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
@@ -235,7 +235,7 @@ test("protected and in-use files are counted, not listed with checkboxes", async
   await expect(page.getByLabel("Filter by release").locator("option")).toHaveText(["All releases", "No file in the release is linked", "Release is partly linked"]);
 });
 
-test("selecting files brings up the action bar, with the re-request choice up front and hold only where storage can hold", async ({ page }) => {
+test("selecting files brings up the action bar, with no re-request choice and hold only where storage can hold", async ({ page }) => {
   const purges = await fixture(page, { remoteCount: 6 });
   const bar = page.getByRole("region", { name: "Selected orphans" });
   await page.goto(`${baseUrl}/library?view=local-orphans`);
@@ -250,14 +250,15 @@ test("selecting files brings up the action bar, with the re-request choice up fr
   await expect(bar.getByRole("button", { name: /Hold 7 days/ })).toBeDisabled();
   await expect(bar.getByRole("button", { name: /Delete now/ })).toHaveAttribute("aria-pressed", "true");
   await expect(bar.getByText("This storage can't hold files, so deletes are immediate.")).toBeVisible();
-  await expect(bar.getByRole("checkbox", { name: /search for a new copy/ })).not.toBeChecked();
+  await expect(bar.getByRole("checkbox", { name: /search for a new copy/ })).toHaveCount(0);
   await page.getByRole("tab", { name: /Folders with no video/ }).click();
   await page.getByRole("checkbox", { name: "Select folder movies/Empty" }).check();
   await expect(bar).toContainText("1 file and 1 folder selected");
   await bar.getByRole("button", { name: "Purge selected" }).click();
   await page.getByRole("group", { name: "Confirm orphan purge" }).getByRole("button", { name: "Delete permanently" }).click();
   await expect.poll(() => purges.length).toBe(1);
-  expect(purges[0]).toMatchObject({ rootType: "remote", mode: "delete", storageFileIds: [2], folderIds: [1], reRequest: false });
+  expect(purges[0]).toMatchObject({ rootType: "remote", mode: "delete", storageFileIds: [2], folderIds: [1] });
+  expect(purges[0]).not.toHaveProperty("reRequest");
   await expect(bar).toHaveCount(0);
 });
 
