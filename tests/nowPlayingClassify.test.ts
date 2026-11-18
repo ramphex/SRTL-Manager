@@ -160,6 +160,19 @@ describe("Jellyfin classification", () => {
 });
 
 describe("shared helpers", () => {
+  it("reads how far the server has each stream ready: Plex's transcoder position or percent, Jellyfin's completion", () => {
+    const plex = (fixture: { session: unknown; library: unknown }) => parsePlexSession(fixture.session, fixture.library, now)!.stream.bufferedMs;
+    // Plex's maxOffsetAvailable is in seconds and wins over its percent.
+    expect(plex(plexHardwareTranscodeEpisode())).toBe(900_500);
+    expect(plex(plexAudioOnlyTranscode())).toBe(2_000_000);
+    // A finished transcode has the whole file ready.
+    expect(plex(plexDirectStreamRemux())).toBe(5_400_000);
+    expect(plex(plexDirectPlayMovie())).toBeNull();
+    expect(parseJellyfinSession(jellyfinVideoTranscodeWithBurnIn(), now)!.stream.bufferedMs).toBe(1_200_000);
+    expect(parseJellyfinSession(jellyfinRemux(), now)!.stream.bufferedMs).toBeNull();
+    expect(parseJellyfinSession(jellyfinDirectPlay(), now)!.stream.bufferedMs).toBeNull();
+  });
+
   it("labels resolutions and clamps absurd bitrates", () => {
     expect(resolutionLabel(1920, 800)).toBe("1080p");
     expect(resolutionLabel(3840, 1600)).toBe("4K");

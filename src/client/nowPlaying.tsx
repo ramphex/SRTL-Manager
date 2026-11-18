@@ -7,7 +7,7 @@ import type { UserPreferences } from "../shared/types";
 import type { StoragePolicyKind } from "../shared/types";
 import { Page } from "./App";
 import { api, request } from "./api";
-import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations } from "./appShared";
+import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { useAccess } from "./access";
 import { mediaServerApi, mediaServersKey } from "./mediaServerApi";
 import { MediaServersRequired } from "./mediaServersRequired";
@@ -16,9 +16,12 @@ import { TextTooltip } from "./tooltip";
 import {
   applyHostEvent,
   audioLabel,
+  bufferedLabel,
+  bufferedPercent,
   busiestGpuEngine,
   codecLabel,
   decisionLabel,
+  endsAtLabel,
   formatBytesPerSecond,
   formatClock,
   formatGigabytes,
@@ -30,6 +33,7 @@ import {
   streamLocationLabel,
   streamSummaryLine,
   streamTitle,
+  timeLeft,
   summaryPills,
   videoLabel,
   type HostState
@@ -301,6 +305,10 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop, showServer
   const title = streamTitle(stream);
   const position = livePosition(stream, now);
   const percent = stream.durationMs ? Math.min(100, (position / stream.durationMs) * 100) : 0;
+  const bufferPercent = bufferedPercent(stream);
+  const buffered = bufferedLabel(stream, position);
+  const left = timeLeft(stream, position);
+  const { timeFormat } = useUserPreferences();
   const player = playerLabels(stream.player);
   const methodClass = stream.playMethod === "transcode" ? `np-method-transcode np-engine-${stream.transcode?.engine ?? "unknown"}` : `np-method-${stream.playMethod}`;
   return (
@@ -327,10 +335,19 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop, showServer
           </span>
           <SourceBadge stream={stream} />
         </div>
-        <div className="np-progress" role="progressbar" aria-label="Playback position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
-          <span style={{ width: `${percent}%` }} />
+        <div className="np-progress" role="progressbar" aria-label="Playback position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)} aria-valuetext={`${formatClock(position)} of ${formatClock(stream.durationMs)}${buffered ? `. ${buffered}` : ""}`} title={buffered ?? undefined}>
+          {bufferPercent !== null ? <span className="np-progress-buffer" style={{ width: `${bufferPercent}%` }} /> : null}
+          <span className="np-progress-played" style={{ width: `${percent}%` }} />
         </div>
-        <div className="np-progress-times"><span>{formatClock(position)}</span><span>{formatClock(stream.durationMs)}</span></div>
+        <div className="np-progress-times">
+          <span>{formatClock(position)}</span>
+          {left !== null ? (
+            <TextTooltip className="np-time-left" trigger={<span aria-label={`${formatClock(left)} left`}>-{formatClock(left)}</span>}>
+              <span className="np-time-total">Total {formatClock(stream.durationMs)}</span>
+              <span>{endsAtLabel(stream, position, now, timeFormat === "12h")}</span>
+            </TextTooltip>
+          ) : <span>--:--</span>}
+        </div>
         <div className={`np-summary${expanded ? " is-expanded" : ""}`}>
           {expanded ? (
             <span className="np-summary-heading">Details</span>

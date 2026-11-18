@@ -73,6 +73,9 @@ export interface NowPlayingStream {
   state: NowPlayingState;
   positionMs: number;
   durationMs: number | null;
+  // How far into the file the server has the stream ready: the transcoder's position (Plex) or completion (Jellyfin).
+  // null for direct play, and whenever the server does not say.
+  bufferedMs: number | null;
   // When the server reported positionMs; the browser advances playing streams from here.
   reportedAt: string;
   playMethod: NowPlayingPlayMethod;

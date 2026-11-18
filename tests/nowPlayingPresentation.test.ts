@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, playerLabels, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
+import { applyHostEvent, bufferedLabel, bufferedPercent, endsAtLabel, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, playerLabels, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, timeLeft, videoLabel } from "../src/client/nowPlayingPresentation";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingMediaInfo } from "../src/shared/nowPlaying";
 
 const sample = (at: number): NowPlayingHostSample => ({ at: new Date(at).toISOString(), cpuPercent: 10, memoryUsedBytes: 1, memoryTotalBytes: 2, networkInBps: 1, networkOutBps: 1, gpus: null });
@@ -21,6 +21,29 @@ describe("Now Playing presentation", () => {
     expect(livePosition({ state: "playing", positionMs: 10_000, durationMs: 60_000, reportedAt }, 1_005_000)).toBe(15_000);
     expect(livePosition({ state: "paused", positionMs: 10_000, durationMs: 60_000, reportedAt }, 1_005_000)).toBe(10_000);
     expect(livePosition({ state: "playing", positionMs: 58_000, durationMs: 60_000, reportedAt }, 1_005_000)).toBe(60_000);
+  });
+
+  it("shows how far the server has a stream ready, and nothing when it does not say", () => {
+    expect(bufferedPercent({ bufferedMs: 900_000, durationMs: 3_600_000 })).toBe(25);
+    expect(bufferedPercent({ bufferedMs: 5_000_000, durationMs: 3_600_000 })).toBe(100);
+    expect(bufferedPercent({ bufferedMs: null, durationMs: 3_600_000 })).toBeNull();
+    expect(bufferedPercent({ bufferedMs: 900_000, durationMs: null })).toBeNull();
+    expect(bufferedLabel({ bufferedMs: 900_000, durationMs: 3_600_000, playMethod: "transcode" }, 600_000)).toBe("Transcoded to 15:00, 5:00 ahead");
+    expect(bufferedLabel({ bufferedMs: 900_000, durationMs: 3_600_000, playMethod: "directStream" }, 900_000)).toBe("Prepared to 15:00, playback has caught up");
+    expect(bufferedLabel({ bufferedMs: 3_600_000, durationMs: 3_600_000, playMethod: "transcode" }, 600_000)).toBe("Transcoded to the end");
+    expect(bufferedLabel({ bufferedMs: null, durationMs: 3_600_000, playMethod: "directPlay" }, 600_000)).toBeNull();
+  });
+
+  it("counts time left and the local time playback ends, from now for a paused stream", () => {
+    const now = Date.parse("2026-11-02T10:00:00.000Z");
+    expect(timeLeft({ durationMs: 3_600_000 }, 600_000)).toBe(3_000_000);
+    expect(timeLeft({ durationMs: 3_600_000 }, 4_000_000)).toBe(0);
+    expect(timeLeft({ durationMs: null }, 600_000)).toBeNull();
+    const at = (hour12: boolean) => new Date(now + 3_000_000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12 });
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "playing" }, 600_000, now, true)).toBe(`Ends at ${at(true)}`);
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "playing" }, 600_000, now, false)).toBe(`Ends at ${at(false)}`);
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "paused" }, 600_000, now, true)).toBe(`Ends at ${at(true)} if resumed now`);
+    expect(endsAtLabel({ durationMs: null, state: "playing" }, 600_000, now, true)).toBeNull();
   });
 
   it("labels play methods and media", () => {

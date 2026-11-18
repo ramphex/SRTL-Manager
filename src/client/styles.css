@@ -8390,9 +8390,13 @@ button.danger-button:hover:not(:disabled) {
 .np-badge-remote { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
 .np-badge-wan { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
 .np-badge-paused { background: var(--secondary-bg); }
-.np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; }
-.np-progress span { background: var(--selected-accent); display: block; height: 100%; transition: width 1s linear; }
-.np-progress-times { color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
+.np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; position: relative; }
+.np-progress span { display: block; height: 100%; left: 0; position: absolute; top: 0; transition: width 1s linear; }
+/* What the server has ready sits behind the played part, in a lighter shade of the same accent. */
+.np-progress .np-progress-buffer { background: color-mix(in srgb, var(--selected-accent) 35%, transparent); }
+.np-progress .np-progress-played { background: var(--selected-accent); }
+.np-progress-times { align-items: center; color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
+.np-time-left .info-tooltip-panel > span { display: block; white-space: nowrap; }
 .np-summary { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-height: 26px; min-width: 0; }
 .np-summary-line { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .np-summary-line .np-badge { flex: none; }
@@ -8427,6 +8431,7 @@ button.danger-button:hover:not(:disabled) {
 @media (min-width: 821px) {
   .np-location .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; white-space: nowrap; width: max-content; }
   .np-server-tooltip .info-tooltip-panel { bottom: calc(100% + 6px); left: 0; max-width: calc(100vw - 48px); right: auto; top: auto; white-space: nowrap; width: max-content; }
+  .np-time-left .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; width: max-content; }
 }
 .np-empty { align-items: center; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); display: flex; gap: 10px; padding: 18px 20px; }
 .np-empty p { margin: 0; }

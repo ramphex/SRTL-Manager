@@ -233,6 +233,21 @@ function plexMediaType(value: unknown): ParsedStream["mediaType"] {
 
 // One entry of /status/sessions MediaContainer.Metadata. sourceMetadata is the item's /library/metadata entry,
 // which describes the original file while the session's own Media describes the transcoder's output.
+// A percent of the file turned into a position, kept within the file.
+function bufferedFromPercent(percent: number | null, durationMs: number | null): number | null {
+  if (percent === null || durationMs === null || durationMs <= 0 || percent < 0) return null;
+  return Math.round(Math.min(100, percent) / 100 * durationMs);
+}
+
+// Plex's transcoder reports the furthest position it has ready in seconds (maxOffsetAvailable), and otherwise a percent done.
+function plexBufferedMs(transcodeSession: Record<string, unknown> | null, durationMs: number | null): number | null {
+  if (!transcodeSession) return null;
+  if (bool(transcodeSession.complete) === true && durationMs !== null) return durationMs;
+  const offset = num(transcodeSession.maxOffsetAvailable);
+  if (offset !== null && offset >= 0) return Math.round(durationMs !== null ? Math.min(durationMs, offset * 1000) : offset * 1000);
+  return bufferedFromPercent(num(transcodeSession.progress), durationMs);
+}
+
 export function parsePlexSession(raw: unknown, sourceMetadata: unknown, now: Date = new Date()): ParsedSession | null {
   const meta = obj(raw);
   const sessionKey = str(meta?.sessionKey);
@@ -347,6 +362,7 @@ export function parsePlexSession(raw: unknown, sourceMetadata: unknown, now: Dat
       state: plexState(player?.state),
       positionMs: Math.max(0, Math.round(num(meta.viewOffset) ?? 0)),
       durationMs: num(meta.duration),
+      bufferedMs: playMethod === "directPlay" ? null : plexBufferedMs(transcodeSession, num(meta.duration)),
       reportedAt: now.toISOString(),
       playMethod,
       videoDecision,
@@ -503,6 +519,7 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
       state: bool(playState?.IsPaused) === true ? "paused" : "playing",
       positionMs: Math.max(0, Math.round((num(playState?.PositionTicks) ?? 0) / ticksPerMs)),
       durationMs: runTicks !== null ? Math.round(runTicks / ticksPerMs) : null,
+      bufferedMs: playMethod === "directPlay" ? null : bufferedFromPercent(num(transcoding?.CompletionPercentage), runTicks !== null ? Math.round(runTicks / ticksPerMs) : null),
       reportedAt: now.toISOString(),
       playMethod,
       videoDecision,

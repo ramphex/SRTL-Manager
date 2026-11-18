@@ -37,6 +37,33 @@ export function livePosition(stream: Pick<NowPlayingStream, "state" | "positionM
   return stream.durationMs ? Math.min(stream.durationMs, position) : position;
 }
 
+// How far the server has the stream ready, as a percent of the file; null when it does not say.
+export function bufferedPercent(stream: Pick<NowPlayingStream, "bufferedMs" | "durationMs">): number | null {
+  if (stream.bufferedMs === null || !stream.durationMs) return null;
+  return Math.max(0, Math.min(100, (stream.bufferedMs / stream.durationMs) * 100));
+}
+
+// One line for the bar's tooltip: how far ahead of playback the server has the stream ready.
+export function bufferedLabel(stream: Pick<NowPlayingStream, "bufferedMs" | "durationMs" | "playMethod">, position: number): string | null {
+  if (stream.bufferedMs === null || !stream.durationMs) return null;
+  const verb = stream.playMethod === "transcode" ? "Transcoded" : "Prepared";
+  if (stream.bufferedMs >= stream.durationMs) return `${verb} to the end`;
+  const ahead = stream.bufferedMs - position;
+  return `${verb} to ${formatClock(stream.bufferedMs)}${ahead > 0 ? `, ${formatClock(ahead)} ahead` : ", playback has caught up"}`;
+}
+
+export function timeLeft(stream: Pick<NowPlayingStream, "durationMs">, position: number): number | null {
+  return stream.durationMs ? Math.max(0, stream.durationMs - position) : null;
+}
+
+// The local clock time playback reaches the end; a paused stream counts from now, as if resumed.
+export function endsAtLabel(stream: Pick<NowPlayingStream, "durationMs" | "state">, position: number, now: number, hour12: boolean): string | null {
+  const left = timeLeft(stream, position);
+  if (left === null) return null;
+  const at = new Date(now + left).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12 });
+  return stream.state === "paused" ? `Ends at ${at} if resumed now` : `Ends at ${at}`;
+}
+
 const codecNames: Record<string, string> = {
   h264: "H.264", hevc: "HEVC", h265: "HEVC", av1: "AV1", vp9: "VP9", mpeg2video: "MPEG-2", mpeg4: "MPEG-4", vc1: "VC-1",
   aac: "AAC", ac3: "AC3", eac3: "EAC3", truehd: "TrueHD", dts: "DTS", "dca": "DTS", "dts-hd ma": "DTS-HD MA", flac: "FLAC", mp3: "MP3", opus: "Opus", vorbis: "Vorbis", pcm: "PCM",

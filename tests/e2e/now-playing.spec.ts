@@ -18,7 +18,7 @@ function stream(overrides: Partial<NowPlayingStream> & Pick<NowPlayingStream, "s
     id: `${serverId}:${overrides.sessionKey}`, serverId, serverKind: serverId === "jf1" ? "jellyfin" : "plex", serverName: serverId === "jf1" ? "Jellyfin" : "Home Plex",
     user: { id: "1", name: "alex_03" }, mediaType: "movie", grandparentTitle: null, episodeLabel: null, year: 2021, posterUrl: `/api/now-playing/poster/${"p".repeat(31)}${overrides.sessionKey.slice(-1)}`,
     player: { name: "Living Room", device: "SHIELD", platform: "Android", product: "Plex for Android (TV)", version: "10.0" },
-    state: "playing", positionMs: 600_000, durationMs: 7_200_000, reportedAt: new Date().toISOString(),
+    state: "playing", positionMs: 600_000, durationMs: 7_200_000, bufferedMs: null, reportedAt: new Date().toISOString(),
     videoDecision: "directPlay", audioDecision: "directPlay", subtitle: null, source: media({}), output: null, transcode: null,
     bandwidth: { kbps: 12_500, kind: "nominal" }, network: { location: "lan", ip: "192.168.1.40", relayed: false, secure: true, geo: null },
     srtl: { status: "local", locationName: "Home NAS", policy: "location_1" }, stop: { available: true, reason: null },
@@ -30,7 +30,7 @@ function streams(plexPass: boolean): NowPlayingStream[] {
   const plexStop = plexPass ? { available: true, reason: null } : { available: false, reason: "Stopping Plex streams needs an active Plex Pass on the server owner's account." };
   return [
     stream({
-      sessionKey: "15", title: "The Fifth One", mediaType: "episode", grandparentTitle: "Example Show", episodeLabel: "S02E05", playMethod: "transcode", user: { id: "7", name: "sam" },
+      sessionKey: "15", bufferedMs: 3_600_000, title: "The Fifth One", mediaType: "episode", grandparentTitle: "Example Show", episodeLabel: "S02E05", playMethod: "transcode", user: { id: "7", name: "sam" },
       videoDecision: "transcode", audioDecision: "transcode", source: media({ videoCodec: "hevc", resolution: "4K", dynamicRange: "HDR10", audioCodec: "truehd", audioChannels: 8 }),
       output: media({ container: "mp4", audioCodec: "aac", audioChannels: 2, bitrateKbps: 10_000 }), subtitle: { decision: "burn", codec: "pgs", language: "English" },
       transcode: { engine: "hardware", hardwareDecode: "nvdec", hardwareEncode: "nvenc", speed: 3.4, throttled: false, reasons: ["Subtitle burn-in", "Video codec hevc to h264"], reasonsDerived: true },
@@ -200,6 +200,16 @@ test("shows one card per stream with play method, source badge, and details", as
   await expect(tooltip).toBeVisible();
   await expect(tooltip).toHaveText("Client IP 198.51.100.23");
   await expect(location).toHaveAccessibleDescription("Client IP 198.51.100.23");
+  // The bar shows what the transcoder has ready behind the played part; time left opens the total and the end time.
+  await expect(hw.locator(".np-progress-buffer")).toHaveAttribute("style", /width: 50%/);
+  await expect(hw.getByRole("progressbar", { name: "Playback position" })).toHaveAttribute("title", /^Transcoded to 1:00:00, /);
+  const timeLeft = hw.locator(".np-time-left .text-tooltip-trigger");
+  await expect(timeLeft).toHaveText(/^-1:(49:\d\d|50:00)$/);
+  await timeLeft.focus();
+  await expect(hw.locator(".np-time-left").getByRole("tooltip")).toBeVisible();
+  await expect(hw.locator(".np-time-left").getByRole("tooltip")).toContainText("Total 2:00:00");
+  await expect(hw.locator(".np-time-left").getByRole("tooltip")).toContainText(/Ends at \d{1,2}:\d\d/);
+  await timeLeft.blur();
   // The choice survives a reload within the session.
   await page.reload();
   await expect(page.getByRole("article", { name: "Example Show — sam" }).getByRole("button", { name: "Stream details" })).toHaveAttribute("aria-expanded", "true");
@@ -213,6 +223,8 @@ test("shows one card per stream with play method, source badge, and details", as
   const direct = page.getByRole("article", { name: "Example Movie — alex_03" });
   await expect(direct.locator(".np-summary-line")).toHaveText("Direct play≈ 54.0 Mbps · 1080p");
   await expect(direct).toContainText("Home NAS");
+  // Direct play has nothing to prepare, so its bar has no buffered part.
+  await expect(direct.locator(".np-progress-buffer")).toHaveCount(0);
   await expect(direct.locator(".np-card-footer")).toContainText("LAN");
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Home Plex");
 });

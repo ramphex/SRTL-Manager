@@ -60,7 +60,7 @@ export function plexHardwareTranscodeEpisode(): { session: Json; library: Json }
     Player: plexPlayer({ local: false, address: "198.51.100.23", remotePublicAddress: "198.51.100.23", product: "Plex for Android (TV)", platform: "Android", device: "SHIELD Android TV", title: "Living Room" }),
     Session: { id: "plex-session-def", bandwidth: 10500, location: "wan" },
     TranscodeSession: {
-      key: "/transcode/sessions/t1", throttled: false, complete: false, progress: 12.5, speed: 3.4, videoDecision: "transcode", audioDecision: "transcode", subtitleDecision: "burn",
+      key: "/transcode/sessions/t1", throttled: false, complete: false, progress: 12.5, maxOffsetAvailable: 900.5, speed: 3.4, videoDecision: "transcode", audioDecision: "transcode", subtitleDecision: "burn",
       protocol: "dash", container: "mp4", videoCodec: "h264", audioCodec: "aac", audioChannels: 2, width: 1920, height: 1080,
       transcodeHwRequested: true, transcodeHwDecoding: "nvdec", transcodeHwEncoding: "nvenc", transcodeHwFullPipeline: false, sourceVideoCodec: "hevc", sourceAudioCodec: "truehd"
     }
@@ -77,7 +77,7 @@ export function plexAudioOnlyTranscode(): { session: Json; library: Json } {
     User: { id: "1", title: "alex_03" },
     Player: plexPlayer({ state: "paused", title: "Bedroom TV", product: "Plex for LG", platform: "webOS" }),
     Session: { id: "plex-session-ghi", bandwidth: 61000, location: "lan" },
-    TranscodeSession: { key: "/transcode/sessions/t2", throttled: true, speed: 0.6, videoDecision: "copy", audioDecision: "transcode", container: "mkv", videoCodec: "hevc", audioCodec: "ac3", audioChannels: 6, transcodeHwRequested: true }
+    TranscodeSession: { key: "/transcode/sessions/t2", throttled: true, progress: 25, speed: 0.6, videoDecision: "copy", audioDecision: "transcode", container: "mkv", videoCodec: "hevc", audioCodec: "ac3", audioChannels: 6, transcodeHwRequested: true }
   };
   return { session, library };
 }
@@ -91,7 +91,7 @@ export function plexDirectStreamRemux(): { session: Json; library: Json } {
     User: { id: "9", title: "sam" },
     Player: plexPlayer({ state: "buffering", local: false, address: "100.64.3.4", remotePublicAddress: "100.64.3.4" }),
     Session: { id: "plex-session-jkl", bandwidth: 2147483647, location: "wan" },
-    TranscodeSession: { key: "/transcode/sessions/t3", speed: 25, throttled: true, videoDecision: "copy", audioDecision: "copy", container: "mkv", videoCodec: "mpeg4", audioCodec: "mp3", audioChannels: 2 }
+    TranscodeSession: { key: "/transcode/sessions/t3", speed: 25, throttled: true, complete: true, videoDecision: "copy", audioDecision: "copy", container: "mkv", videoCodec: "mpeg4", audioCodec: "mp3", audioChannels: 2 }
   };
   return { session, library };
 }
@@ -143,7 +143,7 @@ export function jellyfinVideoTranscodeWithBurnIn(): Json {
     },
     TranscodingInfo: {
       AudioCodec: "aac", VideoCodec: "h264", Container: "ts", IsVideoDirect: false, IsAudioDirect: false, Bitrate: 12_000_000, Width: 1920, Height: 1080, AudioChannels: 2,
-      HardwareAccelerationType: "nvenc", TranscodeReasons: ["VideoCodecNotSupported", "SubtitleCodecNotSupported"]
+      HardwareAccelerationType: "nvenc", TranscodeReasons: ["VideoCodecNotSupported", "SubtitleCodecNotSupported"], CompletionPercentage: 40
     }
   });
 }

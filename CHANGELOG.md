@@ -7,6 +7,7 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Changed
 
 - **Now Playing shows a shorter location.** A client in the United States reads "City, State" and every other client reads "City, Country", instead of city, region and country together. Missing parts are left out, so a client with no known city shows the state and country, or just the country.
+- **Now Playing's progress bar shows what the server has ready, and time left.** A lighter part of the bar shows how far ahead the server has prepared a transcode or direct stream, from Plex's transcoder position or Jellyfin's transcode completion; hovering the bar says how far ahead that is. Direct play has nothing to prepare, so it has no lighter part. The right side shows the time left instead of the total length, and its tooltip gives the total and the local time playback will end.
 
 ## [0.1.5-beta.8] - 2026-11-17
 
