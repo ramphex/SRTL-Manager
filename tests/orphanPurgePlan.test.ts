@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { OrphanLeftoverFolder, OrphanReviewItem } from "../src/shared/types";
-import { filterOrphans, planPurgeAll, purgeBatches, sortOrphans } from "../src/client/orphanPurgePlan";
+import { filterOrphans, isPurgeable, modifiedAgoText, planPurgeAll, purgeBatches, sortOrphans } from "../src/client/orphanPurgePlan";
 
 function item(id: number, patch: Partial<OrphanReviewItem> = {}): OrphanReviewItem {
   return { storageFileId: id, rootType: "remote", relativePath: `m/${id}.mkv`, filePath: `/r/m/${id}.mkv`, section: "movies", itemName: "m", sizeBytes: 100, mtimeMs: 0, category: "superseded", protectedReason: null, hollow: false, integrity: "ok", zeroSamples: null, label: patch.category === "unlinked" ? "no_title_match" : (patch.category ?? "superseded"), matchedTitle: null, releaseName: "m", releaseStatus: "none_linked", releaseFileCount: 1, releaseLinkedCount: 0, linkedSizeBytes: null, sizeComparison: null, episodeCoverage: null, extraLinkPath: null, ...patch };
@@ -10,7 +10,10 @@ function folder(id: number, patch: Partial<OrphanLeftoverFolder> = {}): OrphanLe
 }
 
 describe("planPurgeAll", () => {
-  const review = { items: [item(1), item(2, { category: "unlinked", sizeBytes: 300 }), item(3, { protectedReason: "modified recently" })], leftoverFolders: [folder(10), folder(11, { protectedReason: "copy in progress" })] };
+  const review = {
+    items: [item(1), item(2, { category: "unlinked", sizeBytes: 300 }), item(3, { protectedReason: "Modified in the last 24 hours", protectedKind: "recent", sizeBytes: 40 }), item(4, { protectedReason: "Part of an unfinished copy", protectedKind: "copy" })],
+    leftoverFolders: [folder(10), folder(11, { protectedReason: "Part of an unfinished copy", protectedKind: "copy" }), folder(12, { protectedReason: "Modified in the last 24 hours", protectedKind: "recent", totalBytes: 5 })]
+  };
 
   it("excludes protected files and leaves folders out unless opted in", () => {
     const plan = planPurgeAll(review, false);
@@ -20,6 +23,27 @@ describe("planPurgeAll", () => {
     expect(plan.totalBytes).toBe(400);
     expect(plan.byCategory).toEqual([{ category: "superseded", count: 1, sizeBytes: 100 }, { category: "unlinked", count: 1, sizeBytes: 300 }]);
     expect(plan.byLabel).toEqual([{ label: "superseded", count: 1, sizeBytes: 100 }, { label: "no_title_match", count: 1, sizeBytes: 300 }]);
+    expect(plan.recentCount).toBe(0);
+  });
+
+  it("adds files and folders protected only by the 24-hour rule when recent files are included", () => {
+    const plan = planPurgeAll(review, true, true);
+    expect(plan.fileIds).toEqual([1, 2, 3]);
+    expect(plan.folderIds).toEqual([10, 12]);
+    expect(plan.recentCount).toBe(2);
+    expect(plan.totalCount).toBe(5);
+    expect(plan.totalBytes).toBe(100 + 300 + 40 + 50 + 5);
+    expect(plan.byLabel).toEqual([{ label: "superseded", count: 2, sizeBytes: 140 }, { label: "no_title_match", count: 1, sizeBytes: 300 }]);
+    // Folders still wait for their own opt-in.
+    expect(planPurgeAll(review, false, true)).toMatchObject({ folderIds: [], recentCount: 1 });
+  });
+
+  it("never includes a protection with no kind or any kind but recent", () => {
+    expect(isPurgeable(item(1, { protectedReason: "Modified in the last 24 hours" }), true)).toBe(false);
+    expect(isPurgeable(item(1, { protectedReason: "Still linked from /x", protectedKind: "link" }), true)).toBe(false);
+    expect(isPurgeable(item(1, { protectedReason: "Part of an unfinished copy", protectedKind: "copy" }), true)).toBe(false);
+    expect(isPurgeable(item(1, { protectedReason: "Modified in the last 24 hours", protectedKind: "recent" }), false)).toBe(false);
+    expect(isPurgeable(item(1, { protectedReason: "Modified in the last 24 hours", protectedKind: "recent" }), true)).toBe(true);
   });
 
   it("includes only unprotected folders when opted in", () => {
@@ -27,6 +51,15 @@ describe("planPurgeAll", () => {
     expect(plan.folderIds).toEqual([10]);
     expect(plan.totalCount).toBe(3);
     expect(plan.totalBytes).toBe(450);
+  });
+});
+
+describe("modifiedAgoText", () => {
+  it("says how long ago a recent file changed", () => {
+    const now = Date.parse("2026-11-19T12:00:00Z");
+    expect(modifiedAgoText(now - 20_000, now)).toBe("Modified just now");
+    expect(modifiedAgoText(now - 25 * 60_000, now)).toBe("Modified 25m ago");
+    expect(modifiedAgoText(now - 3 * 3_600_000 - 59 * 60_000, now)).toBe("Modified 3h ago");
   });
 });
 

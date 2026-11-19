@@ -414,6 +414,14 @@ describe("extra symlink folders", () => {
     await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
   });
 
+  it("keeps a recent file an extra folder links to protected when recent files are included", async () => {
+    const target = await storageFile("remote", "Recent.Linked.Release.2026/file.mkv", { mtime: new Date() });
+    const link = await pointer("recent.mkv", target.filePath);
+    configureExtraSymlinkFolders([other]);
+    await expect(app.jobs.startOrphanPurge("remote", [target.id], "delete", [], false, true)).rejects.toThrow(`Still linked from ${link}`);
+    await expect(fs.stat(target.filePath)).resolves.toBeTruthy();
+  });
+
   it("protects everything under a link to a release folder, and resolves relative links and links to links", async () => {
     const inFolder = await storageFile("remote", "Whole.Release.2017/file.mkv");
     const relative = await storageFile("remote", "Relative.Release.2016/file.mkv");
@@ -657,7 +665,7 @@ describe("orphan purge", () => {
         actor: { userId: expect.any(Number), username: "fixture" },
         ip: expect.any(String),
         requestId: queued.headers["x-request-id"],
-        targets: { jobId: purgeJobId, rootType: "remote", mode: "delete", reRequest: false, storageFileIds: [remote.id], folderIds: [] }
+        targets: { jobId: purgeJobId, rootType: "remote", mode: "delete", reRequest: false, includeRecent: false, storageFileIds: [remote.id], folderIds: [] }
       })
     ]);
     expect((await app.jobs.listEvents(purgeJobId)).map((event) => event.message)).toContain("Deleted 1 orphan file(s) and 0 folder(s) on remote storage (requested by fixture from 127.0.0.1)");
@@ -832,6 +840,41 @@ describe("folders with no video", () => {
     expect(events).toContain("modified in the last 24 hours");
     expect(events).toContain("unfinished copy");
     expect(events).toContain("Only folders inside a storage title area can be purged");
+  });
+
+  it("purges a recent folder only when recent files are included, and keeps copy and link protection", async () => {
+    const fresh = await leftoverFolder("local", "movies/Fresh (2026)", { "fresh.srt": "new", "art/poster.jpg": "art" }, new Date(Date.now() - 3 * 3_600_000));
+    const copying = await leftoverFolder("local", "movies/Copying (2026)", { "a.srt": "srt" }, new Date());
+    const linked = await leftoverFolder("local", "movies/Linked (2026)", { "linked.srt": "subtitle" }, new Date());
+    await mediaLink("movies", "Linked (2026)", "linked.srt", path.join(linked.dirPath, "linked.srt"));
+    const timestamp = new Date().toISOString();
+    await app.database.db.insert(schema.jobs).values({ id: 902, type: "copy", status: "failed", createdAt: timestamp, progress: "{}" });
+    await app.database.db.insert(schema.copyOperations).values({ jobId: 902, mediaLinkId: 1, linkPath: "/x", sourcePath: "/remote/c.mkv", destinationPath: path.join(copying.dirPath, "Copying (2026).mkv"), originalLinkState: "symlink", originalTargetPath: "/remote/c.mkv", stage: "transferring", createdAt: timestamp, updatedAt: timestamp });
+
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    expect(review.leftoverFolders.map((folder) => [folder.relativePath, folder.protectedKind])).toEqual([
+      ["movies/Copying (2026)", "copy"],
+      ["movies/Fresh (2026)", "recent"]
+    ]);
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [fresh.id])).rejects.toThrow("Modified in the last 24 hours");
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [copying.id], false, true)).rejects.toThrow("Part of an unfinished copy");
+    await expect(app.jobs.startOrphanPurge("local", [], "delete", [linked.id], false, true)).rejects.toThrow("A symlink points into this folder");
+
+    const jobId = await app.jobs.startOrphanPurge("local", [], "delete", [fresh.id], false, true);
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ options: expect.objectContaining({ includeRecent: true }) });
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ deleted: 1, options: expect.objectContaining({ includeRecent: true }) }) });
+    await expect(fs.stat(fresh.dirPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses a recent folder that changed after the scan, even when recent files are included", async () => {
+    const fresh = await leftoverFolder("local", "movies/Busy (2026)", { "a.srt": "srt" }, new Date(Date.now() - 3_600_000));
+    const jobId = await app.jobs.startOrphanPurge("local", [], "delete", [fresh.id], false, true);
+    await fs.writeFile(path.join(fresh.dirPath, "b.srt"), "still arriving");
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    await expect(fs.stat(path.join(fresh.dirPath, "a.srt"))).resolves.toBeTruthy();
+    expect((await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join()).toContain("changed after the last storage scan");
   });
 
   it("accepts folder ids over HTTP", async () => {
@@ -1643,5 +1686,97 @@ describe("deletes that storage does not carry out", () => {
     const job = await app.jobs.getJob(jobId);
     expect(job).toMatchObject({ status: "cancelled", progress: expect.objectContaining({ stage: "cancelled", deleted: 1 }) });
     expect((await app.jobs.listEvents(jobId)).map((event) => event.message)).toContain("Deleted remote items were not checked again: the job was stopped");
+  });
+});
+
+describe("including files modified in the last 24 hours", () => {
+  const recent = () => new Date(Date.now() - 3 * 3_600_000);
+
+  beforeEach(async () => {
+    const anchor = await storageFile("local", "movies/Anchor (2000)/Anchor (2000).mkv");
+    await mediaLink("movies", "Anchor (2000)", "Anchor (2000).mkv", anchor.filePath);
+  });
+
+  async function unfinishedCopyOf(filePath: string) {
+    const timestamp = new Date().toISOString();
+    await app.database.db.insert(schema.jobs).values({ id: 903, type: "copy", status: "failed", createdAt: timestamp, progress: "{}" });
+    await app.database.db.insert(schema.copyOperations).values({ jobId: 903, mediaLinkId: 1, linkPath: "/x", sourcePath: "/remote/c.mkv", destinationPath: filePath, originalLinkState: "symlink", originalTargetPath: "/remote/c.mkv", stage: "transferring", createdAt: timestamp, updatedAt: timestamp });
+  }
+
+  it("tells the protection reasons apart in the review", async () => {
+    const fresh = await storageFile("local", "movies/Fresh (2026)/Fresh (2026).mkv", { mtime: recent() });
+    const copying = await storageFile("local", "movies/Copying (2026)/Copying (2026).mkv", { mtime: recent() });
+    const old = await storageFile("local", "movies/Old (1999)/Old (1999).mkv");
+    await unfinishedCopyOf(copying.filePath);
+    const review = await listOrphanReview(app.database.db, "local", 7);
+    const kinds = Object.fromEntries(review.items.map((item) => [item.storageFileId, [item.protectedKind, item.protectedReason]]));
+    expect(kinds).toEqual({
+      [fresh.id]: ["recent", "Modified in the last 24 hours"],
+      [copying.id]: ["copy", "Part of an unfinished copy"],
+      [old.id]: [null, null]
+    });
+  });
+
+  it("queues and purges a recent file only when asked, and records that in the job", async () => {
+    const fresh = await storageFile("local", "movies/Fresh (2026)/Fresh (2026).mkv", { mtime: recent() });
+    await expect(app.jobs.startOrphanPurge("local", [fresh.id], "delete")).rejects.toThrow("Modified in the last 24 hours");
+    await expect(app.jobs.startOrphanPurge("local", [fresh.id], "delete", [], false, false)).rejects.toThrow("Modified in the last 24 hours");
+    const jobId = await app.jobs.startOrphanPurge("local", [fresh.id], "delete", [], false, true);
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ options: expect.objectContaining({ includeRecent: true }) });
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ deleted: 1, options: expect.objectContaining({ includeRecent: true }) }) });
+    await expect(fs.stat(fresh.filePath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("holds a recent file when asked", async () => {
+    const fresh = await storageFile("local", "movies/Fresh (2026)/Fresh (2026).mkv", { mtime: recent() });
+    const jobId = await app.jobs.startOrphanPurge("local", [fresh.id], "hold", [], false, true);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "completed", progress: expect.objectContaining({ held: 1 }) });
+    expect((await listHeldOrphans(app.database.db)).map((entry) => entry.filePath)).toEqual([fresh.filePath]);
+  });
+
+  it("still refuses recent files that are part of an unfinished copy or linked", async () => {
+    const copying = await storageFile("local", "movies/Copying (2026)/Copying (2026).mkv", { mtime: recent() });
+    await unfinishedCopyOf(copying.filePath);
+    await expect(app.jobs.startOrphanPurge("local", [copying.id], "delete", [], false, true)).rejects.toThrow("Part of an unfinished copy");
+    const linked = await storageFile("local", "movies/Linked (2026)/Linked (2026).mkv", { mtime: recent() });
+    await mediaLink("movies", "Linked (2026)", "Linked (2026).mkv", linked.filePath);
+    await expect(app.jobs.startOrphanPurge("local", [linked.id], "delete", [], false, true)).rejects.toThrow("no longer an orphan");
+    for (const file of [copying, linked]) await expect(fs.stat(file.filePath)).resolves.toBeTruthy();
+  });
+
+  it("rechecks a recent file before it goes: a change or a new link still stops it", async () => {
+    const changed = await storageFile("local", "movies/Changed (2026)/Changed (2026).mkv", { mtime: recent() });
+    const relinked = await storageFile("local", "movies/Relinked (2026)/Relinked (2026).mkv", { mtime: recent() });
+    const jobId = await app.jobs.startOrphanPurge("local", [changed.id, relinked.id], "delete", [], false, true);
+    await fs.appendFile(changed.filePath, " still downloading");
+    await mediaLink("movies", "Relinked (2026)", "Relinked (2026).mkv", relinked.filePath);
+    await runJobs();
+    expect(await app.jobs.getJob(jobId)).toMatchObject({ status: "failed" });
+    for (const file of [changed, relinked]) await expect(fs.stat(file.filePath)).resolves.toBeTruthy();
+    const events = (await app.jobs.listEvents(jobId)).map((event) => JSON.stringify(event.data)).join();
+    expect(events).toContain("changed after it was inventoried");
+    expect(events).toContain("no longer an orphan");
+  });
+
+  it("takes includeRecent over HTTP, defaulting to off, and records it in the audit trail", async () => {
+    const fresh = await storageFile("remote", "Fresh.Release.2026/file.mkv", { mtime: recent() });
+    const setup = await app.app.inject({ method: "POST", url: "/api/auth/setup", payload: { setupToken: readSetupToken(app), username: "fixture", password: "fixture-password-123", confirmPassword: "fixture-password-123" } });
+    const cookie = String(setup.headers["set-cookie"]);
+    const review = (await app.app.inject({ method: "GET", url: "/api/orphans?rootType=remote", headers: { cookie } })).json<OrphanReview>();
+    expect(review.items).toEqual([expect.objectContaining({ storageFileId: fresh.id, protectedKind: "recent" })]);
+    const refused = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", storageFileIds: [fresh.id], mode: "delete" } });
+    expect(refused.statusCode).toBe(400);
+    expect(refused.body).toContain("Modified in the last 24 hours");
+    const invalid = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", storageFileIds: [fresh.id], mode: "delete", includeRecent: "yes" } });
+    expect(invalid.statusCode).toBe(400);
+    const queued = await app.app.inject({ method: "POST", url: "/api/orphans/purge", headers: { cookie }, payload: { rootType: "remote", storageFileIds: [fresh.id], mode: "delete", includeRecent: true } });
+    expect(queued.statusCode).toBe(200);
+    const { jobId } = queued.json<{ jobId: number }>();
+    const trail = (await app.app.inject({ method: "GET", url: "/api/system/action-audit", headers: { cookie } })).json<Array<{ action: string; summary: string; targets: Record<string, unknown> }>>();
+    expect(trail[0]).toMatchObject({ action: "orphan.purge_delete", summary: expect.stringContaining("including files modified in the last 24 hours"), targets: expect.objectContaining({ jobId, includeRecent: true }) });
+    await runJobs();
+    await expect(fs.stat(fresh.filePath)).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

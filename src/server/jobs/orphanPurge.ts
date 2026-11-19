@@ -2,7 +2,7 @@ import fs from "node:fs/promises";
 import { linkedFileCondition } from "../lib/headerChecks";
 import path from "node:path";
 import { and, eq, inArray, isNull, lte, or, sql } from "drizzle-orm";
-import type { HeldOrphanFile, OrphanCameBackAfterPurge, OrphanCategory, OrphanPurgeItem, OrphanPurgeItemOutcome, OrphanPurgeItemPage, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
+import type { HeldOrphanFile, OrphanCameBackAfterPurge, OrphanCategory, OrphanPurgeItem, OrphanPurgeItemOutcome, OrphanPurgeItemPage, OrphanInUseReason, OrphanSkippedInUse, OrphanLeftoverFolder, OrphanProtectedKind, OrphanPurgeMode, OrphanReview, OrphanReviewItem, OrphanReviewLabel, OrphanSizeComparison, PathsSettings, SectionSettings, StorageRootType } from "../../shared/types";
 import { getJsonSetting, getSectionSettings, nowIso, type Db, type DbExecutor } from "../db/database";
 import * as schema from "../db/schema";
 import { ConflictError, publicErrorMessage } from "../errors";
@@ -219,14 +219,28 @@ function isDamaged(row: Pick<OrphanRow, "size_bytes" | "allocated_bytes" | "inte
   return integrity === "hollow" || integrity === "partial_hollow" || row.audit_status === "fail";
 }
 
-function protectedReason(row: OrphanRow, now: number, extra?: ExtraSymlinks): string | null {
-  if (row.active_copy) return "Part of an unfinished copy";
+type Protection = { kind: OrphanProtectedKind; reason: string };
+
+const recentProtection: Protection = { kind: "recent", reason: "Modified in the last 24 hours" };
+
+// The first rule that protects an orphan. Copy and link protection always come first, so "recent" means nothing else applies.
+function protectionOf(row: OrphanRow, now: number, extra?: ExtraSymlinks): Protection | null {
+  if (row.active_copy) return { kind: "copy", reason: "Part of an unfinished copy" };
   if (extra) {
     const link = extraLinkCovering(extra, row.file_path);
-    if (link) return `Still linked from ${link}`;
+    if (link) return { kind: "link", reason: `Still linked from ${link}` };
   }
-  if (now - Number(row.mtime_ms) < purgeGraceMs) return "Modified in the last 24 hours";
+  if (now - Number(row.mtime_ms) < purgeGraceMs) return recentProtection;
   return null;
+}
+
+function protectedReason(row: OrphanRow, now: number, extra?: ExtraSymlinks): string | null {
+  return protectionOf(row, now, extra)?.reason ?? null;
+}
+
+// Whether a protection still stops a purge. A purge that opts in to recent files waives only the 24-hour rule.
+function blocks(protection: Protection | null, includeRecent: boolean): protection is Protection {
+  return protection !== null && !(includeRecent && protection.kind === "recent");
 }
 
 // A folder with nothing in it holds no links, whether or not a scan has been past. If it cannot be read, assume it might.
@@ -281,7 +295,7 @@ function ancestorDirectories(paths: Iterable<string>): Set<string> {
   return ancestors;
 }
 
-type LeftoverFolderReview = LeftoverFolderRow & { protectedReason: string | null; inUse: OrphanInUseReason | null };
+type LeftoverFolderReview = LeftoverFolderRow & { protectedReason: string | null; protectedKind: OrphanProtectedKind | null; inUse: OrphanInUseReason | null };
 
 async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, folderIds?: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<LeftoverFolderReview[]> {
   const rows = await db
@@ -305,7 +319,7 @@ async function leftoverFolderRows(db: DbExecutor, rootType: StorageRootType, fol
   const extraDirectories = ancestorDirectories(extra?.targets.keys() ?? []);
   return rows.map((row) => {
     const protection = leftoverProtection(row, copyDirectories, linkedDirectories, linkedTargets, extraDirectories, extra, now);
-    return { ...row, protectedReason: protection?.reason ?? null, inUse: protection?.inUse ?? null };
+    return { ...row, protectedReason: protection?.reason ?? null, protectedKind: protection?.kind ?? null, inUse: protection?.inUse ?? null };
   });
 }
 
@@ -317,18 +331,18 @@ function leftoverProtection(
   extraDirectories: Set<string>,
   extra: ExtraSymlinks | undefined,
   now: number
-): { reason: string; inUse: OrphanInUseReason | null } | null {
+): (Protection & { inUse: OrphanInUseReason | null }) | null {
   const directory = path.resolve(row.dirPath);
-  if (copyDirectories.has(directory)) return { reason: "Part of an unfinished copy", inUse: null };
+  if (copyDirectories.has(directory)) return { kind: "copy", reason: "Part of an unfinished copy", inUse: null };
   // Any link counts, whatever the file type it points at, and so does a link to this folder or one above it.
-  if (linkedDirectories.has(directory) || isCoveredByPath(linkedTargets, directory)) return { reason: "A symlink points into this folder", inUse: "library_link" };
-  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return { reason: "A symlink in an extra symlink folder points into this folder", inUse: "extra_link" };
-  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return { reason: "Modified in the last 24 hours", inUse: null };
+  if (linkedDirectories.has(directory) || isCoveredByPath(linkedTargets, directory)) return { kind: "link", reason: "A symlink points into this folder", inUse: "library_link" };
+  if (extra && (extraDirectories.has(directory) || extraLinkCovering(extra, directory))) return { kind: "link", reason: "A symlink in an extra symlink folder points into this folder", inUse: "extra_link" };
+  if (now - Number(row.newestMtimeMs) < purgeGraceMs) return { ...recentProtection, inUse: null };
   return null;
 }
 
 // Recomputed under the job's admission transaction so only folders that are still leftovers can be queued.
-export async function purgeableLeftoverFolders(db: DbExecutor, rootType: StorageRootType, folderIds: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<{ eligible: LeftoverFolderRow[]; rejected: string[] }> {
+export async function purgeableLeftoverFolders(db: DbExecutor, rootType: StorageRootType, folderIds: number[], now = Date.now(), extra?: ExtraSymlinks, includeRecent = false): Promise<{ eligible: LeftoverFolderRow[]; rejected: string[] }> {
   if (folderIds.length === 0) return { eligible: [], rejected: [] };
   const found = new Map((await leftoverFolderRows(db, rootType, folderIds, now, extra)).map((row) => [row.id, row]));
   const eligible: LeftoverFolderRow[] = [];
@@ -336,7 +350,7 @@ export async function purgeableLeftoverFolders(db: DbExecutor, rootType: Storage
   for (const id of folderIds) {
     const row = found.get(id);
     if (!row) rejected.push(`folder #${id} is no longer a folder without video on this storage`);
-    else if (row.protectedReason) rejected.push(`${row.relativePath}: ${row.protectedReason}`);
+    else if (row.protectedReason && !(includeRecent && row.protectedKind === "recent")) rejected.push(`${row.relativePath}: ${row.protectedReason}`);
     else eligible.push(row);
   }
   return { eligible, rejected };
@@ -394,7 +408,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     fileCount: folder.fileCount,
     totalBytes: Number(folder.totalBytes),
     newestMtimeMs: Number(folder.newestMtimeMs),
-    protectedReason: folder.protectedReason
+    protectedReason: folder.protectedReason,
+    protectedKind: folder.protectedKind
   }));
   const containers = new Set(settings.sections);
   const rootPrefix = `${path.resolve(rootPathFor(paths, rootType))}${path.sep}`;
@@ -437,6 +452,7 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
     const label: OrphanReviewLabel = category !== "unlinked" ? category : !matchedTitle ? "no_title_match" : hasUnlinkedEpisode(row, titles, library) ? "episode_not_linked" : "title_in_library";
     const releaseLinkedCount = linkedByRelease.get(releaseKey)?.size ?? 0;
     const linkedSizeBytes = category === "superseded" ? linkedSizeOf(row, library) : null;
+    const protection = protectionOf(row, now, extra);
     return {
       storageFileId: row.id,
       rootType,
@@ -447,7 +463,8 @@ export async function listOrphanReview(db: Db, rootType: StorageRootType, holdDa
       sizeBytes,
       mtimeMs: Number(row.mtime_ms),
       category,
-      protectedReason: protectedReason(row, now, extra),
+      protectedReason: protection?.reason ?? null,
+      protectedKind: protection?.kind ?? null,
       hollow: integrityOf(row) === "hollow",
       integrity: integrityOf(row),
       zeroSamples: row.integrity_zero_samples,
@@ -507,7 +524,8 @@ function skippedInUseSummary(extraLinkedFiles: number, folders: LeftoverFolderRe
 }
 
 // Recomputed under the job's admission transaction so only files that are orphans right now can be queued.
-export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType, storageFileIds: number[], now = Date.now(), extra?: ExtraSymlinks): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
+// includeRecent waives the 24-hour rule only; an unfinished copy or a link still refuses the file.
+export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType, storageFileIds: number[], now = Date.now(), extra?: ExtraSymlinks, includeRecent = false): Promise<{ eligible: OrphanRow[]; rejected: string[] }> {
   const rows = await orphanRows(db, rootType, storageFileIds);
   const found = new Map(rows.map((row) => [row.id, row]));
   const eligible: OrphanRow[] = [];
@@ -518,8 +536,8 @@ export async function purgeableOrphans(db: DbExecutor, rootType: StorageRootType
       rejected.push(`file #${id} is no longer an orphan on this storage`);
       continue;
     }
-    const reason = protectedReason(row, now, extra);
-    if (reason) rejected.push(`${path.basename(row.relative_path)}: ${reason}`);
+    const protection = protectionOf(row, now, extra);
+    if (blocks(protection, includeRecent)) rejected.push(`${path.basename(row.relative_path)}: ${protection.reason}`);
     else eligible.push(row);
   }
   return { eligible, rejected };
@@ -739,12 +757,13 @@ async function moveOrRemove(root: string, from: string, to: string | null, expec
   return stat;
 }
 
-function unchangedSince(operation: PurgeOperation, now: number, action: string): (stat: Stat) => void {
+// A purge that opted in to recent files skips the 24-hour rule; the file must still match what was inventoried.
+function unchangedSince(operation: PurgeOperation, now: number, action: string, includeRecent = false): (stat: Stat) => void {
   return (stat) => {
     if (stat.size !== Number(operation.sizeBytes) || Math.trunc(stat.mtimeMs) !== Number(operation.mtimeMs)) {
       throw new Error(`File changed after it was inventoried; rescan before ${action}`);
     }
-    if (now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
+    if (!includeRecent && now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
   };
 }
 
@@ -785,6 +804,9 @@ export interface PurgeExecutionContext {
   now?: number;
   // The wait before a purge looks again for another copy at a deleted path. Remote storage only; absent means no wait.
   settle?: SettleOptions;
+  // The purge opted in to orphans modified in the last 24 hours. Only the files and folders it queued skip that rule, and
+  // only while they are unchanged since the scan; another copy that appears after a delete is still held to it.
+  includeRecent?: boolean;
 }
 
 type PurgeOutcome = {
@@ -822,18 +844,21 @@ type FolderContents = { files: string[]; directories: string[] };
 
 // Re-walks a folder right before it is purged; anything that could be someone's media stops the purge.
 // Returns what it saw, deepest folders first, so a delete only ever touches files this walk checked.
-async function assertFolderStillLeftover(directory: string, now: number, contents: FolderContents = { files: [], directories: [] }): Promise<FolderContents> {
+// With notAfterMs (a purge that opted in to recent folders) the 24-hour rule is skipped, but nothing may be newer than the scan saw.
+async function assertFolderStillLeftover(directory: string, now: number, contents: FolderContents = { files: [], directories: [] }, notAfterMs?: number): Promise<FolderContents> {
+  const tooNew = (mtimeMs: number) => (notAfterMs === undefined ? now - mtimeMs < purgeGraceMs : Math.trunc(mtimeMs) > notAfterMs);
+  const tooNewText = notAfterMs === undefined ? "was modified in the last 24 hours" : "changed after the last storage scan; rescan before purging";
   const stat = await withFilesystemTimeout(fs.lstat(directory), `Inspection of ${directory}`);
-  if (now - stat.mtimeMs < purgeGraceMs) throw new Error(`${directory} was modified in the last 24 hours`);
+  if (tooNew(stat.mtimeMs)) throw new Error(`${directory} ${tooNewText}`);
   const entries = await withFilesystemTimeout(fs.readdir(directory, { withFileTypes: true }), `Reading ${directory}`);
   for (const entry of entries) {
     const entryPath = path.join(directory, entry.name);
     if (entry.isDirectory()) {
-      await assertFolderStillLeftover(entryPath, now, contents);
+      await assertFolderStillLeftover(entryPath, now, contents, notAfterMs);
     } else if (entry.isFile()) {
       if (isMediaFile(entry.name)) throw new Error(`Folder now contains a video (${entryPath}); nothing was purged`);
       const fileStat = await withFilesystemTimeout(fs.lstat(entryPath), `Inspection of ${entryPath}`);
-      if (now - fileStat.mtimeMs < purgeGraceMs) throw new Error(`${entryPath} was modified in the last 24 hours`);
+      if (tooNew(fileStat.mtimeMs)) throw new Error(`${entryPath} ${tooNewText}`);
       contents.files.push(entryPath);
     } else {
       throw new Error(`Folder contains a symlink or special file (${entryPath}); nothing was purged`);
@@ -1011,7 +1036,9 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
   }
   if (!stat.isDirectory()) throw new Error("Path is no longer a folder; nothing was purged");
   await assertExistingPathInside(root, directory, "Leftover folder");
-  let contents = await assertFolderStillLeftover(directory, now);
+  // Only the first walk can skip the 24-hour rule; another copy of the folder's files is held to it.
+  const notAfterMs = context.includeRecent ? Number(operation.mtimeMs) : undefined;
+  let contents = await assertFolderStillLeftover(directory, now, undefined, notAfterMs);
   const extraLink = extraLinkTouchingFolder(await extraSymlinksForPurge(db, paths), directory);
   if (extraLink) throw new Error(`Symlink ${extraLink} points into this folder; nothing was purged`);
 
@@ -1027,7 +1054,10 @@ async function executeLeftoverFolderPurge(db: DbExecutor, operation: PurgeOperat
       for (;;) {
         const result = await deleteFolderFileByFile(directory, contents, fs, async (target, kind) => {
           const stat = await assertStillInside(root, target, kind, target);
-          if (kind === "file" && Date.now() - stat.mtimeMs < purgeGraceMs) throw new Error(`${target} was modified in the last 24 hours`);
+          if (kind !== "file") return;
+          if (rounds === 1 && notAfterMs !== undefined) {
+            if (Math.trunc(stat.mtimeMs) > notAfterMs) throw new Error(`${target} changed after the last storage scan; rescan before purging`);
+          } else if (Date.now() - stat.mtimeMs < purgeGraceMs) throw new Error(`${target} was modified in the last 24 hours`);
         });
         let resurfaced = result.resurfaced;
         unreadable = result.unreadable;
@@ -1088,7 +1118,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   if (stat.size !== Number(operation.sizeBytes) || Math.trunc(stat.mtimeMs) !== Number(operation.mtimeMs)) {
     throw new Error("File changed after it was inventoried; rescan before purging");
   }
-  if (now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
+  if (!context.includeRecent && now - stat.mtimeMs < purgeGraceMs) throw new Error("File was modified in the last 24 hours");
   // The last check before the file goes: another tool can add a link at any time, and no scan would have seen it.
   const extraSymlinks = await assertNoLiveLink(db, operation, storageFile, context.paths);
 
@@ -1097,7 +1127,7 @@ export async function executeOrphanPurgeOperation(db: DbExecutor, operation: Pur
   let deletedStat: Stat;
   try {
     // Checked again right before the move or delete: the symlink walks above take time.
-    deletedStat = await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "purging"));
+    deletedStat = await moveOrRemove(root, operation.filePath, heldPath, unchangedSince(operation, now, "purging", context.includeRecent));
   } catch (error) {
     throw holdingAreaError(error, heldPath);
   }

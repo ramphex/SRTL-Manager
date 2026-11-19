@@ -201,7 +201,7 @@ export const api = {
   damagedFiles: () => request<DamagedFileRow[]>("/api/damaged-files"),
   damagedFilesCsvUrl: "/api/damaged-files.csv",
   orphanReview: (rootType: StorageRootType) => request<OrphanReview>(`/api/orphans?rootType=${rootType}`),
-  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode; reRequest: boolean }) =>
+  purgeOrphans: (body: { rootType: StorageRootType; storageFileIds: number[]; folderIds: number[]; mode: OrphanPurgeMode; reRequest: boolean; includeRecent?: boolean }) =>
     request<{ jobId: number }>("/api/orphans/purge", { method: "POST", body: JSON.stringify(body) }),
   deleteDamagedFiles: (body: { storageFileIds: number[]; mode: OrphanPurgeMode; reRequest: boolean; rescan: boolean }) =>
     request<{ jobId: number }>("/api/damaged-files/delete", { method: "POST", body: JSON.stringify(body) }),

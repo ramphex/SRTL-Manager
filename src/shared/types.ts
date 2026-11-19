@@ -710,6 +710,8 @@ export interface OrphanReviewItem {
   mtimeMs: number;
   category: OrphanCategory;
   protectedReason: string | null;
+  // Which rule protects it, set whenever protectedReason is. Only "recent" can be waived, by a purge that asks for it.
+  protectedKind?: OrphanProtectedKind | null;
   hollow: boolean;
   integrity: StorageIntegrity;
   zeroSamples: number | null;
@@ -748,7 +750,11 @@ export interface OrphanLeftoverFolder {
   totalBytes: number;
   newestMtimeMs: number;
   protectedReason: string | null;
+  protectedKind?: OrphanProtectedKind | null;
 }
+
+/** Why a listed orphan is protected: part of an unfinished copy, still linked, or modified in the last 24 hours. */
+export type OrphanProtectedKind = "copy" | "link" | "recent";
 
 export interface OrphanReview {
   rootType: StorageRootType;
@@ -786,7 +792,7 @@ export interface OrphanSkippedInUse {
 
 /** The progress an orphan purge or damaged file delete job records. Read it from `JobRecord.progress`; `JobRecord.status` says whether it failed. */
 export interface OrphanPurgeJobProgress {
-  options: { rootType: StorageRootType; mode: OrphanPurgeMode; total: number; reRequest: boolean; rescan?: boolean; source?: "damaged" };
+  options: { rootType: StorageRootType; mode: OrphanPurgeMode; total: number; reRequest: boolean; rescan?: boolean; source?: "damaged"; includeRecent?: boolean };
   current: number;
   total: number;
   held: number;

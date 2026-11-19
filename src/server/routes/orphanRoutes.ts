@@ -22,16 +22,18 @@ export function registerOrphanRoutes(app: FastifyInstance, db: Db, jobs: JobRunn
         storageFileIds: z.array(z.number().int().positive()).max(50_000).default([]),
         folderIds: z.array(z.number().int().positive()).max(50_000).default([]),
         mode: z.enum(["hold", "delete"]),
-        reRequest: z.boolean().default(false)
+        reRequest: z.boolean().default(false),
+        // Opts in to orphans whose only protection is a change in the last 24 hours.
+        includeRecent: z.boolean().default(false)
       })
       .refine((value) => value.storageFileIds.length + value.folderIds.length > 0, { message: "Choose at least one orphan file or folder to purge" })
       .parse(request.body);
-    const jobId = await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode, body.folderIds, body.reRequest);
+    const jobId = await jobs.startOrphanPurge(body.rootType, body.storageFileIds, body.mode, body.folderIds, body.reRequest, body.includeRecent);
     await recordActionAudit(db, request, {
       action: body.mode === "delete" ? "orphan.purge_delete" : "orphan.purge_hold",
-      summary: `${body.mode === "delete" ? "Deleted" : "Held"} ${body.storageFileIds.length} orphan file(s) and ${body.folderIds.length} folder(s) on ${body.rootType} storage${body.reRequest ? " and asked to re-request them" : ""}`,
+      summary: `${body.mode === "delete" ? "Deleted" : "Held"} ${body.storageFileIds.length} orphan file(s) and ${body.folderIds.length} folder(s) on ${body.rootType} storage${body.includeRecent ? " (including files modified in the last 24 hours)" : ""}${body.reRequest ? " and asked to re-request them" : ""}`,
       jobId,
-      targets: { jobId, rootType: body.rootType, mode: body.mode, reRequest: body.reRequest, storageFileIds: body.storageFileIds, folderIds: body.folderIds }
+      targets: { jobId, rootType: body.rootType, mode: body.mode, reRequest: body.reRequest, includeRecent: body.includeRecent, storageFileIds: body.storageFileIds, folderIds: body.folderIds }
     });
     return { jobId };
   });
