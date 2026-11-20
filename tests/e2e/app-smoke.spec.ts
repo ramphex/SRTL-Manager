@@ -525,7 +525,7 @@ test("edits friendly storage names and applies them across primary library surfa
   await expect(page.getByLabel("Location 1 mounted path", { exact: true })).toHaveValue(paths.location_1);
   await expect(page.getByLabel("Location 2 mounted path", { exact: true })).toHaveValue(paths.location_2);
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await expect(page.locator("#local-summary-title")).toHaveText("NAS");
   await expect(page.locator("#remote-summary-title")).toHaveText("Archive");
 
@@ -1188,7 +1188,7 @@ test("recent jobs identifies a targeted scan by title instead of only its parent
     });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   const row = page.locator("tbody tr").filter({ hasText: `#${jobId}` });
   await expect(row).toHaveCount(1);
   await expect(row.locator(".job-scope-cell > span")).toHaveText("Title rescan");
@@ -1284,7 +1284,7 @@ test("recent copy jobs show a single link title directly and retain title inspec
     });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   const singleMovieRow = page.locator("tbody tr").filter({ hasText: "#999991" });
   const singleSeriesRow = page.locator("tbody tr").filter({ hasText: "#999992" });
   const multiTitleRow = page.locator("tbody tr").filter({ hasText: "#999993" });
@@ -1366,7 +1366,7 @@ test("job progress shows the complete event timeline and opens the selected full
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   const progressButton = page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true });
   await expect(progressButton).toHaveCount(1);
   await progressButton.click();
@@ -1438,7 +1438,7 @@ test("copy progress opens a persistent, scrollable failed item summary", async (
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
 
   const dialog = page.getByRole("dialog");
@@ -1524,7 +1524,7 @@ test("copy progress exposes details for a single failed item", async ({ page }) 
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
 
   const dialog = page.getByRole("dialog");
@@ -1614,7 +1614,7 @@ test("failed copy items require explicit review before symlink cleanup is queued
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobs: [job], hasMore: false, nextOffset: [job].length }) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
   const copyDialog = page.locator(".copy-dialog");
   await copyDialog.getByRole("button", { name: "View 3 failed items", exact: true }).click();
