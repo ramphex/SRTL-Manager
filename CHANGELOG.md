@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Maintenance
+
+- **Dependency updates.** Patch and minor updates to the Fastify CORS, static file and API documentation plugins, the icon library, the build tool and its React plugin, the linter, the browser test runner and the test DOM library. No behaviour changes.
+
 ## [0.1.5-beta.9] - 2026-11-20
 
 The Dashboard is now a short summary of everything SRTL runs, with the previous Dashboard moved to Library > Overview. Orphan review can include files modified in the last 24 hours, orphan purges no longer offer a re-request, and Now Playing shows a shorter location and a progress bar with what the server has ready and the time left. There is no database migration.
