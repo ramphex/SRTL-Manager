@@ -156,7 +156,7 @@ test("the dashboard link opens the damaged files tab and the address keeps it th
   await fixture(page);
   const damagedTab = page.getByRole("button", { name: "Damaged files" });
   await page.goto(`${baseUrl}/`);
-  await page.getByRole("link", { name: "Library → Damaged files" }).click();
+  await page.getByRole("link", { name: /damaged files$/ }).click();
   await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
   await expect(damagedTab).toHaveClass("selected");
   await expect(page).toHaveURL(/\/library\?view=damaged$/);
@@ -176,7 +176,7 @@ test("the dashboard link opens the damaged files tab in a new browser tab", asyn
   await fixture(page);
   await page.goto(`${baseUrl}/`);
   const opened = page.context().waitForEvent("page");
-  await page.getByRole("link", { name: "Library → Damaged files" }).click({ modifiers: ["ControlOrMeta"] });
+  await page.getByRole("link", { name: /damaged files$/ }).click({ modifiers: ["ControlOrMeta"] });
   const newTab = await opened;
   await expect(newTab.getByRole("heading", { name: "Damaged files" })).toBeVisible();
   await expect(newTab.getByRole("button", { name: "Damaged files" })).toHaveClass("selected");
@@ -186,7 +186,7 @@ test("the dashboard link opens the damaged files tab in a new browser tab", asyn
 test("the dashboard link takes a moderator to the read-only damaged files tab", async ({ page }) => {
   await fixture(page, { role: "moderator" });
   await page.goto(`${baseUrl}/`);
-  await page.getByRole("link", { name: "Library → Damaged files" }).click();
+  await page.getByRole("link", { name: /damaged files$/ }).click();
   await expect(page.getByRole("heading", { name: "Not allowed" })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Damaged files" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Damaged files" })).toHaveClass("selected");

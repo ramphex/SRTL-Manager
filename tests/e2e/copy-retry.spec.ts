@@ -80,7 +80,7 @@ function recentJobs(page: Page) {
 
 test("the jobs list says how many items a retry covers, and one click starts it", async ({ page }) => {
   const posted = await mockApi(page, { jobs: [copyJob(41, "partially_failed")], plans: { 41: retryPlan(41) } });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const button = recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #41" });
   await expect(button).toHaveText("Retry failed (3)");
   await button.click();
@@ -99,7 +99,7 @@ test("a retry already on its way is not sent twice by a double click", async ({ 
       await route.fulfill({ json: { jobId: 901, retried: 1, skipped: 0, summary: "", deleteRemoteSources: false } });
     }
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const button = recentJobs(page).getByRole("button", { name: "Retry 1 failed item from job #42" });
   await button.dblclick();
   await expect(button).toBeDisabled();
@@ -112,7 +112,7 @@ test("a retry already on its way is not sent twice by a double click", async ({ 
 test("says what was skipped and why when it starts", async ({ page }) => {
   const summary = "Skipping 2: 1 already copied, 1 with a link that is gone or missing.";
   await mockApi(page, { jobs: [copyJob(43, "partially_failed")], plans: { 43: retryPlan(43, { retryCount: 1, skippedCount: 2, summary }) } });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const button = recentJobs(page).getByRole("button", { name: "Retry 1 failed item from job #43" });
   await expect(button).toHaveText("Retry failed (1)");
   await expect(button).toHaveAttribute("title", summary);
@@ -123,7 +123,7 @@ test("says what was skipped and why when it starts", async ({ page }) => {
 test("explains itself instead of starting an empty job when everything was skipped", async ({ page }) => {
   const summary = "Nothing to retry: 3 already copied.";
   const posted = await mockApi(page, { jobs: [copyJob(44, "failed")], plans: { 44: retryPlan(44, { retryCount: 0, skippedCount: 3, summary }) } });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const button = recentJobs(page).getByRole("button", { name: "Nothing to retry from job #44" });
   await expect(button).toHaveAttribute("aria-expanded", "false");
   await expect(recentJobs(page).getByText(summary)).toHaveCount(0);
@@ -139,7 +139,7 @@ test("explains itself instead of starting an empty job when everything was skipp
 
 test("shows nothing for a job with no failed items, or that is not finished", async ({ page }) => {
   await mockApi(page, { jobs: [copyJob(45, "completed"), copyJob(46, "running"), copyJob(47, "failed")] });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await expect(recentJobs(page).locator("tbody tr")).toHaveCount(3);
   await expect(recentJobs(page).locator(".copy-retry-button")).toHaveCount(0);
 });
@@ -150,14 +150,14 @@ test("shows the server's refusal", async ({ page }) => {
     plans: { 48: retryPlan(48) },
     onRetry: (route) => route.fulfill({ status: 409, json: { error: "Nothing to retry: 3 already queued in job #77." } })
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #48" }).click();
   await expect(recentJobs(page).getByRole("alert")).toHaveText("Nothing to retry: 3 already queued in job #77.");
 });
 
 test("the job's own page offers it, then follows the new job", async ({ page }) => {
   const posted = await mockApi(page, { jobs: [copyJob(49, "partially_failed")], plans: { 49: retryPlan(49) } });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: "View copy progress for job #49" }).click();
   const dialog = page.locator(".copy-dialog");
   await dialog.getByRole("button", { name: "Retry 3 failed items from job #49" }).click();
@@ -177,7 +177,7 @@ test("asks before replacing or deleting, and removes nothing unless it is ticked
     jobs: [copyJob(51, "failed", { localConflictStrategy: "replace" })],
     plans: { 51: retryPlan(51, { replaceOffered: true, deleteRemoteSourceOffered: true }) }
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #51" }).click();
   expect(posted).toEqual([]);
   const dialog = page.getByRole("dialog", { name: "Retry 3 failed items from job #51" });
@@ -195,7 +195,7 @@ test("sends a replacement only when asked for", async ({ page }) => {
     jobs: [copyJob(52, "failed", { localConflictStrategy: "replace" })],
     plans: { 52: retryPlan(52, { replaceOffered: true }) }
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #52" }).click();
   const dialog = page.getByRole("dialog", { name: "Retry 3 failed items from job #52" });
   await expect(dialog.getByRole("checkbox", { name: /Delete remote sources/ })).toHaveCount(0);
@@ -211,7 +211,7 @@ test("a moderator is told a replacing job will keep both, and cannot choose othe
     jobs: [copyJob(53, "failed", { localConflictStrategy: "replace" })],
     plans: { 53: retryPlan(53, { replaceOffered: true, deleteRemoteSourceOffered: true }) }
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #53" }).click();
   const dialog = page.getByRole("dialog", { name: "Retry 3 failed items from job #53" });
   await expect(dialog.getByText("Your retry will keep both")).toBeVisible();
@@ -227,7 +227,7 @@ test("a moderator gets one click when only the remote delete was on, and no butt
     jobs: [copyJob(54, "failed"), copyJob(55, "failed", { direction: "to_remote" })],
     plans: { 54: retryPlan(54, { deleteRemoteSourceOffered: true }), 55: retryPlan(55, { direction: "to_remote" }) }
   });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await expect(recentJobs(page).locator(".copy-retry-button")).toHaveCount(1);
   await recentJobs(page).getByRole("button", { name: "Retry 3 failed items from job #54" }).click();
   await expect(page.getByRole("dialog")).toHaveCount(0);
@@ -238,7 +238,7 @@ test("fits a phone, with its explanation open", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   const summary = "Nothing to retry: 2 already copied, 1 with a link that is gone or missing, 3 already queued in job #1234567.";
   await mockApi(page, { jobs: [copyJob(56, "failed"), copyJob(57, "partially_failed")], plans: { 56: retryPlan(56, { retryCount: 0, skippedCount: 6, totalFailed: 6, summary }), 57: retryPlan(57) } });
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: "Nothing to retry from job #56" }).click();
   await expect(page.getByText(summary)).toBeVisible();
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);

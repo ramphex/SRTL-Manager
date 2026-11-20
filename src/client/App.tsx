@@ -1654,7 +1654,7 @@ export function StatusPill({ value, toneValue }: { value: string; toneValue?: st
 const rootRoute = createRootRoute({ component: RootLayout });
 const loadLibraryRoutes = () => import("./libraryRoutes");
 const loadOperationsRoutes = () => import("./operationsRoutes");
-const DashboardPage = lazyRouteComponent(loadLibraryRoutes, "DashboardPage");
+const DashboardPage = lazyRouteComponent(() => import("./dashboard"), "DashboardPage");
 const LibraryPage = lazyRouteComponent(loadLibraryRoutes, "LibraryPage");
 const RunsPage = lazyRouteComponent(loadOperationsRoutes, "RunsPage");
 const SettingsPage = lazyRouteComponent(loadOperationsRoutes, "SettingsPage");

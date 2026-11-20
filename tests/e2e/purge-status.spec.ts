@@ -171,7 +171,7 @@ async function mockApi(page: Page) {
 
 test("a running purge opens a status window with live progress from the recent jobs table", async ({ page }) => {
   const itemRequests = await mockApi(page);
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const table = page.getByRole("table", { name: "Recent jobs" });
   await expect(table.getByRole("button", { name: "Terminate job #1932" })).toBeVisible();
   await table.getByRole("button", { name: "View purge status for job #1932" }).click();
@@ -200,7 +200,7 @@ test("a running purge opens a status window with live progress from the recent j
 
 test("a finished purge with failures lists every failed item, the first error and the held files", async ({ page }) => {
   await mockApi(page);
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const table = page.getByRole("table", { name: "Recent jobs" });
   await expect(table.getByRole("button", { name: "Terminate job #1931" })).toHaveCount(0);
   await table.getByRole("button", { name: "View purge status for job #1931" }).click();
@@ -241,7 +241,7 @@ test("the logs page shows a purge's progress and opens the same status window", 
 
 test("a purge whose deleted files came back lists them apart from the deleted ones", async ({ page }) => {
   const itemRequests = await mockApi(page);
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const table = page.getByRole("table", { name: "Recent jobs" });
   await table.getByRole("button", { name: "View purge status for job #1933" }).click();
 

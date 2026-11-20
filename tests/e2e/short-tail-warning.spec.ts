@@ -51,7 +51,7 @@ test("a copy accepted with a warning reads as completed and shows the warning on
   };
   await mockApi(page, job, { [`/api/jobs/${jobId}/events/page`]: { events, total: events.length, hasOlder: false } });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
   const dialog = page.getByRole("dialog");
   await expect(dialog.locator(".copy-progress-stat-bad")).toHaveCount(0);
@@ -83,7 +83,7 @@ test("an audit lists an accepted short tail as a warning, not a failure", async 
     [`/api/jobs/${jobId}/events/page`]: { events: [], total: 0, hasOlder: false }
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View audit status for job #${jobId}`, exact: true }).click();
   const findings = page.getByRole("dialog").getByRole("region", { name: "Audit findings" });
   await expect(findings).toContainText(warning);

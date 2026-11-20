@@ -4,6 +4,12 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **The Dashboard is a summary of everything SRTL runs.** A **Status** list gives one line per area: jobs, Radarr and Sonarr, re-requests, media servers, watch sync, backups, accounts, security and system health. Problems come first, and colour marks problems only. On a phone it shows only what needs attention, then one "All clear" line naming the rest. Small buttons in the header run **Scan library** and **Run audit** with the saved scope (the button next to each opens the scope picker), **Sync watch state** and **Back up now**. Below are up to three Now Playing streams, running jobs with a thin progress bar and a stop button, failed jobs from the last 24 hours with Retry, and one line of Library counts that open the matching Library views. Each line and button only shows for roles that can use it.
+
+- **The previous Dashboard is now the Library overview.** Needs attention, Storage overview, the damaged files line, Quick actions with their scope pickers, Library Summary with its per-title lists, and Recent jobs moved to **Library > Overview** with the same look. The Overview's entry cards are gone, since every count on them is in Needs attention, Storage overview or the damaged files line; the symlink and file counts in Storage overview now open their views, as the cards did, and the view tabs above are unchanged.
+
 ## [0.1.5-beta.8] - 2026-11-17
 
 Recent jobs on the Dashboard shows ten at a time with Show more and a search, Now Playing cards fold to one line and can be filtered by server, and adding a Plex server leads with Sign in with Plex. There is no database migration.

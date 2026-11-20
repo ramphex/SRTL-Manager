@@ -9,7 +9,7 @@ import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/s
 import { activeJobForLink, activeJobNotice, activeJobsForLinks, activeJobsForStoragePolicyTitle, isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
 import { inventoryPolicyNeededCount, mediaLinkTreeStatusCounts, orderSectionSummaries, sectionActionUnit, sectionCompositionParts, type LinkStatusWorkKind } from "./sectionSummaryDisplay";
 import { inferSectionContentType } from "../shared/sections";
-import { type AuditOptions, type AuditSettings, type InventorySummary, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyBulkResult, type StoragePolicyKind, type StoragePolicyTarget, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
+import { type AuditOptions, type AuditSettings, type JobRecord, type CopyDirection, type CopyOptions, type MediaLinkRow, type MediaLinkTree, type MediaLinkTreeNode, type ScanOptions, type ScanTitleScope, type SectionSummary, type StoragePolicyBulkResult, type StoragePolicyKind, type StoragePolicyTarget, type StoragePolicyTitle, type StorageFileRow, type StorageFileTree, type StorageFileTreeNode, type StorageLocationsSettings, type StorageRootType, type TimeFormatPreference } from "../shared/types";
 import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, OrphanPurgeStatusDialog, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
@@ -73,7 +73,11 @@ function ActionToast({ message, tone }: { message: string | null; tone: "success
   );
 }
 
-export function DashboardPage() {
+/**
+ * The Library overview: library health, storage by location, maintenance actions, the per-folder summary and recent jobs.
+ * This was the Dashboard before the Dashboard became a summary of every area; it keeps its look here.
+ */
+function LibraryOverviewDashboard({ onViewSelect }: { onViewSelect: (view: LibraryView) => void }) {
   const queryClient = useQueryClient();
   const { autoOpenTaskStatus } = useUserPreferences();
   const storageLocations = useStorageLocations();
@@ -277,11 +281,20 @@ export function DashboardPage() {
   const dashboardAttentionCount = policyNeededTotal + copyToLocalTotal + copyToRemoteTotal + totals.brokenLinks;
   const dashboardAttentionState = dashboardInventoryLoading ? "loading" : dashboardAttentionCount > 0 ? "attention" : "clear";
   const dashboardMetric = (value: number) => (dashboardInventoryLoading ? "..." : formatNumber(value));
+  // The symlink and file counts open their views, as the Library entry cards did.
+  const viewLink = (view: "links" | "local" | "remote", count: number, label: string) =>
+    dashboardInventoryLoading ? (
+      dashboardMetric(count)
+    ) : (
+      <Link to="/library" search={{ view }} className="storage-overview-link" aria-label={`Open ${label}: ${formatNumber(count)}`} onClick={() => onViewSelect(view)}>
+        {formatNumber(count)}
+      </Link>
+    );
   const orphanLink = (view: "local-orphans" | "remote-orphans", count: number, name: string) =>
     dashboardInventoryLoading || count === 0 || !can("library.delete") ? (
       dashboardMetric(count)
     ) : (
-      <Link to="/library" search={{ view }} className="storage-overview-link" aria-label={`Review ${formatNumber(count)} ${name}orphans`}>
+      <Link to="/library" search={{ view }} className="storage-overview-link" aria-label={`Review ${formatNumber(count)} ${name}orphans`} onClick={() => onViewSelect(view)}>
         {formatNumber(count)}
       </Link>
     );
@@ -393,11 +406,7 @@ export function DashboardPage() {
   }
 
   return (
-    <Page
-      title="Dashboard"
-      subtitle="Current library health, storage distribution, and maintenance controls."
-      headerClassName="dashboard-page-header"
-    >
+    <>
       <div className="dashboard-summary" aria-busy={dashboardInventoryLoading}>
         <section className={`dashboard-overview-panel dashboard-attention-panel state-${dashboardAttentionState}`} aria-labelledby="attention-summary-title">
           <div className="dashboard-overview-header">
@@ -449,8 +458,8 @@ export function DashboardPage() {
                   <HardDrive size={15} aria-hidden="true" />
                   <span id="local-summary-title">{localName}</span>
                 </th>
-                <td>{dashboardMetric(totals.localLinks)}</td>
-                <td>{dashboardMetric(totals.localFiles)}</td>
+                <td>{viewLink("links", totals.localLinks, `${localName} symlinks`)}</td>
+                <td>{viewLink("local", totals.localFiles, `${localName} files`)}</td>
                 <td>{orphanLink("local-orphans", totals.localOrphanFiles, `${localName} `)}</td>
               </tr>
               <tr>
@@ -458,8 +467,8 @@ export function DashboardPage() {
                   <HardDriveDownload size={15} aria-hidden="true" />
                   <span id="remote-summary-title">{remoteName}</span>
                 </th>
-                <td>{dashboardMetric(totals.remoteLinks)}</td>
-                <td>{dashboardMetric(totals.remoteFiles)}</td>
+                <td>{viewLink("links", totals.remoteLinks, `${remoteName} symlinks`)}</td>
+                <td>{viewLink("remote", totals.remoteFiles, `${remoteName} files`)}</td>
                 <td>{orphanLink("remote-orphans", totals.remoteOrphanFiles, `${remoteName} `)}</td>
               </tr>
               <tr className="storage-overview-total">
@@ -478,7 +487,7 @@ export function DashboardPage() {
       {damagedFiles.data?.length ? (
         <p className="panel-message dashboard-damaged">
           <TriangleAlert size={14} aria-hidden="true" /> {formatNumber(damagedFiles.data.length)} damaged {localName} files (hollow or with zero-filled gaps).{" "}
-          <Link to="/library" search={{ view: "damaged" }}>Library &rarr; Damaged files</Link>
+          <Link to="/library" search={{ view: "damaged" }} onClick={() => onViewSelect("damaged")}>Open Damaged files</Link>
         </p>
       ) : null}
       <ActionToast message={actionToastMessage} tone={actionError ? "error" : "success"} />
@@ -693,7 +702,7 @@ export function DashboardPage() {
       />
       <ScanStatusDialog prompt={scanStatusPrompt} onClose={() => setScanStatusPrompt(null)} />
       <OrphanPurgeStatusDialog prompt={purgeStatusPrompt} onClose={() => setPurgeStatusPrompt(null)} />
-    </Page>
+    </>
   );
 }
 
@@ -1881,7 +1890,6 @@ function AllowedLibraryPage() {
   const isStorageView = view === "local" || view === "remote" || view === "local-orphans" || view === "remote-orphans";
   const storageRoot: StorageRootType = view === "local" || view === "local-orphans" ? "local" : "remote";
   const orphanOnly = view === "local-orphans" || view === "remote-orphans";
-  const overview = useQuery({ queryKey: ["inventory-summary"], queryFn: api.inventorySummary, enabled: view === "overview" });
   const sectionSummaries = useQuery({ queryKey: ["sections"], queryFn: api.sections, refetchInterval: 5000 });
   const sectionSettings = useQuery({ queryKey: ["section-settings"], queryFn: api.getSections });
   const symlinkTree = useQuery({
@@ -2020,18 +2028,8 @@ function AllowedLibraryPage() {
       {!startCopySilently.error && startCopySilently.data ? <p className="action-message">Copy job #{startCopySilently.data.jobId} queued. View progress from the job list.</p> : null}
       {view === "overview" ? (
         <>
-          <LibraryOverview summary={overview.data} isLoading={overview.isLoading} error={overview.error?.message} onSelect={handleLibraryViewChange} />
           {sectionSummaries.error ? <p className="panel-message error">{sectionSummaries.error.message}</p> : null}
-          <SectionTable sections={orderedSectionSummaries} selectedRemoteWork={selectedLibraryWork} onRemoteWorkSelect={setSelectedLibraryWork} />
-          <RemoteWorkLinksTable
-            selection={selectedLibraryWork}
-            sections={orderedSectionSummaries}
-            pendingTitleScopes={startTitleScan.isPending ? startTitleScan.variables?.titleScopes : undefined}
-            onClose={() => setSelectedLibraryWork(null)}
-            onAuditRequest={setAuditPrompt}
-            onCopyRequest={handleCopyRequest}
-            onRescanTitle={(section, itemName) => startTitleScan.mutate(titleRescanOptions([{ section, itemName }]))}
-          />
+          <LibraryOverviewDashboard onViewSelect={handleLibraryViewChange} />
         </>
       ) : view === "links" ? (
         <>
@@ -2122,96 +2120,6 @@ function AllowedLibraryPage() {
       <CopyDialog prompt={copyPrompt} onClose={() => setCopyPrompt(null)} />
       <ScanStatusDialog prompt={scanStatusPrompt} onClose={() => setScanStatusPrompt(null)} />
     </Page>
-  );
-}
-
-function LibraryOverview({
-  summary,
-  isLoading,
-  error,
-  onSelect
-}: {
-  summary: InventorySummary | undefined;
-  isLoading: boolean;
-  error?: string;
-  onSelect: (view: LibraryView) => void;
-}) {
-  const { can } = useAccess();
-  const storageLocations = useStorageLocations();
-  const localName = storageLocationName(storageLocations, "local");
-  const remoteName = storageLocationName(storageLocations, "remote");
-  const damaged = useDamagedFiles();
-  const cards = [
-    {
-      value: "links",
-      label: "Symlinks",
-      icon: Link2,
-      count: summary?.totalLinks,
-      detail: `${formatNumber(summary?.remoteLinks ?? 0)} ${remoteName} / ${formatNumber(summary?.localLinks ?? 0)} ${localName}`
-    },
-    {
-      value: "local",
-      label: `${localName} files`,
-      icon: HardDrive,
-      count: summary?.localFiles,
-      detail: `${formatNumber(summary?.localOrphanFiles ?? 0)} orphan`
-    },
-    {
-      value: "remote",
-      label: `${remoteName} files`,
-      icon: HardDriveDownload,
-      count: summary?.remoteFiles,
-      detail: `${formatNumber(summary?.remoteOrphanFiles ?? 0)} orphan`
-    },
-    {
-      value: "local-orphans",
-      label: `${localName} orphans`,
-      icon: Unlink,
-      count: summary?.localOrphanFiles,
-      detail: "No symlink target"
-    },
-    {
-      value: "remote-orphans",
-      label: `${remoteName} orphans`,
-      icon: Unlink,
-      count: summary?.remoteOrphanFiles,
-      detail: "No symlink target"
-    },
-    {
-      value: "policies",
-      label: "Storage Policies",
-      icon: Shield,
-      count: summary ? inventoryPolicyNeededCount(summary) : 0,
-      detail: `${formatNumber(summary ? inventoryCopyToLocalCount(summary) : 0)} copy to ${localName} / ${formatNumber(summary ? inventoryCopyToRemoteCount(summary) : 0)} copy to ${remoteName}`
-    },
-    {
-      value: "damaged",
-      label: "Damaged files",
-      icon: TriangleAlert,
-      count: damaged.data?.length,
-      detail: "Hollow or zero-filled"
-    }
-  ] as const;
-
-  return (
-    <>
-      {error ? <p className="panel-message error">{error}</p> : null}
-      <div className="library-overview">
-        {cards.filter((item) => libraryViewAllowed(item.value, can)).map((item) => {
-        const Icon = item.icon;
-        return (
-          <button key={item.value} className="library-entry" type="button" onClick={() => onSelect(item.value as LibraryView)}>
-            <Icon size={18} />
-            <span className="library-entry-copy">
-              <span>{item.label}</span>
-              <strong>{isLoading ? "..." : formatNumber(item.count ?? 0)}</strong>
-              <small>{item.detail}</small>
-            </span>
-          </button>
-        );
-        })}
-      </div>
-    </>
   );
 }
 
