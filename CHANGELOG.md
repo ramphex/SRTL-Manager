@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.9] - 2026-11-20
+
+The Dashboard is now a short summary of everything SRTL runs, with the previous Dashboard moved to Library > Overview. Orphan review can include files modified in the last 24 hours, orphan purges no longer offer a re-request, and Now Playing shows a shorter location and a progress bar with what the server has ready and the time left. There is no database migration.
+
 ### Added
 
 - **Purge orphans modified in the last 24 hours.** The orphan review on both storage locations has a new **Include files modified in the last 24 hours** switch. Files and folders changed in the last day are still hidden by default, because an import or download may be using them. With the switch on, those whose only protection is the 24-hour rule are listed with a marker such as "Modified 3h ago", count in the label and filter totals, and can be selected, purged with **Purge selected** or **Purge all eligible**, held or deleted. The confirmation says how many recent items are included. Files that are part of an unfinished copy or that a symlink still uses stay protected and unlisted, and every file is still checked right before it is touched: a recent file must be unchanged since the last scan, and a recent folder must hold nothing newer than the scan saw. The switch is off each time the page opens. `POST /api/orphans/purge` takes an optional `includeRecent` (default false), which is recorded in the job options and the action audit, and each orphan and folder in `GET /api/orphans` now has a `protectedKind` (`copy`, `link` or `recent`) next to `protectedReason`. The Damaged files page is unchanged.
