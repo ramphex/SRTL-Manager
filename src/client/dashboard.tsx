@@ -73,10 +73,10 @@ export function DashboardPage() {
         </div>
         <DashboardActions onNote={setNote} />
       </header>
+      <LibraryLine />
       <StatusBox nowPlaying={nowPlaying} />
       <NowPlayingBox nowPlaying={nowPlaying} />
       <JobsBox />
-      <LibraryLine />
       {note ? <ActionToast key={note.id} message={note.text} tone={note.error ? "error" : "success"} /> : null}
     </div>
   );

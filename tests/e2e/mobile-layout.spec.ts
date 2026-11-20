@@ -521,6 +521,12 @@ test("puts problems, quick actions and the library line on the first phone scree
     return statusElement && actionsElement ? statusElement.y < actionsElement.y : null;
   });
   expect(order, "problems should come before the quick actions on a phone").toBe(true);
+  // The Library line leads, and the problem rows still fit on the first screen under it.
+  const libraryBox = await page.locator(".dash-library").boundingBox();
+  const statusBox = await status.boundingBox();
+  expect(libraryBox!.y, "the Library line should sit above the Status list").toBeLessThan(statusBox!.y);
+  const lastProblem = await status.locator(".dash-row.is-bad, .dash-row.is-warn").last().boundingBox();
+  expect(lastProblem!.y + lastProblem!.height, "problems should stay on the first screen").toBeLessThanOrEqual((await bottomNavigation.boundingBox())!.y);
 
   for (const [label, locator] of [["Scan library", runScan], ["Run audit", runAudit], ["scan scope", scanScope]] as const) {
     await expectTouchTarget(locator, `${label} button`);
@@ -711,9 +717,15 @@ test.describe("desktop disclosure compatibility", () => {
     await expect(page.locator('.dash-status [data-status="system"]')).toBeVisible();
     await expect(page.locator(".dash-all-clear")).toBeHidden();
     for (const region of ["Status", "Now Playing", "Jobs", "Library"]) await expect(page.getByRole("region", { name: region, exact: true })).toBeVisible();
+    // The Library line sits under the header, above the boxes that grow.
+    const libraryBox = await page.getByRole("region", { name: "Library", exact: true }).boundingBox();
+    for (const region of ["Status", "Now Playing"]) {
+      const box = await page.getByRole("region", { name: region, exact: true }).boundingBox();
+      expect(libraryBox!.y + libraryBox!.height, `the Library line should sit above ${region}`).toBeLessThanOrEqual(box!.y);
+    }
     await expect(page.getByRole("region", { name: "Jobs", exact: true })).toContainText("partially failed");
     expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(900);
-    await page.getByRole("link", { name: "Open", exact: true }).last().click();
+    await page.getByRole("region", { name: "Library", exact: true }).getByRole("link", { name: "Open", exact: true }).click();
     await expect(page.locator(".dashboard-attention-panel")).toBeVisible();
   });
 

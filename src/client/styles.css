@@ -8816,10 +8816,11 @@ button.danger-button:hover:not(:disabled) {
   align-items: start;
   display: grid;
   gap: 14px 16px;
-  grid-template-areas: "head head" "np status" "jobs status" "library library";
+  /* The Library line sits right under the header, so it stays put while the boxes below grow. */
+  grid-template-areas: "head head" "library library" "np status" "jobs status";
   grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
   /* Jobs takes the slack beside a tall Status list, so Now Playing and Jobs stay together. */
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto auto 1fr;
 }
 
 .dash-head {
@@ -9220,7 +9221,7 @@ button.danger-button:hover:not(:disabled) {
 
 @media (max-width: 1080px) {
   .dash {
-    grid-template-areas: "head" "status" "np" "jobs" "library";
+    grid-template-areas: "head" "library" "status" "np" "jobs";
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: none;
   }
@@ -9229,7 +9230,7 @@ button.danger-button:hover:not(:disabled) {
 @media (max-width: 820px) {
   .dash {
     gap: 12px;
-    grid-template-areas: "status" "head" "jobs" "np" "library";
+    grid-template-areas: "library" "status" "head" "jobs" "np";
   }
 
   .dash-head > div:first-child {
