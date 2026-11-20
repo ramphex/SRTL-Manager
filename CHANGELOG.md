@@ -4,6 +4,47 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-11-20
+
+Everything from 0.1.5-beta.1 to 0.1.5-beta.10. The beta sections below have the full detail.
+
+### Added
+
+- **A file header check.** At the end of each scan, new and changed video files linked from the library are checked to start with a known video container, and a slow background pass checks the rest. Files that are empty, tiny, all zeros, an archive that was never unpacked, or not a video at all are listed on **Library > Damaged files** as **Bad header**, with the reason in plain words. Such a file is never copied to local storage, and nothing is deleted automatically. **Settings > Advanced > Check file headers after scans** turns it off.
+- **Ask Radarr or Sonarr to rescan** after a delete. Removing failed-copy symlinks and deleting from **Library > Damaged files** can ask the instance that manages each title for one rescan per movie or series, so it shows the title as missing.
+- **Audit estimates and a nightly local audit.** The audit window shows how many files an audit covers, their size and a rough time before it starts. An optional nightly fast audit of local files (off by default) runs in a chosen window and picks up where it stopped. Files that failed their last audit are listed on **Library > Damaged files**, where they can be audited again. See [Audits](docs/audits.md).
+- **Purge orphans modified in the last 24 hours** with a switch in the orphan review, off each time the page opens. Files in an unfinished copy or still used by a symlink stay protected.
+- **Purge checks.** Every delete is confirmed straight after, remote deletes are checked again after a short wait, and files that come back are listed as such, shown in the review again and never counted as deleted.
+- **Recent jobs paging and search**, ten jobs at a time, searching every job by id, type, status, folder or title.
+
+### Changed
+
+- **Storage policies are set per library folder.** The same title can be kept local in one folder and remote in another, for example a 1080p copy and a 4K copy. Existing assignments carry over unchanged, and Radarr and Sonarr tags follow the folder each instance maps.
+- **Targeted audits.** Audits no longer byte-compare against the copy source by default (copies already do), and library-wide remote and deep audits are refused with the reason. Audits of a title, folder, path or selection work as before.
+- **The Dashboard is a summary** of everything SRTL runs, with problems first and quick buttons for a scan, an audit, watch sync and a backup. The previous Dashboard is now **Library > Overview**.
+- **Now Playing** cards fold to one line with the play method, bandwidth and quality, can be filtered by server, show a shorter location, and have a progress bar with what the server has ready and the time left.
+- **Adding a Plex server leads with Sign in with Plex**, with pasting a token kept as a manual option.
+- **Orphan purges no longer offer a re-request**, since an orphan has no library link and a new copy could only be a duplicate. Damaged files keeps the option.
+- Remote storage scans no longer count files the remote mount lists but cannot open.
+- Dependencies are updated, and the container build no longer downloads the PostgreSQL signing key.
+
+### Fixed
+
+- **Restore** in the orphan holding area and **Discard partial copy** work in the standard Docker setup.
+- The API and worker keep running when the database closes an idle connection.
+- Sonarr upgrade imports are accepted by the webhook, and rejected Radarr and Sonarr notifications are logged.
+- No false error after a successful Plex sign-in.
+
+### Security
+
+- Sign-in lockouts are tied to the username and the client together, attempts are counted before the password is checked, and at most two password checks run at once.
+- The orphan holding area and every purge check each file and folder by its real path right before moving or deleting it.
+- Release builds verify the code in a job with a read-only token, separate from the job that publishes images, and images are scanned before their version tag is pushed.
+
+### Upgrade notes
+
+Upgrading from 0.1.4 applies database migrations 31 to 37 automatically. **Back up the database first**: migrations can't be undone by going back to an older image. No settings in `.env` need to change. Migration 33 copies each title's storage policy to every folder that holds it, and migration 34 turns a saved byte-compare default of **on** into **off**.
+
 ## [0.1.5-beta.10] - 2026-11-20
 
 Dependency updates only. There is no database migration.
