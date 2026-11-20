@@ -247,7 +247,10 @@ test("filters streams by server, with type icons, and keeps the choice", async (
   await expect(jellyfin).toHaveAttribute("aria-pressed", "false");
   await expect(page.getByRole("article")).toHaveCount(3);
   await expect(page.getByRole("article", { name: "Example Movie — alex_03" })).toHaveCount(0);
-  await expect(page.getByRole("region", { name: "Quick glance" }).getByLabel("Direct play: 0", { exact: true })).toBeVisible();
+  // The only direct play was on Jellyfin: the total drops to 3 and a pill whose count is 0 is not shown.
+  const strip = page.getByRole("region", { name: "Quick glance" });
+  await expect(strip.getByLabel("Streams: 3", { exact: true })).toBeVisible();
+  await expect(strip.getByLabel(/^Direct play:/)).toHaveCount(0);
   await expect.poll(() => preferences().nowPlayingHiddenServers).toEqual(["jf1"]);
 
   await page.reload();
