@@ -8324,6 +8324,7 @@ button.danger-button:hover:not(:disabled) {
 .np-pill-cpu { border-color: color-mix(in srgb, var(--warn) 50%, var(--border-soft)); }
 .np-pill-unknown { border-style: dashed; }
 .np-pill-bandwidth { background: var(--secondary-bg); }
+.np-pill-total strong { font-weight: 800; }
 .np-connection { align-items: center; color: var(--muted); display: inline-flex; font-size: 12px; gap: 6px; margin-left: auto; }
 .np-connection-reconnecting { color: var(--warn); }
 .np-live-dot { background: var(--good); border-radius: 50%; box-shadow: 0 0 0 3px color-mix(in srgb, var(--good) 22%, transparent); height: 8px; width: 8px; }
@@ -8375,10 +8376,9 @@ button.danger-button:hover:not(:disabled) {
 .np-card-title { min-width: 0; }
 .np-card-title h3 { font-size: 15px; line-height: 1.3; margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-card-title p { color: var(--muted-strong); font-size: 13px; margin: 2px 0 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--bad); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
+.np-stop-button { background: transparent; border: 0; border-radius: 50%; color: var(--muted); flex: none; height: 30px; justify-content: center; margin: -3px -4px 0 0; min-height: 30px; padding: 0; width: 30px; }
 .np-stop-button:hover,
-.np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); }
-.np-card-player { color: var(--muted); font-size: 12px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-stop-button:focus-visible { background: color-mix(in srgb, var(--bad), var(--surface) 86%); color: var(--bad); }
 .np-badges { align-items: center; display: flex; flex-wrap: wrap; gap: 5px; }
 .np-badge { align-items: center; background: var(--pill-neutral-bg); border-radius: 999px; color: var(--pill-neutral-text); box-sizing: border-box; display: inline-flex; font-size: 11px; gap: 4px; height: 20px; line-height: 1; padding: 0 8px; white-space: nowrap; }
 .np-badge svg { flex: none; }
@@ -8388,12 +8388,16 @@ button.danger-button:hover:not(:disabled) {
 .np-method-transcode.np-engine-hardware { background: color-mix(in srgb, var(--good) 16%, var(--surface)); color: var(--good); }
 .np-badge-local { background: var(--pill-local-bg); color: var(--pill-local-text); }
 .np-badge-remote { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
-.np-badge-bad { background: var(--pill-bad-bg); color: var(--pill-bad-text); }
 .np-badge-wan { background: color-mix(in srgb, var(--warn) 14%, var(--surface)); color: var(--warn); }
 .np-badge-paused { background: var(--secondary-bg); }
-.np-progress { background: var(--bg-subtle); border-radius: 999px; height: 5px; overflow: hidden; }
-.np-progress span { background: var(--selected-accent); display: block; height: 100%; transition: width 1s linear; }
-.np-progress-times { color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
+.np-progress { background: color-mix(in srgb, var(--selected-accent) 14%, transparent); border-radius: 999px; height: 5px; overflow: hidden; position: relative; }
+.np-progress span { display: block; height: 100%; left: 0; position: absolute; top: 0; transition: width 1s linear; }
+/* Three shades of one accent: the whole length very light, what the server has ready medium, what has played full. */
+.np-progress .np-progress-buffer { background: color-mix(in srgb, var(--selected-accent) 45%, transparent); }
+.np-progress .np-progress-played { background: var(--selected-accent); }
+.np-progress-times { align-items: center; color: var(--muted); display: flex; font-size: 11px; font-variant-numeric: tabular-nums; justify-content: space-between; }
+.np-time-left .text-tooltip-trigger { text-decoration: none; }
+.np-time-left .info-tooltip-panel > span { display: block; white-space: nowrap; }
 .np-summary { align-items: center; display: flex; gap: 8px; justify-content: space-between; min-height: 26px; min-width: 0; }
 .np-summary-line { align-items: center; display: flex; flex-wrap: wrap; gap: 4px 8px; min-width: 0; }
 .np-summary-line .np-badge { flex: none; }
@@ -8414,18 +8418,21 @@ button.danger-button:hover:not(:disabled) {
 .np-card-footer { border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px 14px; grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
 .np-card-footer > div { min-width: 0; }
 .np-card-footer > .np-footer-location { margin-left: auto; }
+.np-card-footer > .np-footer-player { flex: 1 0 100%; }
 .np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
 .np-card-footer svg { color: var(--muted); flex: none; }
+.np-server-name { align-items: center; display: flex; gap: 4px; min-width: 0; }
+.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; min-width: 20px; justify-content: center; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
-.np-location-wan { color: var(--warn); }
-.np-location-wan svg { color: currentColor; }
 .text-tooltip { max-width: 100%; }
-.text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: help; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
+.text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: default; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
 .text-tooltip-trigger:hover { background: transparent; }
 /* Phones keep the shared tooltip placement: a panel fixed above the bottom navigation. */
 @media (min-width: 821px) {
   .np-location .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; white-space: nowrap; width: max-content; }
+  .np-server-tooltip .info-tooltip-panel { bottom: calc(100% + 6px); left: 0; max-width: calc(100vw - 48px); right: auto; top: auto; white-space: nowrap; width: max-content; }
+  .np-time-left .info-tooltip-panel { bottom: calc(100% + 6px); left: auto; max-width: calc(100vw - 48px); right: 0; top: auto; width: max-content; }
 }
 .np-empty { align-items: center; background: var(--surface); border: 1px dashed var(--border); border-radius: 8px; color: var(--muted); display: flex; gap: 10px; padding: 18px 20px; }
 .np-empty p { margin: 0; }

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, Unlink, UserRound, X } from "lucide-react";
+import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, MonitorSmartphone, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, UserRound, X } from "lucide-react";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
 import { nowPlayingDefaultStopMessage, summarizeStreams } from "../shared/nowPlaying";
 import type { UserPreferences } from "../shared/types";
 import type { StoragePolicyKind } from "../shared/types";
 import { Page } from "./App";
 import { api, request } from "./api";
-import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations } from "./appShared";
+import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { useAccess } from "./access";
 import { mediaServerApi, mediaServersKey } from "./mediaServerApi";
 import { MediaServersRequired } from "./mediaServersRequired";
@@ -16,19 +16,24 @@ import { TextTooltip } from "./tooltip";
 import {
   applyHostEvent,
   audioLabel,
+  bufferedLabel,
+  bufferedPercent,
   busiestGpuEngine,
   codecLabel,
   decisionLabel,
+  endsAtLabel,
   formatBytesPerSecond,
   formatClock,
   formatGigabytes,
   formatKbps,
   livePosition,
   playMethodLabel,
+  playerLabels,
   sparklinePoints,
   streamLocationLabel,
   streamSummaryLine,
   streamTitle,
+  timeLeft,
   summaryPills,
   videoLabel,
   type HostState
@@ -141,7 +146,6 @@ function QuickGlance({ snapshot, summary, host, connection }: { snapshot: NowPla
             <span>{pill.label}</span><strong>{pill.value}</strong>
           </span>
         ))}
-        {summary?.paused ? <span className="np-pill np-pill-paused" aria-label={`Paused: ${summary.paused}`}><span>Paused</span><strong>{summary.paused}</strong></span> : null}
         <span className={`np-connection np-connection-${connection}`} role="status">
           {connection === "open" ? <><span className="np-live-dot" aria-hidden="true" />Live</> : connection === "connecting" ? <><LoaderCircle className="is-spinning" size={13} />Connecting</> : <><RefreshCw className="is-spinning" size={13} />Reconnecting</>}
         </span>
@@ -205,9 +209,8 @@ function SourceBadge({ stream }: { stream: NowPlayingStream }) {
   const policyText = policy ? ` · policy ${storagePolicyLabel(policy as StoragePolicyKind, locations)}` : "";
   if (status === "local") return <span className="np-badge np-badge-local" title={`Playing from local storage${policyText}`}><HardDrive size={12} />{locationName ?? "Local"}</span>;
   if (status === "remote") return <span className="np-badge np-badge-remote" title={`Playing from remote storage${policyText}`}><Cloud size={12} />{locationName ?? "Remote"}</span>;
-  if (status === "broken") return <span className="np-badge np-badge-bad" title="SRTL's link for this file is broken"><Unlink size={12} />Broken link</span>;
-  if (status === "unlinked") return <span className="np-badge np-badge-neutral" title="This file is not one of SRTL's links">Not in SRTL</span>;
-  return <span className="np-badge np-badge-neutral" title="Check the media server's path mappings in Settings > Media servers">Source unknown</span>;
+  // Only files SRTL places on local or remote storage get a badge; anything else shows none.
+  return null;
 }
 
 function MediaIcon({ type }: { type: NowPlayingStream["mediaType"] }) {
@@ -295,14 +298,18 @@ function StreamLocation({ network }: { network: NowPlayingStream["network"] }) {
   );
 }
 
-export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream: NowPlayingStream; now: number; expanded: boolean; onToggle: (id: string) => void; onStop: (stream: NowPlayingStream) => void }) {
+export function StreamCard({ stream, now, expanded, onToggle, onStop, showServerName = true }: { stream: NowPlayingStream; now: number; expanded: boolean; onToggle: (id: string) => void; onStop: (stream: NowPlayingStream) => void; showServerName?: boolean }) {
   const canStop = useAccess().can("streams.stop");
   const [posterFailed, setPosterFailed] = useState(false);
   const detailsId = useId();
   const title = streamTitle(stream);
   const position = livePosition(stream, now);
   const percent = stream.durationMs ? Math.min(100, (position / stream.durationMs) * 100) : 0;
-  const player = [stream.player.product, stream.player.name, stream.player.platform && stream.player.platform !== stream.player.name ? stream.player.platform : null].filter(Boolean).join(" · ");
+  const bufferPercent = bufferedPercent(stream);
+  const buffered = bufferedLabel(stream, position);
+  const left = timeLeft(stream, position);
+  const { timeFormat } = useUserPreferences();
+  const player = playerLabels(stream.player);
   const methodClass = stream.playMethod === "transcode" ? `np-method-transcode np-engine-${stream.transcode?.engine ?? "unknown"}` : `np-method-${stream.playMethod}`;
   return (
     <article className={`np-card np-state-${stream.state}`} aria-label={`${title.primary} — ${stream.user.name}`}>
@@ -321,7 +328,6 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
             </button>
           ) : null}
         </header>
-        {player ? <div className="np-card-player" title={player}>{player}</div> : null}
         <div className="np-badges">
           <span className={`np-badge np-badge-state np-badge-${stream.state}`}>
             {stream.state === "paused" ? <Pause size={12} /> : stream.state === "buffering" ? <LoaderCircle size={12} /> : <Play size={12} />}
@@ -329,10 +335,19 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
           </span>
           <SourceBadge stream={stream} />
         </div>
-        <div className="np-progress" role="progressbar" aria-label="Playback position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)}>
-          <span style={{ width: `${percent}%` }} />
+        <div className="np-progress" role="progressbar" aria-label="Playback position" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(percent)} aria-valuetext={`${formatClock(position)} of ${formatClock(stream.durationMs)}${buffered ? `. ${buffered}` : ""}`} title={buffered ?? undefined}>
+          {bufferPercent !== null ? <span className="np-progress-buffer" style={{ width: `${bufferPercent}%` }} /> : null}
+          <span className="np-progress-played" style={{ width: `${percent}%` }} />
         </div>
-        <div className="np-progress-times"><span>{formatClock(position)}</span><span>{formatClock(stream.durationMs)}</span></div>
+        <div className="np-progress-times">
+          <span>{formatClock(position)}</span>
+          {left !== null ? (
+            <TextTooltip className="np-time-left" trigger={<span aria-label={`${formatClock(left)} left`}>-{formatClock(left)}</span>}>
+              <span className="np-time-total">Total {formatClock(stream.durationMs)}</span>
+              <span>{endsAtLabel(stream, position, now, timeFormat === "12h")}</span>
+            </TextTooltip>
+          ) : <span>--:--</span>}
+        </div>
         <div className={`np-summary${expanded ? " is-expanded" : ""}`}>
           {expanded ? (
             <span className="np-summary-heading">Details</span>
@@ -350,8 +365,12 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop }: { stream
       </div>
       <dl className="np-card-footer">
         <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
-        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd title="Server"><MediaServerIcon kind={stream.serverKind} size={13} /><span className="np-footer-text">{stream.serverName}</span></dd></div>
+        <div className="np-footer-server"><dt className="sr-only">Server</dt><dd>{showServerName ? <span className="np-server-name"><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="np-footer-text">{stream.serverName}</span></span> : (
+          // One server of each kind: the icon is enough, and hover, focus or a tap shows the name.
+          <TextTooltip className="np-server-tooltip" trigger={<><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="sr-only">{stream.serverName}</span></>}>{stream.serverName}</TextTooltip>
+        )}</dd></div>
         <div className="np-footer-location"><dt className="sr-only">Location</dt><dd><StreamLocation network={stream.network} /></dd></div>
+        {player ? <div className="np-footer-player"><dt className="sr-only">Player</dt><dd title={player.full}><MonitorSmartphone size={13} aria-hidden="true" /><span className="np-footer-text">{player.short}</span></dd></div> : null}
       </dl>
     </article>
   );
@@ -427,6 +446,9 @@ function LiveNowPlaying() {
   const serverFilter = useServerFilter();
   const servers = useMemo(() => snapshot?.servers ?? [], [snapshot]);
   const shownServers = servers.filter((server) => !serverFilter.hidden.has(server.id));
+  // Cards name their server only when the icon alone could mean more than one server.
+  // All servers count, not just the ones shown, so turning one off does not change the cards.
+  const showServerNames = useMemo(() => servers.some((server, index) => servers.findIndex((other) => other.kind === server.kind) !== index), [servers]);
   const streams = useMemo(() => (snapshot?.streams ?? []).filter((stream) => !serverFilter.hidden.has(stream.serverId)), [snapshot, serverFilter.hidden]);
   // The pills count only the servers shown; host CPU, memory, network and GPU stay whole.
   const summary = useMemo(() => snapshot ? (streams.length === snapshot.streams.length ? snapshot.summary : summarizeStreams(streams)) : null, [snapshot, streams]);
@@ -444,7 +466,7 @@ function LiveNowPlaying() {
         <section className="np-empty" role="status"><MonitorPlay size={22} /><p>{shownServers.length < servers.length ? "Nothing is playing on the selected servers." : "Nothing is playing right now."}</p></section>
       ) : (
         <div className="np-cards" aria-label="Streams">
-          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} expanded={expanded.has(stream.id)} onToggle={toggle} onStop={setStopping} />)}
+          {streams.map((stream) => <StreamCard key={stream.id} stream={stream} now={now} expanded={expanded.has(stream.id)} onToggle={toggle} onStop={setStopping} showServerName={showServerNames} />)}
         </div>
       )}
       {canManageSettings ? <GeoSetting /> : null}
@@ -459,7 +481,8 @@ export function NowPlayingPage() {
   const servers = useQuery({ queryKey: mediaServersKey, queryFn: mediaServerApi.list, enabled: canManageServers });
   const connected = servers.data?.servers.some((server) => server.hasToken) ?? false;
   return (
-    <Page title="Now Playing" subtitle="Live streams on your Plex and Jellyfin servers, with host load. Nothing here is recorded.">
+    <Page title="Now Playing" subtitle="" hideHeader>
+      <h1 className="sr-only">Now Playing</h1>
       {!canManageServers ? (
         <LiveNowPlaying />
       ) : servers.isLoading ? (

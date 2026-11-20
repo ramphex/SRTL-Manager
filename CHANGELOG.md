@@ -4,6 +4,11 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **Now Playing shows a shorter location.** A client in the United States reads "City, State" and every other client reads "City, Country", instead of city, region and country together. Missing parts are left out, so a client with no known city shows the state and country, or just the country.
+- **Now Playing's progress bar shows what the server has ready, and time left.** A lighter part of the bar shows how far ahead the server has prepared a transcode or direct stream, from Plex's transcoder position or Jellyfin's transcode completion; hovering the bar says how far ahead that is. Direct play has nothing to prepare, so it has no lighter part. The right side shows the time left instead of the total length, and its tooltip gives the total and the local time playback will end. The bar's full length shows in a very light shade, what is ready in a medium one, and what has played in full color. The server icon on a card no longer shows a second, browser-made tooltip, and tooltips across SRTL no longer turn the pointer into a question mark.
+
 ### Maintenance
 
 - **The container build no longer downloads the PostgreSQL signing key.** The PostgreSQL project's public apt signing key is now stored in the repository (`docker/apt.postgresql.org.asc`) and copied into the image, so a slow or unreachable postgresql.org can no longer fail the build. The build still checks the file against its pinned sha256.

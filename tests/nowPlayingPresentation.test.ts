@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyHostEvent, formatBytesPerSecond, formatClock, formatKbps, livePosition, playMethodLabel, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, videoLabel } from "../src/client/nowPlayingPresentation";
+import { applyHostEvent, bufferedLabel, bufferedPercent, endsAtLabel, formatBytesPerSecond, formatClock, formatKbps, geoLabel, livePosition, playMethodLabel, playerLabels, qualityLabel, sparklinePoints, streamLocationLabel, streamQuality, streamSummaryLine, summaryPills, timeLeft, videoLabel } from "../src/client/nowPlayingPresentation";
 import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingMediaInfo } from "../src/shared/nowPlaying";
 
 const sample = (at: number): NowPlayingHostSample => ({ at: new Date(at).toISOString(), cpuPercent: 10, memoryUsedBytes: 1, memoryTotalBytes: 2, networkInBps: 1, networkOutBps: 1, gpus: null });
@@ -23,6 +23,29 @@ describe("Now Playing presentation", () => {
     expect(livePosition({ state: "playing", positionMs: 58_000, durationMs: 60_000, reportedAt }, 1_005_000)).toBe(60_000);
   });
 
+  it("shows how far the server has a stream ready, and nothing when it does not say", () => {
+    expect(bufferedPercent({ bufferedMs: 900_000, durationMs: 3_600_000 })).toBe(25);
+    expect(bufferedPercent({ bufferedMs: 5_000_000, durationMs: 3_600_000 })).toBe(100);
+    expect(bufferedPercent({ bufferedMs: null, durationMs: 3_600_000 })).toBeNull();
+    expect(bufferedPercent({ bufferedMs: 900_000, durationMs: null })).toBeNull();
+    expect(bufferedLabel({ bufferedMs: 900_000, durationMs: 3_600_000, playMethod: "transcode" }, 600_000)).toBe("Transcoded to 15:00, 5:00 ahead");
+    expect(bufferedLabel({ bufferedMs: 900_000, durationMs: 3_600_000, playMethod: "directStream" }, 900_000)).toBe("Prepared to 15:00, playback has caught up");
+    expect(bufferedLabel({ bufferedMs: 3_600_000, durationMs: 3_600_000, playMethod: "transcode" }, 600_000)).toBe("Transcoded to the end");
+    expect(bufferedLabel({ bufferedMs: null, durationMs: 3_600_000, playMethod: "directPlay" }, 600_000)).toBeNull();
+  });
+
+  it("counts time left and the local time playback ends, from now for a paused stream", () => {
+    const now = Date.parse("2026-11-02T10:00:00.000Z");
+    expect(timeLeft({ durationMs: 3_600_000 }, 600_000)).toBe(3_000_000);
+    expect(timeLeft({ durationMs: 3_600_000 }, 4_000_000)).toBe(0);
+    expect(timeLeft({ durationMs: null }, 600_000)).toBeNull();
+    const at = (hour12: boolean) => new Date(now + 3_000_000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12 });
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "playing" }, 600_000, now, true)).toBe(`Ends at ${at(true)}`);
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "playing" }, 600_000, now, false)).toBe(`Ends at ${at(false)}`);
+    expect(endsAtLabel({ durationMs: 3_600_000, state: "paused" }, 600_000, now, true)).toBe(`Ends at ${at(true)} if resumed now`);
+    expect(endsAtLabel({ durationMs: null, state: "playing" }, 600_000, now, true)).toBeNull();
+  });
+
   it("labels play methods and media", () => {
     expect(playMethodLabel({ playMethod: "transcode", transcode: { engine: "hardware", hardwareDecode: null, hardwareEncode: "nvenc", speed: null, throttled: null, reasons: [], reasonsDerived: true } })).toBe("Transcode (HW)");
     expect(playMethodLabel({ playMethod: "transcode", transcode: null })).toBe("Transcode");
@@ -30,9 +53,18 @@ describe("Now Playing presentation", () => {
     expect(videoLabel({ container: "mkv", videoCodec: "hevc", resolution: "4K", width: 3840, height: 2160, dynamicRange: "Dolby Vision", audioCodec: null, audioChannels: null, bitrateKbps: null })).toBe("HEVC 4K Dolby Vision");
   });
 
-  it("shows the unconfirmed-engine pill only when needed", () => {
+  it("shortens the player to app and name, keeping the rest for the hover", () => {
+    expect(playerLabels({ name: "Firefox", device: null, platform: null, product: "Jellyfin Web", version: "10.10.3" })).toEqual({ short: "Jellyfin Web · Firefox", full: "Jellyfin Web · Firefox" });
+    expect(playerLabels({ name: "Chrome", device: "Chrome", platform: "chrome", product: "Plex Web", version: null })).toEqual({ short: "Plex Web · Chrome", full: "Plex Web · Chrome" });
+    expect(playerLabels({ name: null, device: "Roku Ultra", platform: "Roku", product: "Plex for Roku", version: null })).toEqual({ short: "Plex for Roku · Roku Ultra", full: "Plex for Roku · Roku Ultra · Roku" });
+    expect(playerLabels({ name: null, device: null, platform: null, product: null, version: "1" })).toBeNull();
+  });
+
+  it("orders the pills and shows a count only when it is not 0", () => {
     const base = { transcodeHardware: 1, transcodeCpu: 0, transcodeUnknown: 0, directStream: 0, directPlay: 2, paused: 0, totalKbps: 20_000, totalIsEstimate: false };
-    expect(summaryPills(base).map((pill) => pill.key)).toEqual(["hw", "cpu", "stream", "play", "bandwidth"]);
+    expect(summaryPills(base).map((pill) => `${pill.key}=${pill.value}`)).toEqual(["total=3", "hw=1", "play=2", "bandwidth=20.0 Mbps"]);
+    expect(summaryPills({ ...base, transcodeCpu: 1, directStream: 1, paused: 1 }).map((pill) => pill.key)).toEqual(["total", "hw", "cpu", "stream", "play", "paused", "bandwidth"]);
+    expect(summaryPills({ ...base, transcodeHardware: 0, directPlay: 0, totalKbps: 0 }).map((pill) => `${pill.key}=${pill.value}`)).toEqual(["total=0", "bandwidth=0 kbps"]);
     expect(summaryPills({ ...base, transcodeUnknown: 1, totalIsEstimate: true }).map((pill) => `${pill.label}=${pill.value}`)).toContain("Transcode, engine not reported=1");
     expect(summaryPills({ ...base, totalIsEstimate: true }).at(-1)).toMatchObject({ label: "Bandwidth (est.)", value: "≈ 20.0 Mbps" });
   });
@@ -90,5 +122,26 @@ describe("Now Playing presentation", () => {
     expect(streamLocationLabel({ location: "lan", relayed: false, geo: null })).toBe("LAN");
     expect(streamLocationLabel({ location: "wan", relayed: true, geo: { city: "Example City", region: null, country: "Netherlands", code: "NL" } })).toBe("WAN relay · Example City, Netherlands");
     expect(streamLocationLabel({ location: null, relayed: false })).toBe("Unknown");
+  });
+
+  it("shows City, State for US clients and City, Country for everyone else", () => {
+    const label = (geo: { city: string | null; region: string | null; country: string | null; code: string | null }) => geoLabel(geo);
+    // US: the state replaces the country, and the region never appears next to a non-US country.
+    expect(label({ city: "Sample Town", region: "Texas", country: "United States", code: "US" })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: "Texas", country: "United States", code: null })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: "Texas", country: null, code: "US" })).toBe("Sample Town, Texas");
+    expect(label({ city: "Sample Town", region: null, country: "United States", code: "US" })).toBe("Sample Town, United States");
+    expect(label({ city: null, region: "Texas", country: "United States", code: "US" })).toBe("Texas, United States");
+    expect(label({ city: null, region: null, country: "United States", code: "US" })).toBe("United States");
+    expect(label({ city: null, region: null, country: null, code: "US" })).toBe("United States");
+    // Outside the US: the region is left out.
+    expect(label({ city: "Example City", region: "Example Province", country: "Netherlands", code: "NL" })).toBe("Example City, Netherlands");
+    expect(label({ city: null, region: "Example Province", country: "Netherlands", code: "NL" })).toBe("Netherlands");
+    expect(label({ city: "Example City", region: null, country: null, code: null })).toBe("Example City");
+    // A known non-US code wins over a stray US-looking country, and nothing produces an empty label.
+    expect(label({ city: "Example City", region: "Example Province", country: "United States", code: "NL" })).toBe("Example City, United States");
+    expect(label({ city: null, region: null, country: null, code: null })).toBeNull();
+    expect(geoLabel(null)).toBeNull();
+    expect(streamLocationLabel({ location: "wan", relayed: false, geo: { city: "Sample Town", region: "Texas", country: "United States", code: "US" } })).toBe("WAN · Sample Town, Texas");
   });
 });

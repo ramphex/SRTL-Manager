@@ -15,7 +15,8 @@ vi.mock("../src/client/appShared", () => ({
   storagePolicyLabel: (policy: string) => policy,
   useLiveTimestamp: () => Date.parse("2026-11-02T10:00:00.000Z"),
   useModalLifecycle: () => ({ current: null }),
-  useStorageLocations: () => ({})
+  useStorageLocations: () => ({}),
+  useUserPreferences: () => ({ timeFormat: "12h" })
 }));
 
 const { NowPlayingPage, StreamCard } = await import("../src/client/nowPlaying");
@@ -27,7 +28,7 @@ function stream(overrides: Partial<NowPlayingStream> = {}): NowPlayingStream {
     id: "plex1:15", serverId: "plex1", serverKind: "plex", serverName: "Home Plex", sessionKey: "15", user: { id: "7", name: "sam" },
     mediaType: "episode", title: "The Fifth One", grandparentTitle: "Example Show", episodeLabel: "S02E05", year: 2021, posterUrl: null,
     player: { name: "Living Room", device: "SHIELD", platform: "Android", product: "Plex for Android (TV)", version: "10.0" },
-    state: "playing", positionMs: 600_000, durationMs: 3_600_000, reportedAt: "2026-11-02T10:00:00.000Z",
+    state: "playing", positionMs: 600_000, durationMs: 3_600_000, bufferedMs: null, reportedAt: "2026-11-02T10:00:00.000Z",
     playMethod: "transcode", videoDecision: "transcode", audioDecision: "transcode", subtitle: null,
     source: media({ videoCodec: "hevc", resolution: "4K", width: 3840, height: 2160, dynamicRange: "HDR10" }), output: media({ audioCodec: "aac", audioChannels: 2 }),
     transcode: { engine: "hardware", hardwareDecode: "nvdec", hardwareEncode: "nvenc", speed: 3.4, throttled: false, reasons: ["Video codec hevc to h264"], reasonsDerived: true },
@@ -64,6 +65,30 @@ function renderCard(value: NowPlayingStream, expanded = false, handlers: { onTog
 const visible = (element: Element | null) => Boolean(element) && !element!.closest("[hidden]");
 
 describe("Now Playing stream card", () => {
+  it("shows the played part over a lighter buffered part, and time left with the total and end time behind it", () => {
+    const card = renderCard(stream({ playMethod: "transcode", bufferedMs: 1_800_000 }));
+    const bar = card.querySelector(".np-progress")!;
+    expect((bar.querySelector(".np-progress-played") as HTMLElement).style.width).toBe(`${(600_000 / 3_600_000) * 100}%`);
+    expect((bar.querySelector(".np-progress-buffer") as HTMLElement).style.width).toBe("50%");
+    expect(bar.getAttribute("title")).toBe("Transcoded to 30:00, 20:00 ahead");
+    expect(bar.getAttribute("aria-valuetext")).toBe("10:00 of 1:00:00. Transcoded to 30:00, 20:00 ahead");
+    const times = card.querySelector(".np-progress-times")!;
+    expect(times.firstElementChild?.textContent).toBe("10:00");
+    const left = times.querySelector(".np-time-left")!;
+    expect(left.querySelector(".text-tooltip-trigger")?.textContent).toBe("-50:00");
+    const panel = left.querySelector("[role=tooltip]")!;
+    expect(panel.querySelector(".np-time-total")?.textContent).toBe("Total 1:00:00");
+    const endsAt = new Date(Date.parse("2026-11-02T10:00:00.000Z") + 3_000_000).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12: true });
+    expect(panel.textContent).toContain(`Ends at ${endsAt}`);
+  });
+
+  it("has no buffered part when the server does not report one, and no time left without a duration", () => {
+    expect(renderCard(stream({ bufferedMs: null })).querySelector(".np-progress-buffer")).toBeNull();
+    const card = renderCard(stream({ durationMs: null, bufferedMs: null }));
+    expect(card.querySelector(".np-time-left")).toBeNull();
+    expect(card.querySelector(".np-progress-times")?.textContent).toContain("--:--");
+  });
+
   it("starts folded: one summary line with bandwidth and quality, details hidden", () => {
     const card = renderCard(stream());
     expect(card.querySelector(".np-summary-text")?.textContent).toBe("10.5 Mbps · 4K → 1080p");
@@ -88,12 +113,29 @@ describe("Now Playing stream card", () => {
     expect(onToggle).toHaveBeenCalledWith("plex1:15");
   });
 
+  it("shows the SRTL source badge only for files on local or remote storage", () => {
+    expect(renderCard(stream()).querySelector(".np-badge-remote")?.textContent).toBe("Remote storage");
+    expect(renderCard(stream({ srtl: { status: "local", locationName: "Home NAS", policy: null } })).querySelector(".np-badge-local")?.textContent).toBe("Home NAS");
+    for (const status of ["unlinked", "broken", "unknown"] as const) {
+      const card = renderCard(stream({ srtl: { status, locationName: null, policy: null } }));
+      expect(card.querySelectorAll(".np-badges .np-badge")).toHaveLength(1);
+      expect(card.querySelector(".np-badge-state")).not.toBeNull();
+    }
+  });
+
   it("puts user, server and location in the bottom row, with the client IP only in a tooltip", () => {
     const card = renderCard(stream(), true);
     const footer = card.querySelector(".np-card-footer")!;
     expect(footer.querySelector(".np-footer-user")?.textContent).toBe("Usersam");
     expect(footer.querySelector(".np-footer-server .np-footer-text")?.textContent).toBe("Home Plex");
-    expect(footer.querySelector(".np-footer-server svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
+    // The server is named in text, so its icon is decorative and adds no hover tooltip of its own.
+    const icon = footer.querySelector(".np-footer-server svg.server-kind-plex")!;
+    expect(icon.getAttribute("aria-hidden")).toBe("true");
+    expect(icon.querySelector("title")).toBeNull();
+    const player = footer.querySelector(".np-footer-player dd")!;
+    expect(player.textContent).toBe("Plex for Android (TV) · Living Room");
+    expect(player.getAttribute("title")).toBe("Plex for Android (TV) · Living Room · SHIELD · Android");
+    expect(card.querySelector(".np-card-player")).toBeNull();
     const location = footer.querySelector(".np-footer-location")!;
     const trigger = location.querySelector<HTMLButtonElement>("button")!;
     expect(trigger.textContent).toBe("WAN · Example City, Netherlands");
@@ -102,7 +144,7 @@ describe("Now Playing stream card", () => {
     expect(tooltip.textContent).toBe("Client IP 198.51.100.23");
     // The address never shows anywhere else on the card, folded details included.
     const withoutTooltip = card.cloneNode(true) as HTMLElement;
-    withoutTooltip.querySelector("[role=tooltip]")?.remove();
+    withoutTooltip.querySelector(".np-footer-location [role=tooltip]")?.remove();
     expect(withoutTooltip.textContent).not.toContain("198.51.100.23");
     // The user and server are not repeated above the bottom row.
     expect(card.querySelector(".np-card-body")?.textContent).not.toContain("Home Plex");
@@ -115,7 +157,7 @@ describe("Now Playing stream card", () => {
     const location = card.querySelector(".np-footer-location")!;
     expect(location.textContent).toBe("LocationLAN");
     expect(location.querySelector("button")).toBeNull();
-    expect(card.querySelector("[role=tooltip]")).toBeNull();
+    expect(location.querySelector("[role=tooltip]")).toBeNull();
   });
 
   it("stops with a small icon button named Terminate the stream", () => {
@@ -233,9 +275,29 @@ describe("Now Playing page", () => {
     expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("true");
     expect(serverToggle("Home Plex").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Plex");
     expect(serverToggle("Jellyfin").querySelector("svg[role=img]")?.getAttribute("aria-label")).toBe("Jellyfin");
-    const footers = [...container.querySelectorAll(".np-footer-server svg[role=img]")].map((icon) => icon.getAttribute("aria-label"));
-    expect(footers).toEqual(["Plex", "Plex", "Jellyfin"]);
+    const footers = [...container.querySelectorAll(".np-footer-server svg")].map((icon) => icon.getAttribute("class"));
+    expect(footers).toEqual(["server-kind-icon server-kind-plex", "server-kind-icon server-kind-plex", "server-kind-icon server-kind-jellyfin"]);
+    expect(container.querySelector(".np-footer-server title")).toBeNull();
+    expect(pill("Streams")).toBe("Streams: 3");
     expect(pill("Direct play")).toBe("Direct play: 1");
+  });
+
+  it("shows only the server icon while each kind has one server, and names every card once a kind has two", async () => {
+    preferencesServer();
+    mountPage(pageSnapshot());
+    await settle();
+    const serverCells = () => [...container.querySelectorAll(".np-footer-server")];
+    expect(container.querySelectorAll(".np-server-name")).toHaveLength(0);
+    const trigger = serverCells()[0]!.querySelector<HTMLButtonElement>(".np-server-tooltip button")!;
+    expect(trigger.querySelector(".sr-only")?.textContent).toBe("Home Plex");
+    expect(document.getElementById(trigger.getAttribute("aria-describedby")!)?.textContent).toBe("Home Plex");
+
+    remount();
+    preferencesServer();
+    mountPage(pageSnapshot({ servers: [{ ...servers[0]!, id: "plex2", name: "Cabin Plex" }] }));
+    await settle();
+    expect(serverCells().map((cell) => cell.querySelector(".np-server-name .np-footer-text")?.textContent)).toEqual(["Home Plex", "Home Plex", "Jellyfin"]);
+    expect(container.querySelectorAll(".np-server-tooltip")).toHaveLength(0);
   });
 
   it("hides a server's streams when it is turned off, and keeps that choice for the account", async () => {
@@ -247,7 +309,9 @@ describe("Now Playing page", () => {
     expect(serverToggle("Jellyfin").getAttribute("aria-pressed")).toBe("false");
     expect(cardTitles()).toEqual(["Example Show", "Big Film"]);
     // The pills count only the servers shown.
-    expect(pill("Direct play")).toBe("Direct play: 0");
+    expect(pill("Streams")).toBe("Streams: 2");
+    // A count of 0 hides its pill.
+    expect(pill("Direct play")).toBeUndefined();
     expect(pill("Bandwidth")).toBe("Bandwidth: 21.0 Mbps");
     expect(preferences.saves).toEqual([expect.objectContaining({ timeFormat: "12h", nowPlayingHiddenServers: ["jf1"] })]);
 

@@ -37,6 +37,33 @@ export function livePosition(stream: Pick<NowPlayingStream, "state" | "positionM
   return stream.durationMs ? Math.min(stream.durationMs, position) : position;
 }
 
+// How far the server has the stream ready, as a percent of the file; null when it does not say.
+export function bufferedPercent(stream: Pick<NowPlayingStream, "bufferedMs" | "durationMs">): number | null {
+  if (stream.bufferedMs === null || !stream.durationMs) return null;
+  return Math.max(0, Math.min(100, (stream.bufferedMs / stream.durationMs) * 100));
+}
+
+// One line for the bar's tooltip: how far ahead of playback the server has the stream ready.
+export function bufferedLabel(stream: Pick<NowPlayingStream, "bufferedMs" | "durationMs" | "playMethod">, position: number): string | null {
+  if (stream.bufferedMs === null || !stream.durationMs) return null;
+  const verb = stream.playMethod === "transcode" ? "Transcoded" : "Prepared";
+  if (stream.bufferedMs >= stream.durationMs) return `${verb} to the end`;
+  const ahead = stream.bufferedMs - position;
+  return `${verb} to ${formatClock(stream.bufferedMs)}${ahead > 0 ? `, ${formatClock(ahead)} ahead` : ", playback has caught up"}`;
+}
+
+export function timeLeft(stream: Pick<NowPlayingStream, "durationMs">, position: number): number | null {
+  return stream.durationMs ? Math.max(0, stream.durationMs - position) : null;
+}
+
+// The local clock time playback reaches the end; a paused stream counts from now, as if resumed.
+export function endsAtLabel(stream: Pick<NowPlayingStream, "durationMs" | "state">, position: number, now: number, hour12: boolean): string | null {
+  const left = timeLeft(stream, position);
+  if (left === null) return null;
+  const at = new Date(now + left).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit", hour12 });
+  return stream.state === "paused" ? `Ends at ${at} if resumed now` : `Ends at ${at}`;
+}
+
 const codecNames: Record<string, string> = {
   h264: "H.264", hevc: "HEVC", h265: "HEVC", av1: "AV1", vp9: "VP9", mpeg2video: "MPEG-2", mpeg4: "MPEG-4", vc1: "VC-1",
   aac: "AAC", ac3: "AC3", eac3: "EAC3", truehd: "TrueHD", dts: "DTS", "dca": "DTS", "dts-hd ma": "DTS-HD MA", flac: "FLAC", mp3: "MP3", opus: "Opus", vorbis: "Vorbis", pcm: "PCM",
@@ -78,9 +105,22 @@ export function decisionLabel(decision: NowPlayingStream["videoDecision"]): stri
   return decision === "transcode" ? "Transcode" : decision === "copy" ? "Copy" : decision === "directPlay" ? "Direct" : "—";
 }
 
+// "City, State" for a client in the US, "City, Country" everywhere else. Missing parts drop out, so a US client
+// without a city reads "State, United States" and the label is never empty or left with a dangling comma.
 export function geoLabel(geo: NowPlayingGeo | null): string | null {
   if (!geo) return null;
-  return [geo.city, geo.region, geo.country].filter(Boolean).join(", ") || null;
+  const clean = (value: string | null | undefined) => value?.trim() || null;
+  const city = clean(geo.city);
+  const region = clean(geo.region);
+  const country = clean(geo.country);
+  const code = clean(geo.code);
+  const inUS = code ? code.toUpperCase() === "US" : country?.toLowerCase() === "united states";
+  if (inUS) {
+    // Without a city the state keeps the country beside it; without a state the country stands in for it.
+    if (city) return `${city}, ${region ?? "United States"}`;
+    return region ? `${region}, United States` : "United States";
+  }
+  return [city, country].filter(Boolean).join(", ") || region;
 }
 
 // One resolution bucket for the folded card line: 4K, 1440p, 1080p, 720p, or SD for anything below 720p.
@@ -140,14 +180,35 @@ export function streamTitle(stream: Pick<NowPlayingStream, "mediaType" | "title"
   return { primary: stream.title, secondary: stream.year ? String(stream.year) : null };
 }
 
-export function summaryPills(summary: NowPlayingSummary): Array<{ key: string; label: string; value: string; tone: "hw" | "cpu" | "unknown" | "stream" | "play" | "bandwidth" }> {
+// The card shows the app and the player's name; the hover adds the device and platform when they say something new.
+export function playerLabels(player: NowPlayingStream["player"]): { short: string; full: string } | null {
+  const parts: string[] = [];
+  for (const part of [player.product, player.name, player.device, player.platform]) {
+    const text = part?.trim();
+    if (text && !parts.some((seen) => seen.toLowerCase() === text.toLowerCase())) parts.push(text);
+  }
+  if (!parts.length) return null;
+  return { short: parts.slice(0, 2).join(" · "), full: parts.join(" · ") };
+}
+
+type PillTone = "total" | "hw" | "cpu" | "unknown" | "stream" | "play" | "paused" | "bandwidth";
+
+// Total streams first, then each play method and paused only when its count is not 0, then bandwidth.
+// Paused streams are also counted under their play method.
+export function summaryPills(summary: NowPlayingSummary): Array<{ key: string; label: string; value: string; tone: PillTone }> {
+  const total = summary.transcodeHardware + summary.transcodeCpu + summary.transcodeUnknown + summary.directStream + summary.directPlay;
+  const counts: Array<{ key: string; label: string; count: number; tone: PillTone }> = [
+    { key: "hw", label: "HW transcode", count: summary.transcodeHardware, tone: "hw" },
+    { key: "cpu", label: "CPU transcode", count: summary.transcodeCpu, tone: "cpu" },
+    { key: "unknown", label: "Transcode, engine not reported", count: summary.transcodeUnknown, tone: "unknown" },
+    { key: "stream", label: "Direct stream", count: summary.directStream, tone: "stream" },
+    { key: "play", label: "Direct play", count: summary.directPlay, tone: "play" },
+    { key: "paused", label: "Paused", count: summary.paused, tone: "paused" }
+  ];
   return [
-    { key: "hw", label: "HW transcode", value: String(summary.transcodeHardware), tone: "hw" as const },
-    { key: "cpu", label: "CPU transcode", value: String(summary.transcodeCpu), tone: "cpu" as const },
-    ...(summary.transcodeUnknown > 0 ? [{ key: "unknown", label: "Transcode, engine not reported", value: String(summary.transcodeUnknown), tone: "unknown" as const }] : []),
-    { key: "stream", label: "Direct stream", value: String(summary.directStream), tone: "stream" as const },
-    { key: "play", label: "Direct play", value: String(summary.directPlay), tone: "play" as const },
-    { key: "bandwidth", label: summary.totalIsEstimate ? "Bandwidth (est.)" : "Bandwidth", value: `${summary.totalIsEstimate ? "≈ " : ""}${formatKbps(summary.totalKbps)}`, tone: "bandwidth" as const }
+    { key: "total", label: "Streams", value: String(total), tone: "total" },
+    ...counts.filter((pill) => pill.count > 0).map(({ count, ...pill }) => ({ ...pill, value: String(count) })),
+    { key: "bandwidth", label: summary.totalIsEstimate ? "Bandwidth (est.)" : "Bandwidth", value: `${summary.totalIsEstimate ? "≈ " : ""}${formatKbps(summary.totalKbps)}`, tone: "bandwidth" }
   ];
 }
 
