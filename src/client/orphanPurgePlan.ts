@@ -3,9 +3,30 @@ import { createSearchMatcher } from "../shared/search";
 
 const purgeJobIdLimit = 50_000;
 
+/** Whether an orphan file or folder can be chosen for a purge. Only the 24-hour rule can be waived, and only when asked. */
+export function isPurgeable(entry: Pick<OrphanReviewItem, "protectedReason" | "protectedKind">, includeRecent: boolean): boolean {
+  if (!entry.protectedReason) return true;
+  return includeRecent && entry.protectedKind === "recent";
+}
+
+/** Protected only because it was modified in the last 24 hours. */
+export function isRecentOnly(entry: Pick<OrphanReviewItem, "protectedReason" | "protectedKind">): boolean {
+  return Boolean(entry.protectedReason) && entry.protectedKind === "recent";
+}
+
+/** "Modified 3h ago" for a file or folder changed in the last 24 hours. */
+export function modifiedAgoText(mtimeMs: number, now = Date.now()): string {
+  const minutes = Math.max(0, Math.floor((now - mtimeMs) / 60_000));
+  if (minutes < 1) return "Modified just now";
+  if (minutes < 60) return `Modified ${minutes}m ago`;
+  return `Modified ${Math.floor(minutes / 60)}h ago`;
+}
+
 export interface PurgeAllPlan {
   fileIds: number[];
   folderIds: number[];
+  // Files and folders in the plan that changed in the last 24 hours; non-zero only when recent files were included.
+  recentCount: number;
   totalCount: number;
   totalBytes: number;
   byCategory: Array<{ category: OrphanCategory; count: number; sizeBytes: number }>;
@@ -13,10 +34,13 @@ export interface PurgeAllPlan {
   folderBytes: number;
 }
 
-/** Everything the purge-all action may touch: purgeable files, plus leftover folders only when opted in. Protected entries are never included. */
-export function planPurgeAll(review: Pick<OrphanReview, "items" | "leftoverFolders">, includeFolders: boolean): PurgeAllPlan {
-  const files = review.items.filter((item) => !item.protectedReason);
-  const folders: OrphanLeftoverFolder[] = includeFolders ? review.leftoverFolders.filter((folder) => !folder.protectedReason) : [];
+/**
+ * Everything the purge-all action may touch: purgeable files, plus leftover folders only when opted in. Protected entries
+ * are never included, except those protected only by the 24-hour rule when includeRecent is on.
+ */
+export function planPurgeAll(review: Pick<OrphanReview, "items" | "leftoverFolders">, includeFolders: boolean, includeRecent = false): PurgeAllPlan {
+  const files = review.items.filter((item) => isPurgeable(item, includeRecent));
+  const folders: OrphanLeftoverFolder[] = includeFolders ? review.leftoverFolders.filter((folder) => isPurgeable(folder, includeRecent)) : [];
   const categories = new Map<OrphanCategory, { count: number; sizeBytes: number }>();
   const labels = new Map<OrphanReviewLabel, { count: number; sizeBytes: number }>();
   for (const item of files) {
@@ -33,6 +57,7 @@ export function planPurgeAll(review: Pick<OrphanReview, "items" | "leftoverFolde
   return {
     fileIds: files.map((item) => item.storageFileId),
     folderIds: folders.map((folder) => folder.folderId),
+    recentCount: [...files, ...folders].filter(isRecentOnly).length,
     totalCount: files.length + folders.length,
     totalBytes: files.reduce((total, item) => total + item.sizeBytes, 0) + folderBytes,
     byCategory: [...categories].map(([category, entry]) => ({ category, ...entry })),

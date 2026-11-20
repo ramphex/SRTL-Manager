@@ -3125,7 +3125,7 @@ export class JobRunner {
     };
   }
 
-  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = [], reRequest = false): Promise<number> {
+  async startOrphanPurge(rootType: StorageRootType, storageFileIds: number[], mode: OrphanPurgeMode, folderIds: number[] = [], reRequest = false, includeRecent = false): Promise<number> {
     const requested = [...new Set(storageFileIds)];
     const requestedFolders = [...new Set(folderIds)];
     if (requested.length + requestedFolders.length === 0 || [...requested, ...requestedFolders].some((id) => !Number.isInteger(id) || id < 1)) {
@@ -3140,8 +3140,8 @@ export class JobRunner {
       const extra = await extraSymlinksForPurge(transaction, paths).catch((error: unknown) => {
         throw new AdmissionError(errorMessage(error));
       });
-      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested, undefined, extra) : { eligible: [], rejected: [] };
-      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders, undefined, extra);
+      const { eligible, rejected } = requested.length > 0 ? await purgeableOrphans(transaction, rootType, requested, undefined, extra, includeRecent) : { eligible: [], rejected: [] };
+      const folders = await purgeableLeftoverFolders(transaction, rootType, requestedFolders, undefined, extra, includeRecent);
       const allRejected = [...rejected, ...folders.rejected];
       if (allRejected.length > 0) {
         throw new AdmissionError(`Some selections cannot be purged: ${allRejected.slice(0, 5).join("; ")}${allRejected.length > 5 ? ` and ${allRejected.length - 5} more` : ""}. Refresh the orphan list and try again.`);
@@ -3155,7 +3155,7 @@ export class JobRunner {
         claims.push(...pathClaims.flat());
       }
       const total = eligible.length + folders.eligible.length;
-      const options = { rootType, mode, total, reRequest };
+      const options = { rootType, mode, total, reRequest, ...(includeRecent ? { includeRecent: true } : {}) };
       return {
         progress: { options, current: 0, total, held: 0, deleted: 0, alreadyMissing: 0, failed: 0, stage: "queued", message: "Waiting to purge orphan files" },
         options,
@@ -3967,7 +3967,7 @@ export class JobWorker {
       return;
     }
     if (job.type === "orphan_purge") {
-      await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; rescan?: boolean; source?: string }>(job) ?? {});
+      await this.runOrphanPurgeJob(ctx, jobProgressOptions<{ reRequest?: boolean; rescan?: boolean; source?: string; includeRecent?: boolean }>(job) ?? {});
       return;
     }
     if (job.type === "orphan_restore") {
@@ -4778,7 +4778,7 @@ export class JobWorker {
     }
   }
 
-  private async runOrphanPurgeJob(ctx: JobContext, jobOptions: { reRequest?: boolean; rescan?: boolean; source?: string }): Promise<void> {
+  private async runOrphanPurgeJob(ctx: JobContext, jobOptions: { reRequest?: boolean; rescan?: boolean; source?: string; includeRecent?: boolean }): Promise<void> {
     const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
     const cleanup = normalizeAdvancedSettings(await getJsonSetting<unknown>(this.db, "advancedSettings", {})).cleanup;
     const holdDays = cleanup.holdDays;
@@ -4805,12 +4805,14 @@ export class JobWorker {
     const damaged = jobOptions.source === "damaged";
     // Orphans have no library symlink, so Radarr and Sonarr never saw them and a rescan has nothing to find.
     const rescan = damaged && jobOptions.rescan === true;
+    // Damaged file deletes never skip the 24-hour rule.
+    const includeRecent = !damaged && jobOptions.includeRecent === true;
     let rescanSummary: ArrRescanSummary | null = null;
     const name = damaged ? "Damaged file delete" : "Orphan purge";
     const noun = damaged ? "Damaged file" : "Orphan";
     const setProgress = (stage: OrphanPurgeJobProgress["stage"], message: string) => {
       const progress: OrphanPurgeJobProgress = {
-        options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(rescan ? { rescan } : {}), ...(damaged ? { source: "damaged" as const } : {}) },
+        options: { rootType: operations[0]!.rootType as StorageRootType, mode: operations[0]!.mode as OrphanPurgeMode, total, reRequest, ...(rescan ? { rescan } : {}), ...(damaged ? { source: "damaged" as const } : {}), ...(includeRecent ? { includeRecent } : {}) },
         current, total, held, deleted, alreadyMissing, failed, cameBack, resurfacedDeleted, keepsComingBack, listedNotReadable, remaining: Math.max(0, total - current), stage, message,
         ...(firstError ? { firstError } : {}),
         ...(firstCameBack ? { firstCameBack } : {}),
@@ -4821,7 +4823,7 @@ export class JobWorker {
     };
 
     await setProgress("preparing", `Preparing ${name.toLowerCase()}`);
-    await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest, ...(rescan ? { rescan } : {}) });
+    await ctx.event("info", `${name} started`, { total, mode: operations[0]!.mode, rootType: operations[0]!.rootType, reRequest, ...(rescan ? { rescan } : {}), ...(includeRecent ? { includeRecent } : {}) });
     for (const operation of operations) {
       if (operation.stage !== "planned") continue;
       if (await ctx.isCancelled()) break;
@@ -4839,7 +4841,7 @@ export class JobWorker {
           if (!journal) throw new Error(`Orphan purge operation #${operation.id} changed before execution`);
           // Another copy can appear at a deleted remote path once its folder goes, so the purge waits a moment and looks again.
           const settle = journal.rootType === "remote" && cleanup.purgeSettleSeconds > 0 ? { settleMs: cleanup.purgeSettleSeconds * 1000, settle: (ms: number) => this.purgeSettleWait(ms, ctx.signal) } : undefined;
-          const result = await executeOrphanPurgeOperation(leaseDb, journal, { paths, holdDays, settle });
+          const result = await executeOrphanPurgeOperation(leaseDb, journal, { paths, holdDays, settle, includeRecent });
           const timestamp = nowIso();
           await leaseDb
             .update(schema.orphanPurgeOperations)

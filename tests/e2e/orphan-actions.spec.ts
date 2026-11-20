@@ -268,7 +268,7 @@ test("a failed purge job shows a red banner with its first error, until dismisse
   const alert = page.getByRole("alert").filter({ hasText: "Purge job #97" });
   await expect(alert).toContainText("Purge job #97 partly failed: 2 of 6 items not purged.");
   await expect(alert).toContainText("First error: file.mkv: could not be deleted (EACCES)");
-  await expect(page.getByText(/finished/)).toHaveCount(0);
+  await expect(page.getByText(/Purge job #\d+ finished/)).toHaveCount(0);
   await alert.getByRole("button", { name: "Dismiss" }).click();
   await expect(alert).toHaveCount(0);
   await page.reload();

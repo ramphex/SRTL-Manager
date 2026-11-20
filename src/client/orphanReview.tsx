@@ -7,7 +7,7 @@ import type { JobRecord, OrphanRestoreJobProgress, OrphanPurgeMode, OrphanReview
 import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, recordFromUnknown, useModalLifecycle } from "./appShared";
-import { filterOrphans, purgeBatches, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
+import { filterOrphans, isPurgeable, isRecentOnly, modifiedAgoText, purgeBatches, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
 import { SettingsTabs } from "./settingsTabs";
 import { jobFinished, useQueuedJob } from "./queuedJob";
 
@@ -109,8 +109,23 @@ function SizeCell({ item }: { item: OrphanReviewItem }) {
   );
 }
 
+const recentTitle = "Changed in the last 24 hours, so it may still be importing or downloading";
+
+/** Marks a file or folder listed only because recent files are included. */
+function RecentFlag({ mtimeMs }: { mtimeMs: number }) {
+  return (
+    <span className="orv-chip orv-chip-small orv-tone-warn orv-recent-flag" title={recentTitle}>
+      {modifiedAgoText(mtimeMs)}
+      <span className="sr-only">: {recentTitle}</span>
+    </span>
+  );
+}
+
+const recentCountText = (count: number) => `${formatNumber(count)} ${count === 1 ? "was" : "were"} modified in the last 24 hours and may still be importing or downloading.`;
+
 function FileFlags({ item }: { item: OrphanReviewItem }) {
   const flags: Array<{ text: string; title: string; tone: LabelTone }> = [];
+  if (isRecentOnly(item)) flags.push({ text: modifiedAgoText(item.mtimeMs), title: recentTitle, tone: "warn" });
   if (item.hollow) flags.push({ text: "Hollow", title: "Almost none of this file is stored on disk", tone: "bad" });
   if (item.integrity === "partial_hollow") flags.push({ text: "Damaged", title: `${item.zeroSamples ?? "Several"} of 24 sampled regions are zero-filled`, tone: "bad" });
   if (item.episodeCoverage && item.episodeCoverage.linked < item.episodeCoverage.total)
@@ -332,6 +347,8 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   // Hold is the safe default where the storage can hold files; elsewhere every purge is a delete.
   const canHold = canHoldOn(rootType);
   const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
+  // Off every time the page opens: files changed in the last 24 hours may still be importing.
+  const [includeRecent, setIncludeRecent] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [purgeAllOpen, setPurgeAllOpen] = useState(autoOpenPurgeAll);
   const [howOpen, setHowOpen] = useState(false);
@@ -346,7 +363,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
     setConfirming(false);
   };
   const purge = useMutation({
-    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode }),
+    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode, includeRecent: includeRecent && selectedRecent > 0 }),
     onSuccess: (result) => {
       setStartedJobs((current) => [...current, result.jobId]);
       clearSelection();
@@ -366,16 +383,18 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
 
   const data = review.data as ReviewWithSkips | undefined;
   const allItems = useMemo(() => data?.items ?? [], [data]);
-  // Protected files can never be purged, so they are counted, not listed with checkboxes that do nothing.
-  const items = useMemo(() => allItems.filter((item) => !item.protectedReason), [allItems]);
-  const protectedItems = useMemo(() => allItems.filter((item) => item.protectedReason), [allItems]);
+  // Protected files can never be purged, so they are counted, not listed with checkboxes that do nothing. The switch below
+  // lists those protected only by the 24-hour rule.
+  const items = useMemo(() => allItems.filter((item) => isPurgeable(item, includeRecent)), [allItems, includeRecent]);
+  const protectedItems = useMemo(() => allItems.filter((item) => !isPurgeable(item, includeRecent)), [allItems, includeRecent]);
   const filtered = useMemo(() => sortOrphans(filterOrphans(items, { label, release: releaseFilter, size: sizeFilter, search }), sort), [items, label, releaseFilter, sizeFilter, search, sort]);
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const currentPage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(currentPage * pageSize, (currentPage + 1) * pageSize);
   const allFolders = useMemo(() => data?.leftoverFolders ?? [], [data]);
-  const folders = useMemo(() => allFolders.filter((folder) => !folder.protectedReason), [allFolders]);
+  const folders = useMemo(() => allFolders.filter((folder) => isPurgeable(folder, includeRecent)), [allFolders, includeRecent]);
   const protectedFolderCount = allFolders.length - folders.length;
+  const recentAvailable = allItems.filter(isRecentOnly).length + allFolders.filter(isRecentOnly).length;
   const labelCounts = useMemo(() => {
     const counts = new Map<OrphanReviewLabel, number>();
     for (const item of items) counts.set(item.label, (counts.get(item.label) ?? 0) + 1);
@@ -385,6 +404,18 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   const selectedFolderItems = folders.filter((folder) => selectedFolders.has(folder.folderId));
   const selectedBytes = selectedItems.reduce((total, item) => total + item.sizeBytes, 0) + selectedFolderItems.reduce((total, folder) => total + folder.totalBytes, 0);
   const selectedCount = selected.size + selectedFolders.size;
+  const selectedRecent = selectedItems.filter(isRecentOnly).length + selectedFolderItems.filter(isRecentOnly).length;
+  const changeIncludeRecent = (checked: boolean) => {
+    setIncludeRecent(checked);
+    setConfirming(false);
+    // Recent files leave the list when the switch goes off, so they must leave the selection too.
+    if (!checked) {
+      const recentFiles = new Set(allItems.filter(isRecentOnly).map((item) => item.storageFileId));
+      const recentFolders = new Set(allFolders.filter(isRecentOnly).map((folder) => folder.folderId));
+      setSelected((current) => new Set([...current].filter((id) => !recentFiles.has(id))));
+      setSelectedFolders((current) => new Set([...current].filter((id) => !recentFolders.has(id))));
+    }
+  };
   const heldHere = (held.data ?? []).filter((file) => file.rootType === rootType);
   const extraSymlinks = data?.extraSymlinks;
   const inUse = data?.skippedInUse;
@@ -474,11 +505,22 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 </button>
               </div>
             </header>
+            <div className="orv-recent-toggle">
+              <label>
+                <input type="checkbox" role="switch" checked={includeRecent} aria-checked={includeRecent} disabled={busy} onChange={(event) => changeIncludeRecent(event.target.checked)} />
+                <span>
+                  Include files modified in the last 24 hours <span className="orv-muted">({formatNumber(recentAvailable)})</span>
+                </span>
+              </label>
+              <InfoTooltip label="About recent files">
+                Files and folders that changed in the last 24 hours are hidden because an import or download may still be using them. Turn this on to list and purge them anyway; each is marked with when it changed. Files that are part of an unfinished copy or that a symlink still uses stay protected. This switch is off whenever the page opens.
+              </InfoTooltip>
+            </div>
             {howOpen ? (
               <div className="orv-how-panel" id={`orv-how-${rootType}`}>
                 <ul>
                   <li>
-                    <strong>What is listed:</strong> video files nothing in the library links to. Files a symlink still uses, or that changed in the last 24 hours, are left out.
+                    <strong>What is listed:</strong> video files nothing in the library links to. Files a symlink still uses, or that changed in the last 24 hours, are left out. The switch above lists the recent ones too.
                   </li>
                   <li>
                     <strong>Labels about titles:</strong> {nameMatchCaveat} {orphanLabels.no_title_match.short} does not rule out a title that is in the library under another name.
@@ -495,7 +537,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                     )}
                   </li>
                   <li>
-                    <strong>Safety checks:</strong> every file is rechecked right before it is touched: still unlinked, including from any extra symlink folders, unchanged, not part of a copy, and older than 24 hours. Subtitles, artwork, and empty folders go with the last video in a folder.
+                    <strong>Safety checks:</strong> every file is rechecked right before it is touched: still unlinked, including from any extra symlink folders, unchanged, not part of a copy, and older than 24 hours unless recent files are included. Subtitles, artwork, and empty folders go with the last video in a folder.
                   </li>
                 </ul>
               </div>
@@ -684,6 +726,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                                 <td className="orv-col-file">
                                   <div className="orv-name-line">
                                     <span className="orv-name">{fileName(folder.relativePath)}</span>
+                                    {isRecentOnly(folder) ? <RecentFlag mtimeMs={folder.newestMtimeMs} /> : null}
                                   </div>
                                   <div className="orv-sub">
                                     <span className="orv-dir" title={folder.relativePath}>{parentPath(folder.relativePath) || "/"}</span>
@@ -786,6 +829,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                           Permanently delete <strong>{selectionLabel}</strong> ({formatBytes(selectedBytes)}) on {rootLabel}? This cannot be undone.
                         </>
                       )}
+                      {selectedRecent ? <span className="orv-confirm-recent"> {recentCountText(selectedRecent)}</span> : null}
                     </p>
                     <div className="orv-confirm-actions">
                       <button type="button" className={mode === "delete" ? "orv-danger-solid" : undefined} disabled={busy} onClick={() => purge.mutate()}>
@@ -836,6 +880,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
           ? createPortal(
               <PurgeAllDialog
                 review={review.data}
+                includeRecent={includeRecent}
                 rootType={rootType}
                 rootLabel={rootLabel}
                 onClose={() => setPurgeAllOpen(false)}
@@ -876,22 +921,22 @@ function Pager({ page, pageCount, total, onPage }: { page: number; pageCount: nu
   );
 }
 
-function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone }: { review: OrphanReview; rootType: StorageRootType; rootLabel: string; onClose: () => void; onQueued: (jobIds: number[]) => void; onDone: () => void }) {
+function PurgeAllDialog({ review, includeRecent, rootType, rootLabel, onClose, onQueued, onDone }: { review: OrphanReview; includeRecent: boolean; rootType: StorageRootType; rootLabel: string; onClose: () => void; onQueued: (jobIds: number[]) => void; onDone: () => void }) {
   const dialogRef = useModalLifecycle(true, onClose);
   const [includeFolders, setIncludeFolders] = useState(false);
   const canHold = canHoldOn(rootType);
   const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
-  const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
+  const plan = useMemo(() => planPurgeAll(review, includeFolders, includeRecent), [review, includeFolders, includeRecent]);
   const batches = useMemo(() => purgeBatches(plan), [plan]);
-  const eligibleFolders = review.leftoverFolders.filter((folder) => !folder.protectedReason);
-  const protectedCount = review.items.filter((item) => item.protectedReason).length;
+  const eligibleFolders = review.leftoverFolders.filter((folder) => isPurgeable(folder, includeRecent));
+  const protectedCount = review.items.filter((item) => !isPurgeable(item, includeRecent)).length;
   const extraProblems = review.extraSymlinks.problems;
   const stale = Boolean(review.staleWarning || extraProblems.length);
   const start = useMutation({
     mutationFn: async () => {
       const jobIds: number[] = [];
       for (const batch of batches) {
-        const result = await api.purgeOrphans({ rootType, ...batch, mode });
+        const result = await api.purgeOrphans({ rootType, ...batch, mode, includeRecent: plan.recentCount > 0 });
         jobIds.push(result.jobId);
       }
       return jobIds;
@@ -931,6 +976,7 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
         ) : null}
         <p data-testid="purge-all-summary">
           <strong>{items(plan.totalCount)}</strong> on {rootLabel}, <strong>{formatBytes(plan.totalBytes)}</strong>. {protectedCount > 0 ? `${formatNumber(protectedCount)} protected ${protectedCount === 1 ? "file is" : "files are"} left alone. ` : ""}Every file is rechecked right before it is touched.
+          {plan.recentCount > 0 ? <span data-testid="purge-all-recent"> {recentCountText(plan.recentCount)}</span> : null}
         </p>
         <table className="orphan-purge-breakdown" aria-label="Purge breakdown by label">
           <tbody>
