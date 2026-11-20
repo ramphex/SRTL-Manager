@@ -111,7 +111,8 @@ test("orphan purges never offer a re-request, in the confirmation or purge all",
   await expect(confirm.getByTestId("re-request-preview")).toHaveCount(0);
   await confirm.getByRole("button", { name: "Move to holding area" }).click();
   await expect.poll(() => posts.orphans.length).toBe(1);
-  expect(posts.orphans[0]).toEqual({ rootType: "local", storageFileIds: [1], folderIds: [], mode: "hold" });
+  expect(posts.orphans[0]).toMatchObject({ rootType: "local", storageFileIds: [1], folderIds: [], mode: "hold" });
+  expect(posts.orphans[0]).not.toHaveProperty("reRequest");
 
   await page.getByRole("button", { name: "Purge all eligible" }).click();
   const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
