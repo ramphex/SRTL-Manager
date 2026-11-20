@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Maintenance
+
+- **Dependency updates.** Minor updates to the icon library and the TypeScript lint tooling. The lint update clears a moderate advisory in a file pattern matching dependency, so `npm audit` reports no known vulnerabilities. No behaviour changes.
+
 ## [0.1.5] - 2026-11-20
 
 Everything from 0.1.5-beta.1 to 0.1.5-beta.10. The beta sections below have the full detail.
