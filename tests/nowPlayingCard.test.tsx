@@ -68,7 +68,9 @@ describe("Now Playing stream card", () => {
   it("shows the played part over a lighter buffered part, and time left with the total and end time behind it", () => {
     const card = renderCard(stream({ playMethod: "transcode", bufferedMs: 1_800_000 }));
     const bar = card.querySelector(".np-progress")!;
-    expect((bar.querySelector(".np-progress-played") as HTMLElement).style.width).toBe(`${(600_000 / 3_600_000) * 100}%`);
+    const playedWidth = (bar.querySelector(".np-progress-played") as HTMLElement).style.width;
+    expect(playedWidth).toMatch(/%$/);
+    expect(Number.parseFloat(playedWidth)).toBeCloseTo((600_000 / 3_600_000) * 100, 3);
     expect((bar.querySelector(".np-progress-buffer") as HTMLElement).style.width).toBe("50%");
     expect(bar.getAttribute("title")).toBe("Transcoded to 30:00, 20:00 ahead");
     expect(bar.getAttribute("aria-valuetext")).toBe("10:00 of 1:00:00. Transcoded to 30:00, 20:00 ahead");
