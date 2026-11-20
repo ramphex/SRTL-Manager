@@ -1,3 +1,4 @@
+import type { DashboardHealth } from "./dashboardModel";
 import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
   AuditEstimate,
@@ -122,6 +123,8 @@ export const api = {
   revokeSession: (id: number) => request<{ ok: true; current: boolean }>(`/api/auth/sessions/${encodeURIComponent(String(id))}`, { method: "DELETE" }),
   revokeOtherSessions: () => request<{ ok: true; revoked: number }>("/api/auth/sessions/revoke-others", { method: "POST" }),
   securityEvents: (before?: number) => request<SecurityEventPage>(`/api/auth/security-events?limit=50${before ? `&before=${before}` : ""}`),
+  /** Worker and backup health for the dashboard's System line; the same answer local health checks get. */
+  health: () => request<DashboardHealth>("/api/health"),
   backups: () => request<BackupState>("/api/backups"),
   saveBackupSettings: (body: BackupSettings) => request<BackupState>("/api/backups/settings", { method: "PUT", body: JSON.stringify(body) }),
   runBackup: () => request<{ jobId: number }>("/api/backups/run", { method: "POST" }),

@@ -142,7 +142,8 @@ async function mockPopulatedDashboard(
         copy: { profile: "balanced", byteCompare: true, mediaValidation: "fast" },
         audit: { defaultMode: "fast", byteCompareWhenSourceKnown: true }
       };
-    } else if (url.pathname === "/api/sections") body = sections;
+    } else if (url.pathname === "/api/health") body = { ok: true, worker: "ready", expectedWorkerCount: 2, readyWorkerCount: 2 };
+    else if (url.pathname === "/api/sections") body = sections;
     else if (url.pathname === "/api/inventory/summary") {
       if (options.inventoryDelayMs) await new Promise((resolve) => setTimeout(resolve, options.inventoryDelayMs));
       body = options.emptyInventory ? Object.fromEntries(Object.keys(inventory).map((key) => [key, 0])) : inventory;
@@ -280,7 +281,7 @@ async function expectTouchTarget(locator: Locator, label: string, requireSquare 
 
 test.beforeEach(async ({ page }) => {
   await mockPopulatedDashboard(page);
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await expect(page.locator(".dashboard-attention-panel").getByRole("heading", { name: "Needs attention", exact: true })).toBeVisible();
 });
 
@@ -302,7 +303,10 @@ test("uses compact mobile navigation without delaying page content", async ({ pa
   expect(contentBox).not.toBeNull();
   expect(attentionBox).not.toBeNull();
   expect(contentBox!.y, "page content should begin immediately after the compact app bar").toBeLessThanOrEqual(appBarBox!.y + appBarBox!.height + 24);
-  expect(attentionBox!.y, "dashboard status should begin without a large spacer").toBeLessThanOrEqual(contentBox!.y + 24);
+  // On the Library page the overview starts right after the view tabs.
+  const tabsBox = await page.locator(".segmented").first().boundingBox();
+  expect(tabsBox).not.toBeNull();
+  expect(attentionBox!.y, "library status should begin right after the view tabs").toBeLessThanOrEqual(tabsBox!.y + tabsBox!.height + 24);
 
   const bottomTargets = bottomNavigation.locator("a, button");
   const bottomTargetCount = await bottomTargets.count();
@@ -359,7 +363,7 @@ test("uses compact mobile navigation without delaying page content", async ({ pa
   await expectNoGlobalOverflow(page);
 });
 
-test("fits the redesigned dashboard summary and collapsed actions in the first viewport", async ({ page }) => {
+test("fits the library overview summary and collapsed actions in the first viewport", async ({ page }) => {
   const summary = page.locator(".dashboard-summary");
   const attentionPanel = summary.locator(".dashboard-attention-panel");
   const attentionCards = attentionPanel.locator(".dashboard-attention-grid .stat");
@@ -380,6 +384,8 @@ test("fits the redesigned dashboard summary and collapsed actions in the first v
   });
 
   expect(order, "dashboard summary should precede maintenance actions in DOM order").toBe("summary-first");
+  // The Library view tabs come first; the overview's summary and actions fit one screen from there.
+  await summary.evaluate((element) => window.scrollTo(0, element.getBoundingClientRect().top + window.scrollY - 12));
   await expect(attentionPanel).toBeVisible();
   await expect(storagePanel).toBeVisible();
   await expect(attentionCards).toHaveCount(4);
@@ -493,6 +499,67 @@ test("keeps an opened dashboard tooltip inside the mobile viewport", async ({ pa
   const bottomNavigationBox = await page.locator(".mobile-bottom-nav").boundingBox();
   expect(bottomNavigationBox).not.toBeNull();
   expect(box!.y + box!.height, "tooltip should not be covered by mobile navigation").toBeLessThanOrEqual(bottomNavigationBox!.y);
+  await expectNoGlobalOverflow(page);
+});
+
+test("puts problems, quick actions and the library line on the first phone screens", async ({ page }) => {
+  await page.goto(baseUrl!);
+  const status = page.locator(".dash-status");
+  const runScan = page.getByRole("button", { name: "Scan library", exact: true });
+  const runAudit = page.getByRole("button", { name: "Run audit", exact: true });
+  const scanScope = page.getByRole("button", { name: "Choose what to scan", exact: true });
+  const bottomNavigation = page.locator(".mobile-bottom-nav");
+
+  // On a phone the Status list shows problems only; everything that is fine folds into one line.
+  await expect(status.locator('[data-status="jobs"]')).toBeVisible();
+  await expect(status.locator('[data-status="jobs"]')).toContainText("1 failed");
+  await expect(status.locator('[data-status="system"]')).toBeHidden();
+  await expect(status.locator(".dash-all-clear")).toBeVisible();
+  const order = await page.evaluate(() => {
+    const statusElement = document.querySelector(".dash-status")?.getBoundingClientRect();
+    const actionsElement = document.querySelector(".dash-actions")?.getBoundingClientRect();
+    return statusElement && actionsElement ? statusElement.y < actionsElement.y : null;
+  });
+  expect(order, "problems should come before the quick actions on a phone").toBe(true);
+  // The Library line leads, and the problem rows still fit on the first screen under it.
+  const libraryBox = await page.locator(".dash-library").boundingBox();
+  const statusBox = await status.boundingBox();
+  expect(libraryBox!.y, "the Library line should sit above the Status list").toBeLessThan(statusBox!.y);
+  const lastProblem = await status.locator(".dash-row.is-bad, .dash-row.is-warn").last().boundingBox();
+  expect(lastProblem!.y + lastProblem!.height, "problems should stay on the first screen").toBeLessThanOrEqual((await bottomNavigation.boundingBox())!.y);
+
+  for (const [label, locator] of [["Scan library", runScan], ["Run audit", runAudit], ["scan scope", scanScope]] as const) {
+    await expectTouchTarget(locator, `${label} button`);
+    const box = await locator.boundingBox();
+    expect(box!.y + box!.height, `${label} should be visible above mobile navigation`).toBeLessThanOrEqual((await bottomNavigation.boundingBox())!.y);
+  }
+  await expect(page.locator(".dash-library")).toContainText("12broken links");
+  await expectNoGlobalOverflow(page);
+
+  await scanScope.click();
+  const dialog = page.getByRole("dialog", { name: "Scan scope", exact: true });
+  await expect(dialog).toBeVisible();
+  const localScope = dialog.getByRole("region", { name: "Local files", exact: true });
+  await expect(localScope.getByRole("checkbox")).not.toBeChecked();
+  await expect(localScope).toContainText("0/3 folders");
+  const dialogBox = await dialog.boundingBox();
+  expect(dialogBox!.x).toBeGreaterThanOrEqual(0);
+  expect(dialogBox!.x + dialogBox!.width).toBeLessThanOrEqual(mobileViewport.width);
+  await page.keyboard.press("Escape");
+  await expect(dialog).toBeHidden();
+  await expect(scanScope).toBeFocused();
+  await expectNoGlobalOverflow(page);
+});
+
+test("shows a loading dashboard library line before the empty counts arrive", async ({ page }) => {
+  await page.unroute("**/api/**");
+  await mockPopulatedDashboard(page, { emptyInventory: true, inventoryDelayMs: 700 });
+  await page.goto(baseUrl!, { waitUntil: "domcontentloaded" });
+
+  const numbers = page.locator(".dash-library .dash-number b");
+  await expect(numbers.first()).toHaveText("…");
+  await expect(numbers.first()).toHaveText("0");
+  await expect(page.locator(".dash-library .dash-number.is-bad")).toHaveCount(0);
   await expectNoGlobalOverflow(page);
 });
 
@@ -641,6 +708,26 @@ test("keeps failed-copy symlink selection touch friendly", async ({ page }) => {
 
 test.describe("desktop disclosure compatibility", () => {
   test.use({ viewport: { width: 1440, height: 900 }, hasTouch: false, isMobile: false });
+
+  test("fits the dashboard summary on one desktop screen, problems first", async ({ page }) => {
+    await page.goto(baseUrl!);
+    const rows = page.locator(".dash-status .dash-row");
+    await expect(rows.first()).toHaveAttribute("data-status", "jobs");
+    await expect(rows.first()).toHaveClass(/is-bad/);
+    await expect(page.locator('.dash-status [data-status="system"]')).toBeVisible();
+    await expect(page.locator(".dash-all-clear")).toBeHidden();
+    for (const region of ["Status", "Now Playing", "Jobs", "Library"]) await expect(page.getByRole("region", { name: region, exact: true })).toBeVisible();
+    // The Library line sits under the header, above the boxes that grow.
+    const libraryBox = await page.getByRole("region", { name: "Library", exact: true }).boundingBox();
+    for (const region of ["Status", "Now Playing"]) {
+      const box = await page.getByRole("region", { name: region, exact: true }).boundingBox();
+      expect(libraryBox!.y + libraryBox!.height, `the Library line should sit above ${region}`).toBeLessThanOrEqual(box!.y);
+    }
+    await expect(page.getByRole("region", { name: "Jobs", exact: true })).toContainText("partially failed");
+    expect(await page.evaluate(() => document.documentElement.scrollHeight)).toBeLessThanOrEqual(900);
+    await page.getByRole("region", { name: "Library", exact: true }).getByRole("link", { name: "Open", exact: true }).click();
+    await expect(page.locator(".dashboard-attention-panel")).toBeVisible();
+  });
 
   test("keeps selected-title details dismissed after the pointer leaves", async ({ page }) => {
     const row = page.getByRole("row").filter({ hasText: "#703" });

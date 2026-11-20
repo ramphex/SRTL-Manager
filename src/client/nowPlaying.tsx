@@ -41,7 +41,9 @@ import {
 
 type Connection = "connecting" | "open" | "reconnecting";
 
-function useNowPlayingEvents() {
+// The dashboard shares this live feed; exporting a hook here only costs fast refresh for this file.
+// eslint-disable-next-line react-refresh/only-export-components
+export function useNowPlayingEvents() {
   const [snapshot, setSnapshot] = useState<NowPlayingSnapshot | null>(null);
   const [host, setHost] = useState<HostState>({ info: null, samples: [] });
   const [connection, setConnection] = useState<Connection>("connecting");

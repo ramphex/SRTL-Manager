@@ -129,11 +129,13 @@ test("keeps the login form compact across mobile and desktop viewports", async (
 test("loads the authenticated dashboard when a development session is provided", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   await page.goto(baseUrl!);
+  await expect(page.getByRole("region", { name: "Status", exact: true })).toBeVisible();
+  await page.goto(`${baseUrl}/library`);
   await expect(page.getByText("Inventory Scan", { exact: true })).toBeVisible();
   await expect(page.getByText("Library Summary", { exact: true })).toBeVisible();
 });
 
-test("dashboard task notifications overlay without shifting content", async ({ page }) => {
+test("library overview task notifications overlay without shifting content", async ({ page }) => {
   const timestamp = "2026-07-26T12:00:00.000Z";
   const inventory = {
     totalLinks: 1,
@@ -188,7 +190,7 @@ test("dashboard task notifications overlay without shifting content", async ({ p
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   const summary = page.locator(".dashboard-summary");
   const runScan = page.getByRole("button", { name: "Run Inventory Scan", exact: true });
   await expect(summary).toBeVisible();
@@ -327,7 +329,7 @@ test("refreshes an open work list when an inventory job finishes", async ({ page
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: "Shows: 2 episodes need copy to Local", exact: true }).click();
   await expect(page.getByText("New Result", { exact: true })).toBeVisible();
   await expect(page.getByText("Older Result", { exact: true })).toBeVisible({ timeout: 8_000 });
@@ -422,7 +424,7 @@ test("loads every work-list page and scopes show copies beyond the first page", 
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: "Shows: 3 episodes need copy to Local", exact: true }).click();
   await expect(page.getByText("Showing all 3 links across 2 shows", { exact: true })).toBeVisible();
   const splitShow = page.locator(".actionable-show-group").filter({ hasText: "Page Split Show" });
@@ -447,8 +449,8 @@ test("renders every authenticated route without page errors or global overflow",
   });
 
   const routes = [
-    { path: "/", expected: "Inventory Scan" },
-    { path: "/library", expected: "Library" },
+    { path: "/", expected: "Now Playing" },
+    { path: "/library", expected: "Inventory Scan" },
     { path: "/scans", expected: "History > Scans" },
     { path: "/audits", expected: "History > Audits" },
     { path: "/logs", expected: "Logs" },
@@ -546,7 +548,7 @@ test("edits friendly storage names and applies them across primary library surfa
 test("applies and persists theme changes across the sidebar and content shell", async ({ page }) => {
   test.skip(!sessionToken, "Set SRTL_E2E_SESSION_TOKEN to exercise authenticated pages.");
   await page.goto(baseUrl!);
-  await expect(page.getByText("Inventory Scan", { exact: true })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Status", exact: true })).toBeVisible();
 
   const darkTheme = page.getByRole("button", { name: "Dark theme", exact: true });
   await darkTheme.click();
@@ -888,7 +890,7 @@ test("parallel folder scans open a batch status window with independently viewab
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: "Run Inventory Scan", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Folder scans" });
   await expect(dialog).toBeVisible();
@@ -998,8 +1000,7 @@ test("title rescan controls explain their scope and lock sibling actions while q
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ jobId: 999999 }) });
   });
 
-  await page.goto(`${baseUrl}/library`);
-  await page.getByRole("button", { name: "Storage Policies", exact: true }).click();
+  await page.goto(`${baseUrl}/library?view=policies`);
   const policyTab = page.locator(".policy-tabs button").filter({ hasText: policyLabel });
   await expect(policyTab).toHaveCount(1);
   await policyTab.click();
@@ -1121,8 +1122,7 @@ test("failed copy admission does not display a waiting job", async ({ page }) =>
     await route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(`${baseUrl}/library`);
-  await page.getByRole("button", { name: "Storage Policies", exact: true }).click();
+  await page.goto(`${baseUrl}/library?view=policies`);
   await page.locator(".policy-tabs button").filter({ hasText: "Local" }).click();
   await page.getByPlaceholder("Filter scanned titles", { exact: true }).fill(title);
   const row = page.locator("tbody tr").filter({ hasText: title });
@@ -1761,7 +1761,7 @@ test("copy progress opens a persistent, scrollable completed item summary", asyn
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(baseUrl!);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("button", { name: `View copy progress for job #${jobId}`, exact: true }).click();
 
   const dialog = page.getByRole("dialog");
@@ -1841,8 +1841,7 @@ test("storage policies are listed and changed per folder", async ({ page }) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(body) });
   });
 
-  await page.goto(`${baseUrl}/library`);
-  await page.getByRole("button", { name: "Storage Policies", exact: true }).click();
+  await page.goto(`${baseUrl}/library?view=policies`);
   const table = page.locator(".storage-policy-table");
   await expect(table.getByRole("columnheader", { name: "Folder", exact: true })).toBeVisible();
   const alpha = table.locator("tbody tr").filter({ hasText: "Alpha (2020)" });

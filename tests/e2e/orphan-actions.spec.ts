@@ -83,12 +83,12 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
   return Object.assign(purges, { restores });
 }
 
-test("dashboard orphan counts open the matching review", async ({ page }) => {
+test("orphan counts on the Library overview and the dashboard open the matching review", async ({ page }) => {
   await fixture(page);
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("link", { name: "Review 1,500 Archive orphans" }).click();
   await expect(page.getByRole("heading", { name: "Review Archive orphans" })).toBeVisible();
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   await page.getByRole("link", { name: "Review 4 Home NAS orphans" }).click();
   await expect(page.getByRole("heading", { name: "Review Home NAS orphans" })).toBeVisible();
   await page.goto(`${baseUrl}/`);

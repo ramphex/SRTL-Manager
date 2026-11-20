@@ -47,9 +47,9 @@ async function mockApi(page: Page) {
   return pageRequests;
 }
 
-test("the dashboard shows ten jobs, loads ten more per Show more, and searches on the server", async ({ page }) => {
+test("the library overview shows ten jobs, loads ten more per Show more, and searches on the server", async ({ page }) => {
   const pageRequests = await mockApi(page);
-  await page.goto(`${baseUrl}/`);
+  await page.goto(`${baseUrl}/library`);
   const table = page.getByRole("table", { name: "Recent jobs" });
   await expect(table.locator("tbody tr")).toHaveCount(10);
   const showMore = page.getByRole("button", { name: "Show more" });
@@ -74,10 +74,10 @@ test("the dashboard shows ten jobs, loads ten more per Show more, and searches o
   await expect(search).toHaveCount(0);
   await expect(table.locator("tbody tr")).toHaveCount(25);
 
-  // Leaving the Dashboard and coming back starts folded again.
+  // Leaving the Library overview and coming back starts folded again.
   await page.getByRole("link", { name: "Logs", exact: true }).click();
-  // Wait for the Logs page itself: until its code loads, the Dashboard is only hidden, not closed.
+  // Wait for the Logs page itself: until its code loads, the Library is only hidden, not closed.
   await expect(page.getByRole("heading", { name: "Logs", exact: true })).toBeVisible();
-  await page.getByRole("link", { name: "Dashboard", exact: true }).click();
+  await page.getByRole("link", { name: "Library", exact: true }).click();
   await expect(table.locator("tbody tr")).toHaveCount(10);
 });

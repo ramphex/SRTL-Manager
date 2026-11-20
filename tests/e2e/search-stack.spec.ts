@@ -36,7 +36,7 @@ test.afterAll(async () => {
 });
 
 test("the dashboard work search forgives punctuation, word order, apostrophes and small typos", async ({ page }) => {
-  await page.goto(baseUrl);
+  await page.goto(`${baseUrl}/library`);
   await page.getByLabel("Username").fill("the-owner");
   await page.getByLabel("Password").fill("owner-password-for-tests");
   await page.getByRole("button", { name: "Sign in" }).click();

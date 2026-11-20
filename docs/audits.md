@@ -24,7 +24,7 @@ Upgrading to this version turns a saved **on** into **off** (database migration 
 
 Audits are started from:
 
-- **Dashboard > Audits**, for chosen local folders (fast only),
+- **Run audit** on the Dashboard, or **Audits** on **Library > Overview**, for chosen local folders (fast only),
 - a title in the library or on **Storage Policies**,
 - a folder, a path or a selection of files in the library,
 - **Library > Damaged files**, for one file or a selection, including files no symlink points at.

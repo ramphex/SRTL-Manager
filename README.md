@@ -28,9 +28,9 @@ SRTL Manager is early software. Keep backups and review copy and audit results b
 
 These screenshots come from a disposable fictional library built solely for documentation. They contain no private paths or real library data.
 
-**Dashboard**
+**Library overview**
 
-![SRTL Manager dashboard showing inventory, storage totals, and recent jobs](docs/screenshots/dashboard.png)
+![SRTL Manager library overview showing inventory, storage totals, and recent jobs](docs/screenshots/dashboard.png)
 
 **Storage policies**
 
