@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.5-beta.10] - 2026-11-20
+
+Dependency updates only. There is no database migration.
+
 ### Maintenance
 
 - **Dependency updates.** Patch and minor updates to the Fastify CORS, static file and API documentation plugins, the icon library, the build tool and its React plugin, the linter, the browser test runner and the test DOM library. No behaviour changes.
