@@ -99,29 +99,28 @@ test("damaged files: re-request stays off unless chosen, and says what it cannot
   expect(posts.damaged[1]).toEqual({ storageFileIds: [1, 2], mode: "delete", reRequest: true, rescan: false });
 });
 
-test("orphan purges carry the same choice, in both the confirmation and purge all", async ({ page }) => {
+test("orphan purges never offer a re-request, in the confirmation or purge all", async ({ page }) => {
   const posts = await fixture(page);
   await page.goto(`${baseUrl}/library?view=local-orphans`);
   await page.getByRole("checkbox", { name: "Select Alpha.mkv" }).check();
-  // The choice sits in the selection bar, visible before anything is confirmed, and off by default.
+  // An orphan has no link, so the library already has its title or never had it: there is nothing to ask for.
   const bar = page.getByRole("region", { name: "Selected orphans" });
-  const option = bar.getByRole("checkbox", { name: /search for a new copy/ });
-  await expect(option).not.toBeChecked();
-  await option.check();
-  expect(posts.previews).toEqual([]);
+  await expect(bar.getByRole("checkbox", { name: /search for a new copy/ })).toHaveCount(0);
   await bar.getByRole("button", { name: "Purge selected" }).click();
   const confirm = page.getByRole("group", { name: "Confirm orphan purge" });
-  await expect(confirm.getByTestId("re-request-preview")).toContainText("1 in Radarr 4K");
+  await expect(confirm.getByTestId("re-request-preview")).toHaveCount(0);
   await confirm.getByRole("button", { name: "Move to holding area" }).click();
   await expect.poll(() => posts.orphans.length).toBe(1);
-  expect(posts.orphans[0]).toMatchObject({ storageFileIds: [1], mode: "hold", reRequest: true });
+  expect(posts.orphans[0]).toMatchObject({ rootType: "local", storageFileIds: [1], folderIds: [], mode: "hold" });
+  expect(posts.orphans[0]).not.toHaveProperty("reRequest");
 
   await page.getByRole("button", { name: "Purge all eligible" }).click();
   const dialog = page.getByRole("dialog", { name: "Purge all eligible orphans" });
-  await expect(dialog.getByRole("checkbox", { name: /search for a new copy/ })).not.toBeChecked();
+  await expect(dialog.getByRole("checkbox", { name: /search for a new copy/ })).toHaveCount(0);
   await dialog.getByRole("button", { name: /^Hold 2 items/ }).click();
   await expect.poll(() => posts.orphans.length).toBe(2);
-  expect(posts.orphans[1]).toMatchObject({ storageFileIds: [1, 2], reRequest: false });
+  expect(posts.orphans[1]).not.toHaveProperty("reRequest");
+  expect(posts.previews).toEqual([]);
 });
 
 test("shows each result, and retries what failed", async ({ page }) => {

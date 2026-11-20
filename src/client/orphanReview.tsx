@@ -8,7 +8,6 @@ import { api } from "./api";
 import { InfoTooltip, Panel } from "./App";
 import { formatBytes, formatDate, formatNumber, recordFromUnknown, useModalLifecycle } from "./appShared";
 import { filterOrphans, purgeBatches, planPurgeAll, sortOrphans, type OrphanReleaseFilter, type OrphanSizeFilter, type OrphanSort } from "./orphanPurgePlan";
-import { ReRequestActivity, ReRequestOption, ReRequestPreviewCheck, reRequestExplanation, reRequestOptionLabel } from "./reRequest";
 import { SettingsTabs } from "./settingsTabs";
 import { jobFinished, useQueuedJob } from "./queuedJob";
 
@@ -333,7 +332,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
   // Hold is the safe default where the storage can hold files; elsewhere every purge is a delete.
   const canHold = canHoldOn(rootType);
   const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
-  const [reRequest, setReRequest] = useState(false);
   const [confirming, setConfirming] = useState(false);
   const [purgeAllOpen, setPurgeAllOpen] = useState(autoOpenPurgeAll);
   const [howOpen, setHowOpen] = useState(false);
@@ -346,10 +344,9 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
     setSelected(new Set());
     setSelectedFolders(new Set());
     setConfirming(false);
-    setReRequest(false);
   };
   const purge = useMutation({
-    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode, reRequest: reRequest && selected.size > 0 }),
+    mutationFn: () => api.purgeOrphans({ rootType, storageFileIds: [...selected], folderIds: [...selectedFolders], mode }),
     onSuccess: (result) => {
       setStartedJobs((current) => [...current, result.jobId]);
       clearSelection();
@@ -765,7 +762,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                 )}
                 {restore.data ? <RestoreJobStatus jobId={restore.data.jobId} job={restoreJob.data ?? null} /> : null}
                 {restore.error ? <p className="panel-message error" role="alert">{restore.error.message}</p> : null}
-                <ReRequestActivity />
               </div>
             ) : null}
 
@@ -790,9 +786,7 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                           Permanently delete <strong>{selectionLabel}</strong> ({formatBytes(selectedBytes)}) on {rootLabel}? This cannot be undone.
                         </>
                       )}
-                      {reRequest && selected.size ? " Radarr or Sonarr will be asked for a new copy." : ""}
                     </p>
-                    <ReRequestPreviewCheck storageFileIds={[...selected]} enabled={reRequest} />
                     <div className="orv-confirm-actions">
                       <button type="button" className={mode === "delete" ? "orv-danger-solid" : undefined} disabled={busy} onClick={() => purge.mutate()}>
                         {purge.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <Check size={16} />} {mode === "hold" ? "Move to holding area" : "Delete permanently"}
@@ -823,13 +817,6 @@ export function OrphanReviewPanel({ rootType, rootLabel, autoOpenPurgeAll = fals
                       </p>
                     )}
                   </div>
-                  <span className="orv-rerequest">
-                    <label>
-                      <input type="checkbox" checked={reRequest} disabled={busy || selected.size === 0} onChange={(event) => { setReRequest(event.target.checked); setConfirming(false); }} />
-                      <span>{reRequestOptionLabel}</span>
-                    </label>
-                    <InfoTooltip label="About re-requests">{reRequestExplanation}</InfoTooltip>
-                  </span>
                   </div>
                   <div className="orv-action-buttons">
                     <button type="button" className="secondary" disabled={busy} onClick={clearSelection}>
@@ -894,7 +881,6 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
   const [includeFolders, setIncludeFolders] = useState(false);
   const canHold = canHoldOn(rootType);
   const [mode, setMode] = useState<OrphanPurgeMode>(canHold ? "hold" : "delete");
-  const [reRequest, setReRequest] = useState(false);
   const plan = useMemo(() => planPurgeAll(review, includeFolders), [review, includeFolders]);
   const batches = useMemo(() => purgeBatches(plan), [plan]);
   const eligibleFolders = review.leftoverFolders.filter((folder) => !folder.protectedReason);
@@ -905,7 +891,7 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
     mutationFn: async () => {
       const jobIds: number[] = [];
       for (const batch of batches) {
-        const result = await api.purgeOrphans({ rootType, ...batch, mode, reRequest: reRequest && batch.storageFileIds.length > 0 });
+        const result = await api.purgeOrphans({ rootType, ...batch, mode });
         jobIds.push(result.jobId);
       }
       return jobIds;
@@ -982,7 +968,6 @@ function PurgeAllDialog({ review, rootType, rootLabel, onClose, onQueued, onDone
           {mode === "hold" ? `Files move to a hidden .srtl-purged folder and can be restored for ${review.holdDays} days.` : `${canHold ? "" : `${cannotHoldReason} `}Files are removed immediately. This cannot be undone.`}
           {batches.length > 1 ? ` This will be queued as ${batches.length} purge jobs.` : ""}
         </p>
-        <ReRequestOption storageFileIds={plan.fileIds} checked={reRequest} onChange={setReRequest} disabled={start.isPending || start.isSuccess} />
         {start.isSuccess ? (
           <p className="panel-message success" role="status">
             Queued {start.data.length === 1 ? "purge job" : "purge jobs"}{" "}
