@@ -67,7 +67,7 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run check
       - run: npm run build
-      - run: npx playwright install --with-deps chromium
+      - run: npx playwright install --with-deps chromium webkit
       - name: Generate throwaway secrets for browser smoke tests
         run: |
           key="$(openssl rand -base64 32)"

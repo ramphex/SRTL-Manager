@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Fixed
+
+- **The dashboard no longer flickers with Now Playing in Safari.** After leaving Now Playing, Safari could keep flashing old frames of that page over the dashboard until the dashboard's Now Playing card connected. Now Playing no longer repaints the whole page on every frame or blurs the content under its header, and the page and the dashboard card share one live connection, so moving between them shows the current streams at once instead of reconnecting.
+
 ### Maintenance
 
 - **Dependency updates.** Minor updates to the icon library and the TypeScript lint tooling. The lint update clears a moderate advisory in a file pattern matching dependency, so `npm audit` reports no known vulnerabilities. No behaviour changes.

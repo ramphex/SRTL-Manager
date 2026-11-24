@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useId, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useId, useMemo, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowDown, ArrowUp, Check, ChevronDown, CircleAlert, CircleX, Cloud, Cpu, Film, HardDrive, LoaderCircle, MapPin, MemoryStick, Microchip, MonitorPlay, MonitorSmartphone, Music, Network, OctagonX, Pause, Play, RefreshCw, Tv, UserRound, X } from "lucide-react";
-import type { NowPlayingHostEvent, NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
+import type { NowPlayingHostSample, NowPlayingServerState, NowPlayingSettings, NowPlayingSnapshot, NowPlayingStopResult, NowPlayingStream, NowPlayingSummary } from "../shared/nowPlaying";
 import { nowPlayingDefaultStopMessage, summarizeStreams } from "../shared/nowPlaying";
 import type { UserPreferences } from "../shared/types";
 import type { StoragePolicyKind } from "../shared/types";
@@ -10,11 +10,11 @@ import { api, request } from "./api";
 import { defaultUserPreferences, storagePolicyLabel, useLiveTimestamp, useModalLifecycle, useStorageLocations, useUserPreferences } from "./appShared";
 import { useAccess } from "./access";
 import { mediaServerApi, mediaServersKey } from "./mediaServerApi";
+import { useNowPlayingEvents, type NowPlayingConnection } from "./nowPlayingFeed";
 import { MediaServersRequired } from "./mediaServersRequired";
 import { MediaServerIcon } from "./serverIcons";
 import { TextTooltip } from "./tooltip";
 import {
-  applyHostEvent,
   audioLabel,
   bufferedLabel,
   bufferedPercent,
@@ -39,41 +39,7 @@ import {
   type HostState
 } from "./nowPlayingPresentation";
 
-type Connection = "connecting" | "open" | "reconnecting";
-
-// The dashboard shares this live feed; exporting a hook here only costs fast refresh for this file.
-// eslint-disable-next-line react-refresh/only-export-components
-export function useNowPlayingEvents() {
-  const [snapshot, setSnapshot] = useState<NowPlayingSnapshot | null>(null);
-  const [host, setHost] = useState<HostState>({ info: null, samples: [] });
-  const [connection, setConnection] = useState<Connection>("connecting");
-  const [attempt, setAttempt] = useState(0);
-
-  useEffect(() => {
-    const source = new EventSource("/api/now-playing/events");
-    let retry: number | undefined;
-    source.addEventListener("open", () => setConnection("open"));
-    source.addEventListener("sessions", (event) => {
-      setConnection("open");
-      setSnapshot(JSON.parse((event as MessageEvent<string>).data) as NowPlayingSnapshot);
-    });
-    source.addEventListener("host", (event) => {
-      const data = JSON.parse((event as MessageEvent<string>).data) as NowPlayingHostEvent;
-      setHost((current) => applyHostEvent(current, data));
-    });
-    source.addEventListener("error", () => {
-      setConnection("reconnecting");
-      // The browser retries on its own unless the server refused the stream outright.
-      if (source.readyState === EventSource.CLOSED) retry = window.setTimeout(() => setAttempt((value) => value + 1), 10_000);
-    });
-    return () => {
-      if (retry) window.clearTimeout(retry);
-      source.close();
-    };
-  }, [attempt]);
-
-  return { snapshot, host, connection };
-}
+type Connection = NowPlayingConnection;
 
 function Sparkline({ series, max, label }: { series: Array<{ values: Array<number | null>; className: string }>; max: number; label: string }) {
   return (

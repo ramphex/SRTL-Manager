@@ -48,7 +48,7 @@ import {
 import { AuditDialog, CopyRetryAction, FolderScopePicker, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { formatAuditScope, formatScanScope } from "./jobPresentationUtils";
 import { isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
-import { useNowPlayingEvents } from "./nowPlaying";
+import { useNowPlayingEvents } from "./nowPlayingFeed";
 import { formatKbps, playMethodLabel, streamTitle } from "./nowPlayingPresentation";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 
