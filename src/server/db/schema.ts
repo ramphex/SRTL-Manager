@@ -287,6 +287,8 @@ export const mediaLinks = pgTable(
     lastSeenAt: text("last_seen_at"),
     lastChangedAt: text("last_changed_at"),
     missingSince: text("missing_since"),
+    // When a scan first found the link's target gone. Null unless kind is "broken".
+    brokenSince: text("broken_since"),
     lastSeenJobId: integer("last_seen_job_id"),
     updatedAt: text("updated_at").notNull()
   },
@@ -498,6 +500,9 @@ export const symlinkCleanupOperations = pgTable(
       .references(() => mediaLinks.id, { onDelete: "restrict" }),
     linkPath: text("link_path").notNull(),
     expectedTargetPath: text("expected_target_path").notNull(),
+    // "failed_copy" for a failed copy's link, "broken_link" for a link whose target is gone.
+    reason: text("reason").notNull().default("failed_copy"),
+    // planned, removed, already_missing, skipped (changed before removal) or failed.
     stage: text("stage").notNull(),
     errorMessage: text("error_message"),
     createdAt: text("created_at").notNull(),

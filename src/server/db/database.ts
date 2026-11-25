@@ -35,7 +35,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 37;
+export const currentSchemaVersion = 38;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -1069,6 +1069,28 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // Linked files that failed as "not a video" are checked again at the end of the next scan, so archives get their own reason.
         await applyHeaderArchiveRecheckMigration(client, nowIso());
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (37, 'header_archive_recheck', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(38)) {
+      await client.query("BEGIN");
+      try {
+        // When each link was first seen broken, for the broken link review. Links already broken take their last change,
+        // which is when a scan last changed them, so usually when they broke.
+        await client.query(`ALTER TABLE media_links ADD COLUMN IF NOT EXISTS broken_since TEXT`);
+        await client.query(`UPDATE media_links SET broken_since = COALESCE(last_changed_at, updated_at) WHERE kind = 'broken' AND broken_since IS NULL`);
+        await client.query(`CREATE INDEX IF NOT EXISTS media_links_broken_idx ON media_links (section, item_name) WHERE kind = 'broken' AND missing_since IS NULL`);
+        // Broken-link removals share the failed-copy cleanup journal. `reason` tells them apart, since a failed-copy row loses
+        // its source job when job history is pruned. A link that changed before its removal is recorded as skipped.
+        await client.query(`ALTER TABLE symlink_cleanup_operations ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'failed_copy'`);
+        await client.query(`ALTER TABLE symlink_cleanup_operations DROP CONSTRAINT IF EXISTS symlink_cleanup_operations_stage_check`);
+        await client.query(`ALTER TABLE symlink_cleanup_operations ADD CONSTRAINT symlink_cleanup_operations_stage_check CHECK (stage IN ('planned', 'removed', 'already_missing', 'skipped', 'failed'))`);
+        await client.query(`ALTER TABLE symlink_cleanup_operations ADD CONSTRAINT symlink_cleanup_operations_reason_check CHECK (reason IN ('failed_copy', 'broken_link'))`);
+        await client.query(`CREATE INDEX IF NOT EXISTS symlink_cleanup_operations_reason_idx ON symlink_cleanup_operations (reason, completed_at)`);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (38, 'broken_link_review', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

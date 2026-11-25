@@ -603,6 +603,18 @@ function storageRootUnavailableMessage(root: string, required: RequiredStorageRo
 
 // An unmounted NFS share or FUSE mount usually leaves an empty or unreadable mount point behind.
 // One real entry proves the mount is there; later read errors are handled by the walk itself.
+/**
+ * Whether a storage root looks mounted: it lists at least one entry other than the holding area. Read-only. Used before
+ * broken links are listed or removed, since an unmounted root makes every link into it look broken.
+ */
+export async function storageRootLooksMounted(root: string): Promise<{ mounted: boolean; reason: string | null }> {
+  if (!root) return { mounted: false, reason: "The path is not set." };
+  const isLibraryEntry = (entry: Dirent) => entry.name !== holdingFolderName;
+  const listing = await readDirectoryEntries(root, "Checking storage mount", (entries) => entries.some(isLibraryEntry));
+  if (listing.entries.some(isLibraryEntry)) return { mounted: true, reason: null };
+  return { mounted: false, reason: listing.error ? `It could not be read (${describeError(listing.error)}).` : "It is empty." };
+}
+
 async function assertStorageRootMounted(paths: PathsSettings, required: RequiredStorageRoot): Promise<void> {
   const root = required.rootType === "local" ? paths.localDir : paths.remoteDir;
   const isLibraryEntry = (entry: Dirent) => entry.name !== holdingFolderName;
@@ -1227,6 +1239,8 @@ export async function persistScanResult(db: Db, result: ScanResult, jobId: numbe
         firstSeenAt: existing?.firstSeenAt ?? existing?.updatedAt ?? timestamp,
         lastSeenAt: timestamp,
         lastChangedAt: changed ? timestamp : existing?.lastChangedAt ?? existing?.updatedAt ?? timestamp,
+        // When the link was first seen broken; kept while it stays broken, cleared once it is anything else.
+        brokenSince: link.kind === "broken" ? (existing?.kind === "broken" && !existing.missingSince ? existing.brokenSince ?? timestamp : timestamp) : null,
         missingSince: null,
         lastSeenJobId: jobId,
         updatedAt: timestamp
@@ -2252,6 +2266,36 @@ export async function completeSymlinkScanTimes(db: Db, configuredSections: strin
     for (const section of selectedScanSections(options.symlinkSections, options.sections, configuredSections)) setLatestTimestamp(times, section, scan.startedAt);
   }
   return times;
+}
+
+/**
+ * Completed symlink scans that covered every configured library folder, newest first, with the broken links each found.
+ * Title rescans and folder-scoped scans are left out, since their counts cover only part of the library.
+ */
+export async function wholeLibrarySymlinkScans(db: Db, configuredSections: string[], limit: number): Promise<Array<{ startedAt: string; finishedAt: string | null; brokenLinks: number }>> {
+  const rows = await dbAll<{ startedAt: string; finishedAt: string | null; progress: string; options: string; brokenLinks: number }>(db, sql`
+    select
+      sr.started_at as "startedAt",
+      sr.finished_at as "finishedAt",
+      coalesce(j.progress, '{}') as progress,
+      coalesce(nullif(sr.options, '{}'), j.options, '{}') as options,
+      sr.broken_links as "brokenLinks"
+    from scan_runs sr
+    left join jobs j on j.id = sr.job_id
+    where sr.status = 'completed'
+    order by sr.finished_at desc nulls last, sr.started_at desc, sr.id desc
+    limit 200
+  `);
+  const result: Array<{ startedAt: string; finishedAt: string | null; brokenLinks: number }> = [];
+  for (const row of rows) {
+    const options = scanOptionsFromProgress(row.progress, row.options);
+    if (!options?.scanSymlinks || options.titleScopes?.length) continue;
+    const covered = new Set(selectedScanSections(options.symlinkSections, options.sections, configuredSections));
+    if (configuredSections.some((section) => !covered.has(section))) continue;
+    result.push({ startedAt: row.startedAt, finishedAt: row.finishedAt, brokenLinks: Number(row.brokenLinks) });
+    if (result.length >= limit) break;
+  }
+  return result;
 }
 
 export async function getInventoryScanTimestamps(db: Db): Promise<InventoryScanTimestamps> {

@@ -39,6 +39,7 @@ import { registerOnboardingRoutes } from "./routes/onboardingRoutes";
 import { registerRadarrRoutes, webhookInstanceId } from "./routes/radarrRoutes";
 import { registerDamagedRoutes } from "./routes/damagedRoutes";
 import { registerOrphanRoutes } from "./routes/orphanRoutes";
+import { registerBrokenLinkRoutes } from "./routes/brokenLinkRoutes";
 import { registerReRequestRoutes } from "./routes/reRequestRoutes";
 import { registerMediaServerRoutes } from "./routes/mediaServerRoutes";
 import { registerWatchSyncRoutes } from "./routes/watchSyncRoutes";
@@ -369,6 +370,7 @@ export async function createApp(overrides: Partial<AppConfig> = {}, options: Cre
   registerLibraryRoutes(app, database.db, jobs);
   registerAuditRoutes(app, database.db, jobs);
   registerOrphanRoutes(app, database.db, jobs);
+  registerBrokenLinkRoutes(app, database.db, jobs);
   registerDamagedRoutes(app, database.db, jobs);
   registerReRequestRoutes(app, database.db);
   registerJobRoutes(app, jobs, database.db);

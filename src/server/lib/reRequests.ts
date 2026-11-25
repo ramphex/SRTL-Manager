@@ -505,6 +505,33 @@ export async function queueRescansForJob(db: Db, jobId: number, deleted: Deleted
   return summary;
 }
 
+/**
+ * Queues a search for each removed library link, the re-request way: the worker removes Radarr's or Sonarr's record of the
+ * file, keeps the item monitored and sends the search, with the usual pacing. Returns the titles covered, which need no rescan:
+ * the removed record is what a rescan would find.
+ */
+export async function queueSearchesForRemovedLinks(db: Db, jobId: number, removed: Array<DeletedTitleLinks & { displayName: string }>): Promise<Set<string>> {
+  const timestamp = nowIso();
+  const rows: Array<typeof schema.reRequests.$inferInsert> = removed
+    .filter((entry) => entry.section && entry.itemName)
+    .map((entry) => ({
+      jobId,
+      operationId: null,
+      action: "search",
+      section: entry.section,
+      itemName: entry.itemName,
+      fileNames: JSON.stringify([...new Set(entry.fileNames)]),
+      wasLinked: true,
+      displayName: entry.displayName,
+      status: "queued",
+      message: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    }));
+  for (let offset = 0; offset < rows.length; offset += 500) await db.insert(schema.reRequests).values(rows.slice(offset, offset + 500));
+  return new Set(rows.map((row) => titleKeyOf(row.section, row.itemName)));
+}
+
 /** "Rescan asked for 3 titles; 1 not in Radarr or Sonarr", for a job's final message and events. */
 export function rescanSummaryText(summary: ArrRescanSummary): string {
   const parts = [

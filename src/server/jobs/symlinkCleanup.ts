@@ -50,7 +50,7 @@ function failureFileName(sourcePath: string | null, linkPath: string | null, rel
   return candidate ? path.basename(candidate) || null : null;
 }
 
-function currentLinkRow(row: typeof schema.mediaLinks.$inferSelect | undefined): MediaLinkRow | null {
+export function currentLinkRow(row: typeof schema.mediaLinks.$inferSelect | undefined): MediaLinkRow | null {
   if (!row) return null;
   return {
     id: row.id,
@@ -315,27 +315,38 @@ export async function resolveCopyFailures(db: DbExecutor, jobId: number): Promis
   };
 }
 
-export async function removeExpectedSymlink(symlinkRoot: string, linkPath: string, expectedTargetPath: string): Promise<"removed" | "already_missing"> {
-  await assertPathParentInside(symlinkRoot, linkPath, "Failed-copy symlink");
+export interface RemoveSymlinkOptions {
+  // Names the link in errors and timeouts.
+  label?: string;
+  // Runs after every check on the link passed and right before it is removed; throwing leaves the link in place.
+  beforeUnlink?: () => Promise<void>;
+}
+
+export async function removeExpectedSymlink(symlinkRoot: string, linkPath: string, expectedTargetPath: string, options: RemoveSymlinkOptions = {}): Promise<"removed" | "already_missing"> {
+  const label = options.label ?? "Failed-copy symlink";
+  const lower = label.charAt(0).toLowerCase() + label.slice(1);
+  await assertPathParentInside(symlinkRoot, linkPath, label);
   let firstStat: Awaited<ReturnType<typeof fs.lstat>>;
   try {
-    firstStat = await withFilesystemTimeout(fs.lstat(linkPath), `Inspection of failed-copy symlink ${linkPath}`);
+    firstStat = await withFilesystemTimeout(fs.lstat(linkPath), `Inspection of ${lower} ${linkPath}`);
   } catch (error: unknown) {
     if (errorCode(error) === "ENOENT") return "already_missing";
     throw error;
   }
   if (!firstStat.isSymbolicLink()) throw new ConflictError("Managed library path is no longer a symlink; nothing was removed");
-  const rawTarget = await withFilesystemTimeout(fs.readlink(linkPath), `Target read for failed-copy symlink ${linkPath}`);
+  const rawTarget = await withFilesystemTimeout(fs.readlink(linkPath), `Target read for ${lower} ${linkPath}`);
   const actualTarget = path.isAbsolute(rawTarget) ? rawTarget : path.resolve(path.dirname(linkPath), rawTarget);
   if (path.resolve(actualTarget) !== path.resolve(expectedTargetPath)) {
     throw new ConflictError("Symlink target changed after cleanup was queued; rescan before taking action");
   }
 
-  await assertPathParentInside(symlinkRoot, linkPath, "Failed-copy symlink");
-  const finalStat = await withFilesystemTimeout(fs.lstat(linkPath), `Final inspection of failed-copy symlink ${linkPath}`);
+  await assertPathParentInside(symlinkRoot, linkPath, label);
+  const finalStat = await withFilesystemTimeout(fs.lstat(linkPath), `Final inspection of ${lower} ${linkPath}`);
   if (!finalStat.isSymbolicLink() || finalStat.dev !== firstStat.dev || finalStat.ino !== firstStat.ino) {
     throw new ConflictError("Symlink changed while cleanup was being prepared; nothing was removed");
   }
-  await withFilesystemTimeout(fs.unlink(linkPath), `Removal of failed-copy symlink ${linkPath}`);
+  await options.beforeUnlink?.();
+  // unlink removes the symlink itself, never what it points at.
+  await withFilesystemTimeout(fs.unlink(linkPath), `Removal of ${lower} ${linkPath}`);
   return "removed";
 }

@@ -3,6 +3,9 @@ import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
   AuditEstimate,
   AuditOptions,
+  BrokenLinkCleanupRecord,
+  BrokenLinkRescanResult,
+  BrokenLinkReview,
   RollingAuditCoverage,
   AuditResultPage,
   AuditRunRecord,
@@ -211,6 +214,13 @@ export const api = {
   reRequests: () => request<ReRequestList>("/api/re-requests"),
   previewReRequests: (storageFileIds: number[]) => request<ReRequestPreview>("/api/re-requests/preview", { method: "POST", body: JSON.stringify({ storageFileIds }) }),
   retryReRequests: (ids: number[] | "all_failed") => request<{ retried: number }>("/api/re-requests/retry", { method: "POST", body: JSON.stringify({ ids }) }),
+  brokenLinks: () => request<BrokenLinkReview>("/api/broken-links"),
+  removedBrokenLinks: () => request<BrokenLinkCleanupRecord[]>("/api/broken-links/removed"),
+  brokenLinkCleanupResults: (jobId: number) => request<BrokenLinkCleanupRecord[]>(`/api/broken-links/jobs/${jobId}`),
+  deleteBrokenLinks: (body: { mediaLinkIds: number[]; rescan: boolean; search: boolean }) =>
+    request<{ jobId: number }>("/api/broken-links/delete", { method: "POST", body: JSON.stringify(body) }),
+  rescanRemovedBrokenLinks: (body: { operationIds: number[]; search: boolean }) =>
+    request<BrokenLinkRescanResult>("/api/broken-links/rescan", { method: "POST", body: JSON.stringify(body) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>
     request<{ jobId: number }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),

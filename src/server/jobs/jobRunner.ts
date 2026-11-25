@@ -22,7 +22,7 @@ import {
 } from "../lib/copier";
 import type { MediaExpectation } from "../lib/mediaIntegrity";
 import { deletedTitleLinksForJob, executeOrphanPurgeOperation, extraSymlinksForPurge, findCameBack, KeepsComingBackError, markCameBack, maxDeleteRounds, noteListedOnly, operationsForJob, recheckCandidates, restoreHeldOrphan, purgeableDamagedFiles, purgeableLeftoverFolders, purgeableOrphans, queueReRequestsForJob, rootPathFor, symlinkInventoryStaleness, titleRelativePath } from "./orphanPurge";
-import { queueRescansForJob, rescanSummaryText, titlesWithReRequest, type DeletedTitleLinks } from "../lib/reRequests";
+import { queueRescansForJob, queueSearchesForRemovedLinks, rescanSummaryText, titlesWithReRequest, type DeletedTitleLinks } from "../lib/reRequests";
 import type { ArrRescanSummary } from "../../shared/reRequests";
 import { assertDestinationPathInside, assertExistingPathInside, assertPathParentInside, canonicalPathForClaim, withFilesystemTimeout } from "../lib/filesystemSafety";
 import { isMediaFile, isPathInside } from "../lib/media";
@@ -42,7 +42,8 @@ import { listCopyReconciliation, reconcileProvablySettledCopyOperations, unresol
 import { discardPartialCopy, PartialCopyDiscardError, previewPartialCopyDiscard } from "./partialCopyDiscard";
 import { schedulerLockKey } from "./scheduling";
 import { currentStorageFilesById, nextRollingAuditBatch, recordStorageFileAudit, rollingAuditDue, storageFileSizes, type AuditStorageFile } from "./rollingAudit";
-import { removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
+import { currentLinkRow, removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
+import { brokenLinkMountChecks, brokenLinkRows, brokenLinkSafety, brokenLinkTargetRoot, brokenTargetState, linkFileName, mountWarning } from "../lib/brokenLinks";
 import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
 import { runBackup, type BackupRuntime } from "../lib/backups";
 import type { BackupTrigger } from "../../shared/backups";
@@ -113,6 +114,14 @@ export class ScanAdmissionConflictError extends AdmissionError {
   }
 }
 
+// Storage looked down right before a broken link would have been removed; the job removes nothing more.
+class BrokenLinkMountDownError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BrokenLinkMountDownError";
+  }
+}
+
 class PartialJobFailureError extends Error {
   constructor(message: string) {
     super(message);
@@ -147,7 +156,8 @@ interface PreparedJob {
   claims: ResourceClaim[];
   queueBehindClaimConflicts?: boolean;
   symlinkCleanupOperations?: Array<{
-    sourceJobId: number;
+    sourceJobId: number | null;
+    reason?: "failed_copy" | "broken_link";
     mediaLinkId: number;
     linkPath: string;
     expectedTargetPath: string;
@@ -506,6 +516,10 @@ function readCopyOptions(job: JobRecord, frozenLinkIds?: number[]): StoredCopyOp
 
 function readSymlinkCleanupOptions(job: JobRecord, frozenLinkIds?: number[]): SymlinkCleanupOptions {
   const options = jobProgressOptions<Partial<SymlinkCleanupOptions>>(job);
+  if (options?.brokenLinks === true) {
+    if (!frozenLinkIds?.length) throw new Error("Broken link cleanup job is missing its selected links");
+    return { sourceJobId: null, linkIds: frozenLinkIds, brokenLinks: true, rescan: options.rescan === true, search: options.search === true };
+  }
   const sourceJobId = options?.sourceJobId;
   if (!Number.isInteger(sourceJobId) || Number(sourceJobId) < 1 || !frozenLinkIds?.length) {
     throw new Error("Symlink cleanup job is missing its immutable source job or selected links");
@@ -2581,6 +2595,7 @@ export class JobRunner {
             cleanupOperations.slice(offset, offset + 500).map((operation) => ({
               jobId: row.id,
               sourceJobId: operation.sourceJobId,
+              reason: operation.reason ?? "failed_copy",
               mediaLinkId: operation.mediaLinkId,
               linkPath: operation.linkPath,
               expectedTargetPath: operation.expectedTargetPath,
@@ -3304,6 +3319,63 @@ export class JobRunner {
     });
   }
 
+  /**
+   * Queues removal of broken library symlinks chosen on the broken link review. Refused while a storage mount looks down or
+   * the broken count jumped (see brokenLinkSafety). Each link is checked again on disk right before it is removed.
+   */
+  async startBrokenLinkCleanup(linkIds: number[], choices: { rescan?: boolean; search?: boolean } = {}): Promise<number> {
+    const requestedLinkIds = [...new Set(linkIds)];
+    if (requestedLinkIds.length === 0 || requestedLinkIds.some((id) => !Number.isInteger(id) || id < 1)) {
+      throw new ConflictError("Choose at least one broken link to delete");
+    }
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (!paths.symlinkDir) throw new Error("Symlink path setting is incomplete");
+    // Filesystem checks stay outside the queueing transaction; the worker checks the mount again before each removal.
+    const preview = await brokenLinkRows(this.db, requestedLinkIds);
+    const safety = await brokenLinkSafety(this.db, paths, preview.map((row) => brokenLinkTargetRoot(paths, row.targetPath)));
+    if (safety.blocked) throw new ConflictError(`Broken links can't be deleted right now. ${safety.warnings.join(" ")}`);
+    return this.enqueuePreparedJob("symlink_cleanup", async (transaction) => {
+      const rows = await brokenLinkRows(transaction, requestedLinkIds);
+      if (rows.length !== requestedLinkIds.length) {
+        const gone = requestedLinkIds.length - rows.length;
+        throw new ConflictError(`${gone} of the selected links ${gone === 1 ? "is" : "are"} no longer broken in the inventory. Reload the list and choose again.`);
+      }
+      const links = rows.map((row) => currentLinkRow(row)!);
+      const options: SymlinkCleanupOptions = {
+        sourceJobId: null,
+        linkIds: requestedLinkIds,
+        brokenLinks: true,
+        ...(choices.rescan ? { rescan: true } : {}),
+        ...(choices.search ? { search: true } : {})
+      };
+      return {
+        progress: {
+          options,
+          current: 0,
+          total: requestedLinkIds.length,
+          removed: 0,
+          alreadyMissing: 0,
+          skipped: 0,
+          failed: 0,
+          stage: "queued",
+          message: "Waiting to delete broken links"
+        },
+        options,
+        selection: links,
+        selectionFrozen: true,
+        exclusive: false,
+        claims: await symlinkCleanupResourceClaims(links, paths),
+        symlinkCleanupOperations: rows.map((row) => ({
+          sourceJobId: null,
+          reason: "broken_link" as const,
+          mediaLinkId: row.id,
+          linkPath: row.linkPath,
+          expectedTargetPath: row.targetPath
+        }))
+      };
+    });
+  }
+
   async previewCopyConflicts(input: CopyOptions): Promise<CopyConflictPreview> {
     if (await isPathConfigurationBlocked(this.db)) {
       throw new Error("Managed storage paths changed. Resolve the required path migration before previewing copy work.");
@@ -3963,7 +4035,9 @@ export class JobWorker {
       return;
     }
     if (job.type === "symlink_cleanup") {
-      await this.runSymlinkCleanupJob(readSymlinkCleanupOptions(job, frozenLinkIds), ctx);
+      const options = readSymlinkCleanupOptions(job, frozenLinkIds);
+      if (options.brokenLinks) await this.runBrokenLinkCleanupJob(options, ctx);
+      else await this.runSymlinkCleanupJob(options, ctx);
       return;
     }
     if (job.type === "orphan_purge") {
@@ -5247,6 +5321,186 @@ export class JobWorker {
     }
     await setProgress("completed", `Symlink cleanup finished: ${removed} removed${alreadyMissing > 0 ? `, ${alreadyMissing} already missing` : ""}${rescanNote}`);
     await ctx.event("info", "Failed-copy symlink cleanup finished", { sourceJobId: options.sourceJobId, removed, alreadyMissing, failed, total });
+  }
+
+  private async runBrokenLinkCleanupJob(options: SymlinkCleanupOptions, ctx: JobContext): Promise<void> {
+    const paths = await getJsonSetting<PathsSettings>(this.db, "paths", { symlinkDir: "", localDir: "", remoteDir: "" });
+    if (!paths.symlinkDir) throw new Error("Symlink path setting is incomplete");
+    const operations = await this.db
+      .select()
+      .from(schema.symlinkCleanupOperations)
+      .where(and(eq(schema.symlinkCleanupOperations.jobId, ctx.jobId), eq(schema.symlinkCleanupOperations.reason, "broken_link")))
+      .orderBy(asc(schema.symlinkCleanupOperations.id));
+    if (operations.length === 0 || operations.length !== options.linkIds.length) {
+      throw new Error("Broken link cleanup journal does not match the immutable job selection");
+    }
+    const total = operations.length;
+    const tally = { removed: 0, alreadyMissing: 0, skipped: 0, failed: 0 };
+    for (const operation of operations) {
+      if (operation.stage === "removed") tally.removed += 1;
+      else if (operation.stage === "already_missing") tally.alreadyMissing += 1;
+      else if (operation.stage === "skipped") tally.skipped += 1;
+      else if (operation.stage === "failed") tally.failed += 1;
+    }
+    const done = () => tally.removed + tally.alreadyMissing + tally.skipped + tally.failed;
+    let rescanSummary: ArrRescanSummary | null = null;
+    let searched = 0;
+    const setProgress = (stage: string, message: string) =>
+      ctx.setProgress({
+        current: done(),
+        total,
+        ...tally,
+        remaining: Math.max(0, total - done()),
+        stage,
+        message,
+        ...(rescanSummary ? { rescan: rescanSummary } : {}),
+        ...(searched ? { searched } : {})
+      });
+    const recordStage = (operationId: number, stage: "skipped" | "failed", message: string) =>
+      ctx.withLeaseDb(async (leaseDb) => {
+        const timestamp = nowIso();
+        await leaseDb
+          .update(schema.symlinkCleanupOperations)
+          .set({ stage, errorMessage: message, updatedAt: timestamp, completedAt: timestamp })
+          .where(and(eq(schema.symlinkCleanupOperations.id, operationId), eq(schema.symlinkCleanupOperations.stage, "planned")));
+      });
+
+    await setProgress("preparing", "Checking that storage is mounted");
+    await ctx.event("info", "Broken link cleanup started", { total });
+    const rootOf = (targetPath: string) => brokenLinkTargetRoot(paths, targetPath);
+    // A storage location that looks down makes every link into it look broken, so nothing is removed until it is back.
+    const firstChecks = await brokenLinkMountChecks(paths, operations.map((operation) => rootOf(operation.expectedTargetPath)));
+    let mountDown = firstChecks.find((check) => !check.mounted) ?? null;
+
+    for (const operation of operations) {
+      if (operation.stage !== "planned") continue;
+      if (await ctx.isCancelled()) break;
+      if (mountDown) {
+        tally.failed += 1;
+        await recordStage(operation.id, "failed", `Not removed: ${mountWarning(mountDown)}`);
+        continue;
+      }
+      await setProgress("removing", "Checking the next broken link");
+      try {
+        const outcome = await ctx.withLeaseDb(async (leaseDb) => {
+          const journal = await first(
+            leaseDb
+              .select()
+              .from(schema.symlinkCleanupOperations)
+              .where(and(eq(schema.symlinkCleanupOperations.id, operation.id), eq(schema.symlinkCleanupOperations.stage, "planned")))
+              .for("update")
+              .limit(1)
+          );
+          if (!journal) throw new Error(`Broken link cleanup operation #${operation.id} changed before execution`);
+          const link = await first(leaseDb.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.id, journal.mediaLinkId)).for("update").limit(1));
+          if (!link) throw new ConflictError("The link is no longer in the inventory");
+          if (path.resolve(link.linkPath) !== path.resolve(journal.linkPath) || path.resolve(link.targetPath) !== path.resolve(journal.expectedTargetPath)) {
+            throw new ConflictError("A scan recorded a different link or target since the delete was queued");
+          }
+          if (link.kind !== "broken" || link.missingSince) throw new ConflictError("A scan no longer records this link as broken");
+          const targetRoot = rootOf(journal.expectedTargetPath);
+          const result = await removeExpectedSymlink(paths.symlinkDir, journal.linkPath, journal.expectedTargetPath, {
+            label: "Broken symlink",
+            // Last checks, after the link itself was confirmed: the target is still gone, and its storage is still mounted,
+            // so "gone" is not just a mount that dropped a moment ago.
+            beforeUnlink: async () => {
+              const target = await brokenTargetState(journal.expectedTargetPath);
+              if (target.state === "target_exists") throw new ConflictError("The target exists again, so the link was left in place");
+              if (target.state === "unchecked") throw new ConflictError(`${target.detail} The link was left in place`);
+              if (targetRoot !== "other") {
+                const [check] = await brokenLinkMountChecks(paths, [targetRoot]).then((checks) => checks.filter((entry) => entry.rootType === targetRoot));
+                if (check && !check.mounted) {
+                  mountDown = check;
+                  throw new BrokenLinkMountDownError(mountWarning(check));
+                }
+              }
+            }
+          });
+          const timestamp = nowIso();
+          await leaseDb
+            .update(schema.mediaLinks)
+            .set({ missingSince: link.missingSince ?? timestamp, updatedAt: timestamp })
+            .where(and(eq(schema.mediaLinks.id, journal.mediaLinkId), eq(schema.mediaLinks.linkPath, journal.linkPath)));
+          await leaseDb
+            .update(schema.symlinkCleanupOperations)
+            .set({ stage: result, errorMessage: null, updatedAt: timestamp, completedAt: timestamp })
+            .where(and(eq(schema.symlinkCleanupOperations.id, journal.id), eq(schema.symlinkCleanupOperations.stage, "planned")));
+          return { result, link };
+        });
+        if (outcome.result === "removed") tally.removed += 1;
+        else tally.alreadyMissing += 1;
+        await ctx.event("info", outcome.result === "removed" ? "Broken symlink removed" : "Broken symlink was already gone", {
+          mediaLinkId: operation.mediaLinkId,
+          itemName: outcome.link.itemName,
+          linkPath: operation.linkPath
+        });
+      } catch (error: unknown) {
+        if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+        const message = errorMessage(error);
+        // A link that changed is skipped and reported; anything else, including a mount that dropped, is a failure.
+        const stage = error instanceof ConflictError ? "skipped" : "failed";
+        tally[stage] += 1;
+        await recordStage(operation.id, stage, message);
+        await ctx.event(stage === "skipped" ? "warn" : "error", stage === "skipped" ? "Broken symlink skipped" : "Broken symlink was not removed", {
+          mediaLinkId: operation.mediaLinkId,
+          linkPath: operation.linkPath,
+          reason: message
+        });
+      }
+      await setProgress("removing", `${tally.removed} of ${total} removed`);
+    }
+
+    // Links that are gone now, including one already gone: Radarr or Sonarr may still list its file. Not while a mount is down,
+    // since a rescan then would see every file on it as missing.
+    const goneLinks = async (leaseDb: DbExecutor) =>
+      (
+        await leaseDb
+          .select({ section: schema.mediaLinks.section, itemName: schema.mediaLinks.itemName, relativePath: schema.mediaLinks.relativePath, linkPath: schema.symlinkCleanupOperations.linkPath })
+          .from(schema.symlinkCleanupOperations)
+          .innerJoin(schema.mediaLinks, eq(schema.mediaLinks.id, schema.symlinkCleanupOperations.mediaLinkId))
+          .where(and(eq(schema.symlinkCleanupOperations.jobId, ctx.jobId), inArray(schema.symlinkCleanupOperations.stage, ["removed", "already_missing"])))
+      ).map((link) => ({ section: link.section, itemName: link.itemName, fileNames: [linkFileName(link.relativePath, link.section, link.itemName)], displayName: path.basename(link.linkPath) }));
+    if ((options.rescan || options.search) && mountDown) {
+      await ctx.event("warn", "Radarr and Sonarr were not asked to rescan or search, because storage looked down.", {});
+    } else if (options.rescan || options.search) {
+      let covered = new Set<string>();
+      if (options.search) {
+        try {
+          const removed = await ctx.withLeaseDb(goneLinks);
+          covered = await ctx.withLeaseDb((leaseDb) => queueSearchesForRemovedLinks(leaseDb, ctx.jobId, removed));
+          searched = removed.length;
+          if (searched) await ctx.event("info", `Search queued for ${searched} removed ${searched === 1 ? "link" : "links"}`, { searched });
+        } catch (error: unknown) {
+          if (error instanceof LeaseLostError || ctx.signal.aborted) throw error;
+          await ctx.event("warn", `Searches were not queued: ${errorMessage(error)}. The delete itself is done.`, {});
+        }
+      }
+      if (options.rescan) rescanSummary = await this.queueArrRescans(ctx, goneLinks, async () => covered);
+    }
+    const arrNote = [rescanSummary ? rescanSummaryText(rescanSummary) : "", searched ? `search queued for ${searched}` : ""].filter(Boolean).join("; ");
+    const counts = [
+      `${tally.removed} removed`,
+      tally.alreadyMissing ? `${tally.alreadyMissing} already gone` : "",
+      tally.skipped ? `${tally.skipped} skipped because they changed` : "",
+      tally.failed ? `${tally.failed} failed` : ""
+    ].filter(Boolean).join(", ");
+    const summary = `${counts}${arrNote ? `. ${arrNote}` : ""}`;
+
+    if (await ctx.isCancelled()) {
+      await setProgress("cancelled", `Broken link cleanup stopped; completed removals were kept: ${summary}`);
+      await ctx.event("warn", "Broken link cleanup stopped; completed removals were kept", { ...tally, total });
+      return;
+    }
+    if (tally.failed > 0) {
+      const partial = tally.removed + tally.alreadyMissing + tally.skipped > 0;
+      const message = `Broken link cleanup ${partial ? "partially failed" : "failed"}: ${summary}`;
+      await setProgress(partial ? "partially_failed" : "failed", message);
+      await ctx.event(partial ? "warn" : "error", message, { ...tally, total });
+      if (partial) throw new PartialJobFailureError(message);
+      throw new Error(message);
+    }
+    await setProgress("completed", `Broken link cleanup finished: ${summary}`);
+    await ctx.event("info", "Broken link cleanup finished", { ...tally, total });
   }
 
   private async runCopyJob(normalizedOptions: StoredCopyOptions, ctx: JobContext): Promise<void> {
