@@ -182,6 +182,9 @@ const routeTable: readonly RouteEntry[] = [
   { methods: ["GET"], url: "/api/broken-links/jobs/:id", permission: "library.delete" },
   { methods: ["POST"], url: "/api/broken-links/delete", permission: "library.delete" },
   { methods: ["POST"], url: "/api/broken-links/rescan", permission: "library.delete" },
+  { methods: ["GET"], url: "/api/broken-links/arr-missing", permission: "library.delete" },
+  { methods: ["POST"], url: "/api/broken-links/arr-missing/check", permission: "library.delete" },
+  { methods: ["POST"], url: "/api/broken-links/arr-missing/rescan", permission: "library.delete" },
   // Asking Radarr or Sonarr for a new copy only ever follows a delete, so it takes the same permission.
   { methods: ["GET"], url: "/api/re-requests", permission: "library.delete" },
   { methods: ["POST"], url: "/api/re-requests/preview", permission: "library.delete" },

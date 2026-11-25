@@ -11,7 +11,8 @@ export const jobTypeLabels: Readonly<Record<JobType, string>> = {
   partial_copy_discard: "Partial copy discard",
   path_migration: "Path migration",
   watch_sync: "Watch sync",
-  backup: "Database backup"
+  backup: "Database backup",
+  arr_disk_check: "Radarr/Sonarr disk check"
 };
 
 export const jobTypes = Object.keys(jobTypeLabels) as JobType[];

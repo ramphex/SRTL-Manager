@@ -125,4 +125,12 @@ Deleting and rescanning are blocked while:
 
 A full symlink scan with the mount up clears the second case: either the links work again, or the scan finds the same number and confirms them.
 
+### Records Sonarr or Radarr has with nothing on disk
+
+The **In Sonarr/Radarr, not on disk** tab covers a case the broken link list can't see: a file record in Sonarr or Radarr whose path in the library has nothing at all, no file and no link. Sonarr only looks at the disk when a series is rescanned, so it keeps listing such an episode as present.
+
+A check compares every file record with the library after each full symlink scan, and when you press **Check now**. It is read-only. Each record's path is translated through the instance's folder mappings and looked up in SRTL's own inventory; only a path with no current link is looked at on disk, in case it arrived after the scan. Radarr is asked for its movie list once, and Sonarr for one series at a time, with the episode list fetched only for a series that has something missing. An instance that can't be reached is reported on the page and keeps the list from its last check; the others are checked as usual. While a storage location looks down, the check doesn't run and the list is hidden.
+
+Nothing is deleted from this list, since there is nothing on disk. Choose records and ask Radarr or Sonarr to rescan their titles, so they show the files as missing, and optionally search for them. A Sonarr rescan stops at a broken link, so delete a title's broken links first.
+
 The page and deleting take the same permission as the orphan review.

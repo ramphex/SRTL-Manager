@@ -30,7 +30,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "orphan_restore" | "partial_copy_discard" | "path_migration" | "watch_sync" | "backup";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "orphan_restore" | "partial_copy_discard" | "path_migration" | "watch_sync" | "backup" | "arr_disk_check";
 
 export type AuditMode = "fast" | "deep";
 
@@ -1217,4 +1217,45 @@ export interface DamagedFileRow {
   header: FileHeaderState | null;
   // For a Bad header row: why, in plain words (for example "Too small to be a video"). Null on other rows.
   headerFailReason: string | null;
+}
+
+/** A Sonarr or Radarr file record whose library path has nothing on disk: no file and no link. */
+export interface ArrDiskMismatch {
+  id: number;
+  jobId: number;
+  service: "radarr" | "sonarr";
+  instanceName: string;
+  title: string;
+  section: string;
+  sectionTitle: string;
+  itemName: string;
+  relativePath: string;
+  arrPath: string;
+  episodes: string | null;
+  firstFoundAt: string;
+  checkedAt: string;
+  requestedAt: string | null;
+}
+
+export interface ArrDiskCheckInstance {
+  service: "radarr" | "sonarr";
+  instanceId: string;
+  instanceName: string;
+  status: "checked" | "unreachable" | "paused";
+  message: string | null;
+  titles: number;
+  files: number;
+  missing: number;
+}
+
+export interface ArrDiskCheckState {
+  items: ArrDiskMismatch[];
+  // The newest finished check and what each instance said.
+  lastCheck: { jobId: number; finishedAt: string | null; status: string; message: string | null; instances: ArrDiskCheckInstance[] } | null;
+  // A check queued or running now.
+  activeJobId: number | null;
+  // Mismatches are not shown while storage looks down.
+  hiddenBecauseStorageDown: boolean;
+  // Whether any Radarr or Sonarr instance has folder mappings to check.
+  configured: boolean;
 }

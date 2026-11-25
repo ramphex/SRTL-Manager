@@ -158,6 +158,8 @@ const approvedTable: Array<{ row: string; allowed: readonly AccountRole[]; reque
       ["GET", "/api/broken-links/jobs/999999"],
       ["POST", "/api/broken-links/delete", { mediaLinkIds: [999_999] }],
       ["POST", "/api/broken-links/rescan", { operationIds: [999_999] }],
+      ["GET", "/api/broken-links/arr-missing"],
+      ["POST", "/api/broken-links/arr-missing/rescan", { ids: [999_999] }],
       ["GET", "/api/re-requests"],
       ["POST", "/api/re-requests/preview", { storageFileIds: [999_999] }],
       ["POST", "/api/re-requests/retry", { ids: [999_999] }],

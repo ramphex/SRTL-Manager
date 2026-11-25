@@ -35,4 +35,36 @@ export async function applyBrokenLinkMigration(client: PoolClient): Promise<void
     await client.query(`ALTER TABLE symlink_cleanup_operations ADD CONSTRAINT symlink_cleanup_operations_reason_check CHECK (reason IN ('failed_copy', 'broken_link'))`);
     if (cleanup.has("completed_at")) await client.query(`CREATE INDEX IF NOT EXISTS symlink_cleanup_operations_reason_idx ON symlink_cleanup_operations (reason, completed_at)`);
   }
+  // Sonarr and Radarr file records with nothing in the library, from the latest arr disk check. Replaced per instance on each check.
+  await client.query(`CREATE TABLE IF NOT EXISTS arr_disk_mismatches (
+    id SERIAL PRIMARY KEY,
+    job_id INTEGER NOT NULL,
+    service TEXT NOT NULL CHECK (service IN ('radarr', 'sonarr')),
+    instance_id TEXT NOT NULL,
+    instance_name TEXT NOT NULL,
+    arr_item_id INTEGER NOT NULL,
+    arr_file_id INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    section TEXT NOT NULL,
+    item_name TEXT NOT NULL,
+    relative_path TEXT NOT NULL,
+    arr_path TEXT NOT NULL,
+    episodes TEXT,
+    first_found_at TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
+    requested_at TEXT
+  )`);
+  await client.query(`CREATE UNIQUE INDEX IF NOT EXISTS arr_disk_mismatches_file_idx ON arr_disk_mismatches (instance_id, arr_file_id)`);
+  // The check runs as its own job type, so arr calls never hold up or fail a scan.
+  await client.query(`DO $$
+  DECLARE definition text; types text[];
+  BEGIN
+    IF to_regclass('public.jobs') IS NULL THEN RETURN; END IF;
+    SELECT pg_get_constraintdef(oid) INTO definition FROM pg_constraint WHERE conname = 'jobs_type_check' AND conrelid = 'jobs'::regclass;
+    IF definition IS NULL OR position('''arr_disk_check''' in definition) > 0 THEN RETURN; END IF;
+    SELECT array_agg(match[1]) INTO types FROM regexp_matches(definition, '''([a-z_]+)''', 'g') AS match;
+    types := array_append(types, 'arr_disk_check');
+    ALTER TABLE jobs DROP CONSTRAINT jobs_type_check;
+    EXECUTE format('ALTER TABLE jobs ADD CONSTRAINT jobs_type_check CHECK (type IN (%s))', (SELECT string_agg(quote_literal(value), ', ') FROM unnest(types) AS value));
+  END $$`);
 }

@@ -681,3 +681,33 @@ export const auditResults = pgTable(
 
 export * from "./watchSyncSchema";
 export * from "./mediaServerSchema";
+
+// Sonarr and Radarr file records whose library path has nothing on disk, from the latest arr disk check.
+export const arrDiskMismatches = pgTable(
+  "arr_disk_mismatches",
+  {
+    id: serial("id").primaryKey(),
+    // The check job that last found it; rescans and searches are recorded on it.
+    jobId: integer("job_id").notNull(),
+    service: text("service").notNull(),
+    instanceId: text("instance_id").notNull(),
+    instanceName: text("instance_name").notNull(),
+    // The movie or series, and the arr's own file record.
+    arrItemId: integer("arr_item_id").notNull(),
+    arrFileId: integer("arr_file_id").notNull(),
+    title: text("title").notNull(),
+    section: text("section").notNull(),
+    itemName: text("item_name").notNull(),
+    // Relative to the title folder, as the arr reports it.
+    relativePath: text("relative_path").notNull(),
+    // The full path the arr has on record.
+    arrPath: text("arr_path").notNull(),
+    // "S01E02, S01E03" for Sonarr.
+    episodes: text("episodes"),
+    firstFoundAt: text("first_found_at").notNull(),
+    checkedAt: text("checked_at").notNull(),
+    // When a rescan or search was last asked for from the review.
+    requestedAt: text("requested_at")
+  },
+  (table) => [uniqueIndex("arr_disk_mismatches_file_idx").on(table.instanceId, table.arrFileId)]
+);

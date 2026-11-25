@@ -2,7 +2,8 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Check, ChevronDown, LoaderCircle, OctagonX, RefreshCw, Search, Trash2, TriangleAlert, Unlink2, X } from "lucide-react";
-import type { BrokenLinkCleanupRecord, BrokenLinkItem, BrokenLinkRescanResult, JobRecord } from "../shared/types";
+import type { ArrDiskCheckState, ArrDiskMismatch, BrokenLinkCleanupRecord, BrokenLinkItem, BrokenLinkRescanResult, JobRecord } from "../shared/types";
+import { createSearchMatcher } from "../shared/search";
 import { api } from "./api";
 import { Panel } from "./App";
 import { formatDate, formatNumber, recordFromUnknown } from "./appShared";
@@ -12,7 +13,7 @@ import { SettingsTabs } from "./settingsTabs";
 
 const pageSize = 100;
 
-type BrokenLinkView = "broken" | "removed";
+type BrokenLinkView = "broken" | "removed" | "arr";
 
 const countText = (count: number, one: string, many = `${one}s`) => `${formatNumber(count)} ${count === 1 ? one : many}`;
 
@@ -49,7 +50,7 @@ function rescanResultText(result: BrokenLinkRescanResult): string {
 }
 
 /** The arr options shared by the delete confirmation and the rescan of removed links. */
-function ArrChoices({ rescan, search, onRescan, onSearch, disabled, rescanFixed = false }: { rescan: boolean; search: boolean; onRescan?: (value: boolean) => void; onSearch: (value: boolean) => void; disabled: boolean; rescanFixed?: boolean }) {
+function ArrChoices({ rescan, search, onRescan, onSearch, disabled, rescanFixed = false, searchLabel = "Also search for the removed items" }: { rescan: boolean; search: boolean; onRescan?: (value: boolean) => void; onSearch: (value: boolean) => void; disabled: boolean; rescanFixed?: boolean; searchLabel?: string }) {
   return (
     <div className="blk-arr-choices">
       {rescanFixed ? null : (
@@ -60,7 +61,7 @@ function ArrChoices({ rescan, search, onRescan, onSearch, disabled, rescanFixed 
       )}
       <label className="checkbox-row">
         <input type="checkbox" checked={search} disabled={disabled} onChange={(event) => onSearch(event.target.checked)} />
-        Also search for the removed items
+        {searchLabel}
       </label>
       <p className="orv-muted blk-arr-note">
         A rescan makes Radarr or Sonarr see the file as missing. Sonarr's "Unmonitor deleted episodes" and Radarr's "Unmonitor deleted movies" can then unmonitor it. A search removes Radarr's or Sonarr's record of the file, keeps the item monitored and searches for it, so those titles skip the rescan.
@@ -121,6 +122,7 @@ export function BrokenLinkReviewPanel() {
   const queryClient = useQueryClient();
   const review = useQuery({ queryKey: ["broken-links"], queryFn: api.brokenLinks });
   const removed = useQuery({ queryKey: ["broken-links-removed"], queryFn: api.removedBrokenLinks });
+  const arrMissing = useQuery({ queryKey: ["arr-missing-files"], queryFn: api.arrMissingFiles, refetchInterval: (query) => (query.state.data?.activeJobId ? 3000 : false) });
   const [view, setView] = useState<BrokenLinkView>("broken");
   const [section, setSection] = useState<string>("all");
   const [search, setSearch] = useState("");
@@ -223,9 +225,11 @@ export function BrokenLinkReviewPanel() {
                 <button type="button" className="secondary orv-how" aria-expanded={howOpen} aria-controls="blk-how" onClick={() => setHowOpen((value) => !value)}>
                   How this works <ChevronDown size={14} aria-hidden className="orv-chevron" />
                 </button>
-                <button type="button" className="danger" disabled={busy || blocked || filtered.length === 0 || view !== "broken"} onClick={selectAllShown}>
-                  <Trash2 size={15} /> Delete all shown ({formatNumber(filtered.length)})
-                </button>
+                {view === "broken" ? (
+                  <button type="button" className="danger" disabled={busy || blocked || filtered.length === 0} onClick={selectAllShown}>
+                    <Trash2 size={15} /> Delete all shown ({formatNumber(filtered.length)})
+                  </button>
+                ) : null}
               </div>
             </header>
             {howOpen ? (
@@ -244,6 +248,9 @@ export function BrokenLinkReviewPanel() {
                     <strong>When deleting is blocked:</strong> {data.safety.rule}
                   </li>
                   <li>
+                    <strong>In Sonarr/Radarr, not on disk:</strong> file records Sonarr or Radarr has where the library has nothing at all. A check compares them with the library after every full symlink scan, one series at a time; nothing is deleted from that list, only rescans and searches are sent.
+                  </li>
+                  <li>
                     <strong>Not listed here:</strong> links whose target exists but could not be read. They are not broken, so they are never deleted from this page.
                   </li>
                 </ul>
@@ -257,7 +264,8 @@ export function BrokenLinkReviewPanel() {
               onSelect={setView}
               tabs={[
                 { key: "broken", label: <>Broken links <span className="orv-tab-count">{formatNumber(items.length)}</span></> },
-                { key: "removed", label: <>Removed, last 30 days <span className="orv-tab-count">{formatNumber(removedItems.length)}</span></> }
+                { key: "removed", label: <>Removed, last 30 days <span className="orv-tab-count">{formatNumber(removedItems.length)}</span></> },
+                { key: "arr", label: <>In Sonarr/Radarr, not on disk <span className="orv-tab-count">{formatNumber(arrMissing.data?.items.length ?? 0)}</span></> }
               ]}
             />
 
@@ -341,6 +349,8 @@ export function BrokenLinkReviewPanel() {
                   </div>
                 ) : null}
               </div>
+            ) : view === "arr" ? (
+              <ArrMissingPanel state={arrMissing.data} error={arrMissing.error?.message ?? null} onChanged={() => void queryClient.invalidateQueries({ queryKey: ["arr-missing-files"] })} />
             ) : (
               <div role="tabpanel" id="blk-panel-removed" aria-labelledby="blk-tab-removed" className="orv-view">
                 <p className="orv-hint">
@@ -518,6 +528,199 @@ function Pager({ page, pageCount, total, onPage }: { page: number; pageCount: nu
           </button>
         </>
       ) : null}
+    </div>
+  );
+}
+
+function filterArrMismatches(items: ArrDiskMismatch[], section: string, search: string): ArrDiskMismatch[] {
+  const matches = createSearchMatcher(search);
+  return items.filter((item) => (section === "all" || item.section === section) && (!matches || matches(item.title, item.relativePath, item.arrPath, item.episodes ?? "")));
+}
+
+const arrStatusText = { checked: "checked", unreachable: "could not be reached", paused: "paused, not checked" } as const;
+
+/** Sonarr and Radarr file records whose library path has nothing on disk. Nothing to delete; only a rescan or search. */
+function ArrMissingPanel({ state, error, onChanged }: { state: ArrDiskCheckState | undefined; error: string | null; onChanged: () => void }) {
+  const queryClient = useQueryClient();
+  const [section, setSection] = useState("all");
+  const [search, setSearch] = useState("");
+  const [selected, setSelected] = useState<Set<number>>(new Set());
+  const [searchAfter, setSearchAfter] = useState(false);
+  const check = useMutation({ mutationFn: api.checkArrMissingFiles, onSuccess: onChanged });
+  const rescan = useMutation({
+    mutationFn: () => api.rescanArrMissingFiles({ ids: [...selected], search: searchAfter }),
+    onSuccess: () => {
+      setSelected(new Set());
+      onChanged();
+      void queryClient.invalidateQueries({ queryKey: ["re-requests"] });
+    }
+  });
+  const items = useMemo(() => state?.items ?? [], [state]);
+  const sections = useMemo(() => {
+    const seen = new Map<string, { section: string; sectionTitle: string; count: number }>();
+    for (const item of items) {
+      const entry = seen.get(item.section);
+      if (entry) entry.count += 1;
+      else seen.set(item.section, { section: item.section, sectionTitle: item.sectionTitle, count: 1 });
+    }
+    return [...seen.values()];
+  }, [items]);
+  const filtered = useMemo(() => filterArrMismatches(items, section, search), [items, section, search]);
+  const groups = useMemo(() => {
+    const byTitle = new Map<string, { key: string; title: string; instanceName: string; rows: ArrDiskMismatch[] }>();
+    for (const item of filtered) {
+      const key = `${item.section}\0${item.itemName}`;
+      const group = byTitle.get(key);
+      if (group) group.rows.push(item);
+      else byTitle.set(key, { key, title: item.title, instanceName: item.instanceName, rows: [item] });
+    }
+    return [...byTitle.values()];
+  }, [filtered]);
+  const running = Boolean(state?.activeJobId) || check.isPending;
+  const last = state?.lastCheck ?? null;
+  const problems = (last?.instances ?? []).filter((entry) => entry.status !== "checked");
+  const allChosen = filtered.length > 0 && filtered.every((item) => selected.has(item.id));
+
+  return (
+    <div role="tabpanel" id="blk-panel-arr" aria-labelledby="blk-tab-arr" className="orv-view">
+      <p className="orv-hint">
+        Files Sonarr or Radarr has on record where the library has nothing at all: no file and no link. Sonarr only looks at the disk when a series is rescanned, so it keeps listing these as present. Nothing is deleted here; ask for a rescan so Sonarr or Radarr marks them missing.
+      </p>
+      {error ? <p className="panel-message error">{error}</p> : null}
+      {state && !state.configured ? <p className="orv-empty">No Radarr or Sonarr instance has library folders mapped, so there is nothing to compare.</p> : null}
+      {state?.hiddenBecauseStorageDown ? (
+        <div className="orv-banner orv-banner-bad" role="alert">
+          <TriangleAlert size={18} aria-hidden />
+          <div>Storage looks down, so these records are not shown and cannot be checked. They come back once storage is up.</div>
+        </div>
+      ) : null}
+      {state?.configured ? (
+        <div className="orv-table-bar">
+          <p className="orv-skipped" data-testid="arr-check-status">
+            {running
+              ? "Checking Radarr and Sonarr now. The list updates when it finishes."
+              : last
+                ? `Last checked ${last.finishedAt ? formatDate(last.finishedAt) : ""}${last.status === "failed" ? `, failed: ${last.message ?? "see the job log"}` : ""}. A check also runs after every full symlink scan.`
+                : "Not checked yet. A check also runs after every full symlink scan."}
+            {last ? (
+              <>
+                {" "}
+                <Link to="/logs" search={{ job: last.jobId }}>
+                  Job #{last.jobId}
+                </Link>
+              </>
+            ) : null}
+          </p>
+          <button type="button" className="secondary" disabled={running || Boolean(state.hiddenBecauseStorageDown)} onClick={() => check.mutate()}>
+            {running ? <LoaderCircle size={15} className="spin-icon" /> : <RefreshCw size={15} />} Check now
+          </button>
+        </div>
+      ) : null}
+      {problems.length ? (
+        <div className="orv-banner orv-banner-warn" role="status">
+          <TriangleAlert size={18} aria-hidden />
+          <div>
+            {problems.map((entry) => (
+              <span key={entry.instanceId} className="orv-banner-detail">
+                {entry.instanceName} {arrStatusText[entry.status]}{entry.message ? `: ${entry.message}` : "."} {entry.status === "unreachable" ? "Its list is from the last check that reached it." : ""}
+              </span>
+            ))}
+          </div>
+        </div>
+      ) : null}
+      {check.error ? <p className="panel-message error" role="alert">{check.error.message}</p> : null}
+      {items.length > 0 ? (
+        <>
+          <div className="orv-filters">
+            <label className="orv-search">
+              <Search size={15} aria-hidden />
+              <input type="search" aria-label="Search Sonarr and Radarr records" placeholder="Search titles, paths and episodes" value={search} onChange={(event) => setSearch(event.target.value)} />
+            </label>
+            <select aria-label="Filter records by library folder" value={section} onChange={(event) => setSection(event.target.value)}>
+              <option value="all">All folders</option>
+              {sections.map((entry) => (
+                <option key={entry.section} value={entry.section}>
+                  {entry.sectionTitle} ({formatNumber(entry.count)})
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="orv-table-bar">
+            <label className="orv-select-all">
+              <input type="checkbox" checked={allChosen} disabled={rescan.isPending || filtered.length === 0} onChange={(event) => setSelected(event.target.checked ? new Set(filtered.map((item) => item.id)) : new Set())} />
+              <span>Select all {formatNumber(filtered.length)} shown</span>
+            </label>
+          </div>
+          <div className="orv-table-wrap">
+            <table className="orv-table blk-table" aria-label="Records with nothing on disk">
+              <thead>
+                <tr>
+                  <th className="orv-col-check">
+                    <span className="sr-only">Select</span>
+                  </th>
+                  <th>Recorded file</th>
+                  <th>Episode</th>
+                  <th className="orv-col-date">First found</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groups.flatMap((group) => [
+                  <tr key={group.key} className="blk-title-row">
+                    <th colSpan={4} scope="rowgroup">
+                      {group.title} <span className="orv-muted">({group.instanceName}, {countText(group.rows.length, "record")})</span>
+                    </th>
+                  </tr>,
+                  ...group.rows.map((item) => (
+                    <tr key={item.id} className={selected.has(item.id) ? "is-selected" : undefined}>
+                      <td className="orv-col-check">
+                        <input type="checkbox" aria-label={`Select record ${fileName(item.relativePath)}`} checked={selected.has(item.id)} disabled={rescan.isPending} onChange={(event) => setSelected((current) => toggleIn(current, item.id, event.target.checked))} />
+                      </td>
+                      <td className="orv-col-file">
+                        <div className="orv-name-line">
+                          <span className="orv-name">{fileName(item.relativePath)}</span>
+                          {item.requestedAt ? <span className="orv-chip orv-chip-small orv-tone-info" title={`Asked ${formatDate(item.requestedAt)}`}>Rescan asked</span> : null}
+                        </div>
+                        <div className="orv-sub">
+                          <span className="orv-dir" title={item.arrPath}>{item.arrPath}</span>
+                        </div>
+                      </td>
+                      <td>{item.episodes ?? (item.service === "radarr" ? "Movie" : "-")}</td>
+                      <td className="orv-col-date">{formatDate(item.firstFoundAt)}</td>
+                    </tr>
+                  ))
+                ])}
+              </tbody>
+            </table>
+          </div>
+          <div className="blk-removed-actions">
+            <ArrChoices rescan search={searchAfter} onSearch={setSearchAfter} disabled={rescan.isPending} rescanFixed searchLabel="Also search for these items" />
+            <button type="button" className="orv-primary" disabled={rescan.isPending || selected.size === 0 || Boolean(state?.hiddenBecauseStorageDown)} onClick={() => rescan.mutate()}>
+              {rescan.isPending ? <LoaderCircle size={16} className="spin-icon" /> : <RefreshCw size={16} />} Ask Radarr/Sonarr to rescan{selected.size ? ` (${formatNumber(selected.size)})` : ""}
+            </button>
+          </div>
+        </>
+      ) : state?.configured && !state.hiddenBecauseStorageDown && last ? (
+        <p className="orv-empty">Every Sonarr and Radarr file record has something in the library.</p>
+      ) : null}
+      {rescan.data ? (
+        <div className="orv-banner orv-banner-good" role="status">
+          <Check size={16} aria-hidden />
+          <div>
+            <strong>{rescanResultText(rescan.data)}</strong>
+            {rescan.data.problems.length ? (
+              <ul className="blk-result-list" aria-label="Titles not sent">
+                {rescan.data.problems.map((problem) => (
+                  <li key={`${problem.title}-${problem.reason}`}>
+                    {problem.title}: {problem.reason}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            <span className="orv-banner-detail">A Sonarr rescan stops at a broken link, so delete a title's broken links first. The next check drops records Sonarr or Radarr no longer has.</span>
+          </div>
+        </div>
+      ) : null}
+      {rescan.error ? <p className="panel-message error" role="alert">{rescan.error.message}</p> : null}
     </div>
   );
 }

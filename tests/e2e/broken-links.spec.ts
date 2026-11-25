@@ -45,9 +45,28 @@ const removed = [
   { operationId: 7, jobId: 118, mediaLinkId: 9, section: "movies", itemName: "Copper Fields (2008)", relativePath: "Copper Fields (2008)/Copper.Fields.mkv", linkPath: "/links/movies/Copper Fields (2008)/Copper.Fields.mkv", targetPath: "/remote/movies/Copper Fields (2008)/Copper.Fields.mkv", stage: "removed", message: null, completedAt: "2026-11-23T09:00:00.000Z" }
 ];
 
+function arrState(options: FixtureOptions) {
+  const record = (id: number, title: string, relativePath: string, episodes: string | null, service: "sonarr" | "radarr") => ({
+    id, jobId: 129, service, instanceName: service === "sonarr" ? "Sonarr" : "Radarr", title, section: service === "sonarr" ? "shows" : "movies", sectionTitle: service === "sonarr" ? "TV" : "Films",
+    itemName: title, relativePath, arrPath: `/${service === "sonarr" ? "tv" : "m"}/${title}/${relativePath}`, episodes, firstFoundAt: "2026-11-24T04:00:00.000Z", checkedAt: "2026-11-25T04:00:00.000Z", requestedAt: null
+  });
+  return {
+    items: options.blocked ? [] : [record(1, "Paper Lanterns", "Season 02/Paper.Lanterns.S02E05.mkv", "S02E05", "sonarr"), record(2, "Paper Lanterns", "Season 02/Paper.Lanterns.S02E06.mkv", "S02E06", "sonarr"), record(3, "Copper Fields (2008)", "Copper.Fields.mkv", null, "radarr")],
+    lastCheck: { jobId: 129, finishedAt: "2026-11-25T04:00:00.000Z", status: "partially_failed", message: "Radarr/Sonarr disk check: 3 records have nothing on disk; 1 instance could not be checked", instances: [
+      { service: "sonarr", instanceId: "s1", instanceName: "Sonarr", status: "checked", message: null, titles: 40, files: 900, missing: 2 },
+      { service: "radarr", instanceId: "r2", instanceName: "Radarr 4K", status: "unreachable", message: "Radarr could not be reached.", titles: 0, files: 0, missing: 0 }
+    ] },
+    activeJobId: null,
+    hiddenBecauseStorageDown: Boolean(options.blocked),
+    configured: true
+  };
+}
+
 async function fixture(page: Page, options: FixtureOptions = {}) {
   const deletes: unknown[] = [];
   const rescans: unknown[] = [];
+  const arrRescans: unknown[] = [];
+  const checks: unknown[] = [];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const url = new URL(request.url());
@@ -60,6 +79,9 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     else if (url.pathname === "/api/inventory/summary") body = { totalLinks: 0, remoteLinks: 10, localLinks: 5, brokenLinks: 3, otherLinks: 0, nonMediaLinks: 0, actionableRemoteLinks: 0, actionableLocalLinks: 0, assignedRemoteLinks: 0, unassignedRemoteLinks: 0, unassignedLocalLinks: 0, localFiles: 20, remoteFiles: 30, actionableRemoteFiles: 0, actionableLocalFiles: 0, assignedRemoteFiles: 0, unassignedRemoteFiles: 0, unassignedLocalFiles: 0, localOrphanFiles: 0, remoteOrphanFiles: 0, missingLinks: 0, missingLocalFiles: 0, missingRemoteFiles: 0 };
     else if (url.pathname === "/api/broken-links") body = review(options);
     else if (url.pathname === "/api/broken-links/removed") body = removed;
+    else if (url.pathname === "/api/broken-links/arr-missing") body = arrState(options);
+    else if (url.pathname === "/api/broken-links/arr-missing/check") { checks.push(true); body = { jobId: 130 }; }
+    else if (url.pathname === "/api/broken-links/arr-missing/rescan") { arrRescans.push(request.postDataJSON()); body = { titles: 1, asked: 1, searched: 0, notMatched: 0, failed: 0, problems: [], relinked: 0 }; }
     else if (url.pathname === "/api/broken-links/delete") { deletes.push(request.postDataJSON()); body = { jobId: 120 }; }
     else if (url.pathname === "/api/broken-links/rescan") { rescans.push(request.postDataJSON()); body = { titles: 1, asked: 0, searched: 1, notMatched: 0, failed: 0, problems: [], relinked: 0 }; }
     else if (url.pathname === "/api/jobs/120") body = { id: 120, type: "symlink_cleanup", status: "completed", createdAt: "2026-11-25T09:00:00.000Z", startedAt: "2026-11-25T09:00:01.000Z", finishedAt: "2026-11-25T09:00:02.000Z", options: { brokenLinks: true }, progress: { current: 2, total: 2, removed: 1, alreadyMissing: 0, skipped: 1, failed: 0, stage: "completed", message: "Broken link cleanup finished: 1 removed, 1 skipped because they changed. Rescan asked for 1 title" } };
@@ -80,7 +102,7 @@ async function fixture(page: Page, options: FixtureOptions = {}) {
     }
     await route.fulfill({ json: body });
   });
-  return { deletes, rescans };
+  return { deletes, rescans, arrRescans, checks };
 }
 
 test("the dashboard count opens the review, grouped by folder and title, with search and folder filters", async ({ page }) => {
@@ -151,4 +173,33 @@ test("removed links can be sent for another rescan, with a search", async ({ pag
   await page.getByRole("button", { name: /Ask Radarr\/Sonarr to rescan \(1\)/ }).click();
   await expect(page.getByRole("status").filter({ hasText: "Rescan asked for 0 titles; search queued for 1 item." })).toBeVisible();
   expect(rescans).toEqual([{ operationIds: [7], search: true }]);
+});
+
+test("records Sonarr or Radarr have with nothing on disk are listed by title and can be rescanned", async ({ page }) => {
+  const { arrRescans, checks } = await fixture(page);
+  await page.goto(`${baseUrl}/library?view=broken-links`);
+  await page.getByRole("tab", { name: /In Sonarr\/Radarr, not on disk/ }).click();
+  const table = page.getByRole("table", { name: "Records with nothing on disk" });
+  await expect(table.getByRole("rowheader", { name: /Paper Lanterns \(Sonarr, 2 records\)/ })).toBeVisible();
+  await expect(table.getByText("/tv/Paper Lanterns/Season 02/Paper.Lanterns.S02E05.mkv")).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "Radarr 4K could not be reached" })).toBeVisible();
+  // Nothing here can be deleted.
+  await expect(page.getByRole("button", { name: /Delete/ }).filter({ hasText: "selected" })).toHaveCount(0);
+
+  await page.getByLabel("Search Sonarr and Radarr records").fill("S02E06");
+  await page.getByRole("checkbox", { name: "Select all 1 shown" }).check();
+  await page.getByRole("button", { name: /Ask Radarr\/Sonarr to rescan \(1\)/ }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Rescan asked for 1 title." })).toBeVisible();
+  expect(arrRescans).toEqual([{ ids: [2], search: false }]);
+
+  await page.getByRole("button", { name: "Check now" }).click();
+  await expect.poll(() => checks.length).toBe(1);
+});
+
+test("records are hidden while storage looks down", async ({ page }) => {
+  await fixture(page, { blocked: true });
+  await page.goto(`${baseUrl}/library?view=broken-links`);
+  await page.getByRole("tab", { name: /In Sonarr\/Radarr, not on disk/ }).click();
+  await expect(page.getByText("Storage looks down, so these records are not shown")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Check now" })).toBeDisabled();
 });

@@ -3,6 +3,7 @@ import type { ReRequestList, ReRequestPreview } from "../shared/reRequests";
 import type {
   AuditEstimate,
   AuditOptions,
+  ArrDiskCheckState,
   BrokenLinkCleanupRecord,
   BrokenLinkRescanResult,
   BrokenLinkReview,
@@ -221,6 +222,10 @@ export const api = {
     request<{ jobId: number }>("/api/broken-links/delete", { method: "POST", body: JSON.stringify(body) }),
   rescanRemovedBrokenLinks: (body: { operationIds: number[]; search: boolean }) =>
     request<BrokenLinkRescanResult>("/api/broken-links/rescan", { method: "POST", body: JSON.stringify(body) }),
+  arrMissingFiles: () => request<ArrDiskCheckState>("/api/broken-links/arr-missing"),
+  checkArrMissingFiles: () => request<{ jobId: number }>("/api/broken-links/arr-missing/check", { method: "POST", body: "{}" }),
+  rescanArrMissingFiles: (body: { ids: number[]; search: boolean }) =>
+    request<BrokenLinkRescanResult>("/api/broken-links/arr-missing/rescan", { method: "POST", body: JSON.stringify(body) }),
   heldOrphans: () => request<HeldOrphanFile[]>("/api/orphans/held"),
   restoreHeldOrphans: (operationIds: number[]) =>
     request<{ jobId: number }>("/api/orphans/held/restore", { method: "POST", body: JSON.stringify({ operationIds }) }),

@@ -43,6 +43,7 @@ import { discardPartialCopy, PartialCopyDiscardError, previewPartialCopyDiscard 
 import { schedulerLockKey } from "./scheduling";
 import { currentStorageFilesById, nextRollingAuditBatch, recordStorageFileAudit, rollingAuditDue, storageFileSizes, type AuditStorageFile } from "./rollingAudit";
 import { currentLinkRow, removeExpectedSymlink, resolveCopyFailures } from "./symlinkCleanup";
+import { arrDiskCheckConfigured, runArrDiskCheck } from "../lib/arrDiskCheck";
 import { brokenLinkMountChecks, brokenLinkRows, brokenLinkSafety, brokenLinkTargetRoot, brokenTargetState, linkFileName, mountWarning } from "../lib/brokenLinks";
 import { runWatchSyncJob, type WatchSyncJobOptions } from "../lib/watchSyncEngine";
 import { runBackup, type BackupRuntime } from "../lib/backups";
@@ -112,6 +113,15 @@ export class ScanAdmissionConflictError extends AdmissionError {
     super(message);
     this.name = "ScanAdmissionConflictError";
   }
+}
+
+/** Whether a symlink scan walked every configured library folder. */
+async function scanCoversWholeLibrary(db: Db, options: ScanOptions): Promise<boolean> {
+  const configured = (await getSectionSettings(db)).sections;
+  const selected = options.symlinkSections ?? options.sections;
+  if (!selected?.length) return true;
+  const covered = new Set(selected);
+  return configured.every((section) => covered.has(section));
 }
 
 // Storage looked down right before a broken link would have been removed; the job removes nothing more.
@@ -3076,6 +3086,21 @@ export class JobRunner {
     }));
   }
 
+  /**
+   * Queues a read-only comparison of Radarr's and Sonarr's file records with the library. One at a time; a request while one
+   * is queued or running returns that job.
+   */
+  async startArrDiskCheck(trigger: "manual" | "after_scan"): Promise<number> {
+    const [active] = await this.db.select({ id: schema.jobs.id }).from(schema.jobs).where(and(eq(schema.jobs.type, "arr_disk_check"), inArray(schema.jobs.status, ["queued", "running"]))).limit(1);
+    if (active) return active.id;
+    return this.enqueuePreparedJob("arr_disk_check", async () => ({
+      progress: { options: { trigger }, stage: "queued", message: "Waiting to check Radarr and Sonarr against the library" },
+      options: { trigger },
+      exclusive: false,
+      claims: []
+    }));
+  }
+
   async startBackup(trigger: BackupTrigger): Promise<number> {
     return this.enqueuePreparedJob("backup", async (transaction) => {
       const active = await first(
@@ -4058,6 +4083,18 @@ export class JobWorker {
       await ctx.event("info", result.summary);
       return;
     }
+    if (job.type === "arr_disk_check") {
+      await ctx.setProgress({ stage: "checking", message: "Checking that storage is mounted" });
+      const result = await runArrDiskCheck(this.db, ctx.jobId, ctx).catch(async (error: unknown) => {
+        if (!(error instanceof LeaseLostError)) await ctx.setProgress({ stage: "failed", message: errorMessage(error) });
+        throw error;
+      });
+      const message = `Radarr/Sonarr disk check: ${result.summary}`;
+      await ctx.setProgress({ stage: "completed", message, instances: result.instances, missing: result.missing });
+      if (result.instances.some((entry) => entry.status === "unreachable")) throw new PartialJobFailureError(message);
+      await ctx.event("info", message, { missing: result.missing });
+      return;
+    }
     if (job.type === "backup") {
       if (!this.backupRuntime) throw new Error("This worker has no database backup configuration");
       await runBackup(this.db, this.backupRuntime, ctx, jobProgressOptions<{ trigger?: BackupTrigger }>(job)?.trigger ?? "manual");
@@ -4439,7 +4476,15 @@ export class JobWorker {
         });
         persistedInventory = inventory;
       });
-      if (finalized && persistedInventory) return;
+      if (finalized && persistedInventory) {
+        // A scan of the whole library is a good moment to check Radarr and Sonarr against it. Never fails the scan.
+        if (normalizedOptions.scanSymlinks && !isTitleRescan && (await scanCoversWholeLibrary(this.db, normalizedOptions)) && (await arrDiskCheckConfigured(this.db))) {
+          await new JobRunner(this.db).startArrDiskCheck("after_scan").catch(async (error: unknown) => {
+            await ctx.event("warn", `Radarr and Sonarr were not queued for a disk check: ${errorMessage(error)}`).catch(() => undefined);
+          });
+        }
+        return;
+      }
       await ctx.withLeaseDb(async (leaseDb) => {
         await leaseDb.update(schema.scanRuns).set({ status: "cancelled", finishedAt: nowIso(), errorMessage: "Job cancelled" }).where(eq(schema.scanRuns.id, scanRun.id));
       });

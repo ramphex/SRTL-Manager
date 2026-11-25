@@ -15,6 +15,7 @@ import {
   requestRescansForRemovedLinks
 } from "../lib/brokenLinks";
 import type { JobRunner } from "../jobs/jobRunner";
+import { arrDiskCheckState, requestRescansForArrMismatches } from "../lib/arrDiskCheck";
 
 const idList = z.array(z.number().int().positive()).min(1).max(50_000);
 
@@ -65,6 +66,26 @@ export function registerBrokenLinkRoutes(app: FastifyInstance, db: Db, jobs: Job
       action: "broken_link.rescan",
       summary: `Asked Radarr/Sonarr to rescan ${result.asked} title(s) for removed broken links${body.search ? `, and to search for ${result.searched} item(s)` : ""}`,
       targets: { operationIds, search: body.search, asked: result.asked, searched: result.searched, notMatched: result.notMatched }
+    });
+    return result;
+  });
+
+  // Sonarr and Radarr file records with nothing in the library, from the newest check.
+  app.get("/api/broken-links/arr-missing", async () => arrDiskCheckState(db));
+
+  app.post("/api/broken-links/arr-missing/check", async () => ({ jobId: await jobs.startArrDiskCheck("manual") }));
+
+  app.post("/api/broken-links/arr-missing/rescan", { bodyLimit: 1024 * 1024 }, async (request) => {
+    const body = z.object({ ids: idList, search: z.boolean().default(false) }).parse(request.body);
+    const state = await arrDiskCheckState(db);
+    if (state.hiddenBecauseStorageDown) throw new ConflictError("Storage looks down, so Radarr and Sonarr are not asked to rescan. Try again once it is back.");
+    const ids = [...new Set(body.ids)];
+    const result = await requestRescansForArrMismatches(db, ids, body.search);
+    if (result.titles === 0) throw new ConflictError("None of the chosen records are listed any more. Reload the list.");
+    await recordActionAudit(db, request, {
+      action: "broken_link.rescan",
+      summary: `Asked Radarr/Sonarr to rescan ${result.asked} title(s) whose records have nothing on disk${body.search ? `, and to search for ${result.searched} item(s)` : ""}`,
+      targets: { arrMismatchIds: ids, search: body.search, asked: result.asked, searched: result.searched, notMatched: result.notMatched }
     });
     return result;
   });

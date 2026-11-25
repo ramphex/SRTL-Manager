@@ -10,10 +10,11 @@ import { JobWorker } from "../src/server/jobs/jobRunner";
 import { isBrokenLinkJump } from "../src/server/lib/brokenLinks";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { createRadarrInstance, saveRadarrSettings } from "../src/server/lib/radarr";
+import { createSonarrInstance, saveSonarrSettings } from "../src/server/lib/sonarr";
 import { listReRequests, processReRequestWork } from "../src/server/lib/reRequests";
-import type { BrokenLinkCleanupRecord, BrokenLinkRescanResult, BrokenLinkReview, JobRecord } from "../src/shared/types";
+import type { ArrDiskCheckState, BrokenLinkCleanupRecord, BrokenLinkRescanResult, BrokenLinkReview, JobRecord } from "../src/shared/types";
 import { readSetupToken } from "./authHelpers";
-import { arrMockApiKey, closeArrMocks, fakeRadarr, mockMovie } from "./reRequestMocks";
+import { arrMockApiKey, closeArrMocks, fakeRadarr, fakeSonarr, mockMovie, type FakeSonarr } from "./reRequestMocks";
 import { createTestDatabase, type TestDatabaseHandle } from "./testDb";
 
 let tmpDir: string;
@@ -262,5 +263,115 @@ describe("broken link review", () => {
     expect(refused.statusCode).toBe(409);
     expect(refused.json<{ error: string }>().error).toContain("no longer broken");
     await expect(fs.readlink(link.linkPath)).resolves.toBe(link.targetPath);
+  });
+
+  describe("Sonarr and Radarr records with nothing on disk", () => {
+    async function linkOnDisk(section: string, relativePath: string, inventory: boolean): Promise<void> {
+      const linkPath = path.join(tmpDir, "plex", section, relativePath);
+      const targetPath = path.join(tmpDir, "remote", section, relativePath);
+      await fs.mkdir(path.dirname(linkPath), { recursive: true });
+      await fs.mkdir(path.dirname(targetPath), { recursive: true });
+      await fs.writeFile(targetPath, "episode");
+      await fs.symlink(targetPath, linkPath);
+      if (!inventory) return;
+      const timestamp = new Date().toISOString();
+      await ctx.database.db.insert(schema.mediaLinks).values({ section, itemName: relativePath.split("/")[0]!, relativePath, linkPath, targetPath, kind: "remote", targetExists: true, isMedia: true, storagePolicy: "unassigned", sizeBytes: 7, firstSeenAt: timestamp, lastSeenAt: timestamp, lastChangedAt: timestamp, missingSince: null, lastSeenJobId: 1, updatedAt: timestamp });
+    }
+
+    async function setup(): Promise<{ cookie: string; sonarr: FakeSonarr; radarr: Awaited<ReturnType<typeof fakeRadarr>> }> {
+      const cookie = await createAdminSession();
+      const sonarr = await fakeSonarr([{ id: 7, tvdbId: 77, title: "Lantern Bay", year: 2019, path: "/tv/Lantern Bay", tags: [], monitored: true }], "/tv");
+      sonarr.files.push(
+        { id: 40, seriesId: 7, relativePath: "Season 01/Lantern.Bay.S01E01.mkv" },
+        { id: 41, seriesId: 7, relativePath: "Season 01/Lantern.Bay.S01E02.mkv" },
+        { id: 42, seriesId: 7, relativePath: "Season 01/Lantern.Bay.S01E03.mkv" }
+      );
+      sonarr.episodes.push(
+        { id: 101, seriesId: 7, episodeFileId: 40, seasonNumber: 1, episodeNumber: 1, monitored: true },
+        { id: 102, seriesId: 7, episodeFileId: 41, seasonNumber: 1, episodeNumber: 2, monitored: true },
+        { id: 103, seriesId: 7, episodeFileId: 42, seasonNumber: 1, episodeNumber: 3, monitored: true }
+      );
+      const sonarrId = (await createSonarrInstance(ctx.database.db, "Sonarr")).settings.id;
+      await saveSonarrSettings(ctx.database.db, sonarrId, { revision: 0, baseUrl: sonarr.url, apiKey: arrMockApiKey, webhookSecret: "", enabled: true, localTag: "local", remoteTag: "remote", monitorOnCopy: false, mappingMode: "manual", mappings: [{ rootPath: "/tv", section: "shows" }] });
+      const radarr = await fakeRadarr([mockMovie(1, "Copper Fields", "/m", "copper.fields.mkv")], "/m");
+      const radarrId = (await createRadarrInstance(ctx.database.db, "Radarr")).settings.id;
+      await saveRadarrSettings(ctx.database.db, radarrId, { revision: 0, baseUrl: radarr.url, apiKey: arrMockApiKey, webhookSecret: "", enabled: true, localTag: "local", remoteTag: "remote", monitorOnCopy: false, mappingMode: "manual", mappings: [{ rootPath: "/m", section: "movies" }] });
+      // E01 is in the inventory, E02 only on disk (it arrived after the scan), E03 and the movie have nothing at all.
+      await linkOnDisk("shows", "Lantern Bay/Season 01/Lantern.Bay.S01E01.mkv", true);
+      await linkOnDisk("shows", "Lantern Bay/Season 01/Lantern.Bay.S01E02.mkv", false);
+      sonarr.calls.length = 0;
+      radarr.calls.length = 0;
+      return { cookie, sonarr, radarr };
+    }
+
+    async function state(cookie: string): Promise<ArrDiskCheckState> {
+      const response = await ctx.app.inject({ method: "GET", url: "/api/broken-links/arr-missing", headers: { cookie } });
+      expect(response.statusCode).toBe(200);
+      return response.json<ArrDiskCheckState>();
+    }
+
+    it("lists records with nothing in the library, then rescans or searches only the chosen ones", async () => {
+      const { cookie, sonarr, radarr } = await setup();
+      const queued = await ctx.app.inject({ method: "POST", url: "/api/broken-links/arr-missing/check", headers: { cookie } });
+      const jobId = queued.json<{ jobId: number }>().jobId;
+      // A second request while one is waiting returns the same job.
+      expect((await ctx.app.inject({ method: "POST", url: "/api/broken-links/arr-missing/check", headers: { cookie } })).json<{ jobId: number }>().jobId).toBe(jobId);
+      await expect(runQueuedJob(jobId)).resolves.toMatchObject({ type: "arr_disk_check", status: "completed" });
+      // Read-only and polite: one file list and one episode list for the series, one movie list, and no commands.
+      expect(sonarr.calls).toEqual(["GET episodefile?seriesId=7", "GET episode?seriesId=7"]);
+      expect(radarr.calls).toEqual([]);
+
+      const result = await state(cookie);
+      expect(result).toMatchObject({ configured: true, hiddenBecauseStorageDown: false, activeJobId: null, lastCheck: { jobId, status: "completed" } });
+      expect(result.items.map((item) => [item.service, item.title, item.relativePath, item.episodes, item.arrPath])).toEqual([
+        ["radarr", "Copper Fields (2020)", "copper.fields.mkv", null, "/m/Copper Fields (2020)/copper.fields.mkv"],
+        ["sonarr", "Lantern Bay (2019)", "Season 01/Lantern.Bay.S01E03.mkv", "S01E03", "/tv/Lantern Bay/Season 01/Lantern.Bay.S01E03.mkv"]
+      ]);
+
+      const episode = result.items.find((item) => item.service === "sonarr")!;
+      const movie = result.items.find((item) => item.service === "radarr")!;
+      const searched = await ctx.app.inject({ method: "POST", url: "/api/broken-links/arr-missing/rescan", headers: { cookie }, payload: { ids: [episode.id], search: true } });
+      expect(searched.json<BrokenLinkRescanResult>()).toMatchObject({ titles: 1, searched: 1, asked: 0 });
+      const rescanned = await ctx.app.inject({ method: "POST", url: "/api/broken-links/arr-missing/rescan", headers: { cookie }, payload: { ids: [movie.id] } });
+      expect(rescanned.json<BrokenLinkRescanResult>()).toMatchObject({ titles: 1, searched: 0, asked: 1 });
+      await processReRequestWork(ctx.database.db);
+      expect(sonarr.deletedFiles).toEqual([42]);
+      expect(sonarr.searches).toEqual([[103]]);
+      expect(sonarr.rescans).toEqual([]);
+      expect(radarr.rescans).toEqual([1]);
+      expect((await state(cookie)).items.every((item) => item.requestedAt)).toBe(true);
+    });
+
+    it("keeps an unreachable instance's list, reports it, and checks nothing while storage looks down", async () => {
+      const { cookie, sonarr } = await setup();
+      await runQueuedJob((await ctx.jobs.startArrDiskCheck("manual")));
+      expect((await state(cookie)).items).toHaveLength(2);
+
+      sonarr.offline = true;
+      const partial = await runQueuedJob(await ctx.jobs.startArrDiskCheck("manual"));
+      expect(partial.status).toBe("partially_failed");
+      const afterOutage = await state(cookie);
+      expect(afterOutage.items.map((item) => item.service).sort()).toEqual(["radarr", "sonarr"]);
+      expect(afterOutage.lastCheck?.instances).toEqual(expect.arrayContaining([expect.objectContaining({ instanceName: "Sonarr", status: "unreachable" }), expect.objectContaining({ instanceName: "Radarr", status: "checked", missing: 1 })]));
+
+      await fs.rm(path.join(tmpDir, "remote"), { recursive: true, force: true });
+      await fs.mkdir(path.join(tmpDir, "remote"));
+      const failed = await runQueuedJob(await ctx.jobs.startArrDiskCheck("manual"));
+      expect(failed).toMatchObject({ status: "failed", progress: expect.objectContaining({ message: expect.stringContaining("were not checked") }) });
+      const hidden = await state(cookie);
+      expect(hidden).toMatchObject({ hiddenBecauseStorageDown: true, items: [] });
+      const refused = await ctx.app.inject({ method: "POST", url: "/api/broken-links/arr-missing/rescan", headers: { cookie }, payload: { ids: [1] } });
+      expect(refused.statusCode).toBe(409);
+    });
+
+    it("is queued after a full symlink scan but not after a title rescan", async () => {
+      await setup();
+      const titleScan = await ctx.jobs.startScan({ scanSymlinks: true, scanLocal: false, scanRemote: false, titleScopes: [{ section: "shows", itemName: "Lantern Bay" }] });
+      await expect(runQueuedJob(titleScan)).resolves.toMatchObject({ status: "completed" });
+      expect(await ctx.database.db.select().from(schema.jobs).where(eq(schema.jobs.type, "arr_disk_check"))).toEqual([]);
+      const fullScan = await ctx.jobs.startScan({ scanSymlinks: true, scanLocal: false, scanRemote: false });
+      await expect(runQueuedJob(fullScan)).resolves.toMatchObject({ status: "completed" });
+      expect(await ctx.database.db.select({ status: schema.jobs.status }).from(schema.jobs).where(eq(schema.jobs.type, "arr_disk_check"))).toEqual([{ status: "queued" }]);
+    });
   });
 });
