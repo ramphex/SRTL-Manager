@@ -107,3 +107,22 @@ With that in place:
 A link only protects a file if it uses the same path SRTL sees. If the other tool's container sees storage under a different path, its links will not match, and the review warns how many links point outside both storage locations. Links pointing to another symlink are followed. Deleting from **Library > Damaged files** does not check these folders.
 
 With `SRTL_EXTRA_SYMLINK_DIRS` unset, nothing changes and no override is needed. When running outside Docker, set the same variable in the environment or in `.env`.
+
+## Broken links
+
+A broken link is the other way round from an orphan: a library symlink whose target is gone. Third-party mount software sometimes removes a file and leaves the library link pointing at nothing. Sonarr stops its whole rescan of a series when it meets such a link, so it keeps showing the episode as present and never searches for it.
+
+**Library > Broken links** lists the links the last scans found broken, grouped by folder and title, with the target and when a scan first found it broken. The dashboard's broken link count opens it. When the page loads, each link is checked again on disk: a link whose target is back, that changed, or that could not be checked is counted above the list and left out. A link whose target exists but cannot be read is not broken and is never listed here.
+
+**Delete selected** or **Delete all shown** removes the links as a job. Only the symlinks are removed, never a file on storage. Right before each one, SRTL checks that it is still a symlink, still points at the recorded target, that the target is still gone, and that its storage location is still mounted. A link that changed is skipped and listed in the result with the reason. If storage looks down partway through, the job stops removing links.
+
+After the delete, each affected movie or series gets one rescan from the Radarr or Sonarr instance that manages its folder, so the file shows as missing. **Also search for the removed items** (off by default) removes Radarr's or Sonarr's record of the file, keeps the item monitored and searches for it, the same way a re-request does; those titles skip the rescan. Titles no instance manages are reported. The **Removed** tab lists links removed in the last 30 days and can ask for the rescan or search again, for example after an instance was paused. Links still listed as broken are not offered there, since Sonarr's rescan fails while the broken link is still in place.
+
+Deleting and rescanning are blocked while:
+
+- a storage location the links point into looks down or empty, since every link into it then looks broken, or
+- the broken count is at least three times the previous full symlink scan and at least 50 higher, which is what a mount restart during a scan looks like.
+
+A full symlink scan with the mount up clears the second case: either the links work again, or the scan finds the same number and confirms them.
+
+The page and deleting take the same permission as the orphan review.

@@ -528,6 +528,37 @@ describe("scanner", () => {
     }
   });
 
+  it("records when a link was first seen broken, keeps it while broken, and clears it once the target is back", async () => {
+    const symlinkDir = path.join(tmpDir, "plex");
+    const localDir = path.join(tmpDir, "local");
+    const remoteDir = path.join(tmpDir, "remote");
+    await fs.mkdir(path.join(symlinkDir, "movies", "Lantern Bay"), { recursive: true });
+    await fs.mkdir(path.join(remoteDir, "movies", "Lantern Bay"), { recursive: true });
+    const target = path.join(remoteDir, "movies", "Lantern Bay", "lantern.bay.mkv");
+    const linkPath = path.join(symlinkDir, "movies", "Lantern Bay", "lantern.bay.mkv");
+    await fs.writeFile(target, "film");
+    await fs.symlink(target, linkPath);
+    const scanOnce = async (jobId: number) => {
+      await persistScanResult(database.db, await scanLibrary({ symlinkDir, localDir, remoteDir }, { sections: ["movies"] }, new Map(), { scanSymlinks: true, scanLocal: false, scanRemote: false }), jobId);
+      const [row] = await database.db.select().from(schema.mediaLinks).where(eq(schema.mediaLinks.linkPath, linkPath));
+      return row!;
+    };
+
+    const database = await openTestDatabase();
+    try {
+      expect(await scanOnce(1)).toMatchObject({ kind: "remote", brokenSince: null });
+      await fs.rm(target);
+      const broken = await scanOnce(2);
+      expect(broken).toMatchObject({ kind: "broken", brokenSince: expect.any(String) });
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      expect((await scanOnce(3)).brokenSince).toBe(broken.brokenSince);
+      await fs.writeFile(target, "film");
+      expect(await scanOnce(4)).toMatchObject({ kind: "remote", brokenSince: null });
+    } finally {
+      await database.close();
+    }
+  });
+
   it("keeps titles unassigned when a scan is not the configured onboarding scan", async () => {
     const symlinkDir = path.join(tmpDir, "plex");
     const localDir = path.join(tmpDir, "local");

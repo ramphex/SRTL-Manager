@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- **A broken link review.** **Library > Broken links** lists library symlinks whose target is gone, grouped by folder and title, with the link, its target and when a scan first found it broken, and the dashboard's broken link count opens it. Delete the selected links or all shown as a job. Only the symlinks are removed, never a file on storage, and each link is checked again right before it goes: still a symlink, still pointing at the same target, the target still gone and its storage still mounted. A link that changed is skipped and listed in the result. After the delete, Radarr or Sonarr is asked to rescan each affected title, since Sonarr stops a whole series rescan at the first broken link and so never marks the episode missing. An option, off by default, also searches for the removed items. The **Removed** tab can ask for the rescan again later. Deleting is blocked while a storage location looks down or empty, or when the broken count jumped far above the previous full scan, until a full symlink scan with the mount up confirms it. Links whose target exists but cannot be read are not listed. It takes the same permission as the orphan review.
+
 ### Fixed
 
 - **The dashboard no longer flickers with Now Playing in Safari.** After leaving Now Playing, Safari could keep flashing old frames of that page over the dashboard until the dashboard's Now Playing card connected. Now Playing no longer repaints the whole page on every frame or blurs the content under its header, and the page and the dashboard card share one live connection, so moving between them shows the current streams at once instead of reconnecting.

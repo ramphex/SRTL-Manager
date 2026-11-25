@@ -8125,6 +8125,17 @@ button.danger-button:hover:not(:disabled) {
 .orv-table td { padding: 9px 12px; vertical-align: middle; }
 .orv-table tbody tr:last-child td { border-bottom: 0; }
 .orv-table tbody tr.is-selected { background: color-mix(in srgb, var(--selected-accent) 11%, var(--table-row-bg)); }
+.blk-table tr.blk-section-row th { padding: 10px 12px 6px; font-size: 12px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--muted-strong); background: var(--surface); }
+.blk-table tr.blk-title-row th { padding: 6px 12px; font-size: 13px; letter-spacing: 0; text-transform: none; color: var(--text-strong); font-weight: 650; }
+.blk-table tbody:first-of-type tr.blk-section-row th { padding-top: 8px; }
+.blk-arr-choices { display: grid; gap: 6px; }
+.blk-arr-choices .checkbox-row { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 13px; }
+.blk-arr-choices .checkbox-row input { flex: 0 0 auto; width: auto; margin: 0; }
+.blk-table .orv-col-date { width: 170px; white-space: nowrap; }
+.blk-arr-note { margin: 2px 0 0; font-size: 12px; }
+.blk-result-list { margin: 6px 0 0; padding-left: 18px; font-weight: 400; }
+.blk-removed-actions { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 10px 16px; margin-top: 12px; }
+.blk-removed-actions .blk-arr-choices { flex: 1 1 320px; }
 .orv-col-check { width: 44px; }
 .orv-col-label { width: 190px; }
 .orv-col-size { width: 200px; }
@@ -8196,6 +8207,8 @@ button.danger-button:hover:not(:disabled) {
   .orv-table .orv-col-label { grid-column: 2; align-self: center; min-width: 0; }
   .orv-table .orv-col-size { grid-column: 3; text-align: right; }
   .orv-table .orv-col-date, .orv-table .orv-col-num { display: none; }
+  .blk-table tr.blk-section-row, .blk-table tr.blk-title-row { display: block; padding: 0; }
+  .blk-table tr.blk-section-row th, .blk-table tr.blk-title-row th { display: block; width: auto; padding: 8px 12px; text-align: left; }
   .orv-select-all { padding-left: 0; }
   .orv-action-bar { padding: 10px 12px; gap: 10px; }
   .orv-action-row { flex-wrap: wrap; gap: 10px; }

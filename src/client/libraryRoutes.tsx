@@ -2,7 +2,7 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import { createPortal } from "react-dom";
 import { Link, useSearch } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Activity, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, X } from "lucide-react";
+import { Activity, ArrowLeft, CheckCircle2, ChevronDown, ChevronRight, Copy, Database, File, FileText, Folder, HardDrive, HardDriveDownload, Library, Link2, ListChecks, RefreshCw, Search, Settings, Shield, Trash2, TriangleAlert, Unlink, Unlink2, X } from "lucide-react";
 import { api } from "./api";
 import { normalizeAdvancedSettings } from "../shared/advancedSettings";
 import { evaluateSourceTitleRisk, type SourceTitleRiskResult } from "../shared/sourceTitleRisk";
@@ -14,6 +14,7 @@ import { InfoTooltip, Page, Panel, StatCard, StatusPill } from "./App";
 import { AuditPrompt, AuditStatusPrompt, CopyPrompt, formatBytes, formatDate, formatNumber, inventoryCopyToLocalCount, inventoryCopyToRemoteCount, nonShowSectionMetricLabel, oldestScanAgeLabel, scanAgeLabel, ScanBatchStatusPrompt, ScanStatusPrompt, sectionContentType, sectionDisplayTitle, sectionPolicyNeededCount, storageLocationName, storagePolicyActionText, storagePolicyCategoryLabels, storagePolicyLabel, storageRootOrder, storageStatusDisplayLabel, SymlinkKindFilter, symlinkKindFilterLabels, useStartCopyJob, useStorageLocations, useUserPreferences } from "./appShared";
 import { AuditDialog, AuditStatusDialog, CopyDialog, FolderScopePicker, JobsTable, OrphanPurgeStatusDialog, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { DamageIntegrityPill, DamagedFilesPanel } from "./damagedFiles";
+import { BrokenLinkReviewPanel } from "./brokenLinks";
 import { HeaderCheckMark, HeaderFailedPill } from "./fileHeaderMark";
 import { useDamagedFiles } from "./damagedFilesQuery";
 import { useAccess } from "./access";
@@ -1854,10 +1855,10 @@ function JobLockBadge({ jobs, className = "" }: { jobs: JobRecord[]; className?:
   );
 }
 
-type LibraryView = "overview" | "links" | "local" | "remote" | "local-orphans" | "remote-orphans" | "policies" | "damaged";
+type LibraryView = "overview" | "links" | "local" | "remote" | "local-orphans" | "remote-orphans" | "broken-links" | "policies" | "damaged";
 
 function libraryViewAllowed(view: LibraryView, can: (permission: Permission) => boolean): boolean {
-  if (view === "local-orphans" || view === "remote-orphans") return can("library.delete");
+  if (view === "local-orphans" || view === "remote-orphans" || view === "broken-links") return can("library.delete");
   if (view === "policies") return can("library.manage");
   return true;
 }
@@ -2010,6 +2011,7 @@ function AllowedLibraryPage() {
           { value: "remote", label: `${remoteName} files`, icon: HardDriveDownload },
           { value: "local-orphans", label: `${localName} orphans`, icon: Unlink },
           { value: "remote-orphans", label: `${remoteName} orphans`, icon: Unlink },
+          { value: "broken-links", label: "Broken links", icon: Unlink2 },
           { value: "policies", label: "Storage Policies", icon: Shield },
           { value: "damaged", label: "Damaged files", icon: TriangleAlert }
         ].filter((option) => libraryViewAllowed(option.value as LibraryView, can)).map((option) => {
@@ -2061,6 +2063,8 @@ function AllowedLibraryPage() {
         </>
       ) : view === "damaged" ? (
         <DamagedFilesPanel rootLabel={localName} />
+      ) : view === "broken-links" ? (
+        <BrokenLinkReviewPanel />
       ) : view === "policies" ? (
         <StoragePoliciesPanel
           items={storagePolicies.data ?? []}
