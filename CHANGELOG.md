@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+## [0.1.6-beta.1] - 2026-11-25
+
+A new **Library > Broken links** review lists library symlinks whose target is gone and deletes them safely, then asks Radarr or Sonarr to rescan, and a second list shows file records Sonarr or Radarr still has with nothing on disk. The dashboard no longer flickers with Now Playing in Safari. Database migration 38 adds the review's tables.
+
 ### Added
 
 - **A broken link review.** **Library > Broken links** lists library symlinks whose target is gone, grouped by folder and title, with the link, its target and when a scan first found it broken, and the dashboard's broken link count opens it. Delete the selected links or all shown as a job. Only the symlinks are removed, never a file on storage, and each link is checked again right before it goes: still a symlink, still pointing at the same target, the target still gone and its storage still mounted. A link that changed is skipped and listed in the result. After the delete, Radarr or Sonarr is asked to rescan each affected title, since Sonarr stops a whole series rescan at the first broken link and so never marks the episode missing. An option, off by default, also searches for the removed items. The **Removed** tab can ask for the rescan again later. Deleting is blocked while a storage location looks down or empty, or when the broken count jumped far above the previous full scan, until a full symlink scan with the mount up confirms it. Links whose target exists but cannot be read are not listed. It takes the same permission as the orphan review.
@@ -16,6 +20,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 ### Maintenance
 
 - **Dependency updates.** Minor updates to the icon library and the TypeScript lint tooling. The lint update clears a moderate advisory in a file pattern matching dependency, so `npm audit` reports no known vulnerabilities. No behaviour changes.
+
+### Upgrade notes
+
+Upgrading from 0.1.5 applies database migration 38 automatically. **Back up the database first**: migrations can't be undone by going back to an older image. No settings in `.env` need to change.
 
 ## [0.1.5] - 2026-11-20
 
