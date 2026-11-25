@@ -1559,6 +1559,7 @@ const logTypeFilters: Array<{ value: JobTypeFilter; label: string }> = [
   { value: "path_migration", label: "Path migrations" },
   { value: "watch_sync", label: "Watch sync" },
   { value: "backup", label: "Database backups" },
+  { value: "arr_disk_check", label: "Radarr/Sonarr disk checks" },
 ];
 
 const logLevelFilters: Array<{ value: EventLevelFilter; label: string }> = [

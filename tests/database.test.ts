@@ -99,7 +99,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }, { version: 37 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }, { version: 37 }, { version: 38 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -317,7 +317,8 @@ describe("database bootstrap", () => {
         { version: 34 },
         { version: 35 },
         { version: 36 },
-        { version: 37 }
+        { version: 37 },
+        { version: 38 }
       ]);
     } finally {
       await database.close();
@@ -529,7 +530,8 @@ describe("database bootstrap", () => {
         { version: 34, name: "audit_state" },
         { version: 35, name: "arr_rescans" },
         { version: 36, name: "file_header_checks" },
-        { version: 37, name: "header_archive_recheck" }
+        { version: 37, name: "header_archive_recheck" },
+        { version: 38, name: "broken_link_review" }
       ]);
     } finally {
       await database.close();
@@ -708,7 +710,7 @@ describe("database bootstrap", () => {
 
       const database = await openDatabase(testDatabase.databaseUrl);
       try {
-        expect(currentSchemaVersion).toBe(37);
+        expect(currentSchemaVersion).toBe(38);
         const rows = await database.pool.query<{ item_name: string; header_status: string; header_reason: string; queued: boolean }>(
           `SELECT item_name, header_status, header_reason, header_queued_at IS NOT NULL AS queued FROM storage_files`
         );
@@ -719,6 +721,50 @@ describe("database bootstrap", () => {
         expect(byName["Linked Good Film"]).toMatchObject({ header_status: "pass", queued: false });
         expect(byName["Orphan Unknown Film"]).toMatchObject({ header_status: "fail", header_reason: "not_video", queued: false });
         expect(byName["Gone Unknown Film"]).toMatchObject({ header_status: "fail", header_reason: "not_video", queued: false });
+      } finally {
+        await database.close();
+      }
+    } finally {
+      await testDatabase.cleanup();
+    }
+  });
+  it("refuses a no-migrate start without migration 38, then dates existing broken links and accepts skipped cleanup rows", async () => {
+    const testDatabase = await createTestDatabase();
+    try {
+      const initial = await openDatabase(testDatabase.databaseUrl);
+      try {
+        const link = (name: string, kind: string) => initial.pool.query(
+          `INSERT INTO media_links (section, item_name, relative_path, link_path, target_path, kind, target_exists, is_media, last_changed_at, updated_at)
+           VALUES ('movies', $1, $1 || '/film.mkv', '/example/links/movies/' || $1 || '/film.mkv', '/example/remote/movies/' || $1 || '/film.mkv', $2, $2 <> 'broken', true, '2026-11-01T00:00:00.000Z', 't')`,
+          [name, kind]
+        );
+        await link("Broken Lantern", "broken");
+        await link("Working Lantern", "remote");
+        await initial.pool.query(`UPDATE media_links SET broken_since = NULL`);
+        await initial.pool.query(`ALTER TABLE symlink_cleanup_operations DROP CONSTRAINT IF EXISTS symlink_cleanup_operations_reason_check`);
+        await initial.pool.query(`ALTER TABLE symlink_cleanup_operations DROP COLUMN reason`);
+        await initial.pool.query(`DELETE FROM schema_migrations WHERE version = 38`);
+      } finally {
+        await initial.close();
+      }
+
+      await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow(/Missing migration 38\b/);
+
+      const database = await openDatabase(testDatabase.databaseUrl);
+      try {
+        expect(currentSchemaVersion).toBe(38);
+        const rows = await database.pool.query<{ item_name: string; broken_since: string | null }>(`SELECT item_name, broken_since FROM media_links ORDER BY item_name`);
+        expect(rows.rows).toEqual([
+          { item_name: "Broken Lantern", broken_since: "2026-11-01T00:00:00.000Z" },
+          { item_name: "Working Lantern", broken_since: null }
+        ]);
+        const job = await database.pool.query<{ id: number }>(`INSERT INTO jobs (type, status, created_at, progress) VALUES ('symlink_cleanup', 'completed', 't', '{}') RETURNING id`);
+        const linkId = (await database.pool.query<{ id: number }>(`SELECT id FROM media_links WHERE item_name = 'Broken Lantern'`)).rows[0]!.id;
+        await database.pool.query(
+          `INSERT INTO symlink_cleanup_operations (job_id, media_link_id, link_path, expected_target_path, reason, stage, created_at, updated_at) VALUES ($1, $2, '/l', '/t', 'broken_link', 'skipped', 't', 't')`,
+          [job.rows[0]!.id, linkId]
+        );
+        await expect(database.pool.query(`SELECT reason FROM symlink_cleanup_operations`)).resolves.toMatchObject({ rows: [{ reason: "broken_link" }] });
       } finally {
         await database.close();
       }

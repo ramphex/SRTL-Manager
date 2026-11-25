@@ -1991,10 +1991,12 @@ export function JobScope({
     const sourceJobId = finiteNumberFromUnknown(options?.sourceJobId);
     const selectedLinkIds = job.selection?.linkIds ?? [];
     const selectedCount = job.selection?.total ?? selectedLinkIds.length;
-    const detail = sourceJobId > 0 ? `Failed items from copy job #${sourceJobId}` : "Failed copy items";
+    const brokenLinks = options?.brokenLinks === true;
+    const detail = brokenLinks ? "From the broken link review" : sourceJobId > 0 ? `Failed items from copy job #${sourceJobId}` : "Failed copy items";
+    const noun = brokenLinks ? "broken symlink" : "failed-copy symlink";
     return (
       <span className="job-scope-cell">
-        <span>{selectedCount === 1 ? "1 failed-copy symlink" : `${formatNumber(selectedCount)} failed-copy symlinks`}</span>
+        <span>{selectedCount === 1 ? `1 ${noun}` : `${formatNumber(selectedCount)} ${noun}s`}</span>
         <JobScopeDetail text={detail} selection={job.selection} selectedLinkIds={selectedLinkIds} linkRowsById={linkRowsById} linkRowsLoading={linkRowsLoading} linkRowsError={linkRowsError} />
       </span>
     );

@@ -4,6 +4,19 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Added
+
+- **A broken link review.** **Library > Broken links** lists library symlinks whose target is gone, grouped by folder and title, with the link, its target and when a scan first found it broken, and the dashboard's broken link count opens it. Delete the selected links or all shown as a job. Only the symlinks are removed, never a file on storage, and each link is checked again right before it goes: still a symlink, still pointing at the same target, the target still gone and its storage still mounted. A link that changed is skipped and listed in the result. After the delete, Radarr or Sonarr is asked to rescan each affected title, since Sonarr stops a whole series rescan at the first broken link and so never marks the episode missing. An option, off by default, also searches for the removed items. The **Removed** tab can ask for the rescan again later. Deleting is blocked while a storage location looks down or empty, or when the broken count jumped far above the previous full scan, until a full symlink scan with the mount up confirms it. Links whose target exists but cannot be read are not listed. It takes the same permission as the orphan review.
+- **Sonarr and Radarr records with nothing on disk.** A third tab on **Library > Broken links** lists file records Sonarr or Radarr still has where the library has nothing at all, grouped by title with the recorded path and episode. Sonarr only looks at the disk when a series is rescanned, so it keeps such episodes as present. The check runs after every full symlink scan and from **Check now**. It reads the library inventory first and the disk only where the inventory has no link, asks Sonarr one series at a time, and reports an instance it can't reach without failing the rest. Nothing is deleted from this list: choose records to ask for a rescan, and optionally a search. It is skipped, and the list hidden, while storage looks down.
+
+### Fixed
+
+- **The dashboard no longer flickers with Now Playing in Safari.** After leaving Now Playing, Safari could keep flashing old frames of that page over the dashboard until the dashboard's Now Playing card connected. Now Playing no longer repaints the whole page on every frame or blurs the content under its header, and the page and the dashboard card share one live connection, so moving between them shows the current streams at once instead of reconnecting.
+
+### Maintenance
+
+- **Dependency updates.** Minor updates to the icon library and the TypeScript lint tooling. The lint update clears a moderate advisory in a file pattern matching dependency, so `npm audit` reports no known vulnerabilities. No behaviour changes.
+
 ## [0.1.5] - 2026-11-20
 
 Everything from 0.1.5-beta.1 to 0.1.5-beta.10. The beta sections below have the full detail.

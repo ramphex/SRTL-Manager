@@ -27,6 +27,8 @@ export type ActionAuditAction =
   | "orphan.restore"
   | "damaged.hold"
   | "damaged.delete"
+  | "broken_link.delete"
+  | "broken_link.rescan"
   | "re_request.retry"
   | "media_server.remove"
   | "radarr_instance.remove"

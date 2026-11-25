@@ -30,7 +30,7 @@ export type OnboardingPhase = "account_required" | "configuration_required" | "q
 
 export type JobStatus = "queued" | "running" | "completed" | "partially_failed" | "failed" | "cancelled";
 
-export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "orphan_restore" | "partial_copy_discard" | "path_migration" | "watch_sync" | "backup";
+export type JobType = "scan" | "audit" | "copy" | "symlink_cleanup" | "orphan_purge" | "orphan_restore" | "partial_copy_discard" | "path_migration" | "watch_sync" | "backup" | "arr_disk_check";
 
 export type AuditMode = "fast" | "deep";
 
@@ -441,10 +441,97 @@ export interface CopyRetryStarted {
 }
 
 export interface SymlinkCleanupOptions {
-  sourceJobId: number;
+  // The failed copy job; null when broken links are removed from the broken link review.
+  sourceJobId: number | null;
   linkIds: number[];
   // Ask Radarr or Sonarr to rescan each affected title once the symlinks are gone. Off unless chosen.
   rescan?: boolean;
+  // Broken link review only: removes links whose target is gone, after checking the target is still gone.
+  brokenLinks?: boolean;
+  // Broken link review only: also search for the removed items (the re-request path). Off unless chosen.
+  search?: boolean;
+}
+
+export type BrokenLinkTargetRoot = StorageRootType | "other";
+
+/** A library symlink whose target was gone at the last scan, as the broken link review lists it. */
+export interface BrokenLinkItem {
+  mediaLinkId: number;
+  section: string;
+  sectionTitle: string;
+  itemName: string;
+  relativePath: string;
+  linkPath: string;
+  targetPath: string;
+  targetRoot: BrokenLinkTargetRoot;
+  // When a scan first found the target gone; null for links from before SRTL recorded it.
+  brokenSince: string | null;
+  lastSeenAt: string | null;
+}
+
+export interface BrokenLinkMountCheck {
+  rootType: StorageRootType;
+  path: string;
+  mounted: boolean;
+  reason: string | null;
+}
+
+export interface BrokenLinkSafety {
+  // Deleting and rescanning are refused while this is true.
+  blocked: boolean;
+  mounts: BrokenLinkMountCheck[];
+  // Set when the broken count jumped far above the full scan before; cleared by the next full scan that agrees.
+  spike: { current: number; previous: number; message: string } | null;
+  // One sentence per reason the page is blocked, ready to show.
+  warnings: string[];
+  // The jump rule, for the page's explanation.
+  rule: string;
+}
+
+export interface BrokenLinkReview {
+  items: BrokenLinkItem[];
+  safety: BrokenLinkSafety;
+  // Whether each listed link was checked on disk just now. False while a mount looks down: the list is then the last scan's.
+  rechecked: boolean;
+  // Links the last scan found broken that the recheck left out.
+  notListed: {
+    // The target exists (again). Includes targets that exist but could not be read at a title rescan.
+    targetExists: number;
+    // The link is gone, is no longer a symlink, or points somewhere else now.
+    changed: number;
+    // The target could not be checked, for example a read error other than "not found".
+    unchecked: number;
+  };
+  // Newest complete symlink scan of the whole library.
+  lastFullScanAt: string | null;
+}
+
+export type BrokenLinkCleanupStage = "planned" | "removed" | "already_missing" | "skipped" | "failed";
+
+/** One link of a broken link cleanup job, or one removed earlier. */
+export interface BrokenLinkCleanupRecord {
+  operationId: number;
+  jobId: number;
+  mediaLinkId: number;
+  section: string;
+  itemName: string;
+  relativePath: string;
+  linkPath: string;
+  targetPath: string;
+  stage: BrokenLinkCleanupStage;
+  message: string | null;
+  completedAt: string | null;
+}
+
+export interface BrokenLinkRescanResult {
+  titles: number;
+  asked: number;
+  searched: number;
+  notMatched: number;
+  failed: number;
+  problems: Array<{ title: string; reason: string; kind: "not_matched" | "failed" }>;
+  // Removed links left out because a link is back at the same path.
+  relinked: number;
 }
 
 export interface SectionSummary {
@@ -1130,4 +1217,45 @@ export interface DamagedFileRow {
   header: FileHeaderState | null;
   // For a Bad header row: why, in plain words (for example "Too small to be a video"). Null on other rows.
   headerFailReason: string | null;
+}
+
+/** A Sonarr or Radarr file record whose library path has nothing on disk: no file and no link. */
+export interface ArrDiskMismatch {
+  id: number;
+  jobId: number;
+  service: "radarr" | "sonarr";
+  instanceName: string;
+  title: string;
+  section: string;
+  sectionTitle: string;
+  itemName: string;
+  relativePath: string;
+  arrPath: string;
+  episodes: string | null;
+  firstFoundAt: string;
+  checkedAt: string;
+  requestedAt: string | null;
+}
+
+export interface ArrDiskCheckInstance {
+  service: "radarr" | "sonarr";
+  instanceId: string;
+  instanceName: string;
+  status: "checked" | "unreachable" | "paused";
+  message: string | null;
+  titles: number;
+  files: number;
+  missing: number;
+}
+
+export interface ArrDiskCheckState {
+  items: ArrDiskMismatch[];
+  // The newest finished check and what each instance said.
+  lastCheck: { jobId: number; finishedAt: string | null; status: string; message: string | null; instances: ArrDiskCheckInstance[] } | null;
+  // A check queued or running now.
+  activeJobId: number | null;
+  // Mismatches are not shown while storage looks down.
+  hiddenBecauseStorageDown: boolean;
+  // Whether any Radarr or Sonarr instance has folder mappings to check.
+  configured: boolean;
 }

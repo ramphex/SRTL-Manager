@@ -48,7 +48,7 @@ import {
 import { AuditDialog, CopyRetryAction, FolderScopePicker, ScanBatchStatusDialog, ScanScopeBlock, ScanStatusDialog } from "./jobPresentation";
 import { formatAuditScope, formatScanScope } from "./jobPresentationUtils";
 import { isActiveQueueJob, normalizeAuditTargets, scanOptionsFromJob } from "./jobScopeLocks";
-import { useNowPlayingEvents } from "./nowPlaying";
+import { useNowPlayingEvents } from "./nowPlayingFeed";
 import { formatKbps, playMethodLabel, streamTitle } from "./nowPlayingPresentation";
 import { inventoryPolicyNeededCount } from "./sectionSummaryDisplay";
 
@@ -330,11 +330,11 @@ function LibraryLine() {
   const number = (value: number | undefined) => (value === undefined ? "…" : formatNumber(value));
   // Orphans open the side that has them, local first.
   const orphanView = totals && totals.localOrphanFiles === 0 && totals.remoteOrphanFiles > 0 ? "remote-orphans" : "local-orphans";
-  const items: Array<{ key: string; count: number | undefined; label: string; name: (count: string) => string; view?: "policies" | "links" | "local-orphans" | "remote-orphans" | "damaged"; bad?: boolean; hidden?: boolean }> = [
+  const items: Array<{ key: string; count: number | undefined; label: string; name: (count: string) => string; view?: "policies" | "links" | "local-orphans" | "remote-orphans" | "broken-links" | "damaged"; bad?: boolean; hidden?: boolean }> = [
     { key: "unassigned", count: totals ? inventoryPolicyNeededCount(totals) : undefined, label: "unassigned", name: (count) => `${count} unassigned`, view: "policies" },
     { key: "to-local", count: totals ? inventoryCopyToLocalCount(totals) : undefined, label: `copy to ${localName}`, name: (count) => `${count} to copy to ${localName}` },
     { key: "to-remote", count: totals ? inventoryCopyToRemoteCount(totals) : undefined, label: `copy to ${remoteName}`, name: (count) => `${count} to copy to ${remoteName}` },
-    { key: "broken", count: totals?.brokenLinks, label: "broken links", name: (count) => `${count} broken links`, view: "links", bad: true },
+    { key: "broken", count: totals?.brokenLinks, label: "broken links", name: (count) => `${count} broken links`, view: can("library.delete") ? "broken-links" : "links", bad: true },
     { key: "orphans", count: totals ? totals.localOrphanFiles + totals.remoteOrphanFiles : undefined, label: "orphans", name: (count) => `Review ${count} orphans`, view: orphanView, hidden: !can("library.delete") },
     { key: "damaged", count: damaged.data?.length, label: "damaged", name: (count) => `${count} damaged files`, view: "damaged", bad: true }
   ];

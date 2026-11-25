@@ -20,6 +20,7 @@ vi.mock("../src/client/appShared", () => ({
 }));
 
 const { NowPlayingPage, StreamCard } = await import("../src/client/nowPlaying");
+const { nowPlayingFeed } = await import("../src/client/nowPlayingFeed");
 
 const media = (overrides: Partial<NowPlayingMediaInfo>): NowPlayingMediaInfo => ({ container: "mkv", videoCodec: "h264", resolution: "1080p", width: 1920, height: 1080, dynamicRange: "SDR", audioCodec: "eac3", audioChannels: 6, bitrateKbps: 12000, ...overrides });
 
@@ -52,6 +53,8 @@ beforeEach(() => {
 
 afterEach(() => {
   act(() => root.unmount());
+  // The live feed outlives a page for a moment by design; each case starts from a fresh one.
+  nowPlayingFeed.close();
   container.remove();
   window.sessionStorage.clear();
   vi.unstubAllGlobals();

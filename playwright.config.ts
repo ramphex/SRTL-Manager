@@ -16,6 +16,12 @@ export default defineConfig({
     {
       name: "chromium",
       use: { ...devices["Desktop Chrome"] }
+    },
+    {
+      // Safari-only behaviour; the rest of the suite runs in Chromium.
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      testMatch: /webkit-.*\.spec\.ts/
     }
   ]
 });
