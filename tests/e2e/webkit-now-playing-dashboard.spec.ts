@@ -5,6 +5,9 @@ import type { NowPlayingSnapshot, NowPlayingStream } from "../../src/shared/nowP
 // after moving between the two.
 const baseUrl = process.env.SRTL_E2E_BASE_URL;
 test.skip(!baseUrl, "Set SRTL_E2E_BASE_URL to run browser checks.");
+// The production build registers a service worker. Once it controls the page, WebKit sends API requests through it,
+// where page.route no longer sees them, so the mocked API would give way to the real server.
+test.use({ serviceWorkers: "block" });
 
 const pixel = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 
