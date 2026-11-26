@@ -605,7 +605,7 @@ describe("Dupelix media servers", () => {
     mock.scopes = new Set(["library.read"]);
     const missing = await call("POST", `/api/media-servers/${id}/test`);
     expect(missing.statusCode).toBe(400);
-    expect(missing.json().error).toContain("missing the activity.read scope");
+    expect(missing.json().error).toBe("The Dupelix API key is missing the permission \"See who is watching\" (activity.read). Give the key the Dupelix permission \"See who is watching\" (activity.read) under Admin > Integrations.");
     expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toContain("activity.read");
 
     // An older server without the key endpoint is probed with one page of sessions instead.

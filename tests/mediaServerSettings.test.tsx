@@ -283,8 +283,14 @@ describe("Settings > Media servers, adding a Plex server", () => {
     await render();
     await addServer("Dupelix");
     const form = container.querySelector("form[aria-label='Add Dupelix server']")!;
-    expect(form.textContent).toContain("Needs the activity.read scope.");
-    expect(form.textContent).toContain("Use one key per address");
+    // Permissions are named as Dupelix's key form shows them, with the scope id after the name for support.
+    const note = [...form.querySelectorAll("p")].find((entry) => entry.textContent?.startsWith("Create the key in Dupelix"))!;
+    expect(note.textContent).toContain("Create the key in Dupelix under Admin > Integrations. It needs the permission See who is watching activity.read.");
+    expect(note.querySelector("strong + code.dupelix-scope-id")?.textContent).toBe("activity.read");
+    expect(note.textContent).toContain("Stop playback streams activity.stop, See playback client IP addresses activity.network, and Let API keys created by this role include guests' streams activity.guests");
+    expect(note.textContent).toContain("A key that another machine sends over plain HTTP becomes LAN only");
+    expect(note.textContent).toContain("keys used on Dupelix's own address or its integration network are not affected");
+    expect(note.textContent).not.toContain("one key per address");
     expect(form.querySelector("details")).toBeNull();
     await type(inputFor("Name"), "Dupelix");
     await type(inputFor("Server URL"), "https://dupelix.example.com");
@@ -310,9 +316,9 @@ describe("Settings > Media servers, adding a Plex server", () => {
     const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
     expect(card.textContent).toContain("SRTL Manager · msk_ab12cd34… · LAN only");
     expect(card.textContent).toContain("ExpiresNever");
-    expect(card.textContent).toContain("activity.network, activity.read, library.read");
-    expect(card.textContent).toContain("Not on this key: activity.stop (the Stop button), activity.guests (guest profiles' streams, and stopping them).");
-    expect(card.textContent).not.toContain("Missing scopes");
+    expect(card.textContent).toContain("PermissionsSee playback client IP addresses activity.network, See who is watching activity.read, Browse the library library.read");
+    expect(card.textContent).toContain("Not on this key: Stop playback streams activity.stop (the Stop button), Let API keys created by this role include guests' streams activity.guests (guest profiles' streams, and stopping them).");
+    expect(card.textContent).not.toContain("Missing permissions");
     expect(card.textContent).not.toContain("activity.network (");
     // A LAN-only key on the plain HTTP address is fine.
     expect(card.textContent).not.toContain("refuses it on an HTTPS address");
@@ -325,9 +331,19 @@ describe("Settings > Media servers, adding a Plex server", () => {
     })], limit: 10 } satisfies MediaServerList);
     await render();
     const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
-    expect(card.querySelector(".error")?.textContent).toContain("This key is LAN only, so Dupelix refuses it on an HTTPS address.");
-    expect(card.textContent).toContain("library.read (artwork for streams that carry none)");
-    expect(card.textContent).not.toContain("Missing scopes");
+    expect(card.querySelector(".error")?.textContent).toContain("This key is LAN only because another machine sent it over plain HTTP, so Dupelix refuses it on an HTTPS address.");
+    expect(card.textContent).toContain("Browse the library library.read (artwork for streams that carry none)");
+    expect(card.textContent).not.toContain("Missing permissions");
+  });
+
+  it("names a missing required Dupelix permission the way Dupelix's key form does", async () => {
+    api.list.mockResolvedValue({ servers: [plexServer({
+      kind: "dupelix", name: "Dupelix", url: "http://dupelix.example.com:8080", hasToken: true, version: "0.1.0 b1 (API revision 149)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
+      apiKey: { name: "SRTL Manager", prefix: "msk_ab12cd34", scopes: ["library.read"], expiresAt: null, lanOnly: false }
+    })], limit: 10 } satisfies MediaServerList);
+    await render();
+    const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
+    expect(card.textContent).toContain("Missing permissionsSee who is watching activity.read: Now Playing needs it.");
   });
 
   it("shows no LAN-only warning for a key Dupelix has not marked LAN only, such as one used on a local integration route", async () => {

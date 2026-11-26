@@ -1,6 +1,6 @@
 import { Agent, WebSocket } from "undici";
 import { z } from "zod";
-import type { MediaServerKind } from "../../../shared/mediaServers";
+import { dupelixPermission, type MediaServerKind } from "../../../shared/mediaServers";
 import type { NowPlayingServerState, NowPlayingState, NowPlayingStream } from "../../../shared/nowPlaying";
 import { dupelixApiPrefix, dupelixHeaders, parseDupelixKey } from "../dupelixClient";
 import { jellyfinHeaders } from "../jellyfinClient";
@@ -515,7 +515,7 @@ function sessionArtwork(raw: unknown): DupelixArtwork[] {
 export const dupelixArtworkHttp = { request: watchSyncRequest };
 
 export const dupelixStopUnavailable = "This Dupelix server does not let other apps stop streams. Update Dupelix to stop streams from SRTL.";
-export const dupelixStopNeedsScope = "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers.";
+export const dupelixStopNeedsScope = `Stopping Dupelix streams needs the Dupelix permission ${dupelixPermission("activity.stop")} on the API key in Settings > Media servers.`;
 export const dupelixStopRefused = "Dupelix cannot stop this stream.";
 
 // Plain text for the viewer: control characters become spaces, runs of space collapse, and the text is cut to
@@ -668,7 +668,7 @@ export class DupelixLiveAdapter implements LiveAdapter {
       if (error instanceof DupelixRateLimitError) throw error;
       statusMessage(error, {
         401: "Dupelix rejected the API key. Update it in Settings > Media servers.",
-        403: `Dupelix refused to stop the stream (HTTP 403). ${dupelixStopNeedsScope} Guest streams also need activity.guests.`,
+        403: `Dupelix refused to stop the stream (HTTP 403). ${dupelixStopNeedsScope} Guest streams also need ${dupelixPermission("activity.guests")}.`,
         404: "Dupelix no longer has this session (HTTP 404). It has probably ended already.",
         409: `${dupelixStopRefused} It may have ended or be stopping already.`
       });

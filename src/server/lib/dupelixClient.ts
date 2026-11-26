@@ -1,20 +1,23 @@
 import { z } from "zod";
 import packageJson from "../../../package.json";
-import { dupelixOptionalScopes, dupelixRequiredScopes, type MediaServerApiKey } from "../../shared/mediaServers";
+import { dupelixOptionalScopes, dupelixPermission, dupelixRequiredScopes, type MediaServerApiKey } from "../../shared/mediaServers";
 import { WatchSyncError, normalizeServerUrl, watchSyncJson } from "./watchSyncHttp";
 
 // Dupelix speaks its own API under /api/v1. SRTL authenticates with an API key (msk_...) in the Authorization
 // header only; Dupelix refuses credentials in the query string. The key needs activity.read for Now Playing;
 // activity.stop, activity.network and activity.guests add Stop, client addresses and guest profiles, and
-// library.read lets SRTL look up a title's artwork when a stream carries none. A key Dupelix has seen over plain
-// HTTP is LAN only and refused on its HTTPS address. On Dupelix's local integration routes every request needs the
+// library.read lets SRTL look up a title's artwork when a stream carries none. Dupelix's key form (Admin >
+// Integrations) names these as permissions, which is what SRTL's messages show. A key another machine sent over plain
+// HTTP becomes LAN only and is refused on Dupelix's HTTPS address; keys used on Dupelix's own address or its
+// integration network are not marked. On Dupelix's local integration routes every request needs the
 // key, /server included: without one the route answers 404, and an invalid or revoked key gets 401. So SRTL sends
 // the key on every request, in exactly one Authorization header, and never sends forwarding headers.
 export const dupelixApiPrefix = "/api/v1";
 export { dupelixOptionalScopes, dupelixRequiredScopes };
 
 export const dupelixWrongAddress = "This address is not a Dupelix integration route (HTTP 404). Check the URL: use the address and port Dupelix gives integrations, without /api/v1.";
-export const dupelixKeyRejected = "Dupelix rejected the API key (HTTP 401): it is invalid or has been revoked. Create a new key in Dupelix and enter it again.";
+export const dupelixKeyRejected = "Dupelix rejected the API key (HTTP 401): it is invalid or has been revoked. Create a new key in Dupelix under Admin > Integrations and enter it again.";
+const needsRead = `Give the key the Dupelix permission ${dupelixPermission("activity.read")} under Admin > Integrations.`;
 
 export function dupelixHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "X-Client-Info": `SRTL-Manager/${packageJson.version} (server)` };
@@ -69,7 +72,7 @@ function scopeMessage(error: unknown, scope: string): never {
   if (error instanceof WatchSyncError && (error.httpStatus === 401 || error.httpStatus === 403)) {
     throw new WatchSyncError(error.httpStatus === 401
       ? dupelixKeyRejected
-      : `Dupelix refused the API key for ${scope}. Give the key the activity.read scope; a LAN-only key also fails on an HTTPS address.`, error.httpStatus);
+      : `Dupelix refused the API key for ${scope}. ${needsRead} A LAN-only key also fails on Dupelix's HTTPS address.`, error.httpStatus);
   }
   throw error;
 }
@@ -119,10 +122,10 @@ export class DupelixClient {
     const key = await this.currentKey();
     if (key) {
       const missing = dupelixRequiredScopes.filter((scope) => !key.scopes.includes(scope));
-      if (missing.length) throw new WatchSyncError(`The Dupelix API key is missing the ${missing.join(" and ")} scope${missing.length === 1 ? "" : "s"}. Give the key the activity.read scope.`, 403);
+      if (missing.length) throw new WatchSyncError(`The Dupelix API key is missing the permission${missing.length === 1 ? "" : "s"} ${missing.map(dupelixPermission).join(" and ")}. ${needsRead}`, 403);
       return key;
     }
-    await this.get("/activity/sessions?limit=1").catch((error: unknown) => scopeMessage(error, "activity.read (Now Playing)"));
+    await this.get("/activity/sessions?limit=1").catch((error: unknown) => scopeMessage(error, "Now Playing"));
     return null;
   }
 }

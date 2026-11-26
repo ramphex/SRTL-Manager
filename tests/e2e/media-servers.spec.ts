@@ -173,13 +173,14 @@ test("adds a Plex server by signing in with Plex, with pasting a token as the se
   await expect(card.getByRole("button", { name: "Sign in with Plex again" })).toBeVisible();
 });
 
-test("adds a Dupelix server with an API key, naming the scopes it needs", async ({ page }) => {
+test("adds a Dupelix server with an API key, naming the permissions it needs as Dupelix does", async ({ page }) => {
   const { calls } = await fixture(page);
   await openMediaServers(page);
   await addServer(page, "Dupelix");
   const form = page.getByRole("form", { name: "Add Dupelix server" });
-  await expect(form).toContainText("activity.read");
-  await expect(form).toContainText("library.read");
+  await expect(form).toContainText("Create the key in Dupelix under Admin > Integrations. It needs the permission See who is watching activity.read.");
+  await expect(form).toContainText("Stop playback streams activity.stop");
+  await expect(form).toContainText("not affected");
   await expect(form.getByText("Or enter a token manually")).toHaveCount(0);
   await form.getByLabel("Name", { exact: true }).fill("Dupelix");
   await form.getByLabel("Server URL").fill("https://dupelix.example.com");

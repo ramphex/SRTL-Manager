@@ -37,7 +37,7 @@ In detail:
 - **LAN or WAN** and the client address, in the bottom row (the address in the location's tooltip). Behind a reverse proxy, Jellyfin reports the proxy's address unless Jellyfin's known proxies are configured.
 - **SRTL source**: whether the file plays from local storage (Location 1) or remote storage (Location 2), using the location names from Settings. SRTL maps the server's file path through the server's path prefix mappings to its symlink, then reads its own link and storage records. If a card says "Source unknown" or "Not in SRTL", check the mappings in Settings > Media servers. Nothing is read from disk; each file is looked up once and cached.
 
-Posters load through SRTL, so Plex tokens and Jellyfin and Dupelix API keys never reach the browser. For Dupelix, each stream carries signed artwork links (an episode without its own art carries its show's). They point at Dupelix's public HTTPS address even when SRTL reaches Dupelix on a local route, so SRTL follows a link on another address only over HTTPS and only when it has Dupelix's signed artwork path; any other link is ignored. SRTL picks a poster about the card's width, fetches it with the signed link alone (never the key), through the same outbound address rules as every other request and without following redirects, and keeps the picture until the link is due to expire, for at most six hours. When a stream carries no artwork and the key has `library.read`, SRTL looks the title up instead. Only Dupelix artwork paths are fetched this way.
+Posters load through SRTL, so Plex tokens and Jellyfin and Dupelix API keys never reach the browser. For Dupelix, each stream carries signed artwork links (an episode without its own art carries its show's). They point at Dupelix's public HTTPS address even when SRTL reaches Dupelix on a local route, so SRTL follows a link on another address only over HTTPS and only when it has Dupelix's signed artwork path; any other link is ignored. SRTL picks a poster about the card's width, fetches it with the signed link alone (never the key), through the same outbound address rules as every other request and without following redirects, and keeps the picture until the link is due to expire, for at most six hours. When a stream carries no artwork and the key has **Browse the library** (`library.read`), SRTL looks the title up instead. Only Dupelix artwork paths are fetched this way.
 
 ## Stopping a stream
 
@@ -45,7 +45,7 @@ Owners and admins can stop a stream; moderators can only watch this page. The re
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.
-- **Dupelix**: available when Dupelix says the stream can be stopped and the API key has the `activity.stop` scope. SRTL sends the message as plain text (up to 200 characters, control characters removed; apps may not show it) and Dupelix ends playback; the device stays signed in and shows the message on its next check-in. A guest's stream also needs `activity.guests`. Without the scope, the card's Stop is hidden; on a Dupelix server too old to stop streams, too.
+- **Dupelix**: available when Dupelix says the stream can be stopped and the API key has the Dupelix permission **Stop playback streams** (`activity.stop`). SRTL sends the message as plain text (up to 200 characters, control characters removed; apps may not show it) and Dupelix ends playback; the device stays signed in and shows the message on its next check-in. A guest's stream also needs **Let API keys created by this role include guests' streams** (`activity.guests`). Without the permission, the card's Stop is hidden; on a Dupelix server too old to stop streams, too.
 
 ## Locations of client addresses
 
@@ -56,7 +56,7 @@ When **Look up the location of public client addresses with plex.tv** is on (the
 Upstream connections run only while at least one browser has Now Playing open, and stop about 15 seconds after the last one leaves.
 
 - SRTL listens to Plex's notification socket and Jellyfin's session socket for changes and polls each server every 30 seconds as a safety net. When a socket cannot be opened, it polls every 5 seconds and tries the socket again later. Dupelix has no socket, so it is always polled every 5 seconds, and that is not an error. The server line shows **Live** or **Polling**.
-- After three failed requests in a row a server is marked **Unreachable**, its streams are cleared, and polling backs off up to two minutes. A rejected token shows "Plex token invalid — sign in again in Settings > Media servers" (or the Jellyfin or Dupelix equivalent; for Dupelix the message names the scopes the key needs).
+- After three failed requests in a row a server is marked **Unreachable**, its streams are cleared, and polling backs off up to two minutes. A rejected token shows "Plex token invalid — sign in again in Settings > Media servers" (or the Jellyfin or Dupelix equivalent; for Dupelix the message names the permission the key needs).
 - The browser receives updates over server-sent events from `/api/now-playing/events`. Every route requires the normal admin sign-in.
 
 ## Docker: host network totals
@@ -100,9 +100,9 @@ What a Dupelix card shows depends on what the Dupelix server reports. Current se
 
 - **Who is watching**: the account and profile, as "Account (Profile)" when they differ. When someone watches on another account's device sign-in, the card adds "signed in as" that account.
 
-- **Client address, location, and LAN or WAN** need the `activity.network` scope on the key, or the location is left out. Without the address, LAN or WAN still shows when Dupelix says whether the client is local.
+- **Client address, location, and LAN or WAN** need the Dupelix permission **See playback client IP addresses** (`activity.network`) on the key, or the location is left out. Without the address, LAN or WAN still shows when Dupelix says whether the client is local.
 - **SRTL source**: Dupelix does not report file paths to SRTL, so Dupelix cards show no local or remote storage badge.
-- **Stop** needs the `activity.stop` scope, as above.
-- **Guest profiles** appear only with the `activity.guests` scope, which stopping a guest's stream also needs.
+- **Stop** needs **Stop playback streams** (`activity.stop`), as above.
+- **Guest profiles** appear only with **Let API keys created by this role include guests' streams** (`activity.guests`), which stopping a guest's stream also needs.
 
 SRTL reads each detail as soon as Dupelix sends it.

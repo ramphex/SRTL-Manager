@@ -320,7 +320,7 @@ function withDupelix(value: NowPlayingSnapshot): NowPlayingSnapshot {
     output: media({ container: null, videoCodec: "h264", resolution: "720p", width: null, height: 720, dynamicRange: "SDR", audioCodec: null, audioChannels: null, bitrateKbps: null }),
     transcode: { engine: "hardware", hardwareDecode: null, hardwareEncode: "h264_nvenc", speed: null, throttled: null, reasons: ["This browser cannot play HEVC."], reasonsDerived: false },
     bandwidth: { kbps: null, kind: "estimate" }, network: { location: null, ip: null, relayed: false, secure: null, geo: null },
-    srtl: { status: "unknown", locationName: null, policy: null }, stop: { available: false, reason: "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers." }
+    srtl: { status: "unknown", locationName: null, policy: null }, stop: { available: false, reason: "Stopping Dupelix streams needs the Dupelix permission \"Stop playback streams\" (activity.stop) on the API key in Settings > Media servers." }
   });
   return {
     ...value,

@@ -19,6 +19,22 @@ export const dupelixOptionalScopes = [
   { scope: "library.read", purpose: "artwork for streams that carry none" }
 ] as const;
 
+// Dupelix's key form (Admin > Integrations) shows each scope as a named permission; SRTL leads with that name and
+// keeps the id beside it for support.
+export const dupelixPermissionNames: Readonly<Record<string, string>> = {
+  "activity.read": "See who is watching",
+  "activity.stop": "Stop playback streams",
+  "activity.network": "See playback client IP addresses",
+  "activity.guests": "Let API keys created by this role include guests' streams",
+  "library.read": "Browse the library"
+};
+
+// Plain text for server messages: the permission "See who is watching" (activity.read). Unknown ids stay as they are.
+export function dupelixPermission(scope: string): string {
+  const name = dupelixPermissionNames[scope];
+  return name ? `"${name}" (${scope})` : scope;
+}
+
 // What a Dupelix server reports about the key SRTL uses, from the last connection test.
 export interface MediaServerApiKey {
   name: string | null;

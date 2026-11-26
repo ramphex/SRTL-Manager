@@ -8257,6 +8257,7 @@ button.danger-button:hover:not(:disabled) {
 /* Settings > Media servers, shared by watch sync and other media server features. */
 .media-server-settings h3 { font-size: 15px; margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
 .media-server-list { display: grid; gap: 12px; }
+.dupelix-scope-id { color: var(--muted); font-size: 0.9em; font-weight: 400; }
 .add-server-menu { position: relative; }
 .add-server-menu > button .add-server-chevron { margin-left: -2px; transition: transform 120ms ease; }
 .add-server-menu > button[aria-expanded="true"] .add-server-chevron { transform: rotate(180deg); }
