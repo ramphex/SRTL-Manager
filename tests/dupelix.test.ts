@@ -11,11 +11,11 @@ import { dupelixEncoderCodec, dupelixEncoderEngine, dupelixPosterPath, parseDupe
 import { NowPlayingHub, type NowPlayingEvent, type NowPlayingTiming } from "../src/server/lib/nowPlaying/hub";
 import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkPath, dupelixStopNeedsScope, dupelixStopRefused, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
 import { getWatchSyncState, loadWatchSyncContext } from "../src/server/lib/watchSync";
-import { watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
+import { retryAfterMs, watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import type { NowPlayingHostEvent, NowPlayingSnapshot } from "../src/shared/nowPlaying";
 import { readSetupToken } from "./authHelpers";
-import { dupelixArtworkUrl, dupelixDirectStream, dupelixEnded, dupelixGuestSession, dupelixHardwareTranscode, dupelixIds, dupelixPreviewSession, dupelixRichSession, dupelixSession, dupelixTitle } from "./dupelixFixtures";
+import { dupelixArtworkUrl, dupelixDirectStream, dupelixEnded, dupelixGuestSession, dupelixHardwareTranscode, dupelixIds, dupelixFullSession, dupelixRichSession, dupelixSession, dupelixTitle } from "./dupelixFixtures";
 import { createTestDatabase } from "./testDb";
 
 const now = new Date("2026-11-25T18:20:05.000Z");
@@ -67,8 +67,9 @@ describe("Dupelix session mapping", () => {
     expect(parseDupelixSession({ title: dupelixTitle() }, now)).toBeNull();
     expect(parseDupelixSession(dupelixSession({ route: "future_route", encoder: "hevc_qsv" }), now)!.stream).toMatchObject({ playMethod: "transcode", videoDecision: null, transcode: { engine: "hardware" } });
     expect(parseDupelixSession(dupelixSession({ route: "future_route" }), now)!.stream).toMatchObject({ playMethod: "directStream", transcode: { engine: "cpu" } });
-    // An unknown non-final state is still shown as playing.
-    expect(parseDupelixSession(dupelixSession({ state: "warming_up" }), now)!.stream.state).toBe("playing");
+    // Only active sessions are shown; a state added later is not guessed to be playing.
+    expect(parseDupelixSession(dupelixSession({ state: "warming_up" }), now)).toBeNull();
+    expect(parseDupelixSession(dupelixSession({ state: "expired" }), now)).toBeNull();
   });
 
   it("reads the richer session fields when Dupelix sends them", () => {
@@ -93,25 +94,34 @@ describe("Dupelix session mapping", () => {
     expect(parseDupelixSession(dupelixSession({ source: { videoCodec: "h264", bitrate: 5000 } }), now)!.stream.source).toMatchObject({ videoCodec: "h264", bitrateKbps: null });
   });
 
-  it("reads the session fields the Dupelix Coordinator previewed", () => {
-    const parsed = parseDupelixSession(dupelixPreviewSession(), now)!;
+  it("reads a full revision 148 session", () => {
+    const parsed = parseDupelixSession(dupelixFullSession(), now)!;
     expect(parsed.remoteControl).toBe(true);
     expect(parsed.filePath).toBeNull();
     expect(parsed.stream).toMatchObject({
+      user: { id: dupelixIds.account, name: "Alex", signedInAs: "Jordan" },
       state: "buffering", durationMs: 3_000_000, positionMs: 600_000, bufferedMs: 645_000,
       grandparentTitle: "Example Show", episodeLabel: "S01E03", year: 2023,
       player: { product: "Dupelix for Android TV", version: "2.1.0" },
       playMethod: "transcode", videoDecision: "transcode", audioDecision: "copy",
       subtitle: { decision: "burn", codec: "pgs", language: "English" },
       source: { container: "mkv", videoCodec: "hevc", resolution: "4K", dynamicRange: "Dolby Vision", audioCodec: "eac3", audioChannels: 6, bitrateKbps: 38_000 },
-      output: { container: "mp4", videoCodec: "h264", resolution: "1080p", dynamicRange: "SDR", audioCodec: "eac3", bitrateKbps: 9000 },
+      output: { container: "mp4", videoCodec: "h264", resolution: "1080p", dynamicRange: "SDR", audioCodec: "eac3", audioChannels: 6, bitrateKbps: 9000 },
       transcode: { engine: "hardware", hardwareEncode: "h264_nvenc", hardwareDecode: "GPU", speed: 2.4, throttled: false, reasons: ["This TV cannot play HEVC.", "HDR tone mapped to SDR on the GPU"] },
       bandwidth: { kbps: 9100, kind: "nominal" },
       network: { location: "wan", ip: "198.51.100.40", secure: true }
     });
     // Track decisions outrank the route: copied video and audio make a direct stream, and a hardware flag of false means CPU.
     expect(parseDupelixSession(dupelixSession({ route: "transcode", video: { decision: "copy" }, audio: { decision: "copy" } }), now)!.stream.playMethod).toBe("directStream");
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", encoder: "h264_vaapi", transcoder: { hardwareEncode: false } }), now)!.stream.transcode!.engine).toBe("cpu");
+    // Early previews sent the transcoder facts at the top level; the nested block wins when both are present.
     expect(parseDupelixSession(dupelixSession({ route: "transcode", encoder: "h264_vaapi", hardwareEncode: false }), now)!.stream.transcode!.engine).toBe("cpu");
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", encoder: "libx264", encoderSpeed: 1, transcoder: { encoderSpeed: 3 } }), now)!.stream.transcode!.speed).toBe(3);
+    // A track decision of "none" means no such track; unknown decisions and tone mapping read as empty.
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", subtitle: { decision: "none", codec: null, language: null } }), now)!.stream.subtitle).toBeNull();
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", encoder: "libx264", video: { decision: "future" }, transcoder: { toneMapping: "future" } }), now)!.stream).toMatchObject({ videoDecision: "transcode", transcode: { reasons: ["This device plays the file as it is."] } });
+    // The same account signed in and watching shows no second name.
+    expect(parseDupelixSession(dupelixSession(), now)!.stream.user).toEqual({ id: dupelixIds.account, name: "Alex" });
     expect(parseDupelixSession(dupelixSession({ network: { local: true } }), now)!.stream.network.location).toBe("lan");
     expect(parseDupelixSession(dupelixSession({ path: "/data/media/movies/Example Movie (2024)/Example Movie.mkv" }), now)!.filePath).toBe("/data/media/movies/Example Movie (2024)/Example Movie.mkv");
     // Direct play has nothing prepared ahead by the server.
@@ -124,6 +134,18 @@ describe("Dupelix session mapping", () => {
     expect(dupelixEncoderEngine(null)).toBe("unknown");
     expect(dupelixEncoderEngine("mystery")).toBe("unknown");
     expect([dupelixEncoderCodec("h264_vaapi"), dupelixEncoderCodec("libx265"), dupelixEncoderCodec("av1_nvenc"), dupelixEncoderCodec("mystery")]).toEqual(["h264", "hevc", "av1", null]);
+  });
+});
+
+describe("Retry-After", () => {
+  it("reads seconds and HTTP dates, and ignores anything else", () => {
+    const at = Date.parse("2026-11-26T07:00:00.000Z");
+    expect(retryAfterMs("30", at)).toBe(30_000);
+    expect(retryAfterMs(["2"], at)).toBe(2000);
+    expect(retryAfterMs("Thu, 26 Nov 2026 07:00:45 GMT", at)).toBe(45_000);
+    expect(retryAfterMs("-1", at)).toBeNull();
+    expect(retryAfterMs("soon", at)).toBeNull();
+    expect(retryAfterMs(undefined, at)).toBeNull();
   });
 });
 
@@ -166,7 +188,7 @@ describe("Dupelix artwork allow list", () => {
     await expect(adapter.fetchPoster("/api/v1/activity/sessions")).rejects.toThrow("Unsupported artwork path.");
     await expect(adapter.fetchPoster(dupelixArtworkUrl(dupelixIds.artwork))).rejects.toThrow("Unsupported artwork path.");
     // Until the key's scopes are known, Stop waits.
-    expect(adapter.stopAvailability(parseDupelixSession(dupelixPreviewSession(), now)!)).toEqual({ available: false, reason: "Checking the Dupelix API key's scopes." });
+    expect(adapter.stopAvailability(parseDupelixSession(dupelixFullSession(), now)!)).toEqual({ available: false, reason: "Checking the Dupelix API key's scopes." });
   });
 });
 
@@ -182,17 +204,20 @@ class MockDupelix {
   guests: unknown[] = [];
   stops: Array<{ id: string; body: unknown; contentType: string | undefined }> = [];
   ignoreStops = false;
-  pageSize = 200;
+  pageSize = 100;
   version: string | undefined = "0.1.0 b1";
   artworkStatus = 200;
   requests: Array<{ method: string; path: string; authorization: string | undefined }> = [];
+  // Answers every request with 429 and this Retry-After (seconds) while set.
+  rateLimited: string | null = null;
 
   async start(): Promise<void> {
     this.app.all("/*", async (request, reply) => {
       const url = new URL(request.url, "http://mock");
       this.requests.push({ method: request.method, path: `${url.pathname}${url.search}`, authorization: request.headers.authorization });
       if (url.searchParams.has("api_key") || url.searchParams.has("token")) return reply.code(400).send({ code: "credential_in_url" });
-      if (url.pathname === "/api/v1/server") return { apiVersions: ["v1"], contractRevision: 145, ...(this.version && request.headers.authorization ? { version: this.version } : {}) };
+      if (this.rateLimited !== null) return reply.code(429).header("Retry-After", this.rateLimited).send({ code: "rate_limited" });
+      if (url.pathname === "/api/v1/server") return { apiVersions: ["v1"], contractRevision: 148, ...(this.version && request.headers.authorization ? { version: this.version } : {}) };
       if (url.pathname.startsWith("/api/v1/artwork/")) {
         if (this.artworkStatus !== 200) return reply.code(this.artworkStatus).send({ code: "link_expired" });
         return reply.type("image/jpeg").send(Buffer.from([0xff, 0xd8, 0xff, 0xd9]));
@@ -211,7 +236,9 @@ class MockDupelix {
         if (url.searchParams.get("includeGuests") === "true" && !this.scopes.has("activity.guests")) return reply.code(403).send({ code: "forbidden" });
         const all = [...this.sessions, ...(url.searchParams.get("includeGuests") === "true" ? this.guests : [])];
         const start = Number(url.searchParams.get("cursor") ?? 0);
-        const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), this.pageSize);
+        const requested = Number(url.searchParams.get("limit") ?? 50);
+        if (!Number.isInteger(requested) || requested < 1 || requested > 100) return reply.code(400).send({ code: "invalid_limit" });
+        const limit = Math.min(requested, this.pageSize);
         const page = all.slice(start, start + limit);
         return { sessions: page, ...(start + limit < all.length ? { nextCursor: String(start + limit) } : {}) };
       }
@@ -305,7 +332,7 @@ describe("Now Playing with a mocked Dupelix server", () => {
     expect(snapshot.streams[0]!.posterUrl).toMatch(/^\/api\/now-playing\/poster\/[A-Za-z0-9_-]{32}$/);
     expect(JSON.stringify(snapshot)).not.toContain(mock.apiKey);
     // Several polls run at the fallback interval, with no socket attempts and no error building up.
-    await waitFor(() => mock.requests.filter((entry) => entry.path.startsWith("/api/v1/activity/sessions?limit=200")).length >= 6);
+    await waitFor(() => mock.requests.filter((entry) => entry.path.startsWith("/api/v1/activity/sessions?limit=100")).length >= 6);
     expect(view.latest()!.servers[0]).toMatchObject({ status: "polling", message: null });
     expect(mock.requests.every((entry) => entry.authorization === `Bearer ${mock.apiKey}` && !entry.path.includes(mock.apiKey))).toBe(true);
     expect(mock.requests.some((entry) => entry.path.includes("cursor=2"))).toBe(true);
@@ -316,22 +343,22 @@ describe("Now Playing with a mocked Dupelix server", () => {
 
   it("stops a stream that Dupelix says can be stopped, with the message, and checks that it is gone", async () => {
     mock.scopes.add("activity.stop");
-    mock.sessions = [dupelixPreviewSession(), dupelixSession({ canStop: false })];
+    mock.sessions = [dupelixFullSession(), dupelixSession({ canStop: false })];
     const view = watchHub();
     const snapshot = await waitFor(() => view.latest()?.streams.length === 2 && view.latest());
     const stoppable = snapshot.streams.find((stream) => stream.sessionKey === "e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15")!;
     const refused = snapshot.streams.find((stream) => stream.sessionKey === "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10")!;
     expect(stoppable.stop).toEqual({ available: true, reason: null });
     expect(refused.stop).toEqual({ available: false, reason: dupelixStopRefused });
-    const message = `${"x".repeat(199)}é and more`;
+    const message = `\u0007${"x".repeat(198)}\né and more`;
     await expect(hub!.stopStream("dx1", stoppable.sessionKey, message)).resolves.toEqual({ result: "stopped", message: "The stream has stopped." });
-    expect(mock.stops).toEqual([{ id: stoppable.sessionKey, body: { message: `${"x".repeat(199)}é` }, contentType: "application/json" }]);
+    expect(mock.stops).toEqual([{ id: stoppable.sessionKey, body: { message: `${"x".repeat(198)} é` }, contentType: "application/json" }]);
     await expect(hub!.stopStream("dx1", refused.sessionKey, "Stop")).rejects.toMatchObject({ statusCode: 409, message: dupelixStopRefused });
 
     // A server that accepts the stop but keeps listing the stream is reported honestly.
     await waitFor(() => !view.latest()?.streams.some((stream) => stream.sessionKey === stoppable.sessionKey));
     mock.ignoreStops = true;
-    mock.sessions = [dupelixPreviewSession()];
+    mock.sessions = [dupelixFullSession()];
     await waitFor(() => view.latest()?.streams.some((stream) => stream.sessionKey === stoppable.sessionKey));
     await expect(hub!.stopStream("dx1", stoppable.sessionKey, "")).resolves.toMatchObject({ result: "stillPlaying" });
     expect(mock.stops.at(-1)!.body).toEqual({});
@@ -359,27 +386,66 @@ describe("Now Playing with a mocked Dupelix server", () => {
     view.unsubscribe();
   });
 
-  it("fetches posters through the title's signed artwork without the key, caching the lookup and renewing expired links", async () => {
+  it("fetches posters through the title's signed artwork without the key, caching the image by link and renewing expired links", async () => {
     mock.sessions = [dupelixSession()];
     const view = watchHub();
     const snapshot = await waitFor(() => view.latest()?.streams.length === 1 && view.latest());
     const found = hub!.posterSource(snapshot.streams[0]!.posterUrl!.split("/").at(-1)!)!;
     expect(found.source.path).toBe(`title:${dupelixIds.movie}`);
-    expect(await found.adapter.fetchPoster(found.source.path)).toEqual({ contentType: "image/jpeg", body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) });
-    await found.adapter.fetchPoster(found.source.path);
     const titleReads = () => mock.requests.filter((entry) => entry.path === `/api/v1/titles/${dupelixIds.movie}`).length;
-    expect(titleReads()).toBe(1);
-    const artwork = mock.requests.filter((entry) => entry.path.startsWith("/api/v1/artwork/"));
-    expect(artwork).toHaveLength(2);
-    // The smallest poster that covers the card, fetched with no credential: the signed link is the credential.
-    expect(artwork.every((entry) => entry.path.startsWith(`/api/v1/artwork/${dupelixIds.artworkSmall}/`) && entry.authorization === undefined)).toBe(true);
+    const artwork = () => mock.requests.filter((entry) => entry.path.startsWith("/api/v1/artwork/"));
+    // An expired or revoked link: the title is read once more for fresh links.
     mock.artworkStatus = 403;
     await expect(found.adapter.fetchPoster(found.source.path)).rejects.toThrow();
     expect(titleReads()).toBe(2);
+    mock.artworkStatus = 200;
+    const image = { contentType: "image/jpeg", body: Buffer.from([0xff, 0xd8, 0xff, 0xd9]) };
+    // Simultaneous requests share one fetch, and later ones come from the cache.
+    expect(await Promise.all([found.adapter.fetchPoster(found.source.path), found.adapter.fetchPoster(found.source.path)])).toEqual([image, image]);
+    expect(await found.adapter.fetchPoster(found.source.path)).toEqual(image);
+    expect(titleReads()).toBe(2);
+    expect(artwork()).toHaveLength(3);
+    // The smallest poster that covers the card, fetched with no credential: the signed link is the credential.
+    expect(artwork().every((entry) => entry.path.startsWith(`/api/v1/artwork/${dupelixIds.artworkSmall}/`) && entry.authorization === undefined)).toBe(true);
     view.unsubscribe();
   });
 
-  it("uses artwork the session carries, without reading the title", async () => {
+  it("never reads titles without library.read, and uses the artwork the session carries", async () => {
+    mock.scopes.delete("library.read");
+    mock.sessions = [dupelixSession(), dupelixFullSession()];
+    const view = watchHub();
+    const snapshot = await waitFor(() => view.latest()?.streams.length === 2 && view.latest());
+    const posterFor = (sessionKey: string) => {
+      const found = hub!.posterSource(snapshot.streams.find((stream) => stream.sessionKey === sessionKey)!.posterUrl!.split("/").at(-1)!)!;
+      return found.adapter.fetchPoster(found.source.path);
+    };
+    await expect(posterFor("e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15")).resolves.toMatchObject({ contentType: "image/jpeg" });
+    await expect(posterFor("9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10")).rejects.toThrow("Dupelix has no artwork for this title.");
+    expect(mock.requests.some((entry) => entry.path.startsWith("/api/v1/titles"))).toBe(false);
+    view.unsubscribe();
+  });
+
+  it("waits as long as a 429 asks, keeping the last streams meanwhile", async () => {
+    mock.sessions = [dupelixSession()];
+    const view = watchHub();
+    await waitFor(() => view.latest()?.streams.length === 1);
+    const beforeLimit = mock.requests.length;
+    mock.rateLimited = "1";
+    await waitFor(() => mock.requests.length > beforeLimit);
+    const limitedAt = mock.requests.length;
+    // Polls keep running every few tens of milliseconds here, but nothing reaches Dupelix during the pause.
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(mock.requests.length).toBe(limitedAt);
+    expect(view.latest()!.streams).toHaveLength(1);
+    expect(view.latest()!.servers[0]).toMatchObject({ status: "polling" });
+    mock.rateLimited = null;
+    const before = mock.requests.length;
+    await waitFor(() => mock.requests.length > before + 1, 3000);
+    expect(view.latest()!.streams).toHaveLength(1);
+    view.unsubscribe();
+  });
+
+  it("uses artwork the session carries under other names, without reading the title", async () => {
     mock.sessions = [dupelixRichSession()];
     const view = watchHub();
     const snapshot = await waitFor(() => view.latest()?.streams.length === 1 && view.latest());
@@ -450,31 +516,35 @@ describe("Dupelix media servers", () => {
     const tested = await call("POST", `/api/media-servers/${id}/test`);
     expect(tested.statusCode).toBe(200);
     expect((tested.json() as MediaServerList).servers[0]).toMatchObject({
-      kind: "dupelix", version: "0.1.0 b1 (API revision 145)", lastError: null,
+      kind: "dupelix", version: "0.1.0 b1 (API revision 148)", lastError: null,
       apiKey: { name: "SRTL Manager", prefix: mock.apiKey.slice(0, 12), scopes: ["activity.network", "activity.read", "library.read"], expiresAt: null, lanOnly: true }
     });
     expect(tested.body).not.toContain(mock.apiKey);
     expect(mock.requests.map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current"]);
     expect(mock.requests.every((entry) => entry.authorization === `Bearer ${mock.apiKey}`)).toBe(true);
 
+    // library.read is optional: a key with only activity.read passes.
+    mock.scopes = new Set(["activity.read"]);
+    expect((await call("POST", `/api/media-servers/${id}/test`)).statusCode).toBe(200);
+
     // A required scope missing from the key's effective scopes fails the test, naming it.
-    mock.scopes.delete("library.read");
+    mock.scopes = new Set(["library.read"]);
     const missing = await call("POST", `/api/media-servers/${id}/test`);
     expect(missing.statusCode).toBe(400);
-    expect(missing.json().error).toContain("missing the library.read scope");
-    expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toContain("library.read");
+    expect(missing.json().error).toContain("missing the activity.read scope");
+    expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toContain("activity.read");
 
-    // An older server without the key endpoint is probed with one page of sessions and one title instead.
+    // An older server without the key endpoint is probed with one page of sessions instead.
     mock.keyEndpoint = false;
     mock.requests = [];
     const probed = await call("POST", `/api/media-servers/${id}/test`);
     expect(probed.statusCode).toBe(400);
-    expect(probed.json().error).toContain("library.read");
-    mock.scopes.add("library.read");
+    expect(probed.json().error).toContain("activity.read");
+    mock.scopes.add("activity.read");
     const old = await call("POST", `/api/media-servers/${id}/test`);
     expect(old.statusCode).toBe(200);
     expect((old.json() as MediaServerList).servers[0]!.apiKey).toBeUndefined();
-    expect(mock.requests.slice(-4).map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current", "/api/v1/activity/sessions?limit=1", "/api/v1/titles?limit=1"]);
+    expect(mock.requests.slice(-3).map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current", "/api/v1/activity/sessions?limit=1"]);
 
     // A new address needs the key again, and a new address with a key clears what the old one reported.
     const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Dupelix", url: "http://elsewhere.example:8080", prefixMappings: [] });

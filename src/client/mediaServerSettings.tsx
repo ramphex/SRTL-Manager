@@ -86,7 +86,7 @@ const namePlaceholders: Record<MediaServerKind, string> = { plex: "Home Plex", j
 const urlPlaceholders: Record<MediaServerKind, string> = { plex: "http://192.168.1.10:32400", jellyfin: "http://192.168.1.10:8096", dupelix: "https://dupelix.example.com" };
 const apiKeyHelp: Record<Exclude<MediaServerKind, "plex">, ReactNode> = {
   jellyfin: <>Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>,
-  dupelix: <>Create a key in Dupelix&apos;s admin settings. It needs <code>activity.read</code> (to list streams) and <code>library.read</code> (for artwork). Optional: <code>activity.stop</code> for the Stop button, <code>activity.network</code> for client addresses, location, and LAN or WAN, and <code>activity.guests</code> for guest profiles. Keys start with <code>msk_</code>. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>
+  dupelix: <>Create a key in Dupelix&apos;s admin settings. It needs <code>activity.read</code> to list streams. Optional: <code>activity.stop</code> for the Stop button, <code>activity.network</code> for client addresses, location, and LAN or WAN, <code>activity.guests</code> for guest profiles, and <code>library.read</code> for artwork when a stream carries none. Keys start with <code>msk_</code>. Dupelix ties a key used over plain HTTP to the local network, so use one key per address. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>
 };
 
 // The key's name, scopes, and expiry as Dupelix last reported them, with the optional scopes it lacks.
@@ -97,10 +97,13 @@ function DupelixKeyFacts({ server }: { server: MediaServer }) {
   const missingRequired = dupelixRequiredScopes.filter((scope) => !key.scopes.includes(scope));
   const missingOptional = dupelixOptionalScopes.filter((entry) => !key.scopes.includes(entry.scope));
   const expired = key.expiresAt !== null && Date.parse(key.expiresAt) <= renderedAt;
+  // Dupelix marks a key that ever travelled over plain HTTP as LAN only and refuses it on its HTTPS address.
+  const lanOnlyOverHttps = key.lanOnly === true && /^https:/i.test(server.url);
   return <>
     <div><dt>API key</dt><dd>{[key.name, key.prefix ? `${key.prefix}…` : null].filter(Boolean).join(" · ") || "Unnamed"}{key.lanOnly ? " · LAN only" : ""}</dd></div>
     <div><dt>Expires</dt><dd className={expired ? "error" : undefined}>{key.expiresAt ? `${expired ? "Expired " : ""}${formatDate(key.expiresAt)}` : "Never"}</dd></div>
     <div><dt>Scopes</dt><dd>{key.scopes.length ? key.scopes.join(", ") : "None"}</dd></div>
+    {lanOnlyOverHttps ? <div><dt>Address</dt><dd className="error">This key is LAN only, so Dupelix refuses it on an HTTPS address. Use the server&apos;s local address, or create a separate key for this address and never use it over plain HTTP.</dd></div> : null}
     {missingRequired.length ? <div><dt>Missing scopes</dt><dd className="error">{missingRequired.join(", ")}: Now Playing needs {missingRequired.length === 1 ? "it" : "them"}.</dd></div> : null}
     {missingOptional.length ? <div><dt>Optional scopes</dt><dd>Not on this key: {missingOptional.map((entry) => `${entry.scope} (${entry.purpose})`).join(", ")}.</dd></div> : null}
   </>;
@@ -127,7 +130,7 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
     </details> : <div className="radarr-field">
       <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">{apiKeyHelp[kind]}</InfoTooltip></div>
       {tokenInput}
-      {kind === "dupelix" ? <p className="muted">Needs the <code>activity.read</code> and <code>library.read</code> scopes. Add <code>activity.stop</code>, <code>activity.network</code>, and <code>activity.guests</code> for Stop, client addresses, and guest profiles.</p> : null}
+      {kind === "dupelix" ? <p className="muted">Needs the <code>activity.read</code> scope. Add <code>activity.stop</code>, <code>activity.network</code>, and <code>activity.guests</code> for Stop, client addresses, and guest profiles. Use one key per address: a key once sent over plain HTTP works only on the local network.</p> : null}
     </div>}
     <PrefixMappings value={draft.prefixMappings} onChange={(prefixMappings) => setDraft({ ...draft, prefixMappings })} />
   </fieldset>;
@@ -181,7 +184,7 @@ function ServerForm({ kind, onDone, onSignInStarted }: { kind: MediaServerKind; 
     {kind === "plex"
       ? <p className="muted">Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.</p>
       : kind === "dupelix"
-        ? <p className="muted">Enter the server&apos;s address and a Dupelix API key with the <code>activity.read</code> and <code>library.read</code> scopes, plus <code>activity.stop</code>, <code>activity.network</code>, or <code>activity.guests</code> if you want Stop, client addresses, or guest profiles. Dupelix streams appear in Now Playing; watch sync does not use Dupelix yet.</p>
+        ? <p className="muted">Enter the server&apos;s address and a Dupelix API key with the <code>activity.read</code> scope, plus <code>activity.stop</code>, <code>activity.network</code>, or <code>activity.guests</code> if you want Stop, client addresses, or guest profiles. Dupelix streams appear in Now Playing; watch sync does not use Dupelix yet.</p>
         : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
     <ServerFields kind={kind} draft={draft} setDraft={setDraft} hasToken={false} disabled={add.isPending} />
     <div className="radarr-toolbar">

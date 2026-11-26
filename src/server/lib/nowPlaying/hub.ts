@@ -87,7 +87,7 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 
 function unauthorizedMessage(kind: MediaServerRecord["kind"]): string {
   if (kind === "plex") return "Plex token invalid — sign in again in Settings > Media servers.";
-  if (kind === "dupelix") return "Dupelix refused the API key — it needs the activity.read and library.read scopes. Update it in Settings > Media servers.";
+  if (kind === "dupelix") return "Dupelix refused the API key — it needs the activity.read scope, and a LAN-only key does not work on an HTTPS address. Update it in Settings > Media servers.";
   return "Jellyfin API key rejected — update it in Settings > Media servers.";
 }
 

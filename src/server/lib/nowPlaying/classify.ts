@@ -23,8 +23,7 @@ export interface ParsedSession {
   posterPath: string | null;
   // Plex: the Session.id the terminate API needs. Plexamp and some players have none.
   terminateId: string | null;
-  // Jellyfin: whether the client accepts remote or media control commands. Always false for Dupelix, which has no
-  // remote stop yet.
+  // Jellyfin: whether the client accepts remote or media control commands. Dupelix: the session's canStop.
   remoteControl: boolean;
 }
 
@@ -541,15 +540,15 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
 
 // ---------------------------------------------------------------- Dupelix
 
-// One entry of Dupelix's GET /api/v1/activity/sessions (ActivitySession). It always carries the account, profile,
-// device, title, playback route, encoder, output height and position. Newer servers add pause and buffering state,
-// duration, show and episode, artwork, source and output media, per-track decisions, hardware use, speed, throughput,
-// network and whether the session can be stopped; the address needs the activity.network scope. Each of those is
-// read when present and left empty when not, never guessed. Dupelix never reports file paths.
+// One entry of Dupelix's GET /api/v1/activity/sessions (ActivitySession, contract revision 148). It carries the
+// account, profile and signed-in account, device and client, the title with its show, episode and artwork, the
+// state, pause and buffering, position and duration, the route and its reason, per-track decisions, source and
+// output media, the transcoder (hardware use, tone mapping, speed, throttling, how far ahead it is), throughput,
+// network, and whether the session can be stopped; the address needs the activity.network scope. Older servers
+// send less, so each field is read when present and left empty when not, never guessed. Enums may grow: a value
+// SRTL does not know reads as empty. Dupelix does not report file paths to SRTL.
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-// Sessions Dupelix still lists after playback ended.
-const dupelixEndedStates = new Set(["ended", "expired", "revoked", "stopped"]);
 const dupelixHardwareEncoder = /(?:nvenc|qsv|vaapi|videotoolbox|amf|v4l2m2m|mediacodec|rkmpp|omx|mf)(?:$|[@_])/i;
 const dupelixSoftwareEncoder = /^(?:lib[a-z0-9]+|software)$/i;
 
@@ -577,8 +576,9 @@ export function dupelixEncoderCodec(encoder: string | null): string | null {
 }
 
 function dupelixState(session: Json): NowPlayingState | null {
+  // Only active sessions are playing; ended, expired, revoked, and any state added later are not shown.
   const state = lower(session.state);
-  if (state && dupelixEndedStates.has(state)) return null;
+  if (state && state !== "active") return null;
   const playback = lower(session.playbackState) ?? state;
   if (bool(session.paused) === true || bool(session.isPaused) === true || playback === "paused") return "paused";
   if (bool(session.buffering) === true || playback === "buffering") return "buffering";
@@ -636,6 +636,7 @@ function dupelixTrackDecision(value: unknown): NowPlayingDecision | null {
   if (decision === "transcode" || decision === "convert" || decision === "converted" || decision === "encode") return "transcode";
   if (decision === "copy" || decision === "remux" || decision === "directstream") return "copy";
   if (decision === "direct" || decision === "directplay") return "directPlay";
+  // "none": the stream has no such track.
   return null;
 }
 
@@ -698,6 +699,9 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
   const videoTrack = obj(session.video);
   const audioTrack = obj(session.audio);
   const subtitleTrack = obj(session.subtitle);
+  // Transcoder facts are grouped under `transcoder`; early previews sent them at the top level.
+  const transcoderInfo = obj(session.transcoder);
+  const transcoderField = (name: string): unknown => transcoderInfo?.[name] ?? session[name];
 
   let playMethod: NowPlayingPlayMethod;
   let videoDecision: NowPlayingDecision | null;
@@ -753,12 +757,12 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
     };
   }
 
-  const toneMapping = dupelixToneMapping[lower(session.toneMapping) ?? ""] ?? null;
+  const toneMapping = dupelixToneMapping[lower(transcoderField("toneMapping")) ?? ""] ?? null;
   const reasons = playMethod === "directPlay" ? [] : [...new Set([text(reason?.message), dupelixLevelCauses[lower(session.levelCause) ?? ""] ?? null, toneMapping].filter((entry): entry is string => Boolean(entry)))];
-  const encode = dupelixHardware(session.hardwareEncode ?? session.hardware);
-  const decode = dupelixHardware(session.hardwareDecode ?? session.decoderHardware);
-  const speed = num(session.encoderSpeed);
-  const throttled = bool(session.throttled);
+  const encode = dupelixHardware(transcoderField("hardwareEncode") ?? session.hardware);
+  const decode = dupelixHardware(transcoderField("hardwareDecode") ?? session.decoderHardware);
+  const speed = num(transcoderField("encoderSpeed"));
+  const throttled = bool(transcoderField("throttled"));
   let transcode: NowPlayingTranscode | null = null;
   if (playMethod === "transcode") {
     const videoEncoded = videoDecision === "transcode" || videoDecision === null;
@@ -778,8 +782,9 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
   }
 
   const subtitleDecision = dupelixSubtitleDecision(subtitleTrack?.decision);
+  const subtitleOff = lower(subtitleTrack?.decision) === "none";
   const burn = reasonCode === "subtitle_burn_in_required" || bool(subtitleTrack?.burnIn) === true || subtitleDecision === "burn";
-  const subtitle = subtitleTrack || burn ? {
+  const subtitle = (subtitleTrack && !subtitleOff) || burn ? {
     decision: burn ? "burn" as const : subtitleDecision ?? (playMethod === "directPlay" ? "directPlay" as const : "copy" as const),
     codec: lower(subtitleTrack?.codec),
     language: text(subtitleTrack?.language)
@@ -796,11 +801,16 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
   const location = reportedLocation === "lan" || reportedLocation === "wan" ? reportedLocation : local !== null ? (local ? "lan" : "wan") : ip ? (isPrivateAddress(ip) ? "lan" : "wan") : null;
   const reportedBandwidth = kbpsField(session, "throughput", "bandwidth");
   const duration = num(session.durationMs) ?? num(title.runtimeMs);
-  const readyAhead = num(session.readyAheadMs);
+  const readyAhead = num(transcoderField("readyAheadMs"));
   const positionMs = Math.max(0, Math.round(num(session.positionMs) ?? 0));
   const accountName = text(session.displayName) ?? text(session.signInDisplayName);
   const profileName = text(session.profileName);
   const userName = accountName && profileName && profileName.toLowerCase() !== accountName.toLowerCase() ? text(`${accountName} (${profileName})`) : accountName ?? profileName;
+  // The device's owner, when someone watches on another account's sign-in.
+  const signInName = text(session.signInDisplayName);
+  const signInId = str(session.signInAccountId);
+  const accountId = str(session.accountId);
+  const signedInAs = signInName && text(session.displayName) && ((signInId && accountId && signInId !== accountId) || (!signInId && signInName.toLowerCase() !== text(session.displayName)!.toLowerCase())) ? signInName : null;
   const file = obj(session.file);
   const client = obj(session.client);
 
@@ -814,7 +824,7 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
     remoteControl: bool(session.canStop) === true,
     stream: {
       sessionKey,
-      user: { id: str(session.accountId), name: userName ?? "Unknown user" },
+      user: { id: accountId, name: userName ?? "Unknown user", ...(signedInAs ? { signedInAs } : {}) },
       mediaType,
       title: text(title.name) ?? "Unknown title",
       grandparentTitle: mediaType === "episode" ? text(show?.name) ?? text(session.showName) ?? text(title.showName) : null,

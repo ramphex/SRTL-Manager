@@ -224,8 +224,8 @@ describe("Settings > Media servers, adding a Plex server", () => {
     await render();
     await click(button("Add Dupelix server"));
     const form = container.querySelector("form[aria-label='Add Dupelix server']")!;
-    expect(form.textContent).toContain("activity.read");
-    expect(form.textContent).toContain("library.read");
+    expect(form.textContent).toContain("Needs the activity.read scope.");
+    expect(form.textContent).toContain("Use one key per address");
     expect(form.querySelector("details")).toBeNull();
     await type(inputFor("Name"), "Dupelix");
     await type(inputFor("Server URL"), "https://dupelix.example.com");
@@ -244,7 +244,7 @@ describe("Settings > Media servers, adding a Plex server", () => {
 
   it("shows a Dupelix key's name, expiry, scopes, and the optional scopes it lacks", async () => {
     api.list.mockResolvedValue({ servers: [plexServer({
-      kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, version: "0.1.0 b1 (API revision 146)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
+      kind: "dupelix", name: "Dupelix", url: "http://dupelix.example.com:8080", hasToken: true, version: "0.1.0 b1 (API revision 148)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
       apiKey: { name: "SRTL Manager", prefix: "msk_ab12cd34", scopes: ["activity.network", "activity.read", "library.read"], expiresAt: null, lanOnly: true }
     })], limit: 10 } satisfies MediaServerList);
     await render();
@@ -252,8 +252,22 @@ describe("Settings > Media servers, adding a Plex server", () => {
     expect(card.textContent).toContain("SRTL Manager · msk_ab12cd34… · LAN only");
     expect(card.textContent).toContain("ExpiresNever");
     expect(card.textContent).toContain("activity.network, activity.read, library.read");
-    expect(card.textContent).toContain("Not on this key: activity.stop (the Stop button), activity.guests (guest profiles' streams).");
+    expect(card.textContent).toContain("Not on this key: activity.stop (the Stop button), activity.guests (guest profiles' streams, and stopping them).");
     expect(card.textContent).not.toContain("Missing scopes");
     expect(card.textContent).not.toContain("activity.network (");
+    // A LAN-only key on the plain HTTP address is fine.
+    expect(card.textContent).not.toContain("refuses it on an HTTPS address");
+  });
+
+  it("warns that a LAN-only Dupelix key fails on an HTTPS address, and lists library.read as optional", async () => {
+    api.list.mockResolvedValue({ servers: [plexServer({
+      kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, version: "0.1.0 b1 (API revision 148)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
+      apiKey: { name: "SRTL Manager", prefix: "msk_ab12cd34", scopes: ["activity.read"], expiresAt: null, lanOnly: true }
+    })], limit: 10 } satisfies MediaServerList);
+    await render();
+    const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
+    expect(card.querySelector(".error")?.textContent).toContain("This key is LAN only, so Dupelix refuses it on an HTTPS address.");
+    expect(card.textContent).toContain("library.read (artwork for streams that carry none)");
+    expect(card.textContent).not.toContain("Missing scopes");
   });
 });

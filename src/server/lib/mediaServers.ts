@@ -159,7 +159,7 @@ export async function mediaServerClientIdentifier(db: Db): Promise<string> {
 function validateInput(kind: MediaServerKind, input: MediaServerInput) {
   const parsed = mediaServerInputSchema.parse(input);
   // Dupelix API keys all start with msk_; anything else is a session token or a paste of the wrong value.
-  if (kind === "dupelix" && parsed.token && !/^msk_[A-Za-z0-9_-]{16,}$/.test(parsed.token)) throw new WatchSyncError("Dupelix API keys start with msk_. Create one in Dupelix with the activity.read and library.read scopes.");
+  if (kind === "dupelix" && parsed.token && !/^msk_[A-Za-z0-9_-]{16,}$/.test(parsed.token)) throw new WatchSyncError("Dupelix API keys start with msk_. Create one in Dupelix with the activity.read scope.");
   return { ...parsed, url: normalizeServerUrl(parsed.url, mediaServerKindLabels[kind]) };
 }
 

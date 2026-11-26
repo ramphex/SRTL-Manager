@@ -4,9 +4,10 @@ import { dupelixOptionalScopes, dupelixRequiredScopes, type MediaServerApiKey } 
 import { WatchSyncError, normalizeServerUrl, watchSyncJson } from "./watchSyncHttp";
 
 // Dupelix speaks its own API under /api/v1. SRTL authenticates with an API key (msk_...) in the Authorization
-// header only; Dupelix refuses credentials in the query string. The key needs activity.read for Now Playing and
-// library.read for artwork; activity.stop, activity.network and activity.guests add Stop, client addresses and
-// guest profiles.
+// header only; Dupelix refuses credentials in the query string. The key needs activity.read for Now Playing;
+// activity.stop, activity.network and activity.guests add Stop, client addresses and guest profiles, and
+// library.read lets SRTL look up a title's artwork when a stream carries none. A key Dupelix has seen over plain
+// HTTP is LAN only and refused on its HTTPS address.
 export const dupelixApiPrefix = "/api/v1";
 export { dupelixOptionalScopes, dupelixRequiredScopes };
 
@@ -63,7 +64,7 @@ function scopeMessage(error: unknown, scope: string): never {
   if (error instanceof WatchSyncError && (error.httpStatus === 401 || error.httpStatus === 403)) {
     throw new WatchSyncError(error.httpStatus === 401
       ? "Dupelix rejected the API key. Create a new key in Dupelix and enter it again."
-      : `Dupelix refused the API key for ${scope}. Give the key the activity.read and library.read scopes.`, error.httpStatus);
+      : `Dupelix refused the API key for ${scope}. Give the key the activity.read scope; a LAN-only key also fails on an HTTPS address.`, error.httpStatus);
   }
   throw error;
 }
@@ -100,17 +101,15 @@ export class DupelixClient {
   }
 
   // Proves the key works and holds the scopes SRTL needs, so a wrong key or a missing scope fails the connection test
-  // instead of the first Now Playing poll. Newer servers describe the key; older ones are probed with one page of
-  // sessions (activity.read) and one title list entry (library.read).
+  // instead of the first Now Playing poll. Newer servers describe the key; older ones are probed with one session.
   async checkAccess(): Promise<MediaServerApiKey | null> {
     const key = await this.currentKey();
     if (key) {
       const missing = dupelixRequiredScopes.filter((scope) => !key.scopes.includes(scope));
-      if (missing.length) throw new WatchSyncError(`The Dupelix API key is missing the ${missing.join(" and ")} scope${missing.length === 1 ? "" : "s"}. Give the key the activity.read and library.read scopes.`, 403);
+      if (missing.length) throw new WatchSyncError(`The Dupelix API key is missing the ${missing.join(" and ")} scope${missing.length === 1 ? "" : "s"}. Give the key the activity.read scope.`, 403);
       return key;
     }
     await this.get("/activity/sessions?limit=1").catch((error: unknown) => scopeMessage(error, "activity.read (Now Playing)"));
-    await this.get("/titles?limit=1").catch((error: unknown) => scopeMessage(error, "library.read (artwork)"));
     return null;
   }
 }

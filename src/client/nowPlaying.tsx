@@ -332,7 +332,7 @@ export function StreamCard({ stream, now, expanded, onToggle, onStop, showServer
         <StreamDetails stream={stream} id={detailsId} hidden={!expanded} />
       </div>
       <dl className="np-card-footer">
-        <div className="np-footer-user"><dt className="sr-only">User</dt><dd title="User"><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}</span></dd></div>
+        <div className="np-footer-user"><dt className="sr-only">User</dt><dd title={stream.user.signedInAs ? `${stream.user.name}, signed in as ${stream.user.signedInAs}` : "User"}><UserRound size={13} aria-hidden="true" /><span className="np-footer-text">{stream.user.name}{stream.user.signedInAs ? <span className="np-footer-secondary"> · signed in as {stream.user.signedInAs}</span> : null}</span></dd></div>
         <div className="np-footer-server"><dt className="sr-only">Server</dt><dd>{showServerName ? <span className="np-server-name"><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="np-footer-text">{stream.serverName}</span></span> : (
           // One server of each kind: the icon is enough, and hover, focus or a tap shows the name.
           <TextTooltip className="np-server-tooltip" trigger={<><MediaServerIcon kind={stream.serverKind} size={13} decorative /><span className="sr-only">{stream.serverName}</span></>}>{stream.serverName}</TextTooltip>

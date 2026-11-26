@@ -37,7 +37,7 @@ In detail:
 - **LAN or WAN** and the client address, in the bottom row (the address in the location's tooltip). Behind a reverse proxy, Jellyfin reports the proxy's address unless Jellyfin's known proxies are configured.
 - **SRTL source**: whether the file plays from local storage (Location 1) or remote storage (Location 2), using the location names from Settings. SRTL maps the server's file path through the server's path prefix mappings to its symlink, then reads its own link and storage records. If a card says "Source unknown" or "Not in SRTL", check the mappings in Settings > Media servers. Nothing is read from disk; each file is looked up once and cached.
 
-Posters load through SRTL, so Plex tokens and Jellyfin and Dupelix API keys never reach the browser. For Dupelix, SRTL reads the title's signed artwork links with the API key, keeps the chosen link for at most six hours (the links last a week or more), and fetches the picture with the signed link alone. Only Dupelix artwork paths are fetched this way.
+Posters load through SRTL, so Plex tokens and Jellyfin and Dupelix API keys never reach the browser. For Dupelix, each stream carries signed artwork links (an episode without its own art carries its show's); SRTL picks a poster about the card's width, fetches it with the signed link alone, and keeps the picture until the link is due to expire, for at most six hours. When a stream carries no artwork and the key has `library.read`, SRTL looks the title up instead. Only Dupelix artwork paths are fetched this way.
 
 ## Stopping a stream
 
@@ -45,7 +45,7 @@ Owners and admins can stop a stream; moderators can only watch this page. The re
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.
-- **Dupelix**: available when Dupelix says the stream can be stopped and the API key has the `activity.stop` scope. SRTL sends the message (up to 200 characters; apps may not show it) and Dupelix ends playback; the device stays signed in. Without the scope, the card's Stop is hidden; on a Dupelix server too old to stop streams, too.
+- **Dupelix**: available when Dupelix says the stream can be stopped and the API key has the `activity.stop` scope. SRTL sends the message as plain text (up to 200 characters, control characters removed; apps may not show it) and Dupelix ends playback; the device stays signed in and shows the message on its next check-in. A guest's stream also needs `activity.guests`. Without the scope, the card's Stop is hidden; on a Dupelix server too old to stop streams, too.
 
 ## Locations of client addresses
 
@@ -96,11 +96,13 @@ The server type icons are the Plex and Jellyfin glyphs from [Simple Icons](https
 
 ## Dupelix
 
-What a Dupelix card shows depends on what the Dupelix server reports. Current servers send the pause and buffering state, duration, show, season and episode, poster, source and output media, per-track decisions, hardware use, encoder speed, how far ahead the stream is prepared, throughput, and the network. Older ones send only the user, device, title, route, encoder, output height, and position, and their cards leave the rest out instead of guessing.
+What a Dupelix card shows depends on what the Dupelix server reports. Current servers (API revision 148 and later) send the pause and buffering state, duration, show, season and episode, poster, source and output media, per-track decisions, hardware encode and decode, HDR tone mapping, encoder speed and throttling, how far ahead the stream is prepared, throughput, the network, and whether the stream can be stopped. Older ones send only the user, device, title, route, encoder, output height, and position, and their cards leave the rest out instead of guessing. Only active sessions are shown; a value SRTL does not know yet, such as a new route or decision, is left out rather than guessed.
+
+- **Who is watching**: the account and profile, as "Account (Profile)" when they differ. When someone watches on another account's device sign-in, the card adds "signed in as" that account.
 
 - **Client address, location, and LAN or WAN** need the `activity.network` scope on the key, or the location is left out. Without the address, LAN or WAN still shows when Dupelix says whether the client is local.
-- **SRTL source**: Dupelix never reports file paths, so Dupelix cards show no local or remote storage badge.
+- **SRTL source**: Dupelix does not report file paths to SRTL, so Dupelix cards show no local or remote storage badge.
 - **Stop** needs the `activity.stop` scope, as above.
-- **Guest profiles** appear only with the `activity.guests` scope.
+- **Guest profiles** appear only with the `activity.guests` scope, which stopping a guest's stream also needs.
 
 SRTL reads each detail as soon as Dupelix sends it.

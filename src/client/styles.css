@@ -8442,6 +8442,7 @@ button.danger-button:hover:not(:disabled) {
 .np-server-name { align-items: center; display: flex; gap: 4px; min-width: 0; }
 .np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; min-width: 20px; justify-content: center; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-footer-secondary { color: var(--muted); }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
 .text-tooltip { max-width: 100%; }
 .text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: default; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }

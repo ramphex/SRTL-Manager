@@ -418,15 +418,25 @@ export function parseJellyfinSessions(data: unknown[]): ParsedSession[] {
 // They need no credential, so they are the only Dupelix paths SRTL fetches without the API key.
 const dupelixArtworkPattern = /^\/api\/v1\/artwork\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(\d{1,12})\/[A-Za-z0-9_.-]{1,256}(?:\?v=[0-9a-f]{64}\.(?:jpg|png))?$/i;
 const dupelixPosterKey = /^title:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
-// Signed links last 7 to 14 days. SRTL re-reads a title's artwork well before that, and sooner when a link is due
-// to expire within the hour.
+// Signed links last about a week. SRTL re-reads a title's artwork well before that, and sooner when a link is due
+// to expire within the hour. Sessions carry fresh links on every poll, so title lookups are rare.
 export const dupelixArtworkTtlMs = 6 * 60 * 60_000;
 const dupelixArtworkExpiryMarginMs = 60 * 60_000;
 const dupelixPosterWidth = 240;
-const dupelixMaxPages = 5;
+// Dupelix pages sessions 100 at a time at most. The cap only guards against a cursor that never ends.
+const dupelixPageLimit = 100;
+const dupelixMaxPages = 20;
 // The key's scopes decide whether guests are listed and Stop is offered; they are read again every ten minutes.
 const dupelixKeyTtlMs = 10 * 60_000;
 export const dupelixStopMessageMax = 200;
+// Each key has a per-minute request budget (120 by default). A 5 s poll uses 12; artwork is cached by its signed
+// link so a browser reload does not fetch it again. After a 429 SRTL waits as long as Dupelix asks.
+const dupelixArtworkCacheEntries = 64;
+const dupelixArtworkCacheBytes = 32 * 1024 * 1024;
+const dupelixDefaultPauseMs = 60_000;
+const dupelixMaxPauseMs = 10 * 60_000;
+// While paused, the last answer stands in for a poll if it is this recent; after that the server counts as failing.
+const dupelixStaleSessionsMs = 2 * 60_000;
 
 export function dupelixArtworkAllowed(path: string): boolean {
   return dupelixArtworkPattern.test(path);
@@ -487,9 +497,18 @@ export const dupelixStopUnavailable = "This Dupelix server does not let other ap
 export const dupelixStopNeedsScope = "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers.";
 export const dupelixStopRefused = "Dupelix cannot stop this stream.";
 
-// Cuts a stop message to Dupelix's limit without splitting a character.
-function dupelixStopMessage(message: string): string {
-  return [...message.trim()].slice(0, dupelixStopMessageMax).join("");
+// Plain text for the viewer: control characters become spaces, runs of space collapse, and the text is cut to
+// Dupelix's limit without splitting a character.
+export function dupelixStopMessage(message: string): string {
+  // eslint-disable-next-line no-control-regex
+  const plain = message.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]+/g, " ").replace(/\s+/g, " ").trim();
+  return [...plain].slice(0, dupelixStopMessageMax).join("").trim();
+}
+
+export class DupelixRateLimitError extends NowPlayingError {
+  constructor(readonly waitMs: number) {
+    super(`Dupelix asked SRTL to slow down (HTTP 429). Trying again in ${Math.max(1, Math.ceil(waitMs / 1000))} s.`, 429, 503);
+  }
 }
 
 // Dupelix has no push channel yet, so the adapter has no openSocket and the hub polls it. When Dupelix adds its
@@ -497,10 +516,40 @@ function dupelixStopMessage(message: string): string {
 export class DupelixLiveAdapter implements LiveAdapter {
   // Per title: the poster path picked from its signed artwork, and when it was read.
   private readonly artwork = new Map<string, { path: string | null; fetchedAt: number }>();
+  // Artwork bytes by signed link, oldest first, and the fetches under way.
+  private readonly images = new Map<string, { contentType: string; body: Buffer; expiresAt: number }>();
+  private readonly imageFetches = new Map<string, Promise<{ contentType: string; body: Buffer }>>();
   // The key's effective scopes; null when the server does not describe its keys (older Dupelix).
   private key: { scopes: string[] | null; checkedAt: number } | null = null;
+  // Set by a 429: no request goes out before this time.
+  private pausedUntil = 0;
+  private lastSessions: { sessions: ParsedSession[]; at: number } | null = null;
 
   constructor(private readonly config: LiveServerConfig) {}
+
+  private waitMs(): number {
+    return Math.max(0, this.pausedUntil - Date.now());
+  }
+
+  // Every request to Dupelix goes through here, so a 429 holds back sessions, scopes, titles and artwork alike.
+  private async request<T>(send: () => Promise<T>): Promise<T> {
+    const wait = this.waitMs();
+    if (wait > 0) throw new DupelixRateLimitError(wait);
+    try {
+      return await send();
+    } catch (error) {
+      if (error instanceof WatchSyncError && error.httpStatus === 429) {
+        const pause = Math.min(dupelixMaxPauseMs, Math.max(1000, error.retryAfterMs ?? dupelixDefaultPauseMs));
+        this.pausedUntil = Math.max(this.pausedUntil, Date.now() + pause);
+        throw new DupelixRateLimitError(pause);
+      }
+      throw error;
+    }
+  }
+
+  private api(path: string, signal?: AbortSignal) {
+    return this.request(() => watchSyncJson({ url: `${this.config.url}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.config.token), timeoutMs: sessionTimeoutMs, retries: 0, signal, maxBytes: 16 * 1024 * 1024 }));
+  }
 
   private async keyScopes(signal?: AbortSignal): Promise<string[] | null> {
     if (this.key && Date.now() - this.key.checkedAt < dupelixKeyTtlMs) return this.key.scopes;
@@ -509,29 +558,44 @@ export class DupelixLiveAdapter implements LiveAdapter {
       this.key = { scopes: parseDupelixKey(data)?.scopes ?? null, checkedAt: Date.now() };
     } catch (error) {
       if (error instanceof WatchSyncError && error.httpStatus === 404) this.key = { scopes: null, checkedAt: Date.now() };
+      else if (error instanceof DupelixRateLimitError) throw error;
       // Otherwise the sessions request reports the problem; the last known scopes stay, and it is tried again soon.
       else this.key = { scopes: this.key?.scopes ?? null, checkedAt: Date.now() - dupelixKeyTtlMs + 30_000 };
     }
     return this.key.scopes;
   }
 
-  private api(path: string, signal?: AbortSignal) {
-    return watchSyncJson({ url: `${this.config.url}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.config.token), timeoutMs: sessionTimeoutMs, retries: 0, signal, maxBytes: 16 * 1024 * 1024 });
+  private hasScope(scope: string): boolean | null {
+    const scopes = this.key?.scopes;
+    return scopes ? scopes.includes(scope) : null;
   }
 
   async fetchSessions(signal: AbortSignal): Promise<ParsedSession[]> {
+    try {
+      const sessions = await this.readSessions(signal);
+      this.lastSessions = { sessions, at: Date.now() };
+      return sessions;
+    } catch (error) {
+      // A short pause keeps the cards from the last answer instead of dropping every stream.
+      if (error instanceof DupelixRateLimitError && this.lastSessions && Date.now() - this.lastSessions.at < dupelixStaleSessionsMs) return this.lastSessions.sessions;
+      throw error;
+    }
+  }
+
+  private async readSessions(signal: AbortSignal): Promise<ParsedSession[]> {
     const entries: unknown[] = [];
     // Guest profiles are listed only on request, and only to a key with activity.guests.
     const guests = (await this.keyScopes(signal))?.includes("activity.guests") === true;
     let cursor: string | null = null;
     for (let page = 0; page < dupelixMaxPages; page += 1) {
-      const query = new URLSearchParams({ limit: "200", ...(guests ? { includeGuests: "true" } : {}), ...(cursor ? { cursor } : {}) });
+      const query = new URLSearchParams({ limit: String(dupelixPageLimit), ...(guests ? { includeGuests: "true" } : {}), ...(cursor ? { cursor } : {}) });
       const { data } = await this.api(`/activity/sessions?${query.toString()}`, signal);
       const body = data && typeof data === "object" ? data as { sessions?: unknown; nextCursor?: unknown } : null;
       if (!body || !Array.isArray(body.sessions)) throw new NowPlayingError("Dupelix returned an unsupported sessions response.");
       entries.push(...body.sessions);
-      cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
-      if (!cursor) break;
+      const next = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
+      if (!next || next === cursor) break;
+      cursor = next;
     }
     const now = new Date();
     return entries.flatMap((entry) => {
@@ -549,10 +613,13 @@ export class DupelixLiveAdapter implements LiveAdapter {
   prune(activeSessions: ParsedSession[]): void {
     const active = new Set(activeSessions.map((session) => session.itemKey?.toLowerCase()).filter(Boolean));
     for (const key of this.artwork.keys()) if (!active.has(key)) this.artwork.delete(key);
+    const now = Date.now();
+    for (const [path, image] of this.images) if (image.expiresAt <= now) this.images.delete(path);
   }
 
   // Stop needs a server that says the session can be stopped and a key with activity.stop. The scopes are the
-  // ones last read; until they are known, Stop waits.
+  // ones last read; until they are known, Stop waits. Guest streams also need activity.guests, which is the
+  // only way SRTL sees them, and Dupelix's canStop already accounts for it.
   stopAvailability(session: ParsedSession): NowPlayingStream["stop"] {
     const scopes = this.key?.scopes;
     if (!this.key) return { available: false, reason: "Checking the Dupelix API key's scopes." };
@@ -562,11 +629,12 @@ export class DupelixLiveAdapter implements LiveAdapter {
     return { available: true, reason: null };
   }
 
-  // Ends playback with an optional message; the device stays signed in. Dupelix answers 202 and stops shortly after.
+  // Ends playback with an optional message; the device stays signed in and shows the message on its next
+  // heartbeat. Dupelix answers 202 and stops shortly after.
   async stopStream(session: ParsedSession, message: string): Promise<void> {
     const text = dupelixStopMessage(message);
     try {
-      await watchSyncRequest({
+      await this.request(() => watchSyncRequest({
         url: `${this.config.url}${dupelixApiPrefix}/activity/sessions/${encodeURIComponent(session.sessionKey)}/stop`,
         service: "Dupelix",
         method: "POST",
@@ -574,25 +642,78 @@ export class DupelixLiveAdapter implements LiveAdapter {
         body: JSON.stringify(text ? { message: text } : {}),
         timeoutMs: sessionTimeoutMs,
         retries: 0
-      });
+      }));
     } catch (error) {
+      if (error instanceof DupelixRateLimitError) throw error;
       statusMessage(error, {
         401: "Dupelix rejected the API key. Update it in Settings > Media servers.",
-        403: `Dupelix refused to stop the stream (HTTP 403). ${dupelixStopNeedsScope}`,
+        403: `Dupelix refused to stop the stream (HTTP 403). ${dupelixStopNeedsScope} Guest streams also need activity.guests.`,
         404: "Dupelix no longer has this session (HTTP 404). It has probably ended already.",
         409: `${dupelixStopRefused} It may have ended or be stopping already.`
       });
     }
   }
 
+  // The poster link for a title: from the last session that carried it, else from the title itself when the key
+  // has library.read (or the server is too old to say which scopes the key has).
   private async posterPath(titleId: string, refresh: boolean): Promise<string | null> {
     const cached = this.artwork.get(titleId);
     const now = Date.now();
     if (!refresh && cached && now - cached.fetchedAt < dupelixArtworkTtlMs) return cached.path;
+    if (this.hasScope("library.read") === false) {
+      // Without library.read, fresh links come with the next sessions poll.
+      if (refresh) this.artwork.delete(titleId);
+      return refresh ? null : cached?.path ?? null;
+    }
     const { data } = await this.api(`/titles/${titleId}`);
     const path = pickDupelixPoster(dupelixArtworkList((data as { artwork?: unknown } | null)?.artwork), this.config.url, now);
     this.artwork.set(titleId, { path, fetchedAt: now });
     return path;
+  }
+
+  private cachedImage(path: string): { contentType: string; body: Buffer } | null {
+    const image = this.images.get(path);
+    if (!image) return null;
+    if (image.expiresAt <= Date.now()) {
+      this.images.delete(path);
+      return null;
+    }
+    // Most recently used last.
+    this.images.delete(path);
+    this.images.set(path, image);
+    return { contentType: image.contentType, body: image.body };
+  }
+
+  private storeImage(path: string, image: { contentType: string; body: Buffer }): void {
+    const linkExpires = Number(dupelixArtworkPattern.exec(path)?.[1]) * 1000;
+    const expiresAt = Math.min(Date.now() + dupelixArtworkTtlMs, Number.isFinite(linkExpires) ? linkExpires : Infinity);
+    this.images.set(path, { ...image, expiresAt });
+    let bytes = 0;
+    for (const entry of this.images.values()) bytes += entry.body.length;
+    while (this.images.size > dupelixArtworkCacheEntries || bytes > dupelixArtworkCacheBytes) {
+      const oldest = this.images.keys().next().value;
+      if (oldest === undefined) break;
+      bytes -= this.images.get(oldest)!.body.length;
+      this.images.delete(oldest);
+    }
+  }
+
+  // One fetch per signed link at a time; the signed link is the credential, so the API key is never sent with it.
+  private image(path: string): Promise<{ contentType: string; body: Buffer }> {
+    const cached = this.cachedImage(path);
+    if (cached) return Promise.resolve(cached);
+    let pending = this.imageFetches.get(path);
+    if (!pending) {
+      pending = this.request(() => watchSyncRequest({ url: `${this.config.url}${path}`, service: "Dupelix", headers: { Accept: "image/*" }, timeoutMs: sessionTimeoutMs, retries: 0, maxBytes: posterMaxBytes }))
+        .then((response) => {
+          const image = { contentType: String(response.headers["content-type"] ?? ""), body: response.buffer };
+          if (/^image\//i.test(image.contentType)) this.storeImage(path, image);
+          return image;
+        })
+        .finally(() => this.imageFetches.delete(path));
+      this.imageFetches.set(path, pending);
+    }
+    return pending;
   }
 
   async fetchPoster(key: string): Promise<{ contentType: string; body: Buffer }> {
@@ -602,11 +723,9 @@ export class DupelixLiveAdapter implements LiveAdapter {
       const path = await this.posterPath(titleId, refresh);
       if (!path || !dupelixArtworkAllowed(path)) throw new NowPlayingError("Dupelix has no artwork for this title.");
       try {
-        // The signed link is the credential: the API key is never sent with it.
-        const response = await watchSyncRequest({ url: `${this.config.url}${path}`, service: "Dupelix", headers: { Accept: "image/*" }, timeoutMs: sessionTimeoutMs, retries: 0, maxBytes: posterMaxBytes });
-        return { contentType: String(response.headers["content-type"] ?? ""), body: response.buffer };
+        return await this.image(path);
       } catch (error) {
-        // An expired or revoked link: read the title once more for fresh links.
+        // An expired or revoked link: look for fresh links once.
         if (refresh || !(error instanceof WatchSyncError) || (error.httpStatus !== 403 && error.httpStatus !== 404)) throw error;
       }
     }

@@ -10,11 +10,13 @@ export function supportsWatchSync(kind: MediaServerKind): kind is WatchSyncCapab
 }
 
 // Dupelix API key scopes: the ones Now Playing needs, and the ones that add features when the key has them.
-export const dupelixRequiredScopes = ["activity.read", "library.read"] as const;
+// Streams carry their own artwork, so library.read only lets SRTL look a title's artwork up when a stream has none.
+export const dupelixRequiredScopes = ["activity.read"] as const;
 export const dupelixOptionalScopes = [
   { scope: "activity.stop", purpose: "the Stop button" },
   { scope: "activity.network", purpose: "client addresses, location, and LAN or WAN" },
-  { scope: "activity.guests", purpose: "guest profiles' streams" }
+  { scope: "activity.guests", purpose: "guest profiles' streams, and stopping them" },
+  { scope: "library.read", purpose: "artwork for streams that carry none" }
 ] as const;
 
 // What a Dupelix server reports about the key SRTL uses, from the last connection test.

@@ -1,5 +1,5 @@
 // Dupelix GET /api/v1/activity/sessions entries, shaped after the ActivitySession schema in Dupelix's OpenAPI
-// contract (revision 145). Ids, names and addresses are examples only.
+// contract (revision 148). Ids, names and addresses are examples only.
 
 type Json = Record<string, unknown>;
 
@@ -77,7 +77,7 @@ export const dupelixDirectStream = () => dupelixSession({
 
 export const dupelixEnded = () => dupelixSession({ id: "c2b5f2de-eabe-4cd3-9eca-b3fbcefacc13", state: "ended" });
 
-// The richer, key-readable session Dupelix is adding. Field names here are the ones SRTL reads when present.
+// Alternative field names SRTL also reads, in case an older or later server sends them. Not the revision 148 shape.
 export const dupelixRichSession = () => dupelixSession({
   id: "d3c6a3ef-fbcf-4de4-8fdb-c4acdfabdd14",
   title: dupelixTitle({ id: dupelixIds.episode, kind: "episode", name: "Pilot", seasonNumber: 1, episodeNumber: 3 }),
@@ -105,11 +105,15 @@ export const dupelixRichSession = () => dupelixSession({
   clientVersion: "1.4.0"
 });
 
-// The session shape the Dupelix Coordinator previewed for the key-readable session (names may still shift).
-export const dupelixPreviewSession = () => dupelixSession({
+// A full session in the revision 148 shape: everything an API key with activity.read and activity.network sees.
+export const dupelixFullSession = () => dupelixSession({
   id: "e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15",
+  displayName: "Alex",
+  profileName: "Alex",
+  signInAccountId: "0a1b2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d",
+  signInDisplayName: "Jordan",
   title: dupelixTitle({
-    id: dupelixIds.episode, kind: "episode", name: "Pilot", year: 2023, showId: dupelixIds.show, showName: "Example Show", seasonNumber: 1, episodeNumber: 3,
+    id: dupelixIds.episode, kind: "episode", name: "Pilot", year: 2023, showId: dupelixIds.show, showName: "Example Show", seasonNumber: 1, episodeNumber: 3, runtimeMs: 2_940_000,
     artwork: [
       { kind: "still", url: dupelixArtworkUrl(dupelixIds.still), width: 780, height: 439 },
       { kind: "poster", url: dupelixArtworkUrl(dupelixIds.artworkSmall), width: 320, height: 480 }
@@ -124,17 +128,12 @@ export const dupelixPreviewSession = () => dupelixSession({
   durationMs: 3_000_000,
   positionMs: 600_000,
   client: { product: "Dupelix for Android TV", version: "2.1.0" },
-  source: { container: "mkv", videoCodec: "hevc", hdr: "dolby_vision", width: 3840, height: 2160, bitrateKbps: 38_000, audio: [{ codec: "eac3", channels: 6 }] },
-  output: { container: "mp4", videoCodec: "h264", audioCodec: "eac3", width: 1920, height: 1080, hdr: "sdr", bitrateKbps: 9000 },
+  source: { container: "mkv", videoCodec: "hevc", profile: "main10", hdr: "dolby_vision", width: 3840, height: 2160, bitDepth: 10, bitrateKbps: 38_000, frameRate: 23.976, audioCodec: "eac3", audioChannels: 6, audio: [{ codec: "eac3", channels: 6, language: "eng" }] },
+  output: { container: "mp4", videoCodec: "h264", audioCodec: "eac3", audioChannels: 6, width: 1920, height: 1080, hdr: "sdr", bitrateKbps: 9000 },
   video: { decision: "transcode", codec: "h264", language: null },
   audio: { decision: "copy", codec: "eac3", language: "eng" },
   subtitle: { decision: "burn", codec: "pgs", language: "English" },
-  hardwareEncode: true,
-  hardwareDecode: true,
-  toneMapping: "gpu",
-  encoderSpeed: 2.37,
-  throttled: false,
-  readyAheadMs: 45_000,
+  transcoder: { hardwareEncode: true, hardwareDecode: true, toneMapping: "gpu", encoderSpeed: 2.37, throttled: false, readyAheadMs: 45_000 },
   throughputKbps: 9100,
   network: { local: false, secure: true },
   remoteAddress: "198.51.100.40",

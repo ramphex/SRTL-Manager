@@ -309,18 +309,18 @@ test("hides Stop on Plex streams without Plex Pass", async ({ page }) => {
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Stop needs Plex Pass");
 });
 
-const dupelixServer: MediaServer = { id: "dx1", kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "0.1.0 b1 (API revision 145)", lastCheckedAt: "2026-11-02T10:00:00.000Z", lastError: null };
+const dupelixServer: MediaServer = { id: "dx1", kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "0.1.0 b1 (API revision 148)", lastCheckedAt: "2026-11-02T10:00:00.000Z", lastError: null };
 
 function withDupelix(value: NowPlayingSnapshot): NowPlayingSnapshot {
   const dupelix = stream({
     serverId: "dx1", serverKind: "dupelix", serverName: "Dupelix", sessionKey: "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10", id: "dx1:9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10",
-    title: "Pilot", mediaType: "episode", episodeLabel: "S01E03", playMethod: "transcode", user: { id: "a1", name: "Sam (Kids)" },
+    title: "Pilot", mediaType: "episode", episodeLabel: "S01E03", playMethod: "transcode", user: { id: "a1", name: "Sam (Kids)", signedInAs: "Jordan" },
     player: { name: "Chrome on Windows", device: "Chrome on Windows", platform: "web", product: null, version: null }, durationMs: null, bufferedMs: null,
     videoDecision: "transcode", audioDecision: null, source: media({ container: null, videoCodec: null, resolution: null, width: null, height: null, dynamicRange: null, audioCodec: null, audioChannels: null, bitrateKbps: null }),
     output: media({ container: null, videoCodec: "h264", resolution: "720p", width: null, height: 720, dynamicRange: "SDR", audioCodec: null, audioChannels: null, bitrateKbps: null }),
     transcode: { engine: "hardware", hardwareDecode: null, hardwareEncode: "h264_nvenc", speed: null, throttled: null, reasons: ["This browser cannot play HEVC."], reasonsDerived: false },
     bandwidth: { kbps: null, kind: "estimate" }, network: { location: null, ip: null, relayed: false, secure: null, geo: null },
-    srtl: { status: "unknown", locationName: null, policy: null }, stop: { available: false, reason: "Dupelix does not let other apps stop streams yet." }
+    srtl: { status: "unknown", locationName: null, policy: null }, stop: { available: false, reason: "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers." }
   });
   return {
     ...value,
@@ -340,7 +340,8 @@ test("shows Dupelix streams next to Plex and Jellyfin, polled as normal, without
   await expect(dupelix).toContainText("checking every few seconds");
   await expect(dupelix).not.toContainText("no live socket");
   const card = page.getByRole("article", { name: /Pilot/ });
-  await expect(card).toContainText("Sam (Kids)");
+  await expect(card).toContainText("Sam (Kids) · signed in as Jordan");
+  await expect(card.locator(".np-footer-user dd")).toHaveAttribute("title", "Sam (Kids), signed in as Jordan");
   await expect(card).toContainText("Transcode (HW)");
   await expect(card.locator(".np-card-footer svg.server-kind-dupelix")).toBeVisible();
   await expect(card.getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
