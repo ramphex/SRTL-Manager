@@ -1,8 +1,16 @@
-// Plex and Jellyfin connections shared by watch sync and the other features that read media servers.
-export type MediaServerKind = "plex" | "jellyfin";
+// Plex, Jellyfin, and Dupelix connections shared by watch sync and the other features that read media servers.
+export const mediaServerKinds = ["plex", "jellyfin", "dupelix"] as const;
+export type MediaServerKind = (typeof mediaServerKinds)[number];
+// Watch sync pairs a Plex user with a Jellyfin user; other kinds are not part of it yet.
+export const watchSyncServerKinds = ["plex", "jellyfin"] as const;
+export type WatchSyncCapableKind = (typeof watchSyncServerKinds)[number];
+
+export function supportsWatchSync(kind: MediaServerKind): kind is WatchSyncCapableKind {
+  return (watchSyncServerKinds as readonly string[]).includes(kind);
+}
 
 export const mediaServerLimit = 10;
-export const mediaServerKindLabels: Record<MediaServerKind, string> = { plex: "Plex", jellyfin: "Jellyfin" };
+export const mediaServerKindLabels: Record<MediaServerKind, string> = { plex: "Plex", jellyfin: "Jellyfin", dupelix: "Dupelix" };
 
 // The server sees the library under serverPrefix; SRTL's symlinks live under srtlPrefix.
 export interface MediaServerPrefixMapping {
@@ -13,7 +21,7 @@ export interface MediaServerPrefixMapping {
 export interface MediaServerInput {
   name: string;
   url: string;
-  // Write-only: a Plex owner token or a Jellyfin API key. Empty keeps the stored one.
+  // Write-only: a Plex owner token, a Jellyfin API key, or a Dupelix API key. Empty keeps the stored one.
   token?: string;
   prefixMappings: MediaServerPrefixMapping[];
 }

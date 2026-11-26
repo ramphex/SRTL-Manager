@@ -4,6 +4,16 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+Dupelix servers can be connected in **Settings > Media servers**, and their streams appear in Now Playing next to Plex and Jellyfin. Database migration 39 allows the new server type.
+
+### Added
+
+- **Dupelix in Now Playing.** **Settings > Media servers** has an **Add Dupelix server** button that takes the server's address and a Dupelix API key with the `activity.read` and `library.read` scopes. **Test connection** records the Dupelix version and API revision and fails, naming the scope, when the key cannot read streams or the library. Now Playing polls each Dupelix server every 5 seconds while the page is open, which is its normal state because Dupelix has no push channel yet. Cards show the user and profile, the device, the title with its season and episode, the position, the play method (direct play, stored version, direct stream, or transcode), whether a transcode runs on a hardware or software encoder, the output resolution, and why Dupelix chose that route. Posters come from the title's signed artwork links, fetched through SRTL without the key. Stop is not offered, because Dupelix does not let other apps stop streams yet. Details Dupelix does not report yet, such as pause state, media details, bandwidth, client address and file path, are left out instead of guessed, and are shown as soon as Dupelix sends them. Watch sync does not use Dupelix servers yet.
+
+### Upgrade notes
+
+Upgrading applies database migration 39 automatically. It only widens the allowed media server types; existing Plex and Jellyfin servers are unchanged. **Back up the database first**: migrations can't be undone by going back to an older image. No settings in `.env` need to change.
+
 ## [0.1.6-beta.1] - 2026-11-25
 
 A new **Library > Broken links** review lists library symlinks whose target is gone and deletes them safely, then asks Radarr or Sonarr to rescan, and a second list shows file records Sonarr or Radarr still has with nothing on disk. The dashboard no longer flickers with Now Playing in Safari. Database migration 38 adds the review's tables.

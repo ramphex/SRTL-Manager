@@ -55,6 +55,7 @@
   --warn: #a25d16;
   --server-plex: #9a7200;
   --server-jellyfin: #00739c;
+  --server-dupelix: #556070;
   --bad: #b42318;
   --neutral: #42526a;
   --pill-remote-bg: #fff2df;
@@ -119,6 +120,7 @@
   --warn: #d78d3f;
   --server-plex: #ebaf00;
   --server-jellyfin: #00a4dc;
+  --server-dupelix: #c3cad4;
   --bad: #e96c62;
   --neutral: #8f9daf;
   --pill-remote-bg: #3a2814;
@@ -8372,6 +8374,7 @@ button.danger-button:hover:not(:disabled) {
 .server-kind-icon { flex: none; }
 .server-kind-icon.server-kind-plex { color: var(--server-plex); }
 .server-kind-icon.server-kind-jellyfin { color: var(--server-jellyfin); }
+.server-kind-icon.server-kind-dupelix { color: var(--server-dupelix); }
 .np-server-status { border-radius: 999px; font-size: 11px; padding: 1px 7px; background: var(--pill-neutral-bg); color: var(--pill-neutral-text); }
 .np-server-live .np-server-status { background: var(--pill-local-bg); color: var(--pill-local-text); }
 .np-server-polling .np-server-status { background: var(--pill-remote-bg); color: var(--pill-remote-text); }

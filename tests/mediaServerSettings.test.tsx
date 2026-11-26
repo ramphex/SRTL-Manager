@@ -219,4 +219,26 @@ describe("Settings > Media servers, adding a Plex server", () => {
       vi.useRealTimers();
     }
   });
+
+  it("adds a Dupelix server with an API key, naming the scopes the key needs, and never opens plex.tv", async () => {
+    await render();
+    await click(button("Add Dupelix server"));
+    const form = container.querySelector("form[aria-label='Add Dupelix server']")!;
+    expect(form.textContent).toContain("activity.read");
+    expect(form.textContent).toContain("library.read");
+    expect(form.querySelector("details")).toBeNull();
+    await type(inputFor("Name"), "Dupelix");
+    await type(inputFor("Server URL"), "https://dupelix.example.com");
+    await type(inputFor("API key"), "msk_examplekeyexamplekey");
+    const added: MediaServerList = { servers: [plexServer({ kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true })], limit: 10 };
+    api.add.mockResolvedValue(added);
+    api.list.mockResolvedValue(added);
+    await click(button("Add server"));
+    expect(api.add).toHaveBeenCalledWith("dupelix", { name: "Dupelix", url: "https://dupelix.example.com", token: "msk_examplekeyexamplekey", prefixMappings: [] });
+    expect(openPlexWindow).not.toHaveBeenCalled();
+    const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
+    expect(card).toBeTruthy();
+    expect(card.querySelector(".watch-sync-signin")).toBeNull();
+    expect(button("Test connection")).toBeTruthy();
+  });
 });

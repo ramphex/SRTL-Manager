@@ -1,6 +1,6 @@
 # Now Playing
 
-**Now Playing** (in the main navigation) shows what is streaming right now on every Plex and Jellyfin server connected in [Settings > Media servers](media-servers.md), together with the load on the SRTL host. It is live only: nothing is written to the database and there is no history. Without a connected server, the page links to Settings > Media servers.
+**Now Playing** (in the main navigation) shows what is streaming right now on every Plex, Jellyfin, and Dupelix server connected in [Settings > Media servers](media-servers.md), together with the load on the SRTL host. It is live only: nothing is written to the database and there is no history. Without a connected server, the page links to Settings > Media servers.
 
 ## Quick glance
 
@@ -15,7 +15,7 @@ Sparkline history is kept in memory while someone has the page open and is lost 
 
 ## Servers
 
-Below the strip, each connected server is a toggle with its type icon (Plex or Jellyfin) and its connection status. All servers are on by default. Turning one off hides its streams and leaves them out of the pills; the host cards are never filtered. The choice is saved with your account, so it follows you to other browsers, and a server added later starts on. With every server off, the page says "No servers selected".
+Below the strip, each connected server is a toggle with its type icon (Plex, Jellyfin, or Dupelix) and its connection status. All servers are on by default. Turning one off hides its streams and leaves them out of the pills; the host cards are never filtered. The choice is saved with your account, so it follows you to other browsers, and a server added later starts on. With every server off, the page says "No servers selected".
 
 ## Stream cards
 
@@ -30,13 +30,14 @@ In detail:
 - **Play method**:
   - Plex: any transcoded stream makes it a transcode; otherwise any copied stream makes it a direct stream; otherwise it is a direct play. A transcode that converts only the audio is still a transcode, and it always runs on the CPU. A video transcode counts as hardware when Plex reports a hardware encoder.
   - Jellyfin: the server's play method, refined by whether video and audio are copied. A "transcode" that copies both is a remux, shown as a direct stream.
+  - Dupelix: the session's route. A direct play or a stored version sent as it is is a direct play, a direct stream (new container, video untouched) is a direct stream, and a transcode is a transcode. A direct stream that converts the audio counts as a transcode, as on Plex. A video transcode counts as hardware when Dupelix reports a hardware encoder (NVENC, Quick Sync, VAAPI, VideoToolbox and the like) and as CPU for a software one.
 - **Source and output**: codec, resolution, and HDR format of the original file and of what the player receives, subtitles (and whether they are burned in), and the container.
 - **Why it transcodes**: Jellyfin reports its reasons. Plex does not, so SRTL derives them from the source and output streams and labels them "derived". Plex streams also show the transcoder speed and whether it is throttled.
 - **Bandwidth**: Plex's reserved bandwidth for the stream, or an estimate from the bitrate (labelled). Placeholder values such as 2,147,483,647 are shown as unknown.
 - **LAN or WAN** and the client address, in the bottom row (the address in the location's tooltip). Behind a reverse proxy, Jellyfin reports the proxy's address unless Jellyfin's known proxies are configured.
 - **SRTL source**: whether the file plays from local storage (Location 1) or remote storage (Location 2), using the location names from Settings. SRTL maps the server's file path through the server's path prefix mappings to its symlink, then reads its own link and storage records. If a card says "Source unknown" or "Not in SRTL", check the mappings in Settings > Media servers. Nothing is read from disk; each file is looked up once and cached.
 
-Posters load through SRTL, so Plex tokens and Jellyfin API keys never reach the browser.
+Posters load through SRTL, so Plex tokens and Jellyfin and Dupelix API keys never reach the browser. For Dupelix, SRTL reads the title's signed artwork links with the API key, keeps the chosen link for at most six hours (the links last a week or more), and fetches the picture with the signed link alone. Only Dupelix artwork paths are fetched this way.
 
 ## Stopping a stream
 
@@ -44,6 +45,7 @@ Owners and admins can stop a stream; moderators can only watch this page. The re
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.
+- **Dupelix**: not available yet. Dupelix does not let other apps stop streams, so Stop is hidden on Dupelix streams.
 
 ## Locations of client addresses
 
@@ -53,8 +55,8 @@ When **Look up the location of public client addresses with plex.tv** is on (the
 
 Upstream connections run only while at least one browser has Now Playing open, and stop about 15 seconds after the last one leaves.
 
-- SRTL listens to Plex's notification socket and Jellyfin's session socket for changes and polls each server every 30 seconds as a safety net. When a socket cannot be opened, it polls every 5 seconds and tries the socket again later. The server line shows **Live** or **Polling**.
-- After three failed requests in a row a server is marked **Unreachable**, its streams are cleared, and polling backs off up to two minutes. A rejected token shows "Plex token invalid — sign in again in Settings > Media servers" (or the Jellyfin equivalent).
+- SRTL listens to Plex's notification socket and Jellyfin's session socket for changes and polls each server every 30 seconds as a safety net. When a socket cannot be opened, it polls every 5 seconds and tries the socket again later. Dupelix has no socket, so it is always polled every 5 seconds, and that is not an error. The server line shows **Live** or **Polling**.
+- After three failed requests in a row a server is marked **Unreachable**, its streams are cleared, and polling backs off up to two minutes. A rejected token shows "Plex token invalid — sign in again in Settings > Media servers" (or the Jellyfin or Dupelix equivalent; for Dupelix the message names the scopes the key needs).
 - The browser receives updates over server-sent events from `/api/now-playing/events`. Every route requires the normal admin sign-in.
 
 ## Docker: host network totals
@@ -91,3 +93,18 @@ The GPU figures cover the whole GPU, so they include Plex, Jellyfin, and anythin
 ## Credits
 
 The server type icons are the Plex and Jellyfin glyphs from [Simple Icons](https://simpleicons.org) (CC0). Plex and Jellyfin names and logos are trademarks of their respective owners, used only to identify the server type.
+
+## Dupelix
+
+Dupelix's session list does not report everything Plex and Jellyfin do yet. Until it does, Dupelix cards leave these out instead of guessing:
+
+- **Paused or buffering**: every Dupelix stream shows as playing.
+- **Duration and progress bar**: shown only when the title's runtime is known.
+- **Show name** for episodes: the card shows the episode title and its season and episode number.
+- **Source and output details**: codec, HDR format, audio, container, and bitrate. The output resolution comes from the height Dupelix encodes to, and the output codec from its encoder.
+- **Bandwidth**, **LAN or WAN**, the client address and its location.
+- **SRTL source**: without a file path, cards say "Source unknown".
+- **Stop**, as above.
+
+SRTL reads each of these as soon as Dupelix sends it.
+

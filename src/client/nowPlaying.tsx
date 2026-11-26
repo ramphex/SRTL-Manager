@@ -162,7 +162,7 @@ function ServerStatusList({ servers, hidden, onToggle }: { servers: NowPlayingSe
             <strong>{server.name}</strong>
           </button>
           <span className="np-server-status">{serverStatusLabels[server.status]}</span>
-          {server.status === "polling" ? <span className="np-server-note">no live socket, checking every few seconds</span> : null}
+          {server.status === "polling" ? <span className="np-server-note">{server.kind === "dupelix" ? "checking every few seconds" : "no live socket, checking every few seconds"}</span> : null}
           {server.kind === "plex" && server.plexPass === false && server.status !== "unauthorized" ? <span className="np-server-note">Stop needs Plex Pass</span> : null}
           {server.message && (server.status === "unreachable" || server.status === "unauthorized" || server.status === "notConnected") ? <span className="np-server-message" role={server.status === "unauthorized" ? "alert" : undefined}>{server.message}</span> : null}
         </li>

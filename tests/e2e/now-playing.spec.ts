@@ -86,7 +86,7 @@ function restrictedSnapshot(value: NowPlayingSnapshot): NowPlayingSnapshot {
   };
 }
 
-async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean } = {}) {
+async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?: boolean; moderator?: boolean; transform?: (value: NowPlayingSnapshot) => NowPlayingSnapshot } = {}) {
   const stops: unknown[] = [];
   let preferences: Record<string, unknown> = { timeFormat: "24h", autoOpenTaskStatus: false, recentJobsCompletedWindowMinutes: 1440, nowPlayingHiddenServers: [] };
   await page.route("**/api/**", async (route) => {
@@ -94,7 +94,8 @@ async function fixture(page: Page, options: { servers?: MediaServer[]; plexPass?
     const url = new URL(request.url());
     let response: unknown = [];
     if (url.pathname === "/api/now-playing/events") {
-      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(options.moderator ? restrictedSnapshot(snapshot(options.plexPass ?? true)) : snapshot(options.plexPass ?? true))}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
+      const base = (options.transform ?? ((value: NowPlayingSnapshot) => value))(snapshot(options.plexPass ?? true));
+      const body = `retry: 600000\n\nevent: sessions\ndata: ${JSON.stringify(options.moderator ? restrictedSnapshot(base) : base)}\n\nevent: host\ndata: ${JSON.stringify(host())}\n\n`;
       await route.fulfill({ status: 200, headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-store" }, body });
       return;
     }
@@ -306,6 +307,45 @@ test("hides Stop on Plex streams without Plex Pass", async ({ page }) => {
   // Jellyfin streams keep their Stop button.
   await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).getByRole("button", { name: "Terminate the stream" })).toBeVisible();
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Stop needs Plex Pass");
+});
+
+const dupelixServer: MediaServer = { id: "dx1", kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "0.1.0 b1 (API revision 145)", lastCheckedAt: "2026-11-02T10:00:00.000Z", lastError: null };
+
+function withDupelix(value: NowPlayingSnapshot): NowPlayingSnapshot {
+  const dupelix = stream({
+    serverId: "dx1", serverKind: "dupelix", serverName: "Dupelix", sessionKey: "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10", id: "dx1:9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10",
+    title: "Pilot", mediaType: "episode", episodeLabel: "S01E03", playMethod: "transcode", user: { id: "a1", name: "Sam (Kids)" },
+    player: { name: "Chrome on Windows", device: "Chrome on Windows", platform: "web", product: null, version: null }, durationMs: null, bufferedMs: null,
+    videoDecision: "transcode", audioDecision: null, source: media({ container: null, videoCodec: null, resolution: null, width: null, height: null, dynamicRange: null, audioCodec: null, audioChannels: null, bitrateKbps: null }),
+    output: media({ container: null, videoCodec: "h264", resolution: "720p", width: null, height: 720, dynamicRange: "SDR", audioCodec: null, audioChannels: null, bitrateKbps: null }),
+    transcode: { engine: "hardware", hardwareDecode: null, hardwareEncode: "h264_nvenc", speed: null, throttled: null, reasons: ["This browser cannot play HEVC."], reasonsDerived: false },
+    bandwidth: { kbps: null, kind: "estimate" }, network: { location: null, ip: null, relayed: false, secure: null, geo: null },
+    srtl: { status: "unknown", locationName: null, policy: null }, stop: { available: false, reason: "Dupelix does not let other apps stop streams yet." }
+  });
+  return {
+    ...value,
+    servers: [...value.servers, { id: "dx1", name: "Dupelix", kind: "dupelix", status: "polling", message: null, transport: "poll", plexPass: null, bandwidth: null, resources: null, lastUpdatedAt: new Date().toISOString() }],
+    streams: [...value.streams, dupelix],
+    summary: { ...value.summary, transcodeHardware: value.summary.transcodeHardware + 1 }
+  };
+}
+
+test("shows Dupelix streams next to Plex and Jellyfin, polled as normal, without Stop", async ({ page }) => {
+  await fixture(page, { servers: [...connectedServers, dupelixServer], transform: withDupelix });
+  await openNowPlaying(page);
+  await expect(page.getByRole("article")).toHaveCount(5);
+  const servers = page.getByRole("list", { name: "Media servers" });
+  const dupelix = servers.getByRole("listitem").filter({ hasText: "Dupelix" });
+  await expect(dupelix.getByRole("img", { name: "Dupelix" })).toBeVisible();
+  await expect(dupelix).toContainText("checking every few seconds");
+  await expect(dupelix).not.toContainText("no live socket");
+  const card = page.getByRole("article", { name: /Pilot/ });
+  await expect(card).toContainText("Sam (Kids)");
+  await expect(card).toContainText("Transcode (HW)");
+  await expect(card.locator(".np-card-footer svg.server-kind-dupelix")).toBeVisible();
+  await expect(card.getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
+  // Plex and Jellyfin streams keep their Stop buttons.
+  await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).getByRole("button", { name: "Terminate the stream" })).toBeVisible();
 });
 
 test("fits a phone screen without horizontal scrolling", async ({ page }) => {

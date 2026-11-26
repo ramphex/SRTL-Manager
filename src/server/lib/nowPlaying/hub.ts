@@ -14,7 +14,7 @@ import { WatchSyncError } from "../watchSyncHttp";
 import { summarizeStreams, type ParsedSession } from "./classify";
 import { GeoLookup, type GeoLookupOptions } from "./geo";
 import { HostMonitor } from "./hostStats";
-import { NowPlayingError, createLiveAdapter, plexPassActive, type LiveAdapter, type LiveServerConfig, type ServerExtras, type SocketEvent } from "./upstream";
+import { NowPlayingError, createLiveAdapter, dupelixStopUnavailable, plexPassActive, type LiveAdapter, type LiveServerConfig, type ServerExtras, type SocketEvent } from "./upstream";
 
 export type NowPlayingEvent = { type: "sessions"; snapshot: NowPlayingSnapshot } | { type: "host"; host: NowPlayingHostEvent };
 export type NowPlayingListener = (event: NowPlayingEvent) => void;
@@ -86,9 +86,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 function unauthorizedMessage(kind: MediaServerRecord["kind"]): string {
-  return kind === "plex"
-    ? "Plex token invalid — sign in again in Settings > Media servers."
-    : "Jellyfin API key rejected — update it in Settings > Media servers.";
+  if (kind === "plex") return "Plex token invalid — sign in again in Settings > Media servers.";
+  if (kind === "dupelix") return "Dupelix refused the API key — it needs the activity.read and library.read scopes. Update it in Settings > Media servers.";
+  return "Jellyfin API key rejected — update it in Settings > Media servers.";
 }
 
 // One media server's live sessions: a socket for change events where the server offers one, a safety poll,
@@ -142,6 +142,8 @@ class ServerWatcher {
   }
 
   private async connectSocket(): Promise<void> {
+    // A server without a push channel is polled; that is its normal state, not a failure to back off from.
+    if (!this.adapter.openSocket) return;
     if (this.stopped || this.closeSocket || this.socketConnecting || this.status === "unauthorized") return;
     this.socketConnecting = true;
     try {
@@ -549,6 +551,7 @@ export class NowPlayingHub {
       if (!plexPass) return { available: false, reason: "Stopping Plex streams needs an active Plex Pass on the server owner's account." };
       return { available: true, reason: null };
     }
+    if (record.kind === "dupelix") return { available: false, reason: dupelixStopUnavailable };
     return session.remoteControl ? { available: true, reason: null } : { available: false, reason: "This Jellyfin client does not accept remote control." };
   }
 

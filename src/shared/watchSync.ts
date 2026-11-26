@@ -1,7 +1,8 @@
-import type { MediaServer, MediaServerKind, MediaServerPrefixMapping } from "./mediaServers";
+import type { MediaServer, MediaServerPrefixMapping, WatchSyncCapableKind } from "./mediaServers";
 
-// Watch sync reads the shared media server connections from Settings > Media servers.
-export type WatchSyncServerKind = MediaServerKind;
+// Watch sync reads the shared media server connections from Settings > Media servers. It pairs Plex with Jellyfin
+// only; Dupelix servers are left out of it for now.
+export type WatchSyncServerKind = WatchSyncCapableKind;
 export type WatchSyncPrefixMapping = MediaServerPrefixMapping;
 export type WatchSyncDirection = "plex_to_jellyfin" | "jellyfin_to_plex" | "both";
 export type WatchSyncTransfer = Exclude<WatchSyncDirection, "both">;

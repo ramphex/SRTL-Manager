@@ -51,18 +51,19 @@ export function MediaServerSettingsPanel() {
   const { servers, limit } = query.data;
   const full = servers.length >= limit;
   return <div className="radarr-settings media-server-settings">
-    <Section title="Media servers" help="Plex and Jellyfin connections that SRTL features share. Watch sync pairs users across them. Plex signs in through plex.tv; Jellyfin uses an API key from Dashboard > API Keys." actions={<>
+    <Section title="Media servers" help="Plex, Jellyfin, and Dupelix connections that SRTL features share. Watch sync pairs Plex and Jellyfin users; Now Playing shows streams from all three. Plex signs in through plex.tv; Jellyfin and Dupelix use an API key." actions={<>
       <button type="button" className="secondary" disabled={adding !== null || full} onClick={() => setAdding("plex")}><Plus size={16} />Add Plex server</button>
       <button type="button" className="secondary" disabled={adding !== null || full} onClick={() => setAdding("jellyfin")}><Plus size={16} />Add Jellyfin server</button>
+      <button type="button" className="secondary" disabled={adding !== null || full} onClick={() => setAdding("dupelix")}><Plus size={16} />Add Dupelix server</button>
     </>}>
       <p className="radarr-lede">Add each server once here; watch sync and other features use the same connection. If a server sees the library under a different folder than SRTL does, add a path prefix mapping, for example <code>/data/media</code> on the server is <code>/mnt/plex</code> in SRTL.</p>
       {query.error ? <p className="error" role="alert">{query.error.message}</p> : null}
       {adding ? <ServerForm kind={adding} onDone={() => setAdding(null)} onSignInStarted={setStartedSignIn} /> : null}
-      {!servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex or Jellyfin server to start.</p> : null}
+      {!servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex, Jellyfin, or Dupelix server to start.</p> : null}
       {full ? <p className="muted">SRTL supports up to {limit} media servers.</p> : null}
     </Section>
     {servers.length ? <div className="media-server-list">{servers.map((server) => <ServerCard key={server.id} server={server} startedSignIn={startedSignIn?.serverId === server.id ? startedSignIn : undefined} onStartedSignInSeen={() => setStartedSignIn(null)} />)}</div> : null}
-    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored encrypted on the SRTL server and are never shown again.</p>
+    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin and Dupelix API keys are stored encrypted on the SRTL server and are never shown again.</p>
   </div>;
 }
 
@@ -79,6 +80,13 @@ function PrefixMappings({ value, onChange, disabled }: { value: MediaServerPrefi
   </div>;
 }
 
+const namePlaceholders: Record<MediaServerKind, string> = { plex: "Home Plex", jellyfin: "Jellyfin", dupelix: "Dupelix" };
+const urlPlaceholders: Record<MediaServerKind, string> = { plex: "http://192.168.1.10:32400", jellyfin: "http://192.168.1.10:8096", dupelix: "https://dupelix.example.com" };
+const apiKeyHelp: Record<Exclude<MediaServerKind, "plex">, ReactNode> = {
+  jellyfin: <>Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>,
+  dupelix: <>Create a key in Dupelix&apos;s admin settings with the <code>activity.read</code> scope (to list streams) and the <code>library.read</code> scope (for artwork). Keys start with <code>msk_</code>. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>
+};
+
 const plexTokenNote = <>Use the token of the Plex account that owns this server. To find it, open any item in Plex Web, choose <strong>Get Info</strong> &gt; <strong>View XML</strong>, and copy the <code>X-Plex-Token</code> value from the address bar. Never use the <code>PlexOnlineToken</code> from the server&apos;s Preferences.xml.</>;
 
 function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: MediaServerKind; draft: MediaServerInput; setDraft: (draft: MediaServerInput) => void; hasToken: boolean; disabled: boolean }) {
@@ -87,8 +95,8 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
   const tokenInput = <input id={tokenId} type="password" autoComplete="off" aria-describedby={kind === "plex" ? tokenNoteId : undefined} value={draft.token ?? ""} placeholder={hasToken ? "Saved. Leave empty to keep it." : ""} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />;
   return <fieldset className="radarr-fields" disabled={disabled}>
     <div className="radarr-grid">
-      <label>Name<input required maxLength={60} value={draft.name} placeholder={kind === "plex" ? "Home Plex" : "Jellyfin"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-      <label>Server URL<input required value={draft.url} placeholder={kind === "plex" ? "http://192.168.1.10:32400" : "http://192.168.1.10:8096"} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
+      <label>Name<input required maxLength={60} value={draft.name} placeholder={namePlaceholders[kind]} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+      <label>Server URL<input required value={draft.url} placeholder={urlPlaceholders[kind]} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
     </div>
     {kind === "plex" ? <details className="radarr-setup media-server-manual-token">
       <summary>Or enter a token manually</summary>
@@ -98,8 +106,9 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
         <p id={tokenNoteId} className="muted">{plexTokenNote}</p>
       </div>
     </details> : <div className="radarr-field">
-      <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</InfoTooltip></div>
+      <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">{apiKeyHelp[kind]}</InfoTooltip></div>
       {tokenInput}
+      {kind === "dupelix" ? <p className="muted">Needs the <code>activity.read</code> and <code>library.read</code> scopes.</p> : null}
     </div>}
     <PrefixMappings value={draft.prefixMappings} onChange={(prefixMappings) => setDraft({ ...draft, prefixMappings })} />
   </fieldset>;
@@ -152,7 +161,9 @@ function ServerForm({ kind, onDone, onSignInStarted }: { kind: MediaServerKind; 
     <h3>Add a {mediaServerKindLabels[kind]} server</h3>
     {kind === "plex"
       ? <p className="muted">Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.</p>
-      : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
+      : kind === "dupelix"
+        ? <p className="muted">Enter the server&apos;s address and a Dupelix API key with the <code>activity.read</code> and <code>library.read</code> scopes. Dupelix streams appear in Now Playing; watch sync does not use Dupelix yet.</p>
+        : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
     <ServerFields kind={kind} draft={draft} setDraft={setDraft} hasToken={false} disabled={add.isPending} />
     <div className="radarr-toolbar">
       <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : signIn ? <LogIn size={16} /> : <Check size={16} />}{signIn ? "Add and sign in with Plex" : "Add server"}</button>

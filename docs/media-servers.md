@@ -1,6 +1,6 @@
-# Media Servers (Plex and Jellyfin)
+# Media Servers (Plex, Jellyfin, and Dupelix)
 
-**Settings > Media servers** holds SRTL's connections to Plex and Jellyfin. Each server is added once and shared by every feature that reads media servers: [watch sync](watch-sync.md) and [Now Playing](now-playing.md) today, and invitations as they arrive. Radarr and Sonarr stay in **Settings > Integrations**.
+**Settings > Media servers** holds SRTL's connections to Plex, Jellyfin, and Dupelix. Each server is added once and shared by every feature that reads media servers: [watch sync](watch-sync.md) (Plex and Jellyfin) and [Now Playing](now-playing.md) (all three) today, and invitations as they arrive. Other integrations stay in **Settings > Integrations**.
 
 Each server shows its type, URL, status (connected, error, not checked, or not signed in), the server version, and, for Plex, the plex.tv account it is signed in as. Both the SRTL API and the worker need network access to the servers.
 
@@ -8,6 +8,7 @@ Each server shows its type, URL, status (connected, error, not checked, or not s
 
 - **Plex**: select **Add Plex server**, enter a name and the server URL (for example `http://192.168.1.10:32400`), and select **Add and sign in with Plex**. SRTL adds the server and opens a plex.tv window straight away; sign in as the account that **owns** the server and approve "SRTL Manager". Two-factor authentication works as usual. SRTL notices the approval within a few seconds, stores the account token, and tests the connection. If the window was blocked, use the "open it here" link on the server's card; a sign-in that is not approved in about 15 minutes expires, and **Sign in with Plex** on the card starts a new one.
 - **Jellyfin**: create an API key in Jellyfin under **Dashboard > API Keys**, then select **Add Jellyfin server** with a name, the URL (for example `http://192.168.1.10:8096`), and the key.
+- **Dupelix**: as a Dupelix administrator, create an API key with two scopes: `activity.read`, which lets SRTL list the streams playing now, and `library.read`, which lets it show their artwork. Then select **Add Dupelix server** with a name, the server's address (the same one the Dupelix apps use, without `/api/v1`), and the key, which starts with `msk_`. SRTL sends the key only in the `Authorization` header, never in a URL. See [Dupelix](#dupelix) below for what SRTL does with it.
 
 If you cannot use the Plex sign-in, open **Or enter a token manually** in the add form (or in **Edit**) and paste your Plex account token; the button then reads **Add server** and no plex.tv window opens. To find your token, open any item in Plex Web, choose **Get Info > View XML**, and copy the `X-Plex-Token` value from the address bar. Use your own account's token, never the `PlexOnlineToken` from the server's `Preferences.xml`. SRTL always identifies itself to Plex and Jellyfin as its own client ("SRTL Manager") with a stable client identifier.
 
@@ -15,17 +16,25 @@ If you cannot use the Plex sign-in, open **Or enter a token manually** in the ad
 
 ## Test, edit, and remove
 
-- **Test connection** reaches the server with its token or key, records the version and status, and, for Plex, the machine identifier and owner account. Features that use the server record their own failures on it too, so the status reflects the last request any of them made.
-- **Edit** changes the name, URL, token or key, and path prefix mappings. Saved tokens and keys are never shown again; leave the field empty to keep the saved one. Changing a Jellyfin URL requires entering the API key again, so a saved key is never sent to an address you have not confirmed. Changing a Plex URL signs the server out for the same reason: its token and its users' tokens are cleared, so use **Sign in with Plex** again (then watch sync finds the users again), or paste a token with the change. Tokens and keys are stored encrypted with `SRTL_SECRET_KEY`.
+- **Test connection** reaches the server with its token or key, records the version and status, and, for Plex, the machine identifier and owner account. For Dupelix it reads the server's version and API revision, then one page of streams and one library entry, so a wrong key or a missing scope fails the test and the message names the scope. Features that use the server record their own failures on it too, so the status reflects the last request any of them made.
+- **Edit** changes the name, URL, token or key, and path prefix mappings. Saved tokens and keys are never shown again; leave the field empty to keep the saved one. Changing a Jellyfin or Dupelix URL requires entering the API key again, so a saved key is never sent to an address you have not confirmed. Changing a Plex URL signs the server out for the same reason: its token and its users' tokens are cleared, so use **Sign in with Plex** again (then watch sync finds the users again), or paste a token with the change. Tokens and keys are stored encrypted with `SRTL_SECRET_KEY`.
 - **Remove** forgets the connection and the per-server records SRTL kept for it (such as discovered users and the item index). Nothing changes on the server. A server that watch sync pairs still use cannot be removed; the message names the pairs to remove first.
 
 ## Path prefix mappings
 
 Features match media by SRTL's symlink path. When a server mounts the library at the same place as SRTL (for example `/mnt/plex` everywhere), nothing is needed. Otherwise, map the server's prefix to SRTL's under **Edit > Path prefix mappings**; for example, a Plex container that sees `/data/media/...` while SRTL's symlink folder is `/mnt/plex` maps `/data/media` to `/mnt/plex`. The longest matching prefix wins, and prefixes only match whole folder names.
 
+## Dupelix
+
+Dupelix servers feed [Now Playing](now-playing.md). SRTL polls Dupelix's own API (`/api/v1/activity/sessions`) every 5 seconds while someone has Now Playing open; Dupelix has no push channel yet, so its server line reads **Polling** as its normal state. Watch sync does not use Dupelix servers yet: they do not appear in it, and discovering users on one is refused.
+
+Some details are not available from Dupelix yet, and the cards leave them out rather than guess. See [Now Playing](now-playing.md#dupelix) for the list. As Dupelix adds them, SRTL picks them up without a change in settings.
+
 ## Security
 
-Plex tokens and Jellyfin API keys are stored only in SRTL's database. The browser never receives them; the API only reports whether one is saved. Up to 10 media servers can be connected.
+Plex tokens and Jellyfin and Dupelix API keys are stored only in SRTL's database. The browser never receives them; the API only reports whether one is saved. Up to 10 media servers can be connected.
+
+Upgrading to a version with database migration 39 lets media servers be Dupelix servers. Existing Plex and Jellyfin servers are unchanged.
 
 ## Upgrading
 

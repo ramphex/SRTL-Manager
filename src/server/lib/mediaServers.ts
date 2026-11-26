@@ -4,6 +4,7 @@ import { and, asc, eq, inArray, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import {
   mediaServerKindLabels,
+  mediaServerKinds,
   mediaServerLimit,
   type MediaServer,
   type MediaServerInput,
@@ -16,6 +17,7 @@ import {
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { publicErrorMessage } from "../errors";
+import { DupelixClient, dupelixVersionLabel } from "./dupelixClient";
 import { JellyfinClient } from "./jellyfinClient";
 import { openSecret, sealSecret, secretPurposes } from "./secretBox";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
@@ -62,7 +64,7 @@ export const mediaServerInputSchema = z.object({
   token: z.string().trim().max(512).regex(/^[A-Za-z0-9_.\-~]*$/, "Tokens and API keys contain only letters, numbers, and - _ . ~").optional(),
   prefixMappings: z.array(z.object({ serverPrefix: absolutePrefix, srtlPrefix: absolutePrefix })).max(20).default([])
 });
-export const mediaServerCreateSchema = mediaServerInputSchema.extend({ kind: z.enum(["plex", "jellyfin"]) });
+export const mediaServerCreateSchema = mediaServerInputSchema.extend({ kind: z.enum(mediaServerKinds) });
 
 type Row = typeof schema.mediaServers.$inferSelect;
 
@@ -140,6 +142,8 @@ export async function mediaServerClientIdentifier(db: Db): Promise<string> {
 
 function validateInput(kind: MediaServerKind, input: MediaServerInput) {
   const parsed = mediaServerInputSchema.parse(input);
+  // Dupelix API keys all start with msk_; anything else is a session token or a paste of the wrong value.
+  if (kind === "dupelix" && parsed.token && !/^msk_[A-Za-z0-9_-]{16,}$/.test(parsed.token)) throw new WatchSyncError("Dupelix API keys start with msk_. Create one in Dupelix with the activity.read and library.read scopes.");
   return { ...parsed, url: normalizeServerUrl(parsed.url, mediaServerKindLabels[kind]) };
 }
 
@@ -174,14 +178,14 @@ export async function addMediaServer(db: Db, kind: MediaServerKind, input: Media
   return getMediaServer(db, id);
 }
 
-// A saved token or API key is only ever sent to the address it was entered for. A new Jellyfin address needs the
-// API key again. A new Plex address signs the server out: the owner token, the per-user tokens found with it, and
+// A saved token or API key is only ever sent to the address it was entered for. A new Jellyfin or Dupelix address
+// needs the API key again. A new Plex address signs the server out: the owner token, the per-user tokens found with it, and
 // any pending sign-in are cleared, unless a token is pasted with the change, and Sign in with Plex connects it again.
 export async function updateMediaServer(db: Db, serverId: string, input: MediaServerInput): Promise<MediaServerRecord> {
   const current = await getMediaServer(db, serverId);
   const draft = validateInput(current.kind, input);
   const urlChanged = draft.url !== current.url;
-  if (urlChanged && !draft.token && current.kind === "jellyfin") throw new WatchSyncError("Enter the API key again when changing the Jellyfin address.");
+  if (urlChanged && !draft.token && current.kind !== "plex") throw new WatchSyncError(`Enter the API key again when changing the ${mediaServerKindLabels[current.kind]} address.`);
   const signOut = urlChanged && !draft.token;
   const tokenChanged = signOut ? Boolean(current.token) : Boolean(draft.token) && draft.token !== current.token;
   await withNameCheck(() => db.transaction(async (transaction) => {
@@ -256,7 +260,7 @@ export async function recordMediaServerStatus(db: Db, serverId: string, error: s
 // Reaches the server with its token, reads its version and identity, and records the result.
 export async function testMediaServer(db: Db, serverId: string): Promise<MediaServerRecord> {
   const server = await getMediaServer(db, serverId);
-  if (!server.token) throw new WatchSyncError(server.kind === "plex" ? "Sign in with Plex or paste a Plex token first." : "Enter a Jellyfin API key first.");
+  if (!server.token) throw new WatchSyncError(server.kind === "plex" ? "Sign in with Plex or paste a Plex token first." : `Enter a ${mediaServerKindLabels[server.kind]} API key first.`);
   const identifier = await mediaServerClientIdentifier(db);
   let details: MediaServerDetails;
   try {
@@ -267,6 +271,12 @@ export async function testMediaServer(db: Db, serverId: string): Promise<MediaSe
       await pms.sections();
       const account = await new PlexTvClient(identifier).account(server.token);
       details = { machineIdentifier: identity.machineIdentifier, version: identity.version, accountName: account.title, accountId: account.id };
+    } else if (server.kind === "dupelix") {
+      // /server answers without a key, so the key is proven by the scoped reads that follow it.
+      const client = new DupelixClient(server.url, server.token);
+      const info = await client.serverInfo();
+      await client.checkAccess();
+      details = { version: dupelixVersionLabel(info) };
     } else {
       const info = await new JellyfinClient(server.url, server.token, identifier).systemInfo();
       details = { version: info.version };

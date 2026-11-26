@@ -2,11 +2,12 @@ import { Agent, WebSocket } from "undici";
 import { z } from "zod";
 import type { MediaServerKind } from "../../../shared/mediaServers";
 import type { NowPlayingServerState, NowPlayingState } from "../../../shared/nowPlaying";
+import { dupelixApiPrefix, dupelixHeaders } from "../dupelixClient";
 import { jellyfinHeaders } from "../jellyfinClient";
 import { plexEndpoints, plexHeaders } from "../plexClient";
 import { pinnedLookup } from "../outboundPolicy";
 import { WatchSyncError, resolveAllowed, watchSyncJson, watchSyncRequest } from "../watchSyncHttp";
-import { parseJellyfinSession, parsePlexSession, type ParsedSession } from "./classify";
+import { parseDupelixSession, parseJellyfinSession, parsePlexSession, type ParsedSession } from "./classify";
 
 export class NowPlayingError extends WatchSyncError {
   override readonly statusCode: number;
@@ -43,7 +44,8 @@ export interface ServerExtras {
 export interface LiveAdapter {
   fetchSessions(signal: AbortSignal): Promise<ParsedSession[]>;
   // Resolves once the socket is open; the returned function closes it. Rejects when no socket can be opened.
-  openSocket(handlers: SocketHandlers): Promise<() => void>;
+  // Servers without a push channel leave it out, and the hub simply polls them.
+  openSocket?(handlers: SocketHandlers): Promise<() => void>;
   fetchExtras?(signal: AbortSignal): Promise<ServerExtras>;
   stopStream(session: ParsedSession, message: string): Promise<void>;
   fetchPoster(path: string): Promise<{ contentType: string; body: Buffer }>;
@@ -408,8 +410,154 @@ export function parseJellyfinSessions(data: unknown[]): ParsedSession[] {
   });
 }
 
+// ---------------------------------------------------------------- Dupelix
+
+// Signed artwork links: /api/v1/artwork/{artworkId}/{expires}/{reference}.{signature}, optionally ?v={content key}.
+// They need no credential, so they are the only Dupelix paths SRTL fetches without the API key.
+const dupelixArtworkPattern = /^\/api\/v1\/artwork\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(\d{1,12})\/[A-Za-z0-9_.-]{1,256}(?:\?v=[0-9a-f]{64}\.(?:jpg|png))?$/i;
+const dupelixPosterKey = /^title:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+// Signed links last 7 to 14 days. SRTL re-reads a title's artwork well before that, and sooner when a link is due
+// to expire within the hour.
+export const dupelixArtworkTtlMs = 6 * 60 * 60_000;
+const dupelixArtworkExpiryMarginMs = 60 * 60_000;
+const dupelixPosterWidth = 240;
+const dupelixMaxPages = 5;
+
+export function dupelixArtworkAllowed(path: string): boolean {
+  return dupelixArtworkPattern.test(path);
+}
+
+export interface DupelixArtwork { kind: string; url: string; width: number | null }
+
+// Turns an artwork URL into the server-relative path SRTL fetches. A full URL must point at the configured server.
+export function dupelixArtworkPath(url: string, baseUrl: string): string | null {
+  let path = url;
+  if (!url.startsWith("/")) {
+    try {
+      const parsed = new URL(url);
+      if (parsed.origin !== new URL(baseUrl).origin) return null;
+      path = `${parsed.pathname}${parsed.search}`;
+    } catch {
+      return null;
+    }
+  }
+  return dupelixArtworkAllowed(path) ? path : null;
+}
+
+export function dupelixArtworkList(value: unknown): DupelixArtwork[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const item = entry && typeof entry === "object" ? entry as { kind?: unknown; url?: unknown; width?: unknown } : null;
+    if (!item || typeof item.url !== "string" || typeof item.kind !== "string") return [];
+    return [{ kind: item.kind, url: item.url, width: typeof item.width === "number" && Number.isFinite(item.width) ? item.width : null }];
+  });
+}
+
+// The poster for a card: a poster first (an episode lists its own stills before its show's poster), then a still,
+// then a backdrop. Of each kind, the smallest picture at least as wide as the card, else the widest.
+export function pickDupelixPoster(artwork: DupelixArtwork[], baseUrl: string, now = Date.now()): string | null {
+  for (const kind of ["poster", "still", "backdrop"]) {
+    const candidates = artwork.flatMap((entry) => {
+      if (entry.kind !== kind) return [];
+      const path = dupelixArtworkPath(entry.url, baseUrl);
+      if (!path) return [];
+      const expires = Number(dupelixArtworkPattern.exec(path)?.[1]) * 1000;
+      return expires - dupelixArtworkExpiryMarginMs > now ? [{ path, width: entry.width ?? 0 }] : [];
+    });
+    if (!candidates.length) continue;
+    const covering = candidates.filter((entry) => entry.width >= dupelixPosterWidth).sort((a, b) => a.width - b.width);
+    return (covering[0] ?? candidates.sort((a, b) => b.width - a.width)[0]!).path;
+  }
+  return null;
+}
+
+// Artwork a session carries itself, once Dupelix adds it, or that its title summary includes.
+function sessionArtwork(raw: unknown): DupelixArtwork[] {
+  const session = raw && typeof raw === "object" ? raw as { artwork?: unknown; title?: { artwork?: unknown } | null } : null;
+  const own = dupelixArtworkList(session?.artwork);
+  return own.length ? own : dupelixArtworkList(session?.title?.artwork);
+}
+
+export const dupelixStopUnavailable = "Dupelix does not let other apps stop streams yet.";
+
+export class DupelixLiveAdapter implements LiveAdapter {
+  // Per title: the poster path picked from its signed artwork, and when it was read.
+  private readonly artwork = new Map<string, { path: string | null; fetchedAt: number }>();
+
+  constructor(private readonly config: LiveServerConfig) {}
+
+  private api(path: string, signal?: AbortSignal) {
+    return watchSyncJson({ url: `${this.config.url}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.config.token), timeoutMs: sessionTimeoutMs, retries: 0, signal, maxBytes: 16 * 1024 * 1024 });
+  }
+
+  async fetchSessions(signal: AbortSignal): Promise<ParsedSession[]> {
+    const entries: unknown[] = [];
+    let cursor: string | null = null;
+    for (let page = 0; page < dupelixMaxPages; page += 1) {
+      const query = new URLSearchParams({ limit: "200", ...(cursor ? { cursor } : {}) });
+      const { data } = await this.api(`/activity/sessions?${query.toString()}`, signal);
+      const body = data && typeof data === "object" ? data as { sessions?: unknown; nextCursor?: unknown } : null;
+      if (!body || !Array.isArray(body.sessions)) throw new NowPlayingError("Dupelix returned an unsupported sessions response.");
+      entries.push(...body.sessions);
+      cursor = typeof body.nextCursor === "string" && body.nextCursor ? body.nextCursor : null;
+      if (!cursor) break;
+    }
+    const now = new Date();
+    return entries.flatMap((entry) => {
+      const parsed = parseDupelixSession(entry, now);
+      if (!parsed) return [];
+      const art = sessionArtwork(entry);
+      if (parsed.itemKey && art.length) {
+        const path = pickDupelixPoster(art, this.config.url, now.getTime());
+        if (path) this.artwork.set(parsed.itemKey.toLowerCase(), { path, fetchedAt: now.getTime() });
+      }
+      return [parsed];
+    });
+  }
+
+  prune(activeSessions: ParsedSession[]): void {
+    const active = new Set(activeSessions.map((session) => session.itemKey?.toLowerCase()).filter(Boolean));
+    for (const key of this.artwork.keys()) if (!active.has(key)) this.artwork.delete(key);
+  }
+
+  // Dupelix has no way yet for another app to stop someone's stream.
+  async stopStream(): Promise<void> {
+    throw new NowPlayingError(dupelixStopUnavailable, null, 409);
+  }
+
+  private async posterPath(titleId: string, refresh: boolean): Promise<string | null> {
+    const cached = this.artwork.get(titleId);
+    const now = Date.now();
+    if (!refresh && cached && now - cached.fetchedAt < dupelixArtworkTtlMs) return cached.path;
+    const { data } = await this.api(`/titles/${titleId}`);
+    const path = pickDupelixPoster(dupelixArtworkList((data as { artwork?: unknown } | null)?.artwork), this.config.url, now);
+    this.artwork.set(titleId, { path, fetchedAt: now });
+    return path;
+  }
+
+  async fetchPoster(key: string): Promise<{ contentType: string; body: Buffer }> {
+    const titleId = dupelixPosterKey.exec(key)?.[1];
+    if (!titleId) throw new NowPlayingError("Unsupported artwork path.");
+    for (const refresh of [false, true]) {
+      const path = await this.posterPath(titleId, refresh);
+      if (!path || !dupelixArtworkAllowed(path)) throw new NowPlayingError("Dupelix has no artwork for this title.");
+      try {
+        // The signed link is the credential: the API key is never sent with it.
+        const response = await watchSyncRequest({ url: `${this.config.url}${path}`, service: "Dupelix", headers: { Accept: "image/*" }, timeoutMs: sessionTimeoutMs, retries: 0, maxBytes: posterMaxBytes });
+        return { contentType: String(response.headers["content-type"] ?? ""), body: response.buffer };
+      } catch (error) {
+        // An expired or revoked link: read the title once more for fresh links.
+        if (refresh || !(error instanceof WatchSyncError) || (error.httpStatus !== 403 && error.httpStatus !== 404)) throw error;
+      }
+    }
+    throw new NowPlayingError("Dupelix did not return the artwork.");
+  }
+}
+
 export function createLiveAdapter(config: LiveServerConfig): LiveAdapter {
-  return config.kind === "plex" ? new PlexLiveAdapter(config) : new JellyfinLiveAdapter(config);
+  if (config.kind === "plex") return new PlexLiveAdapter(config);
+  if (config.kind === "dupelix") return new DupelixLiveAdapter(config);
+  return new JellyfinLiveAdapter(config);
 }
 
 // plex.tv reports the account's subscription; an active one is Plex Pass.

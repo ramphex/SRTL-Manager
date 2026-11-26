@@ -34,7 +34,7 @@ async function fixture(page: Page) {
       response = { currentVersion: "0.1.4-beta.3", currentChannel: "beta", currentChannelLabel: "Beta", stable: { ...release, channel: "stable" }, beta: { ...release, channel: "beta" }, ...release };
     } else if (url.pathname === "/api/media-servers" && method === "GET") response = list;
     else if (url.pathname === "/api/media-servers" && method === "POST") {
-      const input = body as { kind: "plex" | "jellyfin"; name: string; url: string; token?: string };
+      const input = body as { kind: MediaServer["kind"]; name: string; url: string; token?: string };
       list.servers = [...list.servers, { id: "jf2", kind: input.kind, name: input.name, url: input.url, hasToken: Boolean(input.token), prefixMappings: [], machineIdentifier: null, accountName: null, version: null, lastCheckedAt: null, lastError: null }];
       response = list;
     } else if (url.pathname === "/api/media-servers/jf2/plex-pin" && method === "POST") {
@@ -130,6 +130,25 @@ test("adds a Plex server by signing in with Plex, with pasting a token as the se
   await expect(card.locator(".error")).toHaveCount(0);
   expect(calls.find((call) => call.method === "POST" && call.path === "/api/media-servers")?.body).toMatchObject({ kind: "plex", name: "Basement Plex", token: "" });
   await expect(card.getByRole("button", { name: "Sign in with Plex again" })).toBeVisible();
+});
+
+test("adds a Dupelix server with an API key, naming the scopes it needs", async ({ page }) => {
+  const { calls } = await fixture(page);
+  await openMediaServers(page);
+  await page.getByRole("button", { name: "Add Dupelix server" }).click();
+  const form = page.getByRole("form", { name: "Add Dupelix server" });
+  await expect(form).toContainText("activity.read");
+  await expect(form).toContainText("library.read");
+  await expect(form.getByText("Or enter a token manually")).toHaveCount(0);
+  await form.getByLabel("Name", { exact: true }).fill("Dupelix");
+  await form.getByLabel("Server URL").fill("https://dupelix.example.com");
+  await form.getByLabel("API key", { exact: true }).fill("msk_examplekeyexamplekey");
+  await form.getByRole("button", { name: "Add server" }).click();
+  const card = page.getByRole("region", { name: "Dupelix server Dupelix" });
+  await expect(card).toBeVisible();
+  await expect(card).toContainText("Not checked");
+  await expect(card.getByRole("button", { name: /Sign in with Plex/ })).toHaveCount(0);
+  expect(calls.find((call) => call.method === "POST" && call.path === "/api/media-servers")?.body).toMatchObject({ kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", token: "msk_examplekeyexamplekey" });
 });
 
 test("explains which watch sync pairs block removing a server", async ({ page }) => {

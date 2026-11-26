@@ -2,7 +2,8 @@ import type { MediaServerKind } from "../shared/mediaServers";
 
 // Unmodified brand glyphs from simple-icons 16.36.0 (CC0 1.0, https://simpleicons.org), used only to show which
 // kind of media server a row belongs to. Plex and Jellyfin names and logos are trademarks of their respective owners.
-const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: string; aspect: number }> = {
+// Dupelix's mark is a plain disc; SRTL draws it with a play triangle cut out so it reads at small sizes.
+const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: string; aspect: number; fillRule?: "evenodd" }> = {
   // The Plex glyph is a wordmark that fills under half of its square, so its box is cropped to the glyph's height.
   plex: {
     label: "Plex",
@@ -15,6 +16,13 @@ const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: st
     viewBox: "0 0 24 24",
     aspect: 1,
     path: "M12 .002C8.826.002-1.398 18.537.16 21.666c1.56 3.129 22.14 3.094 23.682 0C25.384 18.573 15.177 0 12 0zm7.76 18.949c-1.008 2.028-14.493 2.05-15.514 0C3.224 16.9 9.92 4.755 12.003 4.755c2.081 0 8.77 12.166 7.759 14.196zM12 9.198c-1.054 0-4.446 6.15-3.93 7.189.518 1.04 7.348 1.027 7.86 0 .511-1.027-2.874-7.19-3.93-7.19z"
+  },
+  dupelix: {
+    label: "Dupelix",
+    viewBox: "0 0 24 24",
+    aspect: 1,
+    fillRule: "evenodd",
+    path: "M12 1a11 11 0 1 0 0 22 11 11 0 0 0 0-22ZM9.5 7.25v9.5L17 12Z"
   }
 };
 
@@ -25,7 +33,7 @@ export function MediaServerIcon({ kind, size = 14, decorative = false }: { kind:
   return (
     <svg className={`server-kind-icon server-kind-${kind}`} viewBox={glyph.viewBox} width={Math.round(size * glyph.aspect)} height={size} {...naming} fill="currentColor">
       {decorative ? null : <title>{glyph.label}</title>}
-      <path d={glyph.path} />
+      <path d={glyph.path} fillRule={glyph.fillRule} />
     </svg>
   );
 }
