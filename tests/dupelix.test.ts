@@ -11,7 +11,7 @@ import { dupelixEncoderCodec, dupelixEncoderEngine, dupelixPosterPath, parseDupe
 import { NowPlayingHub, type NowPlayingEvent, type NowPlayingTiming } from "../src/server/lib/nowPlaying/hub";
 import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkHttp, dupelixArtworkLink, dupelixStopNeedsScope, dupelixStopRefused, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
 import { getWatchSyncState, loadWatchSyncContext } from "../src/server/lib/watchSync";
-import { dupelixKeyRejected, dupelixWrongAddress } from "../src/server/lib/dupelixClient";
+import { DupelixClient, dupelixKeyExpired, dupelixKeyLanOnly, dupelixKeyRejected, dupelixWrongAddress } from "../src/server/lib/dupelixClient";
 import { retryAfterMs, watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import type { NowPlayingHostEvent, NowPlayingSnapshot } from "../src/shared/nowPlaying";
@@ -225,6 +225,7 @@ class MockDupelix {
   scopes = new Set(["activity.read", "library.read"]);
   // Older servers have no /api-keys/current.
   keyEndpoint = true;
+  keyExpiresAt: string | null = null;
   sessions: unknown[] = [];
   guests: unknown[] = [];
   stops: Array<{ id: string; body: unknown; contentType: string | undefined }> = [];
@@ -260,7 +261,7 @@ class MockDupelix {
       };
       if (url.pathname === "/api/v1/api-keys/current" && this.keyEndpoint) {
         if (request.headers.authorization !== `Bearer ${this.apiKey}`) return reply.code(401).send({ code: "unauthenticated" });
-        return { id: dupelixIds.device, name: "SRTL Manager", prefix: this.apiKey.slice(0, 12), scopes: [...this.scopes, "activity.read"], effectiveScopes: [...this.scopes], expiresAt: null, lanOnly: true };
+        return { id: dupelixIds.device, name: "SRTL Manager", prefix: this.apiKey.slice(0, 12), scopes: [...this.scopes, "activity.read"], effectiveScopes: [...this.scopes], expiresAt: this.keyExpiresAt, lanOnly: true };
       }
       if (url.pathname === "/api/v1/activity/sessions") {
         if (!granted("activity.read")) return reply;
@@ -572,7 +573,7 @@ describe("Dupelix media servers", () => {
   const call = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: unknown) =>
     app.app.inject({ method, url, headers: { cookie }, ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }) });
 
-  it("adds a Dupelix server with a sealed key, tests it through the key's own description, and records the version and scopes", async () => {
+  it("adds a Dupelix server with a sealed key, tests it through the key's own description, and keeps nothing about the key but the sealed key", async () => {
     const rejected = await call("POST", "/api/media-servers", { kind: "dupelix", name: "Dupelix", url: mock.base, token: "not-a-dupelix-key", prefixMappings: [] });
     expect(rejected.statusCode).toBe(400);
     expect(rejected.json().error).toContain("msk_");
@@ -589,11 +590,14 @@ describe("Dupelix media servers", () => {
     mock.scopes.add("activity.network");
     const tested = await call("POST", `/api/media-servers/${id}/test`);
     expect(tested.statusCode).toBe(200);
-    expect((tested.json() as MediaServerList).servers[0]).toMatchObject({
-      kind: "dupelix", version: "0.1.0 b1 (API revision 148)", lastError: null,
-      apiKey: { name: "SRTL Manager", prefix: mock.apiKey.slice(0, 12), scopes: ["activity.network", "activity.read", "library.read"], expiresAt: null, lanOnly: true }
-    });
-    expect(tested.body).not.toContain(mock.apiKey);
+    const testedServer = (tested.json() as MediaServerList).servers[0]!;
+    expect(testedServer).toMatchObject({ kind: "dupelix", version: "0.1.0 b1 (API revision 148)", lastError: null });
+    // The browser gets what Plex and Jellyfin servers send: no part of the key, and nothing Dupelix said about it.
+    expect(Object.keys(testedServer).sort()).toEqual(["accountName", "hasToken", "id", "kind", "lastCheckedAt", "lastError", "machineIdentifier", "name", "prefixMappings", "url", "version"]);
+    expect(tested.body).not.toContain(mock.apiKey.slice(0, 8));
+    expect(tested.body).not.toContain("SRTL Manager");
+    // A LAN-only key is fine on a plain HTTP address.
+    expect(Object.keys((await app.database.pool.query(`SELECT * FROM media_servers LIMIT 1`)).rows[0]!)).not.toContain("api_key");
     expect(mock.requests.map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current"]);
     expect(mock.requests.every((entry) => entry.authorization === `Bearer ${mock.apiKey}`)).toBe(true);
 
@@ -605,8 +609,20 @@ describe("Dupelix media servers", () => {
     mock.scopes = new Set(["library.read"]);
     const missing = await call("POST", `/api/media-servers/${id}/test`);
     expect(missing.statusCode).toBe(400);
-    expect(missing.json().error).toBe("The Dupelix API key is missing the permission \"See who is watching\" (activity.read). Give the key the Dupelix permission \"See who is watching\" (activity.read) under Admin > Integrations.");
-    expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toContain("activity.read");
+    const missingText = "The Dupelix key is missing the permission See who is watching. Edit the key in Dupelix under Admin > Integrations.";
+    expect(missing.json().error).toBe(missingText);
+    expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toBe(missingText);
+
+    // An expired key shows as the server's status the same way.
+    mock.scopes = new Set(["activity.read"]);
+    mock.keyExpiresAt = "2020-01-01T00:00:00.000Z";
+    const expired = await call("POST", `/api/media-servers/${id}/test`);
+    expect(expired.statusCode).toBe(400);
+    expect(expired.json().error).toBe(dupelixKeyExpired);
+    expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toBe(dupelixKeyExpired);
+    mock.keyExpiresAt = new Date(Date.now() + 86_400_000).toISOString();
+    expect((await call("POST", `/api/media-servers/${id}/test`)).json().servers[0].lastError).toBeNull();
+    mock.scopes = new Set(["library.read"]);
 
     // An older server without the key endpoint is probed with one page of sessions instead.
     mock.keyEndpoint = false;
@@ -617,13 +633,26 @@ describe("Dupelix media servers", () => {
     mock.scopes.add("activity.read");
     const old = await call("POST", `/api/media-servers/${id}/test`);
     expect(old.statusCode).toBe(200);
-    expect((old.json() as MediaServerList).servers[0]!.apiKey).toBeUndefined();
+    expect((old.json() as MediaServerList).servers[0]!.lastError).toBeNull();
     expect(mock.requests.slice(-3).map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current", "/api/v1/activity/sessions?limit=1"]);
 
     // A new address needs the key again, and a new address with a key clears what the old one reported.
     const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Dupelix", url: "http://elsewhere.example:8080", prefixMappings: [] });
     expect(moved.statusCode).toBe(400);
     expect(moved.json().error).toContain("Enter the API key again when changing the Dupelix address");
+  });
+
+  it("refuses a LAN-only key on an HTTPS address, and only there", async () => {
+    const answer = (lanOnly: boolean | null) => async (path: string) => ({ data: path === "/api-keys/current" ? { effectiveScopes: ["activity.read"], expiresAt: null, lanOnly } : {} });
+    const client = (url: string, lanOnly: boolean | null) => {
+      const dupelix = new DupelixClient(url, mock.apiKey);
+      (dupelix as unknown as { get: ReturnType<typeof answer> }).get = answer(lanOnly);
+      return dupelix;
+    };
+    await expect(client("https://dupelix.example.com", true).checkAccess()).rejects.toThrow(dupelixKeyLanOnly);
+    await expect(client("https://dupelix.example.com", false).checkAccess()).resolves.toBeUndefined();
+    await expect(client("https://dupelix.example.com", null).checkAccess()).resolves.toBeUndefined();
+    await expect(client("http://dupelix.example.com:8100", true).checkAccess()).resolves.toBeUndefined();
   });
 
   it("sends the key to /server on a local integration route, and tells a wrong address from a rejected key", async () => {
@@ -672,7 +701,8 @@ describe("Dupelix migration", () => {
       // Rewind to schema 38, where the table only allowed Plex and Jellyfin.
       await first.pool.query(`ALTER TABLE media_servers DROP CONSTRAINT media_servers_kind_check`);
       await first.pool.query(`ALTER TABLE media_servers ADD CONSTRAINT media_servers_kind_check CHECK (kind IN ('plex', 'jellyfin'))`);
-      await first.pool.query(`ALTER TABLE media_servers DROP COLUMN api_key`);
+      // A pre-release build stored a key description here; migration 40 drops it.
+      await first.pool.query(`ALTER TABLE media_servers ADD COLUMN api_key TEXT`);
       await first.pool.query(`DELETE FROM schema_migrations WHERE version IN (39, 40)`);
       await first.pool.query(`INSERT INTO media_servers (id, kind, name, url, token, created_at, updated_at) VALUES ('aaaaaaaaaaaa', 'plex', 'Home Plex', 'http://plex:32400', '', now()::text, now()::text), ('bbbbbbbbbbbb', 'jellyfin', 'Jellyfin', 'http://jellyfin:8096', '', now()::text, now()::text)`);
       await expect(first.pool.query(`INSERT INTO media_servers (id, kind, name, url, created_at, updated_at) VALUES ('cccccccccccc', 'dupelix', 'Dupelix', 'http://dupelix:8080', now()::text, now()::text)`)).rejects.toThrow(/media_servers_kind_check/);
@@ -690,7 +720,7 @@ describe("Dupelix migration", () => {
       expect(checks.rows).toEqual([{ name: "media_servers_kind_check" }]);
       expect((await upgraded.pool.query(`SELECT 1 FROM schema_migrations WHERE version = 39 AND name = 'dupelix_media_servers'`)).rowCount).toBe(1);
       expect((await upgraded.pool.query(`SELECT 1 FROM schema_migrations WHERE version = 40 AND name = 'media_server_api_keys'`)).rowCount).toBe(1);
-      expect((await upgraded.pool.query<{ api_key: string | null }>(`SELECT api_key FROM media_servers ORDER BY id`)).rows).toEqual([{ api_key: null }, { api_key: null }, { api_key: null }]);
+      expect((await upgraded.pool.query(`SELECT 1 FROM information_schema.columns WHERE table_name = 'media_servers' AND column_name = 'api_key'`)).rowCount).toBe(0);
     } finally {
       await upgraded.close();
       await testDatabase.cleanup();

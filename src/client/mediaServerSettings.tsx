@@ -2,9 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type K
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Check, ChevronDown, KeyRound, LoaderCircle, LogIn, Pencil, Plug, Plus, Save, Server, Trash2, X } from "lucide-react";
 import {
-  dupelixOptionalScopes,
   dupelixPermissionNames,
-  dupelixRequiredScopes,
   mediaServerKindLabels,
   mediaServerKinds,
   type MediaServer,
@@ -137,10 +135,6 @@ function DupelixPermission({ scope }: { scope: string }) {
   return name ? <><strong>{name}</strong> <code className="dupelix-scope-id">{scope}</code></> : <code>{scope}</code>;
 }
 
-function DupelixPermissionList({ scopes }: { scopes: readonly string[] }) {
-  return <>{scopes.map((scope, index) => <span key={scope}>{index ? ", " : null}<DupelixPermission scope={scope} /></span>)}</>;
-}
-
 // Dupelix marks a key LAN only once another machine sends it over plain HTTP, then refuses it on its HTTPS address.
 // Keys used on Dupelix's own address or on its integration network are never marked.
 const dupelixLanOnlyNote = <>A key that another machine sends over plain HTTP becomes LAN only, and Dupelix then refuses it on its HTTPS address; keys used on Dupelix&apos;s own address or its integration network are not affected. If SRTL reaches Dupelix over plain HTTP from another machine, use a separate key for the HTTPS address.</>;
@@ -149,26 +143,6 @@ const apiKeyHelp: Record<Exclude<MediaServerKind, "plex">, ReactNode> = {
   jellyfin: <>Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>,
   dupelix: <>Create a key in Dupelix under <strong>Admin &gt; Integrations</strong>. It needs the permission <DupelixPermission scope="activity.read" /> to list streams. Optional: <DupelixPermission scope="activity.stop" /> for the Stop button, <DupelixPermission scope="activity.network" /> for client addresses, location, and LAN or WAN, <DupelixPermission scope="activity.guests" /> for guest profiles&apos; streams, and <DupelixPermission scope="library.read" /> for artwork when a stream carries none. Keys start with <code>msk_</code>. {dupelixLanOnlyNote} It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>
 };
-
-// The key's name, scopes, and expiry as Dupelix last reported them, with the optional scopes it lacks.
-function DupelixKeyFacts({ server }: { server: MediaServer }) {
-  const [renderedAt] = useState(() => Date.now());
-  const key = server.apiKey;
-  if (!key) return null;
-  const missingRequired = dupelixRequiredScopes.filter((scope) => !key.scopes.includes(scope));
-  const missingOptional = dupelixOptionalScopes.filter((entry) => !key.scopes.includes(entry.scope));
-  const expired = key.expiresAt !== null && Date.parse(key.expiresAt) <= renderedAt;
-  // Dupelix marks a key LAN only once another machine sends it over plain HTTP, and refuses it on its HTTPS address.
-  const lanOnlyOverHttps = key.lanOnly === true && /^https:/i.test(server.url);
-  return <>
-    <div><dt>API key</dt><dd>{[key.name, key.prefix ? `${key.prefix}…` : null].filter(Boolean).join(" · ") || "Unnamed"}{key.lanOnly ? " · LAN only" : ""}</dd></div>
-    <div><dt>Expires</dt><dd className={expired ? "error" : undefined}>{key.expiresAt ? `${expired ? "Expired " : ""}${formatDate(key.expiresAt)}` : "Never"}</dd></div>
-    <div><dt>Permissions</dt><dd>{key.scopes.length ? <DupelixPermissionList scopes={key.scopes} /> : "None"}</dd></div>
-    {lanOnlyOverHttps ? <div><dt>Address</dt><dd className="error">This key is LAN only because another machine sent it over plain HTTP, so Dupelix refuses it on an HTTPS address. Use Dupelix&apos;s local integration address, or create a separate key for this address under Admin &gt; Integrations and never send it over plain HTTP from another machine.</dd></div> : null}
-    {missingRequired.length ? <div><dt>Missing permissions</dt><dd className="error"><DupelixPermissionList scopes={missingRequired} />: Now Playing needs {missingRequired.length === 1 ? "it" : "them"}.</dd></div> : null}
-    {missingOptional.length ? <div><dt>Optional permissions</dt><dd>Not on this key: {missingOptional.map((entry, index) => <span key={entry.scope}>{index ? ", " : null}<DupelixPermission scope={entry.scope} /> ({entry.purpose})</span>)}.</dd></div> : null}
-  </>;
-}
 
 const plexTokenNote = <>Use the token of the Plex account that owns this server. To find it, open any item in Plex Web, choose <strong>Get Info</strong> &gt; <strong>View XML</strong>, and copy the <code>X-Plex-Token</code> value from the address bar. Never use the <code>PlexOnlineToken</code> from the server&apos;s Preferences.xml.</>;
 
@@ -337,7 +311,6 @@ function ServerCard({ server, startedSignIn, onStartedSignInSeen }: { server: Me
       <div><dt>Version</dt><dd>{server.version ? `${kind} ${server.version}` : "Unknown"}</dd></div>
       <div><dt>Status</dt><dd className={server.lastError ? "error" : undefined}>{server.lastError ?? (server.lastCheckedAt ? `Connected, checked ${formatDate(server.lastCheckedAt)}` : server.hasToken ? "Not checked yet" : status.label)}</dd></div>
       {server.accountName ? <div><dt>Plex account</dt><dd>{server.accountName}</dd></div> : null}
-      {server.kind === "dupelix" ? <DupelixKeyFacts server={server} /> : null}
       {server.prefixMappings.length ? <div><dt>Path mappings</dt><dd>{server.prefixMappings.map((mapping) => `${mapping.serverPrefix} → ${mapping.srtlPrefix}`).join(", ")}</dd></div> : null}
     </dl>
     <div className="radarr-toolbar">

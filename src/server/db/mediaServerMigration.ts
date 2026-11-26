@@ -26,7 +26,7 @@ export async function applyMediaServerMigration(client: PoolClient, timestamp: s
   await client.query(`CREATE TABLE IF NOT EXISTS media_servers (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL CHECK (kind IN ('plex', 'jellyfin')), name TEXT NOT NULL, url TEXT NOT NULL,
     token TEXT NOT NULL DEFAULT '', prefix_mappings TEXT NOT NULL DEFAULT '[]',
-    machine_identifier TEXT, account_name TEXT, account_id TEXT, version TEXT, api_key TEXT,
+    machine_identifier TEXT, account_name TEXT, account_id TEXT, version TEXT,
     last_checked_at TEXT, last_error TEXT, pending_pin TEXT, position INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL, updated_at TEXT NOT NULL
   )`);
@@ -92,10 +92,10 @@ function quoteIdentifier(name: string): string {
   return `"${name.replace(/"/g, '""')}"`;
 }
 
-// Migration 40: Dupelix servers describe the API key SRTL uses (name, scopes, expiry). The description is kept per
-// server for Settings; existing rows start without one until their next connection test.
+// Migration 40: SRTL keeps no description of a media server's API key. A pre-release build stored one in api_key;
+// this drops that column where it exists, and does nothing anywhere else.
 export async function applyMediaServerKeyMigration(client: PoolClient): Promise<void> {
   const table = (await client.query<{ name: string | null }>(`SELECT to_regclass('public.media_servers')::text AS name`)).rows[0]?.name;
   if (!table) return;
-  await client.query(`ALTER TABLE media_servers ADD COLUMN IF NOT EXISTS api_key TEXT`);
+  await client.query(`ALTER TABLE media_servers DROP COLUMN IF EXISTS api_key`);
 }

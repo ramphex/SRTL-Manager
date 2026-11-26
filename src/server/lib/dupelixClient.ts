@@ -1,6 +1,6 @@
 import { z } from "zod";
 import packageJson from "../../../package.json";
-import { dupelixOptionalScopes, dupelixPermission, dupelixRequiredScopes, type MediaServerApiKey } from "../../shared/mediaServers";
+import { dupelixOptionalScopes, dupelixPermission, dupelixPermissionNames, dupelixRequiredScopes } from "../../shared/mediaServers";
 import { WatchSyncError, normalizeServerUrl, watchSyncJson } from "./watchSyncHttp";
 
 // Dupelix speaks its own API under /api/v1. SRTL authenticates with an API key (msk_...) in the Authorization
@@ -16,6 +16,8 @@ export const dupelixApiPrefix = "/api/v1";
 export { dupelixOptionalScopes, dupelixRequiredScopes };
 
 export const dupelixWrongAddress = "This address is not a Dupelix integration route (HTTP 404). Check the URL: use the address and port Dupelix gives integrations, without /api/v1.";
+export const dupelixKeyExpired = "The Dupelix key has expired. Create a new one in Dupelix under Admin > Integrations.";
+export const dupelixKeyLanOnly = "The Dupelix key is LAN only because another machine sent it over plain HTTP, so Dupelix refuses it on this HTTPS address. Use Dupelix's local integration address, or a separate key for this address.";
 export const dupelixKeyRejected = "Dupelix rejected the API key (HTTP 401): it is invalid or has been revoked. Create a new key in Dupelix under Admin > Integrations and enter it again.";
 const needsRead = `Give the key the Dupelix permission ${dupelixPermission("activity.read")} under Admin > Integrations.`;
 
@@ -30,25 +32,30 @@ const serverInfoSchema = z.object({
 }).loose();
 
 const currentKeySchema = z.object({
-  id: z.string().optional(),
-  name: z.string().nullish(),
-  prefix: z.string().nullish(),
   scopes: z.array(z.string()).optional(),
   effectiveScopes: z.array(z.string()).optional(),
   expiresAt: z.string().nullish(),
   lanOnly: z.boolean().nullish()
 }).loose();
 
-// What the key itself is allowed to do: its effective scopes, which shrink when its creator loses a permission.
-export function parseDupelixKey(raw: unknown): MediaServerApiKey | null {
+// What SRTL reads from Dupelix's description of its own key. The key's name and visible start are never kept: SRTL
+// only needs to know what the key may do, when it expires, and whether Dupelix limits it to the LAN.
+export interface DupelixKeyInfo {
+  // Effective scopes: what the key may do now, as far as its creator still holds those permissions.
+  scopes: string[];
+  // Null when the key never expires.
+  expiresAt: string | null;
+  // True once another machine sent the key over plain HTTP: Dupelix then refuses it on its HTTPS address.
+  lanOnly: boolean | null;
+}
+
+export function parseDupelixKey(raw: unknown): DupelixKeyInfo | null {
   const parsed = currentKeySchema.safeParse(raw);
   if (!parsed.success) return null;
   const key = parsed.data;
   const scopes = [...new Set(key.effectiveScopes ?? key.scopes ?? [])].filter((scope) => /^[a-z0-9_.]{1,64}$/.test(scope)).sort();
   const expires = key.expiresAt ? new Date(key.expiresAt) : null;
   return {
-    name: key.name?.trim().slice(0, 120) || null,
-    prefix: key.prefix && /^[A-Za-z0-9_-]{1,32}$/.test(key.prefix) ? key.prefix : null,
     scopes,
     expiresAt: expires && Number.isFinite(expires.getTime()) ? expires.toISOString() : null,
     lanOnly: key.lanOnly ?? null
@@ -103,7 +110,7 @@ export class DupelixClient {
   }
 
   // The key describes itself on newer servers. Null when the server is too old to have this endpoint.
-  async currentKey(): Promise<MediaServerApiKey | null> {
+  async currentKey(): Promise<DupelixKeyInfo | null> {
     try {
       const { data } = await this.get("/api-keys/current");
       const key = parseDupelixKey(data);
@@ -116,16 +123,19 @@ export class DupelixClient {
     }
   }
 
-  // Proves the key works and holds the scopes SRTL needs, so a wrong key or a missing scope fails the connection test
-  // instead of the first Now Playing poll. Newer servers describe the key; older ones are probed with one session.
-  async checkAccess(): Promise<MediaServerApiKey | null> {
+  // Proves the key works for Now Playing, so a problem with it fails the connection test (and shows as the server's
+  // status) instead of the first Now Playing poll: an expired key, a missing required permission, or a LAN-only key on
+  // an HTTPS address. Missing optional permissions only hide their features. Newer servers describe the key; older
+  // ones are probed with one session.
+  async checkAccess(now = Date.now()): Promise<void> {
     const key = await this.currentKey();
     if (key) {
+      if (key.expiresAt && Date.parse(key.expiresAt) <= now) throw new WatchSyncError(dupelixKeyExpired, 403);
       const missing = dupelixRequiredScopes.filter((scope) => !key.scopes.includes(scope));
-      if (missing.length) throw new WatchSyncError(`The Dupelix API key is missing the permission${missing.length === 1 ? "" : "s"} ${missing.map(dupelixPermission).join(" and ")}. ${needsRead}`, 403);
-      return key;
+      if (missing.length) throw new WatchSyncError(`The Dupelix key is missing the permission${missing.length === 1 ? "" : "s"} ${missing.map((scope) => dupelixPermissionNames[scope] ?? scope).join(" and ")}. Edit the key in Dupelix under Admin > Integrations.`, 403);
+      if (key.lanOnly === true && /^https:/i.test(this.baseUrl)) throw new WatchSyncError(dupelixKeyLanOnly, 403);
+      return;
     }
     await this.get("/activity/sessions?limit=1").catch((error: unknown) => scopeMessage(error, "Now Playing"));
-    return null;
   }
 }

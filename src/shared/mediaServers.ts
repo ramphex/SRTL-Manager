@@ -35,18 +35,6 @@ export function dupelixPermission(scope: string): string {
   return name ? `"${name}" (${scope})` : scope;
 }
 
-// What a Dupelix server reports about the key SRTL uses, from the last connection test.
-export interface MediaServerApiKey {
-  name: string | null;
-  // The key's visible start, such as "msk_ab12cd34"; never the whole key.
-  prefix: string | null;
-  // Effective scopes: what the key may do now, as far as its creator still holds those permissions.
-  scopes: string[];
-  // Null when the key never expires.
-  expiresAt: string | null;
-  lanOnly: boolean | null;
-}
-
 export const mediaServerLimit = 10;
 export const mediaServerKindLabels: Record<MediaServerKind, string> = { plex: "Plex", jellyfin: "Jellyfin", dupelix: "Dupelix" };
 
@@ -79,8 +67,6 @@ export interface MediaServer {
   // Plex only: the server's machine identifier and the plex.tv account that owns it.
   machineIdentifier: string | null;
   accountName: string | null;
-  // Dupelix only: the API key's name, scopes, and expiry, when the server describes its keys. Absent otherwise.
-  apiKey?: MediaServerApiKey | null;
   version: string | null;
   lastCheckedAt: string | null;
   lastError: string | null;

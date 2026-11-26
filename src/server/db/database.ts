@@ -1103,7 +1103,7 @@ async function initializeDatabase(pool: Pool): Promise<void> {
     if (!applied.has(40)) {
       await client.query("BEGIN");
       try {
-        // What Dupelix reports about the API key SRTL uses, for Settings > Media servers.
+        // Drops the API key description a pre-release build stored; SRTL keeps none.
         await applyMediaServerKeyMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (40, 'media_server_api_keys', $1)`, [nowIso()]);
         await client.query("COMMIT");
