@@ -2,15 +2,16 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import fastify, { type FastifyInstance } from "fastify";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { openDatabase } from "../src/server/db/database";
 import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onboarding";
 import { loadMediaServers, type MediaServerRecord } from "../src/server/lib/mediaServers";
 import { dupelixEncoderCodec, dupelixEncoderEngine, dupelixPosterPath, parseDupelixSession } from "../src/server/lib/nowPlaying/classify";
 import { NowPlayingHub, type NowPlayingEvent, type NowPlayingTiming } from "../src/server/lib/nowPlaying/hub";
-import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkPath, dupelixStopNeedsScope, dupelixStopRefused, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
+import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkHttp, dupelixArtworkLink, dupelixStopNeedsScope, dupelixStopRefused, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
 import { getWatchSyncState, loadWatchSyncContext } from "../src/server/lib/watchSync";
+import { dupelixKeyRejected, dupelixWrongAddress } from "../src/server/lib/dupelixClient";
 import { retryAfterMs, watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import type { NowPlayingHostEvent, NowPlayingSnapshot } from "../src/shared/nowPlaying";
@@ -166,20 +167,44 @@ describe("Dupelix artwork allow list", () => {
     expect(dupelixPosterPath("not-a-uuid")).toBeNull();
   });
 
-  it("follows a full URL only on the configured server", () => {
+  it("accepts a signed artwork link on another origin over HTTPS only, and nothing but the artwork path", () => {
     const relative = dupelixArtworkUrl(dupelixIds.artwork);
-    expect(dupelixArtworkPath(`${base}${relative}`, base)).toBe(relative);
-    expect(dupelixArtworkPath(`https://elsewhere.example${relative}`, base)).toBeNull();
-    expect(dupelixArtworkPath("javascript:alert(1)", base)).toBeNull();
+    // SRTL reaches Dupelix on a local integration route; Dupelix signs links for its public HTTPS address.
+    const local = "http://dupelix:8100";
+    expect(dupelixArtworkLink(relative, local)).toBe(`${local}${relative}`);
+    expect(dupelixArtworkLink(`${local}${relative}`, local)).toBe(`${local}${relative}`);
+    expect(dupelixArtworkLink(`https://media.example.com${relative}`, local)).toBe(`https://media.example.com${relative}`);
+    expect(dupelixArtworkLink(`https://media.example.com:8443${relative}?v=${"b".repeat(64)}.png`, local)).toBe(`https://media.example.com:8443${relative}?v=${"b".repeat(64)}.png`);
+    expect(dupelixArtworkLink(`https://elsewhere.example${relative}`, base)).toBe(`https://elsewhere.example${relative}`);
+    for (const link of [
+      // Another origin over plain HTTP.
+      `http://media.example.com${relative}`,
+      `http://dupelix:8200${relative}`,
+      // Other paths, on the configured server or elsewhere.
+      `https://media.example.com/api/v1/activity/sessions`,
+      `https://media.example.com/api/v1/titles/${dupelixIds.movie}`,
+      `${local}/api/v1/api-keys/current`,
+      `https://media.example.com${relative}/extra`,
+      `https://media.example.com${relative}?v=x`,
+      `${relative}/../../../activity/sessions`,
+      `/api/v1/x/../artwork/${dupelixIds.artwork}/1900000000/kabc.def`,
+      // Credentials, fragments, protocol-relative and other schemes.
+      `https://user:secret@media.example.com${relative}`,
+      `https://media.example.com${relative}#frag`,
+      `//media.example.com${relative}`,
+      `ftp://media.example.com${relative}`,
+      "javascript:alert(1)",
+      "not a url"
+    ]) expect(dupelixArtworkLink(link, local), link).toBeNull();
   });
 
   it("picks a poster over a still, the smallest that covers the card, and skips links about to expire", () => {
     const small = dupelixArtworkUrl(dupelixIds.artworkSmall);
     const large = dupelixArtworkUrl(dupelixIds.artwork);
     const still = dupelixArtworkUrl(dupelixIds.still);
-    expect(pickDupelixPoster([{ kind: "still", url: still, width: 780 }, { kind: "poster", url: large, width: 780 }, { kind: "poster", url: small, width: 320 }], base)).toBe(small);
-    expect(pickDupelixPoster([{ kind: "still", url: still, width: 780 }, { kind: "logo", url: large, width: 780 }], base)).toBe(still);
-    expect(pickDupelixPoster([{ kind: "poster", url: dupelixArtworkUrl(dupelixIds.artworkSmall, Date.now() + 10 * 60_000), width: 320 }, { kind: "poster", url: large, width: 780 }], base)).toBe(large);
+    expect(pickDupelixPoster([{ kind: "still", url: still, width: 780 }, { kind: "poster", url: large, width: 780 }, { kind: "poster", url: small, width: 320 }], base)).toBe(`${base}${small}`);
+    expect(pickDupelixPoster([{ kind: "still", url: still, width: 780 }, { kind: "logo", url: large, width: 780 }], base)).toBe(`${base}${still}`);
+    expect(pickDupelixPoster([{ kind: "poster", url: dupelixArtworkUrl(dupelixIds.artworkSmall, Date.now() + 10 * 60_000), width: 320 }, { kind: "poster", url: large, width: 780 }], base)).toBe(`${base}${large}`);
     expect(pickDupelixPoster([{ kind: "poster", url: "https://elsewhere.example/x.jpg", width: 320 }], base)).toBeNull();
   });
 
@@ -207,14 +232,20 @@ class MockDupelix {
   pageSize = 100;
   version: string | undefined = "0.1.0 b1";
   artworkStatus = 200;
-  requests: Array<{ method: string; path: string; authorization: string | undefined }> = [];
+  requests: Array<{ method: string; path: string; authorization: string | undefined; headers: Record<string, string | string[] | undefined>; rawHeaders: string[] }> = [];
+  // A local integration route: every request without a key gets 404, /server included.
+  localRoute = false;
+  // An address that is not a Dupelix integration route at all.
+  notDupelix = false;
   // Answers every request with 429 and this Retry-After (seconds) while set.
   rateLimited: string | null = null;
 
   async start(): Promise<void> {
     this.app.all("/*", async (request, reply) => {
       const url = new URL(request.url, "http://mock");
-      this.requests.push({ method: request.method, path: `${url.pathname}${url.search}`, authorization: request.headers.authorization });
+      this.requests.push({ method: request.method, path: `${url.pathname}${url.search}`, authorization: request.headers.authorization, headers: { ...request.headers }, rawHeaders: [...request.raw.rawHeaders] });
+      if (this.notDupelix || (this.localRoute && !request.headers.authorization)) return reply.code(404).send({ code: "not_found" });
+      if (this.localRoute && request.headers.authorization !== `Bearer ${this.apiKey}`) return reply.code(401).send({ code: "unauthenticated" });
       if (url.searchParams.has("api_key") || url.searchParams.has("token")) return reply.code(400).send({ code: "credential_in_url" });
       if (this.rateLimited !== null) return reply.code(429).header("Retry-After", this.rateLimited).send({ code: "rate_limited" });
       if (url.pathname === "/api/v1/server") return { apiVersions: ["v1"], contractRevision: 148, ...(this.version && request.headers.authorization ? { version: this.version } : {}) };
@@ -425,6 +456,49 @@ describe("Now Playing with a mocked Dupelix server", () => {
     view.unsubscribe();
   });
 
+  it("fetches artwork signed for Dupelix's public HTTPS address without the key, and refuses other hosts", async () => {
+    mock.localRoute = true;
+    const publicLink = `https://media.example.com${dupelixArtworkUrl(dupelixIds.artwork)}`;
+    mock.sessions = [
+      dupelixSession({ title: dupelixTitle({ artwork: [{ kind: "poster", url: publicLink, width: 320, height: 480 }] }) }),
+      dupelixFullSession()
+    ];
+    // The episode's only links point at plain HTTP on another host, or at another path.
+    (mock.sessions[1] as { title: { artwork: unknown } }).title.artwork = [
+      { kind: "poster", url: `http://media.example.com${dupelixArtworkUrl(dupelixIds.artworkSmall)}`, width: 320, height: 480 },
+      { kind: "still", url: "https://media.example.com/api/v1/activity/sessions", width: 780, height: 439 }
+    ];
+    mock.scopes.delete("library.read");
+    const fetched: Array<{ url: string; headers?: Record<string, string>; trusted?: boolean }> = [];
+    const spy = vi.spyOn(dupelixArtworkHttp, "request").mockImplementation(async (request) => {
+      fetched.push(request);
+      return { status: 200, headers: { "content-type": "image/jpeg" }, body: "", buffer: Buffer.from([0xff, 0xd8, 0xff, 0xd9]), serverTime: null };
+    });
+    try {
+      const view = watchHub();
+      const snapshot = await waitFor(() => view.latest()?.streams.length === 2 && view.latest());
+      const posterFor = (sessionKey: string) => {
+        const found = hub!.posterSource(snapshot.streams.find((stream) => stream.sessionKey === sessionKey)!.posterUrl!.split("/").at(-1)!)!;
+        return found.adapter.fetchPoster(found.source.path);
+      };
+      await expect(posterFor("9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10")).resolves.toMatchObject({ contentType: "image/jpeg" });
+      expect(fetched).toEqual([expect.objectContaining({ url: publicLink })]);
+      expect(fetched[0]!.headers).toEqual({ Accept: "image/*" });
+      expect(fetched[0]!.trusted).toBeUndefined();
+      await expect(posterFor("e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15")).rejects.toThrow("Dupelix has no artwork for this title.");
+      expect(fetched).toHaveLength(1);
+      // Every API request carried exactly one Authorization header and no forwarding headers.
+      expect(mock.requests.length).toBeGreaterThan(0);
+      for (const entry of mock.requests) {
+        expect(entry.rawHeaders.filter((_, index) => index % 2 === 0 && entry.rawHeaders[index]!.toLowerCase() === "authorization")).toHaveLength(1);
+        expect(Object.keys(entry.headers).filter((name) => name.startsWith("x-forwarded") || name === "forwarded")).toEqual([]);
+      }
+      view.unsubscribe();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("waits as long as a 429 asks, keeping the last streams meanwhile", async () => {
     mock.sessions = [dupelixSession()];
     const view = watchHub();
@@ -550,6 +624,32 @@ describe("Dupelix media servers", () => {
     const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Dupelix", url: "http://elsewhere.example:8080", prefixMappings: [] });
     expect(moved.statusCode).toBe(400);
     expect(moved.json().error).toContain("Enter the API key again when changing the Dupelix address");
+  });
+
+  it("sends the key to /server on a local integration route, and tells a wrong address from a rejected key", async () => {
+    mock.localRoute = true;
+    const created = await call("POST", "/api/media-servers", { kind: "dupelix", name: "Dupelix", url: mock.base, token: mock.apiKey, prefixMappings: [] });
+    const id = (created.json() as MediaServerList).servers[0]!.id;
+    const tested = await call("POST", `/api/media-servers/${id}/test`);
+    expect(tested.statusCode).toBe(200);
+    expect((tested.json() as MediaServerList).servers[0]).toMatchObject({ version: "0.1.0 b1 (API revision 148)", lastError: null });
+    expect(mock.requests[0]).toMatchObject({ path: "/api/v1/server", authorization: `Bearer ${mock.apiKey}` });
+    for (const entry of mock.requests) {
+      expect(entry.rawHeaders.filter((_, index) => index % 2 === 0 && entry.rawHeaders[index]!.toLowerCase() === "authorization")).toHaveLength(1);
+      expect(Object.keys(entry.headers).filter((name) => name.startsWith("x-forwarded") || name === "forwarded")).toEqual([]);
+    }
+
+    // A revoked key: 401 on /server.
+    mock.apiKey = "msk_revokedKey_0123456789abcdef";
+    const revoked = await call("POST", `/api/media-servers/${id}/test`);
+    expect(revoked.statusCode).toBe(400);
+    expect(revoked.json().error).toBe(dupelixKeyRejected);
+
+    // Not a Dupelix integration route: 404 even with a key.
+    mock.notDupelix = true;
+    const wrong = await call("POST", `/api/media-servers/${id}/test`);
+    expect(wrong.statusCode).toBe(400);
+    expect(wrong.json().error).toBe(dupelixWrongAddress);
   });
 
   it("keeps Dupelix out of watch sync", async () => {

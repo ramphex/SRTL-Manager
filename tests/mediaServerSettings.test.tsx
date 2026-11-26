@@ -270,4 +270,16 @@ describe("Settings > Media servers, adding a Plex server", () => {
     expect(card.textContent).toContain("library.read (artwork for streams that carry none)");
     expect(card.textContent).not.toContain("Missing scopes");
   });
+
+  it("shows no LAN-only warning for a key Dupelix has not marked LAN only, such as one used on a local integration route", async () => {
+    for (const lanOnly of [false, null]) {
+      api.list.mockResolvedValue({ servers: [plexServer({
+        kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, version: "0.1.0 b1 (API revision 149)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
+        apiKey: { name: "SRTL Manager", prefix: "msk_ab12cd34", scopes: ["activity.read"], expiresAt: null, lanOnly }
+      })], limit: 10 } satisfies MediaServerList);
+      await render();
+      const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
+      expect(card.textContent).not.toContain("LAN only");
+    }
+  });
 });

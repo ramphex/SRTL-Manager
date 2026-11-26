@@ -7,9 +7,14 @@ import { WatchSyncError, normalizeServerUrl, watchSyncJson } from "./watchSyncHt
 // header only; Dupelix refuses credentials in the query string. The key needs activity.read for Now Playing;
 // activity.stop, activity.network and activity.guests add Stop, client addresses and guest profiles, and
 // library.read lets SRTL look up a title's artwork when a stream carries none. A key Dupelix has seen over plain
-// HTTP is LAN only and refused on its HTTPS address.
+// HTTP is LAN only and refused on its HTTPS address. On Dupelix's local integration routes every request needs the
+// key, /server included: without one the route answers 404, and an invalid or revoked key gets 401. So SRTL sends
+// the key on every request, in exactly one Authorization header, and never sends forwarding headers.
 export const dupelixApiPrefix = "/api/v1";
 export { dupelixOptionalScopes, dupelixRequiredScopes };
+
+export const dupelixWrongAddress = "This address is not a Dupelix integration route (HTTP 404). Check the URL: use the address and port Dupelix gives integrations, without /api/v1.";
+export const dupelixKeyRejected = "Dupelix rejected the API key (HTTP 401): it is invalid or has been revoked. Create a new key in Dupelix and enter it again.";
 
 export function dupelixHeaders(apiKey: string): Record<string, string> {
   return { Authorization: `Bearer ${apiKey}`, Accept: "application/json", "X-Client-Info": `SRTL-Manager/${packageJson.version} (server)` };
@@ -63,7 +68,7 @@ export function dupelixVersionLabel(info: DupelixServerInfo): string | null {
 function scopeMessage(error: unknown, scope: string): never {
   if (error instanceof WatchSyncError && (error.httpStatus === 401 || error.httpStatus === 403)) {
     throw new WatchSyncError(error.httpStatus === 401
-      ? "Dupelix rejected the API key. Create a new key in Dupelix and enter it again."
+      ? dupelixKeyRejected
       : `Dupelix refused the API key for ${scope}. Give the key the activity.read scope; a LAN-only key also fails on an HTTPS address.`, error.httpStatus);
   }
   throw error;
@@ -79,8 +84,16 @@ export class DupelixClient {
     return watchSyncJson({ url: `${this.baseUrl}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.apiKey), timeoutMs: 8000, retries: 1, signal: this.signal, maxBytes: 4 * 1024 * 1024 });
   }
 
+  // Sent with the key: local integration routes hide even /server from callers without one.
   async serverInfo(): Promise<DupelixServerInfo> {
-    const { data } = await this.get("/server");
+    let data: unknown;
+    try {
+      ({ data } = await this.get("/server"));
+    } catch (error) {
+      if (error instanceof WatchSyncError && error.httpStatus === 404) throw new WatchSyncError(dupelixWrongAddress, 404);
+      if (error instanceof WatchSyncError && error.httpStatus === 401) throw new WatchSyncError(dupelixKeyRejected, 401);
+      throw error;
+    }
     const parsed = serverInfoSchema.safeParse(data);
     if (!parsed.success || parsed.data.contractRevision === undefined) throw new WatchSyncError("This address did not answer like a Dupelix server. Check the URL.");
     return { version: parsed.data.version?.trim() || null, contractRevision: parsed.data.contractRevision };

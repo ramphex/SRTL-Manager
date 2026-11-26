@@ -442,21 +442,39 @@ export function dupelixArtworkAllowed(path: string): boolean {
   return dupelixArtworkPattern.test(path);
 }
 
+// The link's expiry, from its path; NaN when it has none.
+function dupelixArtworkExpiry(link: string): number {
+  try {
+    const url = new URL(link);
+    return Number(dupelixArtworkPattern.exec(`${url.pathname}${url.search}`)?.[1]) * 1000;
+  } catch {
+    return Number.NaN;
+  }
+}
+
 export interface DupelixArtwork { kind: string; url: string; width: number | null }
 
-// Turns an artwork URL into the server-relative path SRTL fetches. A full URL must point at the configured server.
-export function dupelixArtworkPath(url: string, baseUrl: string): string | null {
-  let path = url;
-  if (!url.startsWith("/")) {
-    try {
-      const parsed = new URL(url);
-      if (parsed.origin !== new URL(baseUrl).origin) return null;
-      path = `${parsed.pathname}${parsed.search}`;
-    } catch {
-      return null;
-    }
+// Turns an artwork URL from an authenticated Dupelix response into the absolute URL SRTL fetches, or null. Dupelix
+// signs its links for its public HTTPS address, which may differ from the address SRTL uses (a local integration
+// route), so another origin is accepted over HTTPS only. Any origin must carry the signed artwork path exactly; a
+// link without a host resolves against the configured server. The fetch still goes through the outbound policy and
+// pinned DNS, follows no redirects, and never carries the API key.
+export function dupelixArtworkLink(url: string, baseUrl: string): string | null {
+  let base: URL;
+  let parsed: URL;
+  try {
+    base = new URL(baseUrl);
+    if (url.startsWith("//") || url.startsWith("\\")) return null;
+    parsed = url.startsWith("/") ? new URL(url, base) : new URL(url);
+  } catch {
+    return null;
   }
-  return dupelixArtworkAllowed(path) ? path : null;
+  if (parsed.username || parsed.password || parsed.hash) return null;
+  if (parsed.origin !== base.origin && parsed.protocol !== "https:") return null;
+  const path = `${parsed.pathname}${parsed.search}`;
+  // The relative form is checked as written too, so a path that only matches after "../" is resolved is refused.
+  if (!dupelixArtworkAllowed(path) || (url.startsWith("/") && url !== path)) return null;
+  return `${parsed.origin}${path}`;
 }
 
 export function dupelixArtworkList(value: unknown): DupelixArtwork[] {
@@ -474,9 +492,9 @@ export function pickDupelixPoster(artwork: DupelixArtwork[], baseUrl: string, no
   for (const kind of ["poster", "still", "backdrop"]) {
     const candidates = artwork.flatMap((entry) => {
       if (entry.kind !== kind) return [];
-      const path = dupelixArtworkPath(entry.url, baseUrl);
+      const path = dupelixArtworkLink(entry.url, baseUrl);
       if (!path) return [];
-      const expires = Number(dupelixArtworkPattern.exec(path)?.[1]) * 1000;
+      const expires = dupelixArtworkExpiry(path);
       return expires - dupelixArtworkExpiryMarginMs > now ? [{ path, width: entry.width ?? 0 }] : [];
     });
     if (!candidates.length) continue;
@@ -492,6 +510,9 @@ function sessionArtwork(raw: unknown): DupelixArtwork[] {
   const own = dupelixArtworkList(session?.artwork);
   return own.length ? own : dupelixArtworkList(session?.title?.artwork);
 }
+
+// The artwork fetch, replaceable in tests that check where it goes and what it sends.
+export const dupelixArtworkHttp = { request: watchSyncRequest };
 
 export const dupelixStopUnavailable = "This Dupelix server does not let other apps stop streams. Update Dupelix to stop streams from SRTL.";
 export const dupelixStopNeedsScope = "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers.";
@@ -514,7 +535,7 @@ export class DupelixRateLimitError extends NowPlayingError {
 // Dupelix has no push channel yet, so the adapter has no openSocket and the hub polls it. When Dupelix adds its
 // event stream, an openSocket that reads it and emits refresh and progress events drops in without other changes.
 export class DupelixLiveAdapter implements LiveAdapter {
-  // Per title: the poster path picked from its signed artwork, and when it was read.
+  // Per title: the absolute poster link picked from its signed artwork, and when it was read.
   private readonly artwork = new Map<string, { path: string | null; fetchedAt: number }>();
   // Artwork bytes by signed link, oldest first, and the fetches under way.
   private readonly images = new Map<string, { contentType: string; body: Buffer; expiresAt: number }>();
@@ -685,7 +706,7 @@ export class DupelixLiveAdapter implements LiveAdapter {
   }
 
   private storeImage(path: string, image: { contentType: string; body: Buffer }): void {
-    const linkExpires = Number(dupelixArtworkPattern.exec(path)?.[1]) * 1000;
+    const linkExpires = dupelixArtworkExpiry(path);
     const expiresAt = Math.min(Date.now() + dupelixArtworkTtlMs, Number.isFinite(linkExpires) ? linkExpires : Infinity);
     this.images.set(path, { ...image, expiresAt });
     let bytes = 0;
@@ -704,7 +725,7 @@ export class DupelixLiveAdapter implements LiveAdapter {
     if (cached) return Promise.resolve(cached);
     let pending = this.imageFetches.get(path);
     if (!pending) {
-      pending = this.request(() => watchSyncRequest({ url: `${this.config.url}${path}`, service: "Dupelix", headers: { Accept: "image/*" }, timeoutMs: sessionTimeoutMs, retries: 0, maxBytes: posterMaxBytes }))
+      pending = this.request(() => dupelixArtworkHttp.request({ url: path, service: "Dupelix artwork", headers: { Accept: "image/*" }, timeoutMs: sessionTimeoutMs, retries: 0, maxBytes: posterMaxBytes }))
         .then((response) => {
           const image = { contentType: String(response.headers["content-type"] ?? ""), body: response.buffer };
           if (/^image\//i.test(image.contentType)) this.storeImage(path, image);
@@ -721,9 +742,11 @@ export class DupelixLiveAdapter implements LiveAdapter {
     if (!titleId) throw new NowPlayingError("Unsupported artwork path.");
     for (const refresh of [false, true]) {
       const path = await this.posterPath(titleId, refresh);
-      if (!path || !dupelixArtworkAllowed(path)) throw new NowPlayingError("Dupelix has no artwork for this title.");
+      // Re-checked at fetch time: only a signed artwork link SRTL picked from an authenticated response is fetched.
+      const link = path ? dupelixArtworkLink(path, this.config.url) : null;
+      if (!link) throw new NowPlayingError("Dupelix has no artwork for this title.");
       try {
-        return await this.image(path);
+        return await this.image(link);
       } catch (error) {
         // An expired or revoked link: look for fresh links once.
         if (refresh || !(error instanceof WatchSyncError) || (error.httpStatus !== 403 && error.httpStatus !== 404)) throw error;
