@@ -509,7 +509,7 @@ function AllowedSettingsPage({ activeView }: { activeView: SettingsView }) {
         : activeView === "backups"
           ? "Scheduled database backups, checked after every run."
         : activeView === "media-servers"
-          ? "Plex and Jellyfin connections shared by watch sync and other features."
+          ? "Plex, Jellyfin, and Dupelix connections shared by watch sync, Now Playing, and other features."
           : activeView === "integrations" ? "External connections and synchronization." : activeView === "accounts" ? "Who can help run this instance, and what they can do." : "Manage display preferences, account access, and signed-in sessions.";
   const activeTitle = activeView === "library" ? "Library" : activeView === "accounts" ? "Accounts" : activeView === "advanced" ? "Advanced" : activeView === "backups" ? "Backups" : activeView === "media-servers" ? "Media servers" : activeView === "integrations" ? "Integrations" : "User settings";
   return (

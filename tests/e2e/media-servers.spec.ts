@@ -67,6 +67,47 @@ async function openMediaServers(page: Page) {
   await expect(page.getByRole("heading", { name: "Settings > Media servers" })).toBeVisible();
 }
 
+async function addServer(page: Page, kind: "Plex" | "Jellyfin" | "Dupelix") {
+  await page.getByRole("button", { name: "Add server", exact: true }).click();
+  await page.getByRole("menu", { name: "Server type" }).getByRole("menuitem", { name: kind, exact: true }).click();
+}
+
+test("one Add server button opens a menu of server types that works from the keyboard and fits a phone", async ({ page }) => {
+  await fixture(page);
+  await openMediaServers(page);
+  await page.setViewportSize({ width: 375, height: 812 });
+  const trigger = page.getByRole("button", { name: "Add server", exact: true });
+  await expect(trigger).toHaveAttribute("aria-haspopup", "menu");
+  await expect(trigger).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByRole("button", { name: /^Add (Plex|Jellyfin|Dupelix) server$/ })).toHaveCount(0);
+  await trigger.click();
+  const menu = page.getByRole("menu", { name: "Server type" });
+  await expect(trigger).toHaveAttribute("aria-expanded", "true");
+  await expect(menu.getByRole("menuitem")).toHaveText(["Plex", "Jellyfin", "Dupelix"]);
+  await expect(menu.getByRole("menuitem", { name: "Plex" })).toBeFocused();
+  const box = (await menu.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(375);
+  await page.keyboard.press("ArrowDown");
+  await expect(menu.getByRole("menuitem", { name: "Jellyfin" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await trigger.click();
+  await page.getByText("Add each server once here").click();
+  await expect(menu).toHaveCount(0);
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  await page.keyboard.press("ArrowUp");
+  await expect(menu.getByRole("menuitem", { name: "Dupelix" })).toBeFocused();
+  await page.keyboard.press("Enter");
+  const form = page.getByRole("form", { name: "Add Dupelix server" });
+  await expect(form.getByLabel("Name", { exact: true })).toBeFocused();
+  await expect(trigger).toBeDisabled();
+  await form.getByRole("button", { name: "Cancel" }).click();
+  await expect(trigger).toBeEnabled();
+});
+
 test("lists servers with type, URL, status, and version, and tests a connection", async ({ page }) => {
   const { calls } = await fixture(page);
   await openMediaServers(page);
@@ -87,12 +128,12 @@ test("lists servers with type, URL, status, and version, and tests a connection"
 test("adds and edits a server without ever showing the saved key", async ({ page }) => {
   const { calls } = await fixture(page);
   await openMediaServers(page);
-  await page.getByRole("button", { name: "Add Jellyfin server" }).click();
+  await addServer(page, "Jellyfin");
   const form = page.getByRole("form", { name: "Add Jellyfin server" });
   await form.getByLabel("Name", { exact: true }).fill("Basement");
   await form.getByLabel("Server URL").fill("http://basement:8096");
   await form.getByLabel("API key", { exact: true }).fill("new-api-key");
-  await form.getByRole("button", { name: "Add server" }).click();
+  await form.getByRole("button", { name: "Add Jellyfin server" }).click();
   await expect(page.getByRole("region", { name: "Jellyfin server Basement" })).toBeVisible();
   expect(calls.find((call) => call.method === "POST" && call.path === "/api/media-servers")?.body).toMatchObject({ kind: "jellyfin", name: "Basement", url: "http://basement:8096", token: "new-api-key" });
 
@@ -110,7 +151,7 @@ test("adds and edits a server without ever showing the saved key", async ({ page
 test("adds a Plex server by signing in with Plex, with pasting a token as the secondary option", async ({ page }) => {
   const { calls, pinChecks } = await fixture(page);
   await openMediaServers(page);
-  await page.getByRole("button", { name: "Add Plex server" }).click();
+  await addServer(page, "Plex");
   const form = page.getByRole("form", { name: "Add Plex server" });
   await expect(form).toContainText("Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.");
   await expect(form.getByLabel("Plex token")).toBeHidden();
@@ -135,7 +176,7 @@ test("adds a Plex server by signing in with Plex, with pasting a token as the se
 test("adds a Dupelix server with an API key, naming the scopes it needs", async ({ page }) => {
   const { calls } = await fixture(page);
   await openMediaServers(page);
-  await page.getByRole("button", { name: "Add Dupelix server" }).click();
+  await addServer(page, "Dupelix");
   const form = page.getByRole("form", { name: "Add Dupelix server" });
   await expect(form).toContainText("activity.read");
   await expect(form).toContainText("library.read");
@@ -143,7 +184,7 @@ test("adds a Dupelix server with an API key, naming the scopes it needs", async 
   await form.getByLabel("Name", { exact: true }).fill("Dupelix");
   await form.getByLabel("Server URL").fill("https://dupelix.example.com");
   await form.getByLabel("API key", { exact: true }).fill("msk_examplekeyexamplekey");
-  await form.getByRole("button", { name: "Add server" }).click();
+  await form.getByRole("button", { name: "Add Dupelix server" }).click();
   const card = page.getByRole("region", { name: "Dupelix server Dupelix" });
   await expect(card).toBeVisible();
   await expect(card).toContainText("Not checked");

@@ -128,15 +128,74 @@ describe("Settings > Media servers, adding a Plex server", () => {
       input.dispatchEvent(new Event("input", { bubbles: true }));
     });
   };
+  const menuButton = () => container.querySelector<HTMLButtonElement>("button[aria-haspopup='menu']")!;
+  const menuItems = () => [...container.querySelectorAll<HTMLButtonElement>("[role='menu'] [role='menuitem']")];
+  const addServer = async (kind: string) => {
+    await click(menuButton());
+    await click(menuItems().find((item) => item.textContent?.trim() === kind));
+  };
+  const key = async (target: Element, name: string) => {
+    await act(async () => { target.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true, cancelable: true })); });
+  };
   const field = (label: string) => [...container.querySelectorAll("label")].find((entry) => entry.textContent?.startsWith(label))!;
   const inputFor = (label: string) => {
     const element = field(label);
     return (element.htmlFor ? container.querySelector(`#${CSS.escape(element.htmlFor)}`) : element.querySelector("input")) as HTMLInputElement;
   };
 
+  it("adds servers from one Add server menu that works from the keyboard", async () => {
+    await render();
+    const trigger = menuButton();
+    expect(trigger.textContent?.trim()).toBe("Add server");
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(container.querySelector("[role='menu']")).toBeNull();
+    await click(trigger);
+    expect(trigger.getAttribute("aria-expanded")).toBe("true");
+    expect(trigger.getAttribute("aria-controls")).toBe(container.querySelector("[role='menu']")!.id);
+    expect(menuItems().map((item) => item.textContent?.trim())).toEqual(["Plex", "Jellyfin", "Dupelix"]);
+    // The icons are decorative, so each item is named by its server type alone.
+    expect(menuItems().every((item) => item.querySelector("svg")?.getAttribute("aria-hidden") === "true")).toBe(true);
+    expect(document.activeElement).toBe(menuItems()[0]);
+    await key(menuItems()[0]!, "ArrowDown");
+    expect(document.activeElement).toBe(menuItems()[1]);
+    await key(menuItems()[1]!, "End");
+    expect(document.activeElement).toBe(menuItems()[2]);
+    await key(menuItems()[2]!, "ArrowDown");
+    expect(document.activeElement).toBe(menuItems()[0]);
+    await key(menuItems()[0]!, "ArrowUp");
+    expect(document.activeElement).toBe(menuItems()[2]);
+    await key(menuItems()[2]!, "Escape");
+    expect(container.querySelector("[role='menu']")).toBeNull();
+    expect(trigger.getAttribute("aria-expanded")).toBe("false");
+    expect(document.activeElement).toBe(trigger);
+
+    // ArrowUp on the button opens the menu on its last item; a click outside closes it.
+    await key(trigger, "ArrowUp");
+    expect(document.activeElement).toBe(menuItems()[2]);
+    await act(async () => { document.body.dispatchEvent(new Event("pointerdown", { bubbles: true })); });
+    expect(container.querySelector("[role='menu']")).toBeNull();
+
+    // Picking a type opens its form, focused on the first field, and the button stays disabled while it is open.
+    await addServer("Jellyfin");
+    const form = container.querySelector("form[aria-label='Add Jellyfin server']")!;
+    expect(form).toBeTruthy();
+    expect(document.activeElement).toBe(form.querySelector("input"));
+    expect(menuButton().disabled).toBe(true);
+    expect(form.querySelector("button[type='submit']")!.textContent?.trim()).toBe("Add Jellyfin server");
+    await click(button("Cancel"));
+    expect(menuButton().disabled).toBe(false);
+  });
+
+  it("disables Add server when the server list is full", async () => {
+    api.list.mockResolvedValue({ servers: [plexServer()], limit: 1 } satisfies MediaServerList);
+    await render();
+    expect(menuButton().disabled).toBe(true);
+    expect(container.textContent).toContain("SRTL supports up to 1 media servers.");
+  });
+
   it("leads with Sign in with Plex and starts it as soon as the server is added", async () => {
     await render();
-    await click(button("Add Plex server"));
+    await addServer("Plex");
     const form = container.querySelector("form[aria-label='Add Plex server']")!;
     expect(form.textContent).toContain("Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.");
     // Pasting a token is the secondary path, folded away with where the token comes from and what never to use.
@@ -171,12 +230,12 @@ describe("Settings > Media servers, adding a Plex server", () => {
 
   it("adds a server with a pasted token without opening plex.tv", async () => {
     await render();
-    await click(button("Add Plex server"));
+    await addServer("Plex");
     await type(inputFor("Name"), "Home Plex");
     await type(inputFor("Server URL"), "http://plex:32400");
     await type(inputFor("Plex token"), "pasted-token");
     api.add.mockResolvedValue({ servers: [plexServer({ hasToken: true })], limit: 10 } satisfies MediaServerList);
-    await click(button("Add server"));
+    await click(button("Add Plex server"));
     expect(api.add).toHaveBeenCalledWith("plex", expect.objectContaining({ token: "pasted-token" }));
     expect(openPlexWindow).not.toHaveBeenCalled();
     expect(api.startPin).not.toHaveBeenCalled();
@@ -187,7 +246,7 @@ describe("Settings > Media servers, adding a Plex server", () => {
 
   it("keeps the new server and says why when the sign-in cannot start", async () => {
     await render();
-    await click(button("Add Plex server"));
+    await addServer("Plex");
     await type(inputFor("Name"), "Home Plex");
     await type(inputFor("Server URL"), "http://plex:32400");
     api.add.mockResolvedValue({ servers: [plexServer()], limit: 10 } satisfies MediaServerList);
@@ -222,7 +281,7 @@ describe("Settings > Media servers, adding a Plex server", () => {
 
   it("adds a Dupelix server with an API key, naming the scopes the key needs, and never opens plex.tv", async () => {
     await render();
-    await click(button("Add Dupelix server"));
+    await addServer("Dupelix");
     const form = container.querySelector("form[aria-label='Add Dupelix server']")!;
     expect(form.textContent).toContain("Needs the activity.read scope.");
     expect(form.textContent).toContain("Use one key per address");
@@ -233,7 +292,7 @@ describe("Settings > Media servers, adding a Plex server", () => {
     const added: MediaServerList = { servers: [plexServer({ kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true })], limit: 10 };
     api.add.mockResolvedValue(added);
     api.list.mockResolvedValue(added);
-    await click(button("Add server"));
+    await click(button("Add Dupelix server"));
     expect(api.add).toHaveBeenCalledWith("dupelix", { name: "Dupelix", url: "https://dupelix.example.com", token: "msk_examplekeyexamplekey", prefixMappings: [] });
     expect(openPlexWindow).not.toHaveBeenCalled();
     const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
