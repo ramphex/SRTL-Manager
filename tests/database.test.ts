@@ -99,7 +99,7 @@ describe("database bootstrap", () => {
       expect(indexes.rows.map((index) => index.indexname)).toEqual(expect.arrayContaining(["jobs_status_idx", "jobs_heartbeat_idx"]));
 
       const migrations = await database.pool.query<{ version: number }>("select version from schema_migrations order by version");
-      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }, { version: 37 }, { version: 38 }, { version: 39 }]);
+      expect(migrations.rows).toEqual([{ version: 1 }, { version: 2 }, { version: 3 }, { version: 4 }, { version: 5 }, { version: 6 }, { version: 7 }, { version: 8 }, { version: 9 }, { version: 10 }, { version: 11 }, { version: 12 }, { version: 13 }, { version: 14 }, { version: 15 }, { version: 16 }, { version: 17 }, { version: 18 }, { version: 19 }, { version: 20 }, { version: 21 }, { version: 22 }, { version: 23 }, { version: 24 }, { version: 25 }, { version: 26 }, { version: 27 }, { version: 28 }, { version: 29 }, { version: 30 }, { version: 31 }, { version: 32 }, { version: 33 }, { version: 34 }, { version: 35 }, { version: 36 }, { version: 37 }, { version: 38 }, { version: 39 }, { version: 40 }]);
 
       const unvalidatedConstraints = await database.pool.query<{ conname: string }>(`
         SELECT conname
@@ -319,7 +319,8 @@ describe("database bootstrap", () => {
         { version: 36 },
         { version: 37 },
         { version: 38 },
-        { version: 39 }
+        { version: 39 },
+        { version: 40 }
       ]);
     } finally {
       await database.close();
@@ -533,7 +534,8 @@ describe("database bootstrap", () => {
         { version: 36, name: "file_header_checks" },
         { version: 37, name: "header_archive_recheck" },
         { version: 38, name: "broken_link_review" },
-        { version: 39, name: "dupelix_media_servers" }
+        { version: 39, name: "dupelix_media_servers" },
+        { version: 40, name: "media_server_api_keys" }
       ]);
     } finally {
       await database.close();
@@ -712,7 +714,7 @@ describe("database bootstrap", () => {
 
       const database = await openDatabase(testDatabase.databaseUrl);
       try {
-        expect(currentSchemaVersion).toBe(39);
+        expect(currentSchemaVersion).toBe(40);
         const rows = await database.pool.query<{ item_name: string; header_status: string; header_reason: string; queued: boolean }>(
           `SELECT item_name, header_status, header_reason, header_queued_at IS NOT NULL AS queued FROM storage_files`
         );
@@ -754,7 +756,7 @@ describe("database bootstrap", () => {
 
       const database = await openDatabase(testDatabase.databaseUrl);
       try {
-        expect(currentSchemaVersion).toBe(39);
+        expect(currentSchemaVersion).toBe(40);
         const rows = await database.pool.query<{ item_name: string; broken_since: string | null }>(`SELECT item_name, broken_since FROM media_links ORDER BY item_name`);
         expect(rows.rows).toEqual([
           { item_name: "Broken Lantern", broken_since: "2026-11-01T00:00:00.000Z" },

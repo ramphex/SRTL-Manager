@@ -1,8 +1,8 @@
 import { Agent, WebSocket } from "undici";
 import { z } from "zod";
 import type { MediaServerKind } from "../../../shared/mediaServers";
-import type { NowPlayingServerState, NowPlayingState } from "../../../shared/nowPlaying";
-import { dupelixApiPrefix, dupelixHeaders } from "../dupelixClient";
+import type { NowPlayingServerState, NowPlayingState, NowPlayingStream } from "../../../shared/nowPlaying";
+import { dupelixApiPrefix, dupelixHeaders, parseDupelixKey } from "../dupelixClient";
 import { jellyfinHeaders } from "../jellyfinClient";
 import { plexEndpoints, plexHeaders } from "../plexClient";
 import { pinnedLookup } from "../outboundPolicy";
@@ -48,6 +48,8 @@ export interface LiveAdapter {
   openSocket?(handlers: SocketHandlers): Promise<() => void>;
   fetchExtras?(signal: AbortSignal): Promise<ServerExtras>;
   stopStream(session: ParsedSession, message: string): Promise<void>;
+  // Whether a stream can be stopped, for servers that decide it themselves. The hub decides for the others.
+  stopAvailability?(session: ParsedSession): NowPlayingStream["stop"];
   fetchPoster(path: string): Promise<{ contentType: string; body: Buffer }>;
   // Forgets per-item caches for items no longer playing.
   prune?(activeSessions: ParsedSession[]): void;
@@ -422,6 +424,9 @@ export const dupelixArtworkTtlMs = 6 * 60 * 60_000;
 const dupelixArtworkExpiryMarginMs = 60 * 60_000;
 const dupelixPosterWidth = 240;
 const dupelixMaxPages = 5;
+// The key's scopes decide whether guests are listed and Stop is offered; they are read again every ten minutes.
+const dupelixKeyTtlMs = 10 * 60_000;
+export const dupelixStopMessageMax = 200;
 
 export function dupelixArtworkAllowed(path: string): boolean {
   return dupelixArtworkPattern.test(path);
@@ -478,13 +483,37 @@ function sessionArtwork(raw: unknown): DupelixArtwork[] {
   return own.length ? own : dupelixArtworkList(session?.title?.artwork);
 }
 
-export const dupelixStopUnavailable = "Dupelix does not let other apps stop streams yet.";
+export const dupelixStopUnavailable = "This Dupelix server does not let other apps stop streams. Update Dupelix to stop streams from SRTL.";
+export const dupelixStopNeedsScope = "Stopping Dupelix streams needs the activity.stop scope on the API key in Settings > Media servers.";
+export const dupelixStopRefused = "Dupelix cannot stop this stream.";
 
+// Cuts a stop message to Dupelix's limit without splitting a character.
+function dupelixStopMessage(message: string): string {
+  return [...message.trim()].slice(0, dupelixStopMessageMax).join("");
+}
+
+// Dupelix has no push channel yet, so the adapter has no openSocket and the hub polls it. When Dupelix adds its
+// event stream, an openSocket that reads it and emits refresh and progress events drops in without other changes.
 export class DupelixLiveAdapter implements LiveAdapter {
   // Per title: the poster path picked from its signed artwork, and when it was read.
   private readonly artwork = new Map<string, { path: string | null; fetchedAt: number }>();
+  // The key's effective scopes; null when the server does not describe its keys (older Dupelix).
+  private key: { scopes: string[] | null; checkedAt: number } | null = null;
 
   constructor(private readonly config: LiveServerConfig) {}
+
+  private async keyScopes(signal?: AbortSignal): Promise<string[] | null> {
+    if (this.key && Date.now() - this.key.checkedAt < dupelixKeyTtlMs) return this.key.scopes;
+    try {
+      const { data } = await this.api("/api-keys/current", signal);
+      this.key = { scopes: parseDupelixKey(data)?.scopes ?? null, checkedAt: Date.now() };
+    } catch (error) {
+      if (error instanceof WatchSyncError && error.httpStatus === 404) this.key = { scopes: null, checkedAt: Date.now() };
+      // Otherwise the sessions request reports the problem; the last known scopes stay, and it is tried again soon.
+      else this.key = { scopes: this.key?.scopes ?? null, checkedAt: Date.now() - dupelixKeyTtlMs + 30_000 };
+    }
+    return this.key.scopes;
+  }
 
   private api(path: string, signal?: AbortSignal) {
     return watchSyncJson({ url: `${this.config.url}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.config.token), timeoutMs: sessionTimeoutMs, retries: 0, signal, maxBytes: 16 * 1024 * 1024 });
@@ -492,9 +521,11 @@ export class DupelixLiveAdapter implements LiveAdapter {
 
   async fetchSessions(signal: AbortSignal): Promise<ParsedSession[]> {
     const entries: unknown[] = [];
+    // Guest profiles are listed only on request, and only to a key with activity.guests.
+    const guests = (await this.keyScopes(signal))?.includes("activity.guests") === true;
     let cursor: string | null = null;
     for (let page = 0; page < dupelixMaxPages; page += 1) {
-      const query = new URLSearchParams({ limit: "200", ...(cursor ? { cursor } : {}) });
+      const query = new URLSearchParams({ limit: "200", ...(guests ? { includeGuests: "true" } : {}), ...(cursor ? { cursor } : {}) });
       const { data } = await this.api(`/activity/sessions?${query.toString()}`, signal);
       const body = data && typeof data === "object" ? data as { sessions?: unknown; nextCursor?: unknown } : null;
       if (!body || !Array.isArray(body.sessions)) throw new NowPlayingError("Dupelix returned an unsupported sessions response.");
@@ -520,9 +551,38 @@ export class DupelixLiveAdapter implements LiveAdapter {
     for (const key of this.artwork.keys()) if (!active.has(key)) this.artwork.delete(key);
   }
 
-  // Dupelix has no way yet for another app to stop someone's stream.
-  async stopStream(): Promise<void> {
-    throw new NowPlayingError(dupelixStopUnavailable, null, 409);
+  // Stop needs a server that says the session can be stopped and a key with activity.stop. The scopes are the
+  // ones last read; until they are known, Stop waits.
+  stopAvailability(session: ParsedSession): NowPlayingStream["stop"] {
+    const scopes = this.key?.scopes;
+    if (!this.key) return { available: false, reason: "Checking the Dupelix API key's scopes." };
+    if (scopes === null || scopes === undefined) return { available: false, reason: dupelixStopUnavailable };
+    if (!scopes.includes("activity.stop")) return { available: false, reason: dupelixStopNeedsScope };
+    if (!session.remoteControl) return { available: false, reason: dupelixStopRefused };
+    return { available: true, reason: null };
+  }
+
+  // Ends playback with an optional message; the device stays signed in. Dupelix answers 202 and stops shortly after.
+  async stopStream(session: ParsedSession, message: string): Promise<void> {
+    const text = dupelixStopMessage(message);
+    try {
+      await watchSyncRequest({
+        url: `${this.config.url}${dupelixApiPrefix}/activity/sessions/${encodeURIComponent(session.sessionKey)}/stop`,
+        service: "Dupelix",
+        method: "POST",
+        headers: { ...dupelixHeaders(this.config.token), "Content-Type": "application/json", "X-Requested-By": "SRTL Manager" },
+        body: JSON.stringify(text ? { message: text } : {}),
+        timeoutMs: sessionTimeoutMs,
+        retries: 0
+      });
+    } catch (error) {
+      statusMessage(error, {
+        401: "Dupelix rejected the API key. Update it in Settings > Media servers.",
+        403: `Dupelix refused to stop the stream (HTTP 403). ${dupelixStopNeedsScope}`,
+        404: "Dupelix no longer has this session (HTTP 404). It has probably ended already.",
+        409: `${dupelixStopRefused} It may have ended or be stopping already.`
+      });
+    }
   }
 
   private async posterPath(titleId: string, refresh: boolean): Promise<string | null> {

@@ -241,4 +241,19 @@ describe("Settings > Media servers, adding a Plex server", () => {
     expect(card.querySelector(".watch-sync-signin")).toBeNull();
     expect(button("Test connection")).toBeTruthy();
   });
+
+  it("shows a Dupelix key's name, expiry, scopes, and the optional scopes it lacks", async () => {
+    api.list.mockResolvedValue({ servers: [plexServer({
+      kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, version: "0.1.0 b1 (API revision 146)", lastCheckedAt: "2026-11-26T05:00:00.000Z",
+      apiKey: { name: "SRTL Manager", prefix: "msk_ab12cd34", scopes: ["activity.network", "activity.read", "library.read"], expiresAt: null, lanOnly: true }
+    })], limit: 10 } satisfies MediaServerList);
+    await render();
+    const card = container.querySelector("section[aria-label='Dupelix server Dupelix']")!;
+    expect(card.textContent).toContain("SRTL Manager · msk_ab12cd34… · LAN only");
+    expect(card.textContent).toContain("ExpiresNever");
+    expect(card.textContent).toContain("activity.network, activity.read, library.read");
+    expect(card.textContent).toContain("Not on this key: activity.stop (the Stop button), activity.guests (guest profiles' streams).");
+    expect(card.textContent).not.toContain("Missing scopes");
+    expect(card.textContent).not.toContain("activity.network (");
+  });
 });

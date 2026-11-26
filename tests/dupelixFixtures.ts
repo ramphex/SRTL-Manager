@@ -104,3 +104,41 @@ export const dupelixRichSession = () => dupelixSession({
   clientName: "Dupelix for tvOS",
   clientVersion: "1.4.0"
 });
+
+// The session shape the Dupelix Coordinator previewed for the key-readable session (names may still shift).
+export const dupelixPreviewSession = () => dupelixSession({
+  id: "e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15",
+  title: dupelixTitle({
+    id: dupelixIds.episode, kind: "episode", name: "Pilot", year: 2023, showId: dupelixIds.show, showName: "Example Show", seasonNumber: 1, episodeNumber: 3,
+    artwork: [
+      { kind: "still", url: dupelixArtworkUrl(dupelixIds.still), width: 780, height: 439 },
+      { kind: "poster", url: dupelixArtworkUrl(dupelixIds.artworkSmall), width: 320, height: 480 }
+    ]
+  }),
+  route: "transcode",
+  reason: { code: "video_codec_unsupported", message: "This TV cannot play HEVC." },
+  encoder: "h264_nvenc",
+  levelHeight: 1080,
+  paused: false,
+  buffering: true,
+  durationMs: 3_000_000,
+  positionMs: 600_000,
+  client: { product: "Dupelix for Android TV", version: "2.1.0" },
+  source: { container: "mkv", videoCodec: "hevc", hdr: "dolby_vision", width: 3840, height: 2160, bitrateKbps: 38_000, audio: [{ codec: "eac3", channels: 6 }] },
+  output: { container: "mp4", videoCodec: "h264", audioCodec: "eac3", width: 1920, height: 1080, hdr: "sdr", bitrateKbps: 9000 },
+  video: { decision: "transcode", codec: "h264", language: null },
+  audio: { decision: "copy", codec: "eac3", language: "eng" },
+  subtitle: { decision: "burn", codec: "pgs", language: "English" },
+  hardwareEncode: true,
+  hardwareDecode: true,
+  toneMapping: "gpu",
+  encoderSpeed: 2.37,
+  throttled: false,
+  readyAheadMs: 45_000,
+  throughputKbps: 9100,
+  network: { local: false, secure: true },
+  remoteAddress: "198.51.100.40",
+  canStop: true
+});
+
+export const dupelixGuestSession = () => dupelixSession({ id: "f5e8c5ab-bdeb-4fa6-8bfd-e6cefbcdff16", displayName: "Guest", profileName: "Guest", accountType: "adult" });

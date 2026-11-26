@@ -7,6 +7,7 @@ import {
   mediaServerKinds,
   mediaServerLimit,
   type MediaServer,
+  type MediaServerApiKey,
   type MediaServerInput,
   type MediaServerKind,
   type MediaServerList,
@@ -34,6 +35,8 @@ export interface MediaServerRecord {
   machineIdentifier: string | null;
   accountName: string | null;
   accountId: string | null;
+  // Dupelix: the key description from the last connection test. Absent when there is none.
+  apiKey?: MediaServerApiKey | null;
   version: string | null;
   lastCheckedAt: string | null;
   lastError: string | null;
@@ -81,10 +84,23 @@ function parseMappings(raw: string): MediaServerPrefixMapping[] {
 const sealToken = (token: string) => sealSecret(token, secretPurposes.mediaServerToken);
 const openToken = (stored: string) => openSecret(stored, secretPurposes.mediaServerToken);
 
+function parseApiKey(raw: string | null): MediaServerApiKey | null {
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Partial<MediaServerApiKey> | null;
+    if (!value || !Array.isArray(value.scopes)) return null;
+    return { name: value.name ?? null, prefix: value.prefix ?? null, scopes: value.scopes.filter((scope): scope is string => typeof scope === "string"), expiresAt: value.expiresAt ?? null, lanOnly: value.lanOnly ?? null };
+  } catch {
+    return null;
+  }
+}
+
+const optionalApiKey = (apiKey: MediaServerApiKey | null) => apiKey ? { apiKey } : {};
+
 function toRecord(row: Row): MediaServerRecord {
   return {
     id: row.id, kind: row.kind as MediaServerKind, name: row.name, url: row.url, token: openToken(row.token), prefixMappings: parseMappings(row.prefixMappings),
-    machineIdentifier: row.machineIdentifier, accountName: row.accountName, accountId: row.accountId, version: row.version,
+    machineIdentifier: row.machineIdentifier, accountName: row.accountName, accountId: row.accountId, ...optionalApiKey(parseApiKey(row.apiKey)), version: row.version,
     lastCheckedAt: row.lastCheckedAt, lastError: row.lastError
   };
 }
@@ -93,7 +109,7 @@ function toRecord(row: Row): MediaServerRecord {
 export function publicMediaServer(server: MediaServerRecord): MediaServer {
   return {
     id: server.id, kind: server.kind, name: server.name, url: server.url, hasToken: Boolean(server.token), prefixMappings: server.prefixMappings,
-    machineIdentifier: server.machineIdentifier, accountName: server.accountName, version: server.version,
+    machineIdentifier: server.machineIdentifier, accountName: server.accountName, ...optionalApiKey(server.apiKey ?? null), version: server.version,
     lastCheckedAt: server.lastCheckedAt, lastError: server.lastError
   };
 }
@@ -196,7 +212,7 @@ export async function updateMediaServer(db: Db, serverId: string, input: MediaSe
     await transaction.update(schema.mediaServers).set({
       name: draft.name, url: draft.url, token, prefixMappings: JSON.stringify(draft.prefixMappings),
       ...(tokenChanged || urlChanged ? { machineIdentifier: null, accountName: null, accountId: null, pendingPin: null } : {}),
-      ...(tokenChanged || urlChanged ? { lastCheckedAt: null, lastError: null, version: null } : {}),
+      ...(tokenChanged || urlChanged ? { lastCheckedAt: null, lastError: null, version: null, apiKey: null } : {}),
       updatedAt: nowIso()
     }).where(eq(schema.mediaServers.id, serverId));
     if (urlChanged && current.kind === "plex") {
@@ -243,6 +259,8 @@ export interface MediaServerDetails {
   accountName?: string | null;
   accountId?: string | null;
   version?: string | null;
+  // JSON of MediaServerApiKey, or null to forget it.
+  apiKey?: string | null;
 }
 
 // Records the outcome of any request to the server: a successful check clears the error.
@@ -275,8 +293,8 @@ export async function testMediaServer(db: Db, serverId: string): Promise<MediaSe
       // /server answers without a key, so the key is proven by the scoped reads that follow it.
       const client = new DupelixClient(server.url, server.token);
       const info = await client.serverInfo();
-      await client.checkAccess();
-      details = { version: dupelixVersionLabel(info) };
+      const key = await client.checkAccess();
+      details = { version: dupelixVersionLabel(info), apiKey: key ? JSON.stringify(key) : null };
     } else {
       const info = await new JellyfinClient(server.url, server.token, identifier).systemInfo();
       details = { version: info.version };

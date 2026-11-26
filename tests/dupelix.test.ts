@@ -9,13 +9,13 @@ import { markOnboardingCompleteForExistingInstall } from "../src/server/lib/onbo
 import { loadMediaServers, type MediaServerRecord } from "../src/server/lib/mediaServers";
 import { dupelixEncoderCodec, dupelixEncoderEngine, dupelixPosterPath, parseDupelixSession } from "../src/server/lib/nowPlaying/classify";
 import { NowPlayingHub, type NowPlayingEvent, type NowPlayingTiming } from "../src/server/lib/nowPlaying/hub";
-import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkPath, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
+import { DupelixLiveAdapter, dupelixArtworkAllowed, dupelixArtworkPath, dupelixStopNeedsScope, dupelixStopRefused, dupelixStopUnavailable, pickDupelixPoster } from "../src/server/lib/nowPlaying/upstream";
 import { getWatchSyncState, loadWatchSyncContext } from "../src/server/lib/watchSync";
 import { watchSyncHttpTiming } from "../src/server/lib/watchSyncHttp";
 import type { MediaServerList } from "../src/shared/mediaServers";
 import type { NowPlayingHostEvent, NowPlayingSnapshot } from "../src/shared/nowPlaying";
 import { readSetupToken } from "./authHelpers";
-import { dupelixArtworkUrl, dupelixDirectStream, dupelixEnded, dupelixHardwareTranscode, dupelixIds, dupelixRichSession, dupelixSession, dupelixTitle } from "./dupelixFixtures";
+import { dupelixArtworkUrl, dupelixDirectStream, dupelixEnded, dupelixGuestSession, dupelixHardwareTranscode, dupelixIds, dupelixPreviewSession, dupelixRichSession, dupelixSession, dupelixTitle } from "./dupelixFixtures";
 import { createTestDatabase } from "./testDb";
 
 const now = new Date("2026-11-25T18:20:05.000Z");
@@ -93,6 +93,31 @@ describe("Dupelix session mapping", () => {
     expect(parseDupelixSession(dupelixSession({ source: { videoCodec: "h264", bitrate: 5000 } }), now)!.stream.source).toMatchObject({ videoCodec: "h264", bitrateKbps: null });
   });
 
+  it("reads the session fields the Dupelix Coordinator previewed", () => {
+    const parsed = parseDupelixSession(dupelixPreviewSession(), now)!;
+    expect(parsed.remoteControl).toBe(true);
+    expect(parsed.filePath).toBeNull();
+    expect(parsed.stream).toMatchObject({
+      state: "buffering", durationMs: 3_000_000, positionMs: 600_000, bufferedMs: 645_000,
+      grandparentTitle: "Example Show", episodeLabel: "S01E03", year: 2023,
+      player: { product: "Dupelix for Android TV", version: "2.1.0" },
+      playMethod: "transcode", videoDecision: "transcode", audioDecision: "copy",
+      subtitle: { decision: "burn", codec: "pgs", language: "English" },
+      source: { container: "mkv", videoCodec: "hevc", resolution: "4K", dynamicRange: "Dolby Vision", audioCodec: "eac3", audioChannels: 6, bitrateKbps: 38_000 },
+      output: { container: "mp4", videoCodec: "h264", resolution: "1080p", dynamicRange: "SDR", audioCodec: "eac3", bitrateKbps: 9000 },
+      transcode: { engine: "hardware", hardwareEncode: "h264_nvenc", hardwareDecode: "GPU", speed: 2.4, throttled: false, reasons: ["This TV cannot play HEVC.", "HDR tone mapped to SDR on the GPU"] },
+      bandwidth: { kbps: 9100, kind: "nominal" },
+      network: { location: "wan", ip: "198.51.100.40", secure: true }
+    });
+    // Track decisions outrank the route: copied video and audio make a direct stream, and a hardware flag of false means CPU.
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", video: { decision: "copy" }, audio: { decision: "copy" } }), now)!.stream.playMethod).toBe("directStream");
+    expect(parseDupelixSession(dupelixSession({ route: "transcode", encoder: "h264_vaapi", hardwareEncode: false }), now)!.stream.transcode!.engine).toBe("cpu");
+    expect(parseDupelixSession(dupelixSession({ network: { local: true } }), now)!.stream.network.location).toBe("lan");
+    expect(parseDupelixSession(dupelixSession({ path: "/data/media/movies/Example Movie (2024)/Example Movie.mkv" }), now)!.filePath).toBe("/data/media/movies/Example Movie (2024)/Example Movie.mkv");
+    // Direct play has nothing prepared ahead by the server.
+    expect(parseDupelixSession(dupelixSession({ readyAheadMs: 30_000 }), now)!.stream.bufferedMs).toBeNull();
+  });
+
   it("tells hardware and software encoders apart, and the codec they write", () => {
     for (const encoder of ["h264_nvenc", "h264_qsv", "h264_vaapi", "h264_videotoolbox", "hevc_amf", "qsv@0000:00:02.0"]) expect(dupelixEncoderEngine(encoder)).toBe("hardware");
     for (const encoder of ["libx264", "libx265", "libsvtav1", "software"]) expect(dupelixEncoderEngine(encoder)).toBe("cpu");
@@ -140,7 +165,8 @@ describe("Dupelix artwork allow list", () => {
     const adapter = new DupelixLiveAdapter({ id: "dx1", kind: "dupelix", name: "Dupelix", url: base, token: "msk_example", clientIdentifier: "client-1" });
     await expect(adapter.fetchPoster("/api/v1/activity/sessions")).rejects.toThrow("Unsupported artwork path.");
     await expect(adapter.fetchPoster(dupelixArtworkUrl(dupelixIds.artwork))).rejects.toThrow("Unsupported artwork path.");
-    await expect(adapter.stopStream()).rejects.toThrow(dupelixStopUnavailable);
+    // Until the key's scopes are known, Stop waits.
+    expect(adapter.stopAvailability(parseDupelixSession(dupelixPreviewSession(), now)!)).toEqual({ available: false, reason: "Checking the Dupelix API key's scopes." });
   });
 });
 
@@ -150,7 +176,12 @@ class MockDupelix {
   base = "";
   apiKey = "msk_exampleKey_0123456789abcdef";
   scopes = new Set(["activity.read", "library.read"]);
+  // Older servers have no /api-keys/current.
+  keyEndpoint = true;
   sessions: unknown[] = [];
+  guests: unknown[] = [];
+  stops: Array<{ id: string; body: unknown; contentType: string | undefined }> = [];
+  ignoreStops = false;
   pageSize = 200;
   version: string | undefined = "0.1.0 b1";
   artworkStatus = 200;
@@ -171,12 +202,25 @@ class MockDupelix {
         if (!this.scopes.has(scope)) { void reply.code(403).send({ code: "forbidden" }); return false; }
         return true;
       };
+      if (url.pathname === "/api/v1/api-keys/current" && this.keyEndpoint) {
+        if (request.headers.authorization !== `Bearer ${this.apiKey}`) return reply.code(401).send({ code: "unauthenticated" });
+        return { id: dupelixIds.device, name: "SRTL Manager", prefix: this.apiKey.slice(0, 12), scopes: [...this.scopes, "activity.read"], effectiveScopes: [...this.scopes], expiresAt: null, lanOnly: true };
+      }
       if (url.pathname === "/api/v1/activity/sessions") {
         if (!granted("activity.read")) return reply;
+        if (url.searchParams.get("includeGuests") === "true" && !this.scopes.has("activity.guests")) return reply.code(403).send({ code: "forbidden" });
+        const all = [...this.sessions, ...(url.searchParams.get("includeGuests") === "true" ? this.guests : [])];
         const start = Number(url.searchParams.get("cursor") ?? 0);
         const limit = Math.min(Number(url.searchParams.get("limit") ?? 50), this.pageSize);
-        const page = this.sessions.slice(start, start + limit);
-        return { sessions: page, ...(start + limit < this.sessions.length ? { nextCursor: String(start + limit) } : {}) };
+        const page = all.slice(start, start + limit);
+        return { sessions: page, ...(start + limit < all.length ? { nextCursor: String(start + limit) } : {}) };
+      }
+      const stop = /^\/api\/v1\/activity\/sessions\/([0-9a-f-]{36})\/stop$/.exec(url.pathname);
+      if (stop && request.method === "POST") {
+        if (!granted("activity.stop")) return reply;
+        this.stops.push({ id: stop[1]!, body: request.body, contentType: request.headers["content-type"] });
+        if (!this.ignoreStops) this.sessions = this.sessions.filter((session) => (session as { id: string }).id !== stop[1]);
+        return reply.code(202).send({ status: "stopping" });
       }
       if (url.pathname === "/api/v1/titles") return granted("library.read") ? { titles: [], nextCursor: null } : reply;
       const title = /^\/api\/v1\/titles\/([0-9a-f-]{36})$/.exec(url.pathname);
@@ -245,17 +289,19 @@ describe("Now Playing with a mocked Dupelix server", () => {
     return { unsubscribe, latest: () => latest as NowPlayingSnapshot | null };
   };
 
-  it("polls sessions across pages with the key in a header, shows polling as normal, and never offers Stop", async () => {
+  it("polls sessions across pages with the key in a header, shows polling as normal, and offers no Stop without activity.stop", async () => {
     mock.pageSize = 2;
     mock.sessions = [dupelixSession(), dupelixHardwareTranscode(), dupelixEnded(), dupelixDirectStream()];
     const view = watchHub();
     const snapshot = await waitFor(() => view.latest()?.streams.length === 3 && view.latest());
     expect(snapshot.servers).toEqual([expect.objectContaining({ id: "dx1", kind: "dupelix", status: "polling", transport: "poll", message: null, plexPass: null })]);
     expect(snapshot.streams.map((stream) => [stream.user.name, stream.playMethod, stream.stop])).toEqual([
-      ["Alex", "directPlay", { available: false, reason: dupelixStopUnavailable }],
-      ["Alex", "directStream", { available: false, reason: dupelixStopUnavailable }],
-      ["Sam (Kids)", "transcode", { available: false, reason: dupelixStopUnavailable }]
+      ["Alex", "directPlay", { available: false, reason: dupelixStopNeedsScope }],
+      ["Alex", "directStream", { available: false, reason: dupelixStopNeedsScope }],
+      ["Sam (Kids)", "transcode", { available: false, reason: dupelixStopNeedsScope }]
     ]);
+    // No guests without activity.guests, and the key's scopes are read once, not on every poll.
+    expect(mock.requests.some((entry) => entry.path.includes("includeGuests"))).toBe(false);
     expect(snapshot.streams[0]!.posterUrl).toMatch(/^\/api\/now-playing\/poster\/[A-Za-z0-9_-]{32}$/);
     expect(JSON.stringify(snapshot)).not.toContain(mock.apiKey);
     // Several polls run at the fallback interval, with no socket attempts and no error building up.
@@ -263,7 +309,53 @@ describe("Now Playing with a mocked Dupelix server", () => {
     expect(view.latest()!.servers[0]).toMatchObject({ status: "polling", message: null });
     expect(mock.requests.every((entry) => entry.authorization === `Bearer ${mock.apiKey}` && !entry.path.includes(mock.apiKey))).toBe(true);
     expect(mock.requests.some((entry) => entry.path.includes("cursor=2"))).toBe(true);
-    await expect(hub!.stopStream("dx1", "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10", "Stop")).rejects.toMatchObject({ statusCode: 409, message: dupelixStopUnavailable });
+    expect(mock.requests.filter((entry) => entry.path === "/api/v1/api-keys/current")).toHaveLength(1);
+    await expect(hub!.stopStream("dx1", "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10", "Stop")).rejects.toMatchObject({ statusCode: 409, message: dupelixStopNeedsScope });
+    view.unsubscribe();
+  });
+
+  it("stops a stream that Dupelix says can be stopped, with the message, and checks that it is gone", async () => {
+    mock.scopes.add("activity.stop");
+    mock.sessions = [dupelixPreviewSession(), dupelixSession({ canStop: false })];
+    const view = watchHub();
+    const snapshot = await waitFor(() => view.latest()?.streams.length === 2 && view.latest());
+    const stoppable = snapshot.streams.find((stream) => stream.sessionKey === "e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15")!;
+    const refused = snapshot.streams.find((stream) => stream.sessionKey === "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10")!;
+    expect(stoppable.stop).toEqual({ available: true, reason: null });
+    expect(refused.stop).toEqual({ available: false, reason: dupelixStopRefused });
+    const message = `${"x".repeat(199)}é and more`;
+    await expect(hub!.stopStream("dx1", stoppable.sessionKey, message)).resolves.toEqual({ result: "stopped", message: "The stream has stopped." });
+    expect(mock.stops).toEqual([{ id: stoppable.sessionKey, body: { message: `${"x".repeat(199)}é` }, contentType: "application/json" }]);
+    await expect(hub!.stopStream("dx1", refused.sessionKey, "Stop")).rejects.toMatchObject({ statusCode: 409, message: dupelixStopRefused });
+
+    // A server that accepts the stop but keeps listing the stream is reported honestly.
+    await waitFor(() => !view.latest()?.streams.some((stream) => stream.sessionKey === stoppable.sessionKey));
+    mock.ignoreStops = true;
+    mock.sessions = [dupelixPreviewSession()];
+    await waitFor(() => view.latest()?.streams.some((stream) => stream.sessionKey === stoppable.sessionKey));
+    await expect(hub!.stopStream("dx1", stoppable.sessionKey, "")).resolves.toMatchObject({ result: "stillPlaying" });
+    expect(mock.stops.at(-1)!.body).toEqual({});
+    view.unsubscribe();
+  });
+
+  it("lists guest profiles only for a key with activity.guests", async () => {
+    mock.sessions = [dupelixSession()];
+    mock.guests = [dupelixGuestSession()];
+    mock.scopes.add("activity.guests");
+    const view = watchHub();
+    const snapshot = await waitFor(() => view.latest()?.streams.length === 2 && view.latest());
+    expect(snapshot.streams.map((stream) => stream.user.name).sort()).toEqual(["Alex", "Guest"]);
+    expect(mock.requests.some((entry) => entry.path.includes("includeGuests=true"))).toBe(true);
+    view.unsubscribe();
+  });
+
+  it("says when an older Dupelix server cannot stop streams", async () => {
+    mock.keyEndpoint = false;
+    mock.sessions = [dupelixSession()];
+    const view = watchHub();
+    const snapshot = await waitFor(() => view.latest()?.streams.length === 1 && view.latest());
+    expect(snapshot.streams[0]!.stop).toEqual({ available: false, reason: dupelixStopUnavailable });
+    expect(snapshot.servers[0]).toMatchObject({ status: "polling", message: null });
     view.unsubscribe();
   });
 
@@ -340,7 +432,7 @@ describe("Dupelix media servers", () => {
   const call = (method: "GET" | "POST" | "PUT" | "DELETE", url: string, payload?: unknown) =>
     app.app.inject({ method, url, headers: { cookie }, ...(payload === undefined ? {} : { payload: payload as Record<string, unknown> }) });
 
-  it("adds a Dupelix server with a sealed key, tests it with the key, and records the version", async () => {
+  it("adds a Dupelix server with a sealed key, tests it through the key's own description, and records the version and scopes", async () => {
     const rejected = await call("POST", "/api/media-servers", { kind: "dupelix", name: "Dupelix", url: mock.base, token: "not-a-dupelix-key", prefixMappings: [] });
     expect(rejected.statusCode).toBe(400);
     expect(rejected.json().error).toContain("msk_");
@@ -354,18 +446,35 @@ describe("Dupelix media servers", () => {
     expect(row.token).toMatch(/^enc:v1:/);
     expect((await loadMediaServers(app.database.db))[0]!.token).toBe(mock.apiKey);
 
+    mock.scopes.add("activity.network");
     const tested = await call("POST", `/api/media-servers/${id}/test`);
     expect(tested.statusCode).toBe(200);
-    expect((tested.json() as MediaServerList).servers[0]).toMatchObject({ kind: "dupelix", version: "0.1.0 b1 (API revision 145)", lastError: null });
-    expect(mock.requests.map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/activity/sessions?limit=1", "/api/v1/titles?limit=1"]);
+    expect((tested.json() as MediaServerList).servers[0]).toMatchObject({
+      kind: "dupelix", version: "0.1.0 b1 (API revision 145)", lastError: null,
+      apiKey: { name: "SRTL Manager", prefix: mock.apiKey.slice(0, 12), scopes: ["activity.network", "activity.read", "library.read"], expiresAt: null, lanOnly: true }
+    });
+    expect(tested.body).not.toContain(mock.apiKey);
+    expect(mock.requests.map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current"]);
     expect(mock.requests.every((entry) => entry.authorization === `Bearer ${mock.apiKey}`)).toBe(true);
 
-    // A missing scope fails the test, naming the scopes the key needs.
+    // A required scope missing from the key's effective scopes fails the test, naming it.
     mock.scopes.delete("library.read");
     const missing = await call("POST", `/api/media-servers/${id}/test`);
     expect(missing.statusCode).toBe(400);
-    expect(missing.json().error).toContain("library.read");
+    expect(missing.json().error).toContain("missing the library.read scope");
     expect((await call("GET", "/api/media-servers")).json().servers[0].lastError).toContain("library.read");
+
+    // An older server without the key endpoint is probed with one page of sessions and one title instead.
+    mock.keyEndpoint = false;
+    mock.requests = [];
+    const probed = await call("POST", `/api/media-servers/${id}/test`);
+    expect(probed.statusCode).toBe(400);
+    expect(probed.json().error).toContain("library.read");
+    mock.scopes.add("library.read");
+    const old = await call("POST", `/api/media-servers/${id}/test`);
+    expect(old.statusCode).toBe(200);
+    expect((old.json() as MediaServerList).servers[0]!.apiKey).toBeUndefined();
+    expect(mock.requests.slice(-4).map((entry) => entry.path)).toEqual(["/api/v1/server", "/api/v1/api-keys/current", "/api/v1/activity/sessions?limit=1", "/api/v1/titles?limit=1"]);
 
     // A new address needs the key again, and a new address with a key clears what the old one reported.
     const moved = await call("PUT", `/api/media-servers/${id}`, { name: "Dupelix", url: "http://elsewhere.example:8080", prefixMappings: [] });
@@ -393,7 +502,8 @@ describe("Dupelix migration", () => {
       // Rewind to schema 38, where the table only allowed Plex and Jellyfin.
       await first.pool.query(`ALTER TABLE media_servers DROP CONSTRAINT media_servers_kind_check`);
       await first.pool.query(`ALTER TABLE media_servers ADD CONSTRAINT media_servers_kind_check CHECK (kind IN ('plex', 'jellyfin'))`);
-      await first.pool.query(`DELETE FROM schema_migrations WHERE version = 39`);
+      await first.pool.query(`ALTER TABLE media_servers DROP COLUMN api_key`);
+      await first.pool.query(`DELETE FROM schema_migrations WHERE version IN (39, 40)`);
       await first.pool.query(`INSERT INTO media_servers (id, kind, name, url, token, created_at, updated_at) VALUES ('aaaaaaaaaaaa', 'plex', 'Home Plex', 'http://plex:32400', '', now()::text, now()::text), ('bbbbbbbbbbbb', 'jellyfin', 'Jellyfin', 'http://jellyfin:8096', '', now()::text, now()::text)`);
       await expect(first.pool.query(`INSERT INTO media_servers (id, kind, name, url, created_at, updated_at) VALUES ('cccccccccccc', 'dupelix', 'Dupelix', 'http://dupelix:8080', now()::text, now()::text)`)).rejects.toThrow(/media_servers_kind_check/);
     } finally {
@@ -409,6 +519,8 @@ describe("Dupelix migration", () => {
       const checks = await upgraded.pool.query<{ name: string }>(`SELECT conname AS name FROM pg_constraint WHERE conrelid = 'media_servers'::regclass AND contype = 'c'`);
       expect(checks.rows).toEqual([{ name: "media_servers_kind_check" }]);
       expect((await upgraded.pool.query(`SELECT 1 FROM schema_migrations WHERE version = 39 AND name = 'dupelix_media_servers'`)).rowCount).toBe(1);
+      expect((await upgraded.pool.query(`SELECT 1 FROM schema_migrations WHERE version = 40 AND name = 'media_server_api_keys'`)).rowCount).toBe(1);
+      expect((await upgraded.pool.query<{ api_key: string | null }>(`SELECT api_key FROM media_servers ORDER BY id`)).rows).toEqual([{ api_key: null }, { api_key: null }, { api_key: null }]);
     } finally {
       await upgraded.close();
       await testDatabase.cleanup();

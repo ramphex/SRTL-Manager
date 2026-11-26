@@ -15,6 +15,8 @@ export const mediaServers = pgTable("media_servers", {
   accountName: text("account_name"),
   accountId: text("account_id"),
   version: text("version"),
+  // Dupelix: what the server reported about the API key at the last connection test, as JSON. Never the key itself.
+  apiKey: text("api_key"),
   lastCheckedAt: text("last_checked_at"),
   lastError: text("last_error"),
   // A Plex PIN sign-in waiting for approval at plex.tv, as JSON.

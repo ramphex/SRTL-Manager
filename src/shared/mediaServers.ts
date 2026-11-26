@@ -9,6 +9,26 @@ export function supportsWatchSync(kind: MediaServerKind): kind is WatchSyncCapab
   return (watchSyncServerKinds as readonly string[]).includes(kind);
 }
 
+// Dupelix API key scopes: the ones Now Playing needs, and the ones that add features when the key has them.
+export const dupelixRequiredScopes = ["activity.read", "library.read"] as const;
+export const dupelixOptionalScopes = [
+  { scope: "activity.stop", purpose: "the Stop button" },
+  { scope: "activity.network", purpose: "client addresses, location, and LAN or WAN" },
+  { scope: "activity.guests", purpose: "guest profiles' streams" }
+] as const;
+
+// What a Dupelix server reports about the key SRTL uses, from the last connection test.
+export interface MediaServerApiKey {
+  name: string | null;
+  // The key's visible start, such as "msk_ab12cd34"; never the whole key.
+  prefix: string | null;
+  // Effective scopes: what the key may do now, as far as its creator still holds those permissions.
+  scopes: string[];
+  // Null when the key never expires.
+  expiresAt: string | null;
+  lanOnly: boolean | null;
+}
+
 export const mediaServerLimit = 10;
 export const mediaServerKindLabels: Record<MediaServerKind, string> = { plex: "Plex", jellyfin: "Jellyfin", dupelix: "Dupelix" };
 
@@ -41,6 +61,8 @@ export interface MediaServer {
   // Plex only: the server's machine identifier and the plex.tv account that owns it.
   machineIdentifier: string | null;
   accountName: string | null;
+  // Dupelix only: the API key's name, scopes, and expiry, when the server describes its keys. Absent otherwise.
+  apiKey?: MediaServerApiKey | null;
   version: string | null;
   lastCheckedAt: string | null;
   lastError: string | null;

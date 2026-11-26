@@ -541,10 +541,11 @@ export function parseJellyfinSession(raw: unknown, now: Date = new Date()): Pars
 
 // ---------------------------------------------------------------- Dupelix
 
-// One entry of Dupelix's GET /api/v1/activity/sessions (ActivitySession). Today it carries the account, profile,
-// device, title, playback route, encoder, output height and position. Dupelix is adding a richer session (pause
-// state, duration, show and episode, artwork, media info, address, bandwidth, file path); each of those is read
-// when present and left empty when not, never guessed.
+// One entry of Dupelix's GET /api/v1/activity/sessions (ActivitySession). It always carries the account, profile,
+// device, title, playback route, encoder, output height and position. Newer servers add pause and buffering state,
+// duration, show and episode, artwork, source and output media, per-track decisions, hardware use, speed, throughput,
+// network and whether the session can be stopped; the address needs the activity.network scope. Each of those is
+// read when present and left empty when not, never guessed. Dupelix never reports file paths.
 
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Sessions Dupelix still lists after playback ended.
@@ -580,14 +581,14 @@ function dupelixState(session: Json): NowPlayingState | null {
   if (state && dupelixEndedStates.has(state)) return null;
   const playback = lower(session.playbackState) ?? state;
   if (bool(session.paused) === true || bool(session.isPaused) === true || playback === "paused") return "paused";
-  if (playback === "buffering") return "buffering";
+  if (bool(session.buffering) === true || playback === "buffering") return "buffering";
   return "playing";
 }
 
 function dupelixDynamicRange(value: unknown): string | null {
   const range = lower(value)?.replace(/[\s_-]+/g, "");
   if (!range) return null;
-  if (range.startsWith("dolbyvision") || range.startsWith("dovi") || range === "dv") return "Dolby Vision";
+  if (range.startsWith("dolbyvision") || range.startsWith("dovi") || range.startsWith("dv")) return "Dolby Vision";
   if (range === "hdr10+" || range === "hdr10plus") return "HDR10+";
   if (range === "hdr10" || range === "pq") return "HDR10";
   if (range === "hlg") return "HLG";
@@ -606,11 +607,12 @@ function kbpsField(media: Json | null, ...prefixes: string[]): number | null {
   return null;
 }
 
-// A media description such as the session's future `source` or `output`. Only fields that say their unit are read.
+// A media description: the session's `source` or `output`. Only fields that say their unit are read.
 function dupelixMedia(media: Json | null): NowPlayingMediaInfo | null {
   if (!media) return null;
   const video = obj(media.video);
-  const audio = obj(media.audio);
+  // A source lists its audio tracks; an output describes the one it sends.
+  const audio = obj(media.audio) ?? list(media.audio)[0] ?? null;
   const width = num(media.width) ?? num(video?.width);
   const height = num(media.height) ?? num(video?.height);
   const info: NowPlayingMediaInfo = {
@@ -619,12 +621,32 @@ function dupelixMedia(media: Json | null): NowPlayingMediaInfo | null {
     resolution: resolutionLabel(width, height, text(media.resolution)),
     width,
     height,
-    dynamicRange: dupelixDynamicRange(media.dynamicRange ?? media.videoRange ?? video?.dynamicRange),
+    dynamicRange: dupelixDynamicRange(media.hdr ?? media.dynamicRange ?? media.videoRange ?? video?.hdr ?? video?.dynamicRange),
     audioCodec: lower(media.audioCodec) ?? lower(audio?.codec),
     audioChannels: num(media.audioChannels) ?? num(audio?.channels),
     bitrateKbps: kbpsField(media, "bitrate", "bitRate")
   };
   return Object.values(info).some((value) => value !== null) ? info : null;
+}
+
+// A track's own decision, as Dupelix reports it per video, audio, and subtitle track.
+function dupelixTrackDecision(value: unknown): NowPlayingDecision | null {
+  const decision = lower(value)?.replace(/[\s_-]+/g, "");
+  if (!decision) return null;
+  if (decision === "transcode" || decision === "convert" || decision === "converted" || decision === "encode") return "transcode";
+  if (decision === "copy" || decision === "remux" || decision === "directstream") return "copy";
+  if (decision === "direct" || decision === "directplay") return "directPlay";
+  return null;
+}
+
+function dupelixSubtitleDecision(value: unknown): NonNullable<NowPlayingStream["subtitle"]>["decision"] {
+  const decision = lower(value)?.replace(/[\s_-]+/g, "");
+  if (!decision) return null;
+  if (decision === "burn" || decision === "burnin" || decision === "burnedin" || decision === "encode") return "burn";
+  if (decision === "transcode" || decision === "convert" || decision === "converted") return "transcode";
+  if (decision === "copy" || decision === "remux") return "copy";
+  if (decision === "direct" || decision === "directplay" || decision === "external" || decision === "sidecar") return "directPlay";
+  return null;
 }
 
 function dupelixAudioDecision(reasonCode: string | null, source: NowPlayingMediaInfo, output: NowPlayingMediaInfo | null): NowPlayingDecision | null {
@@ -633,10 +655,25 @@ function dupelixAudioDecision(reasonCode: string | null, source: NowPlayingMedia
   return null;
 }
 
+// A hardware flag may be a boolean or the name of the encoder or decoder that ran.
+function dupelixHardware(value: unknown): { hardware: boolean | null; name: string | null } {
+  const flag = bool(value);
+  if (flag !== null) return { hardware: flag, name: null };
+  const name = text(value);
+  if (!name) return { hardware: null, name: null };
+  const engine = dupelixEncoderEngine(name);
+  return { hardware: engine === "hardware" ? true : engine === "cpu" ? false : true, name: engine === "cpu" ? null : name };
+}
+
 const dupelixLevelCauses: Record<string, string> = {
   encoder_limited: "Quality lowered because the encoder is busy",
   network_limited: "Quality lowered for the network",
   client_requested: "Quality chosen by the player"
+};
+
+const dupelixToneMapping: Record<string, string> = {
+  gpu: "HDR tone mapped to SDR on the GPU",
+  cpu: "HDR tone mapped to SDR on the CPU"
 };
 
 export function parseDupelixSession(raw: unknown, now: Date = new Date()): ParsedSession | null {
@@ -654,9 +691,13 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
   const reasonCode = lower(reason?.code);
   const encoder = text(session.encoder);
   const media = obj(session.media);
-  const source = dupelixMedia(obj(session.source) ?? obj(media?.source)) ?? emptyMedia();
+  const reportedSource = dupelixMedia(obj(session.source) ?? obj(media?.source));
+  const source = reportedSource ?? emptyMedia();
   const reportedOutput = dupelixMedia(obj(session.output) ?? obj(media?.output));
   const levelHeight = num(session.levelHeight);
+  const videoTrack = obj(session.video);
+  const audioTrack = obj(session.audio);
+  const subtitleTrack = obj(session.subtitle);
 
   let playMethod: NowPlayingPlayMethod;
   let videoDecision: NowPlayingDecision | null;
@@ -681,13 +722,24 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
     videoDecision = null;
     audioDecision = null;
   }
+  // Per-track decisions, when Dupelix reports them, are more precise than the route.
+  const trackVideo = dupelixTrackDecision(videoTrack?.decision);
+  const trackAudio = dupelixTrackDecision(audioTrack?.decision);
+  if (trackVideo || trackAudio) {
+    videoDecision = trackVideo ?? videoDecision;
+    audioDecision = trackAudio ?? audioDecision;
+    const decisions = [videoDecision, audioDecision];
+    playMethod = decisions.includes("transcode") ? "transcode" : decisions.includes("copy") ? "directStream" : decisions.includes("directPlay") ? "directPlay" : playMethod;
+  }
+  if (videoTrack && !source.videoCodec && videoDecision !== "transcode") source.videoCodec = lower(videoTrack.codec);
+  if (audioTrack && !source.audioCodec && audioDecision !== "transcode") source.audioCodec = lower(audioTrack.codec);
 
   let output: NowPlayingMediaInfo | null = null;
   if (playMethod !== "directPlay") {
     const videoCopied = videoDecision === "copy";
     const height = reportedOutput?.height ?? levelHeight ?? (videoCopied ? source.height : null);
     const width = reportedOutput?.width ?? (videoCopied && height === source.height ? source.width : null);
-    const videoCodec = reportedOutput?.videoCodec ?? (videoCopied ? source.videoCodec : dupelixEncoderCodec(encoder));
+    const videoCodec = reportedOutput?.videoCodec ?? (videoCopied ? source.videoCodec : (videoDecision === "transcode" ? lower(videoTrack?.codec) : null) ?? dupelixEncoderCodec(encoder));
     output = {
       container: reportedOutput?.container ?? null,
       videoCodec,
@@ -695,28 +747,42 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
       width,
       height,
       dynamicRange: reportedOutput?.dynamicRange ?? outputDynamicRange(videoDecision, source, videoCodec),
-      audioCodec: reportedOutput?.audioCodec ?? (audioDecision === "copy" ? source.audioCodec : null),
+      audioCodec: reportedOutput?.audioCodec ?? (audioDecision === "copy" ? source.audioCodec : audioDecision === "transcode" ? lower(audioTrack?.codec) : null),
       audioChannels: reportedOutput?.audioChannels ?? (audioDecision === "copy" ? source.audioChannels : null),
       bitrateKbps: reportedOutput?.bitrateKbps ?? null
     };
   }
 
-  const reasons = playMethod === "directPlay" ? [] : [...new Set([text(reason?.message), dupelixLevelCauses[lower(session.levelCause) ?? ""] ?? null].filter((entry): entry is string => Boolean(entry)))];
+  const toneMapping = dupelixToneMapping[lower(session.toneMapping) ?? ""] ?? null;
+  const reasons = playMethod === "directPlay" ? [] : [...new Set([text(reason?.message), dupelixLevelCauses[lower(session.levelCause) ?? ""] ?? null, toneMapping].filter((entry): entry is string => Boolean(entry)))];
+  const encode = dupelixHardware(session.hardwareEncode ?? session.hardware);
+  const decode = dupelixHardware(session.hardwareDecode ?? session.decoderHardware);
+  const speed = num(session.encoderSpeed);
+  const throttled = bool(session.throttled);
   let transcode: NowPlayingTranscode | null = null;
   if (playMethod === "transcode") {
-    // Only the video encoder is reported. Audio-only conversion runs on the CPU.
-    const engine = videoDecision === "transcode" || videoDecision === null ? dupelixEncoderEngine(encoder) : "cpu";
-    transcode = { engine, hardwareDecode: null, hardwareEncode: engine === "hardware" ? encoder : null, speed: null, throttled: null, reasons, reasonsDerived: false };
+    const videoEncoded = videoDecision === "transcode" || videoDecision === null;
+    // Audio-only conversion runs on the CPU. A reported hardware flag outranks the encoder's name.
+    const engine: NowPlayingTranscode["engine"] = !videoEncoded ? "cpu" : encode.hardware === true ? "hardware" : encode.hardware === false ? "cpu" : dupelixEncoderEngine(encoder);
+    transcode = {
+      engine,
+      hardwareDecode: decode.hardware ? decode.name ?? "GPU" : null,
+      hardwareEncode: engine === "hardware" ? encode.name ?? encoder ?? "GPU" : null,
+      speed: speed !== null && speed > 0 ? Math.round(speed * 10) / 10 : null,
+      throttled,
+      reasons,
+      reasonsDerived: false
+    };
   } else if (playMethod === "directStream" && reasons.length) {
     transcode = { engine: "cpu", hardwareDecode: null, hardwareEncode: null, speed: null, throttled: null, reasons, reasonsDerived: false };
   }
 
-  const subtitleInfo = obj(session.subtitle);
-  const burn = reasonCode === "subtitle_burn_in_required" || bool(subtitleInfo?.burnIn) === true;
-  const subtitle = subtitleInfo || burn ? {
-    decision: burn ? "burn" as const : playMethod === "directPlay" ? "directPlay" as const : "copy" as const,
-    codec: lower(subtitleInfo?.codec),
-    language: text(subtitleInfo?.language)
+  const subtitleDecision = dupelixSubtitleDecision(subtitleTrack?.decision);
+  const burn = reasonCode === "subtitle_burn_in_required" || bool(subtitleTrack?.burnIn) === true || subtitleDecision === "burn";
+  const subtitle = subtitleTrack || burn ? {
+    decision: burn ? "burn" as const : subtitleDecision ?? (playMethod === "directPlay" ? "directPlay" as const : "copy" as const),
+    codec: lower(subtitleTrack?.codec),
+    language: text(subtitleTrack?.language)
   } : null;
 
   const show = obj(session.show);
@@ -724,23 +790,28 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
   const episode = num(session.episodeNumber) ?? num(title.episodeNumber);
   const address = text(session.remoteAddress) ?? text(session.ipAddress) ?? text(session.clientAddress) ?? text(session.ip);
   const ip = address ? normalizeAddress(address) : null;
-  const reportedLocation = lower(session.location) ?? lower(session.network);
-  const local = bool(session.local) ?? bool(session.isLocal);
+  const network = obj(session.network);
+  const reportedLocation = lower(network?.location) ?? lower(session.location) ?? lower(session.network);
+  const local = bool(network?.local) ?? bool(session.local) ?? bool(session.isLocal);
   const location = reportedLocation === "lan" || reportedLocation === "wan" ? reportedLocation : local !== null ? (local ? "lan" : "wan") : ip ? (isPrivateAddress(ip) ? "lan" : "wan") : null;
-  const reportedBandwidth = kbpsField(session, "bandwidth");
+  const reportedBandwidth = kbpsField(session, "throughput", "bandwidth");
   const duration = num(session.durationMs) ?? num(title.runtimeMs);
+  const readyAhead = num(session.readyAheadMs);
+  const positionMs = Math.max(0, Math.round(num(session.positionMs) ?? 0));
   const accountName = text(session.displayName) ?? text(session.signInDisplayName);
   const profileName = text(session.profileName);
   const userName = accountName && profileName && profileName.toLowerCase() !== accountName.toLowerCase() ? text(`${accountName} (${profileName})`) : accountName ?? profileName;
   const file = obj(session.file);
+  const client = obj(session.client);
 
   return {
     sessionKey,
     itemKey: titleId,
-    filePath: str(session.filePath) ?? str(file?.path) ?? null,
+    filePath: str(session.filePath) ?? str(session.path) ?? str(file?.path) ?? null,
     posterPath: dupelixPosterPath(titleId),
     terminateId: null,
-    remoteControl: false,
+    // Dupelix says per session whether it can be stopped; the key also needs activity.stop.
+    remoteControl: bool(session.canStop) === true,
     stream: {
       sessionKey,
       user: { id: str(session.accountId), name: userName ?? "Unknown user" },
@@ -752,14 +823,14 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
       player: {
         name: text(session.deviceFriendlyName) ?? text(session.deviceName),
         device: text(session.deviceName),
-        platform: text(session.platform),
-        product: text(session.clientName) ?? text(session.appName),
-        version: text(session.clientVersion) ?? text(session.appVersion)
+        platform: text(session.platform) ?? text(client?.platform),
+        product: text(client?.product) ?? text(client?.appName) ?? text(session.clientName) ?? text(session.appName),
+        version: text(client?.version) ?? text(client?.appVersion) ?? text(session.clientVersion) ?? text(session.appVersion)
       },
       state,
-      positionMs: Math.max(0, Math.round(num(session.positionMs) ?? 0)),
+      positionMs,
       durationMs: duration !== null && duration > 0 ? Math.round(duration) : null,
-      bufferedMs: null,
+      bufferedMs: playMethod === "directPlay" || readyAhead === null || readyAhead < 0 ? null : positionMs + Math.round(readyAhead),
       reportedAt: now.toISOString(),
       playMethod,
       videoDecision,
@@ -769,7 +840,7 @@ export function parseDupelixSession(raw: unknown, now: Date = new Date()): Parse
       output,
       transcode,
       bandwidth: reportedBandwidth !== null ? { kbps: reportedBandwidth, kind: "nominal" } : { kbps: output?.bitrateKbps ?? source.bitrateKbps, kind: "estimate" },
-      network: { location, ip, relayed: bool(session.relayed) === true, secure: bool(session.secure), geo: null }
+      network: { location, ip, relayed: bool(session.relayed) === true, secure: bool(network?.secure) ?? bool(session.secure), geo: null }
     }
   };
 }

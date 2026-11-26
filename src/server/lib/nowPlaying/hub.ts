@@ -14,7 +14,7 @@ import { WatchSyncError } from "../watchSyncHttp";
 import { summarizeStreams, type ParsedSession } from "./classify";
 import { GeoLookup, type GeoLookupOptions } from "./geo";
 import { HostMonitor } from "./hostStats";
-import { NowPlayingError, createLiveAdapter, dupelixStopUnavailable, plexPassActive, type LiveAdapter, type LiveServerConfig, type ServerExtras, type SocketEvent } from "./upstream";
+import { NowPlayingError, createLiveAdapter, plexPassActive, type LiveAdapter, type LiveServerConfig, type ServerExtras, type SocketEvent } from "./upstream";
 
 export type NowPlayingEvent = { type: "sessions"; snapshot: NowPlayingSnapshot } | { type: "host"; host: NowPlayingHostEvent };
 export type NowPlayingListener = (event: NowPlayingEvent) => void;
@@ -544,14 +544,15 @@ export class NowPlayingHub {
     return source && watcher ? { source, adapter: watcher.adapter } : null;
   }
 
-  private stopAvailability(record: MediaServerRecord, session: ParsedSession, plexPass: boolean | null): NowPlayingStream["stop"] {
+  private stopAvailability(record: MediaServerRecord, session: ParsedSession, plexPass: boolean | null, adapter: LiveAdapter): NowPlayingStream["stop"] {
+    const own = adapter.stopAvailability?.(session);
+    if (own) return own;
     if (record.kind === "plex") {
       if (!session.terminateId) return { available: false, reason: "This player does not report a Plex session id (Plexamp and some players), so Plex cannot stop it." };
       if (plexPass === null) return { available: false, reason: "Checking Plex Pass on the server owner's account." };
       if (!plexPass) return { available: false, reason: "Stopping Plex streams needs an active Plex Pass on the server owner's account." };
       return { available: true, reason: null };
     }
-    if (record.kind === "dupelix") return { available: false, reason: dupelixStopUnavailable };
     return session.remoteControl ? { available: true, reason: null } : { available: false, reason: "This Jellyfin client does not accept remote control." };
   }
 
@@ -580,7 +581,7 @@ export class NowPlayingHub {
           serverName: record.name,
           posterUrl: this.posterUrl(record.id, session.posterPath),
           srtl: sources[index]!,
-          stop: this.stopAvailability(record, session, plexPass),
+          stop: this.stopAvailability(record, session, plexPass, watcher.adapter),
           network: { ...session.stream.network, geo: this.geo.get(session.stream.network.ip) }
         });
       });
@@ -599,7 +600,7 @@ export class NowPlayingHub {
     if (!watcher) throw new NowPlayingError("This media server is not connected.", null, 404);
     const session = watcher.sessions.get(sessionKey);
     if (!session) throw new NowPlayingError("This stream has already ended.", null, 404);
-    const availability = this.stopAvailability(watcher.record, session, watcher.record.kind === "plex" ? this.plexPassFor(watcher.record) : null);
+    const availability = this.stopAvailability(watcher.record, session, watcher.record.kind === "plex" ? this.plexPassFor(watcher.record) : null, watcher.adapter);
     if (!availability.available) throw new NowPlayingError(availability.reason ?? "This stream cannot be stopped from SRTL.", null, 409);
     try {
       await watcher.adapter.stopStream(session, message);

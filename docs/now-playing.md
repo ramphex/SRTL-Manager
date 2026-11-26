@@ -30,7 +30,7 @@ In detail:
 - **Play method**:
   - Plex: any transcoded stream makes it a transcode; otherwise any copied stream makes it a direct stream; otherwise it is a direct play. A transcode that converts only the audio is still a transcode, and it always runs on the CPU. A video transcode counts as hardware when Plex reports a hardware encoder.
   - Jellyfin: the server's play method, refined by whether video and audio are copied. A "transcode" that copies both is a remux, shown as a direct stream.
-  - Dupelix: the session's route. A direct play or a stored version sent as it is is a direct play, a direct stream (new container, video untouched) is a direct stream, and a transcode is a transcode. A direct stream that converts the audio counts as a transcode, as on Plex. A video transcode counts as hardware when Dupelix reports a hardware encoder (NVENC, Quick Sync, VAAPI, VideoToolbox and the like) and as CPU for a software one.
+  - Dupelix: each track's own decision when Dupelix reports it (any converted track makes a transcode, any copied one a direct stream), otherwise the session's route. A direct play or a stored version sent as it is is a direct play, a direct stream (new container, video untouched) is a direct stream, and a transcode is a transcode. A stream that converts only the audio counts as a transcode, as on Plex. A video transcode counts as hardware when Dupelix says its encoder is a hardware one, or names one (NVENC, Quick Sync, VAAPI, VideoToolbox and the like), and as CPU for a software one. Dupelix also reports a hardware decode, HDR tone mapping, the encoder speed, and whether the encoder is throttled.
 - **Source and output**: codec, resolution, and HDR format of the original file and of what the player receives, subtitles (and whether they are burned in), and the container.
 - **Why it transcodes**: Jellyfin reports its reasons. Plex does not, so SRTL derives them from the source and output streams and labels them "derived". Plex streams also show the transcoder speed and whether it is throttled.
 - **Bandwidth**: Plex's reserved bandwidth for the stream, or an estimate from the bitrate (labelled). Placeholder values such as 2,147,483,647 are shown as unknown.
@@ -45,7 +45,7 @@ Owners and admins can stop a stream; moderators can only watch this page. The re
 
 - **Plex**: needs an active Plex Pass on the account SRTL signed in with (the server owner). SRTL checks the subscription at plex.tv and caches the answer for a day (half an hour when inactive). Without Plex Pass, Stop is hidden on Plex streams and the server line says "Stop needs Plex Pass". Players that report no session id, such as Plexamp, cannot be stopped.
 - **Jellyfin**: available when the client accepts remote control. SRTL sends the message (many clients ignore it) and then the stop command.
-- **Dupelix**: not available yet. Dupelix does not let other apps stop streams, so Stop is hidden on Dupelix streams.
+- **Dupelix**: available when Dupelix says the stream can be stopped and the API key has the `activity.stop` scope. SRTL sends the message (up to 200 characters; apps may not show it) and Dupelix ends playback; the device stays signed in. Without the scope, the card's Stop is hidden; on a Dupelix server too old to stop streams, too.
 
 ## Locations of client addresses
 
@@ -96,15 +96,11 @@ The server type icons are the Plex and Jellyfin glyphs from [Simple Icons](https
 
 ## Dupelix
 
-Dupelix's session list does not report everything Plex and Jellyfin do yet. Until it does, Dupelix cards leave these out instead of guessing:
+What a Dupelix card shows depends on what the Dupelix server reports. Current servers send the pause and buffering state, duration, show, season and episode, poster, source and output media, per-track decisions, hardware use, encoder speed, how far ahead the stream is prepared, throughput, and the network. Older ones send only the user, device, title, route, encoder, output height, and position, and their cards leave the rest out instead of guessing.
 
-- **Paused or buffering**: every Dupelix stream shows as playing.
-- **Duration and progress bar**: shown only when the title's runtime is known.
-- **Show name** for episodes: the card shows the episode title and its season and episode number.
-- **Source and output details**: codec, HDR format, audio, container, and bitrate. The output resolution comes from the height Dupelix encodes to, and the output codec from its encoder.
-- **Bandwidth**, **LAN or WAN**, the client address and its location.
-- **SRTL source**: without a file path, cards say "Source unknown".
-- **Stop**, as above.
+- **Client address, location, and LAN or WAN** need the `activity.network` scope on the key, or the location is left out. Without the address, LAN or WAN still shows when Dupelix says whether the client is local.
+- **SRTL source**: Dupelix never reports file paths, so Dupelix cards show no local or remote storage badge.
+- **Stop** needs the `activity.stop` scope, as above.
+- **Guest profiles** appear only with the `activity.guests` scope.
 
-SRTL reads each of these as soon as Dupelix sends it.
-
+SRTL reads each detail as soon as Dupelix sends it.

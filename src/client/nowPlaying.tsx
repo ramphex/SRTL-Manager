@@ -371,8 +371,8 @@ function StopDialog({ stream, onClose }: { stream: NowPlayingStream | null; onCl
           </p>
         ) : (
           <label className="np-stop-message">
-            <span>Message shown to {stream.user.name}{stream.serverKind === "jellyfin" ? " (if the app displays messages)" : ""}</span>
-            <textarea value={message} maxLength={250} rows={3} onChange={(event) => setMessage(event.target.value)} disabled={stop.isPending} />
+            <span>Message shown to {stream.user.name}{stream.serverKind !== "plex" ? " (if the app displays messages)" : ""}</span>
+            <textarea value={message} maxLength={stream.serverKind === "dupelix" ? 200 : 250} rows={3} onChange={(event) => setMessage(event.target.value)} disabled={stop.isPending} />
           </label>
         )}
         {stop.error ? <p className="panel-message action-error" role="alert">{stop.error instanceof Error ? stop.error.message : "The stream could not be stopped."}</p> : null}
