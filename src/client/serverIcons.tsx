@@ -4,18 +4,23 @@ import type { MediaServerKind } from "../shared/mediaServers";
 // https://simpleicons.org); Plex and Jellyfin names and logos are trademarks of their respective owners. The Dupelix
 // mark comes from the Dupelix project and is used with its owner's permission. All three only show which kind of
 // media server a row belongs to.
-const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: string; aspect: number }> = {
+// `scale` is the share of the requested size a glyph's box takes. Lucide icons leave about a twelfth of their box empty
+// on each side, so square marks that fill their box are drawn at 0.85 of the size to look as big as the icons beside
+// them. The Plex wordmark keeps the full size: its lowercase body is then about the x-height of the text next to it.
+const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: string; aspect: number; scale: number }> = {
   // The Plex glyph is a wordmark that fills under half of its square, so its box is cropped to the glyph's height.
   plex: {
     label: "Plex",
     viewBox: "0 5.05 24 13.7",
     aspect: 24 / 13.7,
+    scale: 1,
     path: "M3.987 8.409c-.96 0-1.587.28-2.12.933v-.72H0v8.88s.038.018.127.037c.138.03.821.187 1.331-.249.441-.377.542-.814.542-1.318v-1.283c.533.573 1.147.813 2 .813 1.84 0 3.253-1.493 3.253-3.48 0-2.12-1.36-3.613-3.266-3.613Zm16.748 5.595.406.591c.391.614.894.906 1.492.908.621-.012 1.064-.562 1.226-.755 0 0-.307-.27-.686-.72-.517-.614-1.214-1.755-1.24-1.803l-1.198 1.779Zm-3.205-1.955c0-2.08-1.52-3.64-3.52-3.64s-3.467 1.587-3.467 3.573a3.48 3.48 0 0 0 3.507 3.52c1.413 0 2.626-.84 3.253-2.293h-2.04l-.093.093c-.427.4-.72.533-1.227.533-.787 0-1.373-.506-1.453-1.266h4.986c.04-.214.054-.307.054-.52Zm-7.671-.219c0 .769.11 1.701.868 2.722l.056.069c-.306.526-.742.88-1.248.88-.399 0-.814-.211-1.138-.579a2.177 2.177 0 0 1-.538-1.441V6.409H9.86l-.001 5.421Zm9.283 3.46h-2.39l2.247-3.332-2.247-3.335h2.39l2.248 3.335-2.248 3.332Zm1.593-1.286Zm-17.162-.342c-.933 0-1.68-.773-1.68-1.72s.76-1.666 1.68-1.666c.92 0 1.68.733 1.68 1.68 0 .946-.733 1.706-1.68 1.706Zm18.361-1.974L24 8.622h-2.391l-.87 1.293 1.195 1.773Zm-9.404-.466c.16-.706.72-1.133 1.493-1.133.773 0 1.373.467 1.507 1.133h-3Z"
   },
   jellyfin: {
     label: "Jellyfin",
     viewBox: "0 0 24 24",
     aspect: 1,
+    scale: 0.85,
     path: "M12 .002C8.826.002-1.398 18.537.16 21.666c1.56 3.129 22.14 3.094 23.682 0C25.384 18.573 15.177 0 12 0zm7.76 18.949c-1.008 2.028-14.493 2.05-15.514 0C3.224 16.9 9.92 4.755 12.003 4.755c2.081 0 8.77 12.166 7.759 14.196zM12 9.198c-1.054 0-4.446 6.15-3.93 7.189.518 1.04 7.348 1.027 7.86 0 .511-1.027-2.874-7.19-3.93-7.19z"
   },
   // The one-color mark in its own units, so its box is the glyph itself, as with Plex.
@@ -23,6 +28,7 @@ const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: st
     label: "Dupelix",
     viewBox: "0 0 402 431",
     aspect: 402 / 431,
+    scale: 0.85,
     path: "M402 0 L310 29 Q282 37 282 65 L282 296 Q282 327 250 327 L115 327 L115 240 Q115 216 139 216 L282 216 L282 122 L160 122 C80 122 0 222 0 320 C0 393 34 431 115 431 L231 431 C350 431 402 329 402 195 Z"
   }
 };
@@ -31,8 +37,9 @@ const glyphs: Record<MediaServerKind, { label: string; path: string; viewBox: st
 export function MediaServerIcon({ kind, size = 14, decorative = false }: { kind: MediaServerKind; size?: number; decorative?: boolean }) {
   const glyph = glyphs[kind];
   const naming = decorative ? { "aria-hidden": true } : { role: "img", "aria-label": glyph.label };
+  const height = Math.round(size * glyph.scale);
   return (
-    <svg className={`server-kind-icon server-kind-${kind}`} viewBox={glyph.viewBox} width={Math.round(size * glyph.aspect)} height={size} {...naming} fill="currentColor">
+    <svg className={`server-kind-icon server-kind-${kind}`} viewBox={glyph.viewBox} width={Math.round(height * glyph.aspect)} height={height} {...naming} fill="currentColor">
       {decorative ? null : <title>{glyph.label}</title>}
       <path d={glyph.path} />
     </svg>

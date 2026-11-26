@@ -8444,14 +8444,20 @@ button.danger-button:hover:not(:disabled) {
 .np-details dd { margin: 0; overflow-wrap: anywhere; }
 .np-decision { color: var(--muted); }
 .np-burn { color: var(--warn); font-weight: 600; }
-.np-card-footer { border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px 14px; grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
-.np-card-footer > div { min-width: 0; }
+/* Every footer entry is a row centred on one line, so icons, names and the server glyph share a centre line whatever
+   each entry's height (the server's tooltip button is taller than a line of text). */
+.np-card-footer { --np-footer-gap: 14px; align-items: center; border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px var(--np-footer-gap); grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
+.np-card-footer > div { align-items: center; display: flex; min-width: 0; }
+/* The server glyph belongs to the name before it, so it sits 6px from it instead of the gap between entries. A
+   negative right margin only pulls in an entry on the same line, so a server that wraps stays put. */
+.np-card-footer > .np-footer-user { margin-right: calc(6px - var(--np-footer-gap)); }
 .np-card-footer > .np-footer-location { margin-left: auto; }
 .np-card-footer > .np-footer-player { flex: 1 0 100%; }
 .np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
+.np-card-footer .server-kind-icon { display: block; }
 .np-card-footer svg { color: var(--muted); flex: none; }
 .np-server-name { align-items: center; display: flex; gap: 4px; min-width: 0; }
-.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; min-width: 20px; justify-content: center; }
+.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; justify-content: center; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .np-footer-secondary { color: var(--muted); }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
@@ -8506,7 +8512,7 @@ button.danger-button:hover:not(:disabled) {
   .np-card { grid-template-columns: 64px minmax(0, 1fr); padding: 10px; }
   .np-poster { width: 64px; }
   .np-details > div { grid-template-columns: 76px minmax(0, 1fr); }
-  .np-card-footer { gap: 4px 10px; }
+  .np-card-footer { --np-footer-gap: 10px; }
   .np-stop-button { height: 36px; min-height: 36px; width: 36px; margin: -6px -6px 0 0; }
   .np-details-toggle { height: 32px; min-height: 32px; width: 32px; }
 }
