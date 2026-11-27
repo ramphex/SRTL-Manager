@@ -4,7 +4,7 @@ import type { AddressInfo } from "node:net";
 import type { Duplex } from "node:stream";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { requestArrJson } from "../src/server/lib/arrHttp";
-import { PlexLiveAdapter } from "../src/server/lib/nowPlaying/upstream";
+import { DupelixLiveAdapter, PlexLiveAdapter } from "../src/server/lib/nowPlaying/upstream";
 import { configureOutboundPolicy, defaultOutboundPolicy, outboundAddressAllowed, outboundAddressProblem, outboundDns, parseOutboundPolicy } from "../src/server/lib/outboundPolicy";
 import { testOutboundAllow } from "./setup";
 
@@ -115,5 +115,49 @@ describe("Now Playing sockets", () => {
     dnsAnswers.set("plex.example.test", [{ address: "127.0.0.1", family: 4 }]);
     await expect(adapter("plex.example.test").openSocket({ onEvent: () => undefined, onClose: () => undefined })).rejects.toThrow("loopback");
     expect(upgrades).toEqual([]);
+  });
+});
+
+describe("Dupelix activity stream address checks", () => {
+  let server: http.Server;
+  let port = 0;
+  let requests: Array<{ host: string | undefined; remote: string | undefined }> = [];
+
+  beforeEach(async () => {
+    requests = [];
+    server = http.createServer((request, response) => {
+      requests.push({ host: request.headers.host, remote: request.socket.remoteAddress });
+      // An older key endpoint: SRTL then knows no scopes and asks for no guests.
+      if (!request.url?.startsWith("/api/v1/activity/stream")) { response.writeHead(404).end(); return; }
+      response.writeHead(200, { "Content-Type": "text/event-stream" });
+      response.write("retry: 5000\n\n");
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    port = (server.address() as AddressInfo).port;
+  });
+
+  afterEach(async () => {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  const adapter = (host: string) => new DupelixLiveAdapter({ id: "dx1", kind: "dupelix", name: "Dupelix", url: `http://${host}:${port}`, token: "msk_exampleKey", clientIdentifier: "example-client" });
+  const handlers = { onEvent: () => undefined, onClose: () => undefined };
+
+  it("connects to the address that was checked, without resolving the host again", async () => {
+    dnsAnswers.set("dupelix.example.test", [{ address: "127.0.0.1", family: 4 }]);
+    const close = await adapter("dupelix.example.test").openSocket(handlers);
+    close();
+    expect(requests.at(-1)).toEqual({ host: `dupelix.example.test:${port}`, remote: "127.0.0.1" });
+    expect(new Set(dnsQueries)).toEqual(new Set(["dupelix.example.test"]));
+  });
+
+  it("never opens a stream to a host whose answer the policy refuses", async () => {
+    dnsAnswers.set("metadata.example.test", [{ address: "169.254.169.254", family: 4 }]);
+    await expect(adapter("metadata.example.test").openSocket(handlers)).rejects.toThrow("Dupelix URL resolves to an unsupported network address.");
+    configureOutboundPolicy(defaultOutboundPolicy);
+    dnsAnswers.set("dupelix.example.test", [{ address: "127.0.0.1", family: 4 }]);
+    await expect(adapter("dupelix.example.test").openSocket(handlers)).rejects.toThrow("loopback");
+    expect(requests).toEqual([]);
   });
 });

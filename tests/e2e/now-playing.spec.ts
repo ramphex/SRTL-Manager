@@ -309,9 +309,10 @@ test("hides Stop on Plex streams without Plex Pass", async ({ page }) => {
   await expect(page.getByRole("list", { name: "Media servers" })).toContainText("Stop needs Plex Pass");
 });
 
-const dupelixServer: MediaServer = { id: "dx1", kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "0.1.0 b1 (API revision 148)", lastCheckedAt: "2026-11-02T10:00:00.000Z", lastError: null };
+const dupelixServer: MediaServer = { id: "dx1", kind: "dupelix", name: "Dupelix", url: "https://dupelix.example.com", hasToken: true, prefixMappings: [], machineIdentifier: null, accountName: null, version: "0.1.0 b1 (API revision 152)", lastCheckedAt: "2026-11-02T10:00:00.000Z", lastError: null };
 
-function withDupelix(value: NowPlayingSnapshot): NowPlayingSnapshot {
+// Dupelix pushes its sessions over its activity stream, so its normal state is Live; it polls while the stream is down.
+const withDupelix = (status: "live" | "polling" = "live") => (value: NowPlayingSnapshot): NowPlayingSnapshot => {
   const dupelix = stream({
     serverId: "dx1", serverKind: "dupelix", serverName: "Dupelix", sessionKey: "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10", id: "dx1:9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10",
     title: "Pilot", mediaType: "episode", episodeLabel: "S01E03", playMethod: "transcode", user: { id: "a1", name: "Sam (Kids)", signedInAs: "Jordan" },
@@ -324,21 +325,21 @@ function withDupelix(value: NowPlayingSnapshot): NowPlayingSnapshot {
   });
   return {
     ...value,
-    servers: [...value.servers, { id: "dx1", name: "Dupelix", kind: "dupelix", status: "polling", message: null, transport: "poll", plexPass: null, bandwidth: null, resources: null, lastUpdatedAt: new Date().toISOString() }],
+    servers: [...value.servers, { id: "dx1", name: "Dupelix", kind: "dupelix", status, message: null, transport: status === "live" ? "socket" : "poll", plexPass: null, bandwidth: null, resources: null, lastUpdatedAt: new Date().toISOString() }],
     streams: [...value.streams, dupelix],
     summary: { ...value.summary, transcodeHardware: value.summary.transcodeHardware + 1 }
   };
-}
+};
 
-test("shows Dupelix streams next to Plex and Jellyfin, polled as normal, without Stop", async ({ page }) => {
-  await fixture(page, { servers: [...connectedServers, dupelixServer], transform: withDupelix });
+test("shows Dupelix streams next to Plex and Jellyfin, live like them, without Stop", async ({ page }) => {
+  await fixture(page, { servers: [...connectedServers, dupelixServer], transform: withDupelix() });
   await openNowPlaying(page);
   await expect(page.getByRole("article")).toHaveCount(5);
   const servers = page.getByRole("list", { name: "Media servers" });
   const dupelix = servers.getByRole("listitem").filter({ hasText: "Dupelix" });
   await expect(dupelix.getByRole("img", { name: "Dupelix" })).toBeVisible();
-  await expect(dupelix).toContainText("checking every few seconds");
-  await expect(dupelix).not.toContainText("no live socket");
+  await expect(dupelix.locator(".np-server-status")).toHaveText("Live");
+  await expect(dupelix).not.toContainText("checking every few seconds");
   const card = page.getByRole("article", { name: /Pilot/ });
   await expect(card).toContainText("Sam (Kids) · signed in as Jordan");
   await expect(card.locator(".np-footer-user dd")).toHaveAttribute("title", "Sam (Kids), signed in as Jordan");
@@ -347,6 +348,15 @@ test("shows Dupelix streams next to Plex and Jellyfin, polled as normal, without
   await expect(card.getByRole("button", { name: "Terminate the stream" })).toHaveCount(0);
   // Plex and Jellyfin streams keep their Stop buttons.
   await expect(page.getByRole("article", { name: "Example Movie — alex_03" }).getByRole("button", { name: "Terminate the stream" })).toBeVisible();
+});
+
+test("says when a Dupelix server falls back to polling", async ({ page }) => {
+  await fixture(page, { servers: [...connectedServers, dupelixServer], transform: withDupelix("polling") });
+  await openNowPlaying(page);
+  const dupelix = page.getByRole("list", { name: "Media servers" }).getByRole("listitem").filter({ hasText: "Dupelix" });
+  await expect(dupelix.locator(".np-server-status")).toHaveText("Polling");
+  await expect(dupelix).toContainText("no live connection, checking every few seconds");
+  await expect(page.getByRole("article", { name: /Pilot/ })).toBeVisible();
 });
 
 test("fits a phone screen without horizontal scrolling", async ({ page }) => {
