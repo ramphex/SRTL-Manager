@@ -85,6 +85,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
   ]).finally(() => clearTimeout(timer));
 }
 
+// A socket that stays open this long counts as working, so the next drop is retried without backoff.
+const socketHealthyMs = 10_000;
+
 function unauthorizedMessage(kind: MediaServerRecord["kind"]): string {
   if (kind === "plex") return "Plex token invalid — sign in again in Settings > Media servers.";
   if (kind === "dupelix") return `Dupelix refused the API key — it needs the Dupelix permission ${dupelixPermission("activity.read")}, and a LAN-only key does not work on Dupelix's HTTPS address. Update it in Settings > Media servers.`;
@@ -101,7 +104,12 @@ class ServerWatcher {
   lastUpdatedAt: string | null = null;
   extras: ServerExtras = {};
   private failures = 0;
+  // Failed opens, and connections that closed soon after opening, since the last one that lasted.
   private socketFailures = 0;
+  // How long the server asked SRTL to wait before reconnecting, when it said.
+  private socketRetryHintMs: number | null = null;
+  // Counts pushed session changes, so a poll that was already under way never overwrites a newer push.
+  private pushSeq = 0;
   private closeSocket: (() => void) | null = null;
   private socketConnecting = false;
   private pollTimer: NodeJS.Timeout | null = null;
@@ -146,12 +154,21 @@ class ServerWatcher {
     if (!this.adapter.openSocket) return;
     if (this.stopped || this.closeSocket || this.socketConnecting || this.status === "unauthorized") return;
     this.socketConnecting = true;
+    let openedAt = 0;
+    let closedBeforeOpen = false;
     try {
       const close = await this.adapter.openSocket({
+        signal: this.abort.signal,
         onEvent: (event) => this.onSocketEvent(event),
-        onClose: () => {
+        onClose: (_reason, retryMs) => {
+          if (this.stopped) return;
+          if (retryMs !== undefined) this.socketRetryHintMs = retryMs;
+          // Closed before this watcher saw it open (the same moment it opened): handled below as a failed open.
+          if (!openedAt) { closedBeforeOpen = true; return; }
           this.closeSocket = null;
           this.transport = "poll";
+          // A connection that drops right after opening counts as a failure, so the retries slow down.
+          this.socketFailures = Date.now() - openedAt < socketHealthyMs ? this.socketFailures + 1 : 0;
           if (this.status === "live") this.status = "polling";
           this.changed();
           this.schedulePoll();
@@ -159,14 +176,29 @@ class ServerWatcher {
         }
       });
       if (this.stopped) { close(); return; }
+      if (closedBeforeOpen) {
+        this.socketFailures += 1;
+        this.transport = "poll";
+        this.schedulePoll();
+        this.scheduleSocketRetry();
+        return;
+      }
+      openedAt = Date.now();
       this.closeSocket = close;
-      this.socketFailures = 0;
       this.transport = "socket";
       if (this.status === "polling") this.status = "live";
       this.changed();
       this.schedulePoll();
-    } catch {
+    } catch (error) {
       if (this.stopped) return;
+      const httpStatus = error instanceof WatchSyncError ? error.httpStatus : null;
+      // The same key problem a poll would hit: shown at once, and no retries until a poll succeeds again.
+      if (httpStatus === 401 || httpStatus === 403) {
+        this.markUnauthorized();
+        this.changed();
+        this.schedulePoll();
+        return;
+      }
       this.socketFailures += 1;
       this.transport = "poll";
       this.schedulePoll();
@@ -178,7 +210,11 @@ class ServerWatcher {
 
   private scheduleSocketRetry(): void {
     if (this.stopped || this.socketTimer || this.status === "unauthorized") return;
-    const delay = Math.min(this.timing.maxBackoffMs * 2.5, this.timing.socketRetryMs * 2 ** Math.min(4, Math.max(0, this.socketFailures - 1)));
+    // A server that names its reconnect delay is retried after that long first, within sensible bounds.
+    const base = this.socketRetryHintMs === null
+      ? this.timing.socketRetryMs
+      : Math.min(this.timing.maxBackoffMs, Math.max(Math.min(1000, this.timing.socketRetryMs), this.socketRetryHintMs));
+    const delay = Math.min(this.timing.maxBackoffMs * 2.5, base * 2 ** Math.min(4, Math.max(0, this.socketFailures - 1)));
     this.socketTimer = setTimeout(() => {
       this.socketTimer = null;
       // While the server is unreachable, polling decides when it is back.
@@ -234,10 +270,12 @@ class ServerWatcher {
   refresh(): Promise<boolean> {
     if (this.inFlight) return this.inFlight;
     this.inFlight = (async () => {
+      const pushSeq = this.pushSeq;
       try {
         const sessions = await this.adapter.fetchSessions(this.abort.signal);
         if (this.stopped) return false;
-        this.applySessions(sessions);
+        // Sessions pushed while the request was under way are newer than its answer.
+        if (this.pushSeq === pushSeq) this.applySessions(sessions);
         const recovered = this.failures >= this.timing.failureThreshold || this.status === "unauthorized";
         this.failures = 0;
         this.status = this.liveStatus();
@@ -248,12 +286,7 @@ class ServerWatcher {
         if (this.stopped) return false;
         const httpStatus = error instanceof WatchSyncError ? error.httpStatus : null;
         if (httpStatus === 401 || httpStatus === 403) {
-          this.status = "unauthorized";
-          this.message = unauthorizedMessage(this.record.kind);
-          this.sessions.clear();
-          this.closeSocket?.();
-          this.closeSocket = null;
-          this.transport = "poll";
+          this.markUnauthorized();
           return false;
         }
         this.failures += 1;
@@ -273,6 +306,15 @@ class ServerWatcher {
     return this.inFlight;
   }
 
+  private markUnauthorized(): void {
+    this.status = "unauthorized";
+    this.message = unauthorizedMessage(this.record.kind);
+    this.sessions.clear();
+    this.closeSocket?.();
+    this.closeSocket = null;
+    this.transport = "poll";
+  }
+
   // The latest list replaces the previous one: sessions it no longer contains disappear immediately.
   private applySessions(sessions: ParsedSession[]): void {
     this.sessions.clear();
@@ -283,6 +325,21 @@ class ServerWatcher {
 
   private onSocketEvent(event: SocketEvent): void {
     if (this.stopped) return;
+    if (event.type === "replace" || event.type === "upsert" || event.type === "remove") {
+      // Pushed sessions are complete, so they apply directly, with no poll to follow.
+      if (this.status === "unauthorized" || this.status === "unreachable") return;
+      this.pushSeq += 1;
+      if (event.type === "replace") this.applySessions(event.sessions);
+      else if (event.type === "upsert") {
+        this.sessions.set(event.session.sessionKey, event.session);
+        this.lastUpdatedAt = new Date().toISOString();
+      } else if (this.sessions.delete(event.sessionKey)) {
+        this.adapter.prune?.([...this.sessions.values()]);
+        this.lastUpdatedAt = new Date().toISOString();
+      }
+      this.changed();
+      return;
+    }
     if (event.type === "refresh") {
       this.requestRefresh(event.minIntervalMs);
       return;

@@ -86,16 +86,30 @@ test("Now Playing does not repaint every frame or blur what scrolls under its he
   expect(backdrop).toBe("none");
 });
 
+/**
+ * Follows a navigation link from the keyboard. A mouse click first waits for the link to hold still over
+ * consecutive animation frames, and headless WebKit on macOS sometimes stops producing frames while the page
+ * itself keeps working: a failing trace had one frame a second, then none for 27 seconds, so the click never
+ * started. Focus and Enter need no frames, and a full page load instead of an in-app move still fails below.
+ */
+async function follow(page: Page, name: string) {
+  const link = page.getByRole("navigation").getByRole("link", { name }).first();
+  await expect(link).toBeVisible();
+  await link.press("Enter");
+}
+
 test("moving from Now Playing to the dashboard keeps the live stream and shows it at once", async ({ page }) => {
   const streams = await fixture(page);
   await page.goto(`${baseUrl}/now-playing`);
   await expect(page.locator(".np-card")).toHaveCount(9);
-  await page.getByRole("navigation").getByRole("link", { name: "Dashboard" }).first().click();
+  await follow(page, "Dashboard");
+  await expect(page).toHaveURL(`${baseUrl}/`);
   const card = page.getByRole("region", { name: "Now Playing", exact: true });
   // A second stream would answer only after four seconds; the shared one already has the streams.
   await expect(card).toContainText("9 streams", { timeout: 1_500 });
   await expect(card).not.toContainText("Connecting to your media servers");
-  await page.getByRole("navigation").getByRole("link", { name: "Now Playing" }).first().click();
+  await follow(page, "Now Playing");
+  await expect(page).toHaveURL(`${baseUrl}/now-playing`);
   await expect(page.locator(".np-card")).toHaveCount(9, { timeout: 1_500 });
   expect(streams.opened).toBe(1);
 });

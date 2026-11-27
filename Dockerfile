@@ -30,9 +30,15 @@ LABEL org.opencontainers.image.source="https://github.com/ramphex/SRTL-Manager"
 # https://www.postgresql.org/media/keys/ACCC4CF8.asc, compare the fingerprint
 # with the one published at https://www.postgresql.org/download/linux/debian/,
 # replace the file and update the sha256 below.
+#
+# The base image is refreshed less often than Debian publishes security fixes,
+# so the runtime layer upgrades the packages it ships (for example libpam,
+# CVE-2025-6020) before installing anything else. The container scan fails on
+# fixed HIGH or CRITICAL issues, so this keeps it passing between refreshes.
 COPY docker/apt.postgresql.org.asc /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
 RUN set -eu \
     && apt-get update \
+    && apt-get upgrade --no-install-recommends -y \
     && apt-get install --no-install-recommends -y ca-certificates ffmpeg tini \
     && echo "0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76  /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc" | sha256sum -c - \
     && . /etc/os-release \

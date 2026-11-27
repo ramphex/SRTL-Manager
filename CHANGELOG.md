@@ -4,6 +4,10 @@ All notable changes are documented here. The project follows Semantic Versioning
 
 ## [Unreleased]
 
+### Changed
+
+- **Dupelix is Live in Now Playing.** SRTL follows each Dupelix server's activity stream, so plays, pauses and stops show within about a second and the server line reads **Live**, the same as Plex and Jellyfin. While the stream is down SRTL polls every 5 seconds, reads **Polling**, and reconnects after the delay Dupelix asks for, picking up from the last change it saw. A stream that goes quiet for 45 seconds is treated as dead, and one that ends before sending anything counts as a failed connection, so SRTL backs off instead of reconnecting in a loop. A Dupelix older than API revision 152 has no stream and is polled as before. When Dupelix refuses the key on the stream, SRTL stops retrying and shows the same message as a refused poll. SRTL keeps one stream per server and always closes the old one before opening a new one, including when Now Playing shuts down.
+
 ## [0.1.6-beta.2] - 2026-11-26
 
 Dupelix servers can be connected in **Settings > Media servers**, and their streams appear in Now Playing next to Plex and Jellyfin, with Stop where the API key allows it. Media servers are added from one **Add server** menu. Database migrations 39 and 40 add the new server type.

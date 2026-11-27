@@ -4361,10 +4361,12 @@ describe("api app", () => {
     });
 
     try {
+      // A claim blocked on the lock would wait until the ROLLBACK below, so any limit proves it was not
+      // blocked. Ten seconds leaves room for a loaded machine; the claim takes a few hundred milliseconds.
       await expect(
         Promise.race([
           worker.runOnce(),
-          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("claim blocked on unrelated lease")), 1_000))
+          new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("claim blocked on unrelated lease")), 10_000))
         ])
       ).resolves.toBe(true);
     } finally {

@@ -1,4 +1,4 @@
-import http, { type IncomingHttpHeaders } from "node:http";
+import http, { type IncomingHttpHeaders, type IncomingMessage } from "node:http";
 import https from "node:https";
 import { outboundProblemMessage, pinnedLookup, resolveOutbound, type ResolvedAddress } from "./outboundPolicy";
 import { AppError } from "../errors";
@@ -148,6 +148,69 @@ export async function watchSyncRequest(request: WatchSyncRequest): Promise<Watch
     if (!failure.retryable || attemptIndex >= retries || request.signal?.aborted) throw failure;
     await delay(watchSyncHttpTiming.backoffMs * 3 ** attemptIndex, request.signal);
   }
+}
+
+export interface WatchSyncStream {
+  headers: IncomingHttpHeaders;
+  body: IncomingMessage;
+  // Ends the connection. Safe to call more than once.
+  close: () => void;
+}
+
+// A long-lived response, such as server-sent events, under the same rules as every other request: the host is
+// resolved once and checked against the outbound policy, the connection goes to that address only, redirects are
+// not followed, and only the given headers are sent. Resolves once the headers arrive; an answer other than 2xx is
+// thrown like a normal request's, with its Retry-After. The timeout covers only the wait for the headers.
+export async function openWatchSyncStream(request: Omit<WatchSyncRequest, "method" | "body" | "maxBytes" | "retries">): Promise<WatchSyncStream> {
+  const url = new URL(request.url);
+  if (request.signal?.aborted) throw new WatchSyncError(`${request.service} request was cancelled.`);
+  const address = await resolveAllowed(url.hostname, request.service, { trusted: request.trusted });
+  // A caller that gave up during the lookup must not open the connection after all.
+  if (request.signal?.aborted) throw new WatchSyncError(`${request.service} request was cancelled.`);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const outgoing = (url.protocol === "https:" ? https : http).request(url, {
+      method: "GET",
+      agent: false,
+      lookup: pinnedLookup(address),
+      headers: { Connection: "close", ...request.headers }
+    }, (response) => {
+      clearTimeout(timer);
+      const status = response.statusCode ?? 500;
+      if (status < 200 || status >= 300) {
+        const failure = statusError(request.service, status);
+        failure.retryAfterMs = retryAfterMs(response.headers["retry-after"]);
+        close();
+        fail(failure);
+        return;
+      }
+      settled = true;
+      resolve({ headers: response.headers, body: response, close });
+    });
+    const onAbort = () => {
+      close();
+      fail(new WatchSyncError(`${request.service} request was cancelled.`));
+    };
+    function close() {
+      request.signal?.removeEventListener("abort", onAbort);
+      clearTimeout(timer);
+      outgoing.destroy();
+    }
+    function fail(error: WatchSyncError) {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    }
+    // Declared after the handlers above, which only run once it is set.
+    const timer = setTimeout(() => {
+      close();
+      fail(new WatchSyncError(`${request.service} did not answer in time.`, null, true));
+    }, request.timeoutMs ?? 20_000);
+    request.signal?.addEventListener("abort", onAbort, { once: true });
+    // After the headers, a broken connection shows up on the response; before them, it fails the request.
+    outgoing.on("error", () => fail(new WatchSyncError(`${request.service} connection failed or timed out. Check its address, network access, and TLS certificate.`, null, true)));
+    outgoing.end();
+  });
 }
 
 export async function watchSyncJson(request: WatchSyncRequest): Promise<{ data: unknown; serverTime: Date | null }> {

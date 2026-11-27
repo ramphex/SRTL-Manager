@@ -6,7 +6,8 @@ import { dupelixApiPrefix, dupelixHeaders, parseDupelixKey } from "../dupelixCli
 import { jellyfinHeaders } from "../jellyfinClient";
 import { plexEndpoints, plexHeaders } from "../plexClient";
 import { pinnedLookup } from "../outboundPolicy";
-import { WatchSyncError, resolveAllowed, watchSyncJson, watchSyncRequest } from "../watchSyncHttp";
+import { ServerSentEventParser, type ServerSentEvent } from "../serverSentEvents";
+import { WatchSyncError, openWatchSyncStream, resolveAllowed, watchSyncJson, watchSyncRequest, type WatchSyncStream } from "../watchSyncHttp";
 import { parseDupelixSession, parseJellyfinSession, parsePlexSession, type ParsedSession } from "./classify";
 
 export class NowPlayingError extends WatchSyncError {
@@ -26,13 +27,22 @@ export interface LiveServerConfig {
   clientIdentifier: string;
 }
 
+// Plex and Jellyfin only signal changes (refresh) and positions (progress); the session list then comes from a
+// poll. Dupelix pushes whole sessions: replace is the full list, upsert one session's new state, remove one that
+// ended or is no longer visible.
 export type SocketEvent =
   | { type: "refresh"; minIntervalMs?: number }
-  | { type: "progress"; sessionKey: string; positionMs: number | null; state: NowPlayingState | "stopped" };
+  | { type: "progress"; sessionKey: string; positionMs: number | null; state: NowPlayingState | "stopped" }
+  | { type: "replace"; sessions: ParsedSession[] }
+  | { type: "upsert"; session: ParsedSession }
+  | { type: "remove"; sessionKey: string };
 
 export interface SocketHandlers {
   onEvent: (event: SocketEvent) => void;
-  onClose: (reason: string) => void;
+  // retryMs is how long the server asked clients to wait before reconnecting, when it said.
+  onClose: (reason: string, retryMs?: number) => void;
+  // Aborts an open that is still under way when the watcher stops.
+  signal?: AbortSignal;
 }
 
 export interface ServerExtras {
@@ -44,7 +54,8 @@ export interface ServerExtras {
 export interface LiveAdapter {
   fetchSessions(signal: AbortSignal): Promise<ParsedSession[]>;
   // Resolves once the socket is open; the returned function closes it. Rejects when no socket can be opened.
-  // Servers without a push channel leave it out, and the hub simply polls them.
+  // Servers without a push channel leave it out, and the hub simply polls them. An error with HTTP status 401 or
+  // 403 is a key problem: the hub then stops trying until a poll succeeds again.
   openSocket?(handlers: SocketHandlers): Promise<() => void>;
   fetchExtras?(signal: AbortSignal): Promise<ServerExtras>;
   stopStream(session: ParsedSession, message: string): Promise<void>;
@@ -437,6 +448,18 @@ const dupelixDefaultPauseMs = 60_000;
 const dupelixMaxPauseMs = 10 * 60_000;
 // While paused, the last answer stands in for a poll if it is this recent; after that the server counts as failing.
 const dupelixStaleSessionsMs = 2 * 60_000;
+// The activity stream pings every 20 seconds; this long without a byte means the connection is dead.
+export const dupelixStreamIdleMs = 45_000;
+// A snapshot holds every current session in one event.
+const dupelixStreamEventMax = 8 * 1024 * 1024;
+// Event ids are opaque cursors (hexadecimal since API revision 153): SRTL never parses or compares them, it only
+// sends the last one back verbatim, and only when it is a plain header value.
+const dupelixEventIdPattern = /^[\x21-\x7e]{1,256}$/;
+
+export interface DupelixAdapterOptions {
+  // Tests shorten the dead-connection timeout.
+  streamIdleMs?: number;
+}
 
 export function dupelixArtworkAllowed(path: string): boolean {
   return dupelixArtworkPattern.test(path);
@@ -532,8 +555,9 @@ export class DupelixRateLimitError extends NowPlayingError {
   }
 }
 
-// Dupelix has no push channel yet, so the adapter has no openSocket and the hub polls it. When Dupelix adds its
-// event stream, an openSocket that reads it and emits refresh and progress events drops in without other changes.
+// Dupelix pushes sessions over its activity stream (server-sent events), which the hub treats like the Plex and
+// Jellyfin sockets: while it is open the server is Live and polled only as a safety net; while it is down, or on an
+// older Dupelix without the stream (HTTP 404), the hub polls every few seconds.
 export class DupelixLiveAdapter implements LiveAdapter {
   // Per title: the absolute poster link picked from its signed artwork, and when it was read.
   private readonly artwork = new Map<string, { path: string | null; fetchedAt: number }>();
@@ -545,8 +569,17 @@ export class DupelixLiveAdapter implements LiveAdapter {
   // Set by a 429: no request goes out before this time.
   private pausedUntil = 0;
   private lastSessions: { sessions: ParsedSession[]; at: number } | null = null;
+  private keyFetch: Promise<string[] | null> | null = null;
+  // The open activity stream, whether it includes guests, the last event it delivered, and the reconnect delay
+  // Dupelix asked for.
+  private stream: { guests: boolean; drop: (reason: string | null) => void } | null = null;
+  private lastEventId: string | null = null;
+  private retryMs: number | null = null;
+  private readonly streamIdleMs: number;
 
-  constructor(private readonly config: LiveServerConfig) {}
+  constructor(private readonly config: LiveServerConfig, options: DupelixAdapterOptions = {}) {
+    this.streamIdleMs = options.streamIdleMs ?? dupelixStreamIdleMs;
+  }
 
   private waitMs(): number {
     return Math.max(0, this.pausedUntil - Date.now());
@@ -572,8 +605,14 @@ export class DupelixLiveAdapter implements LiveAdapter {
     return this.request(() => watchSyncJson({ url: `${this.config.url}${dupelixApiPrefix}${path}`, service: "Dupelix", headers: dupelixHeaders(this.config.token), timeoutMs: sessionTimeoutMs, retries: 0, signal, maxBytes: 16 * 1024 * 1024 }));
   }
 
-  private async keyScopes(signal?: AbortSignal): Promise<string[] | null> {
-    if (this.key && Date.now() - this.key.checkedAt < dupelixKeyTtlMs) return this.key.scopes;
+  // The first poll and the stream both ask at start-up; they share one request.
+  private keyScopes(signal?: AbortSignal): Promise<string[] | null> {
+    if (this.key && Date.now() - this.key.checkedAt < dupelixKeyTtlMs) return Promise.resolve(this.key.scopes);
+    this.keyFetch ??= this.readKeyScopes(signal).finally(() => { this.keyFetch = null; });
+    return this.keyFetch;
+  }
+
+  private async readKeyScopes(signal?: AbortSignal): Promise<string[] | null> {
     try {
       const { data } = await this.api("/api-keys/current", signal);
       this.key = { scopes: parseDupelixKey(data)?.scopes ?? null, checkedAt: Date.now() };
@@ -607,6 +646,8 @@ export class DupelixLiveAdapter implements LiveAdapter {
     const entries: unknown[] = [];
     // Guest profiles are listed only on request, and only to a key with activity.guests.
     const guests = (await this.keyScopes(signal))?.includes("activity.guests") === true;
+    // A stream opened before the key gained or lost activity.guests shows a different set of sessions; reopen it.
+    if (this.stream && this.stream.guests !== guests) this.stream.drop("The Dupelix key's guest permission changed.");
     let cursor: string | null = null;
     for (let page = 0; page < dupelixMaxPages; page += 1) {
       const query = new URLSearchParams({ limit: String(dupelixPageLimit), ...(guests ? { includeGuests: "true" } : {}), ...(cursor ? { cursor } : {}) });
@@ -618,6 +659,11 @@ export class DupelixLiveAdapter implements LiveAdapter {
       if (!next || next === cursor) break;
       cursor = next;
     }
+    return this.parseEntries(entries);
+  }
+
+  // Sessions as both the list and the stream deliver them, keeping the artwork each one carries.
+  private parseEntries(entries: unknown[]): ParsedSession[] {
     const now = new Date();
     return entries.flatMap((entry) => {
       const parsed = parseDupelixSession(entry, now);
@@ -629,6 +675,106 @@ export class DupelixLiveAdapter implements LiveAdapter {
       }
       return [parsed];
     });
+  }
+
+  // Opens the activity stream. Each key may hold two streams, and one whose client vanished without closing can
+  // keep its slot for minutes, so a previous stream is always closed first. A reconnect sends the last event id
+  // in Last-Event-ID; Dupelix then replays what changed, or sends a fresh snapshot when it no longer can. 404
+  // means an older Dupelix without the stream; 401 and 403 are key problems, which the hub shows like a poll's.
+  async openSocket(handlers: SocketHandlers): Promise<() => void> {
+    this.stream?.drop(null);
+    const guests = (await this.keyScopes(handlers.signal))?.includes("activity.guests") === true;
+    const headers: Record<string, string> = { ...dupelixHeaders(this.config.token), Accept: "text/event-stream", "Cache-Control": "no-cache" };
+    if (this.lastEventId) headers["Last-Event-ID"] = this.lastEventId;
+    let response: WatchSyncStream;
+    try {
+      response = await this.request(() => openWatchSyncStream({
+        url: `${this.config.url}${dupelixApiPrefix}/activity/stream${guests ? "?includeGuests=true" : ""}`,
+        service: "Dupelix",
+        headers,
+        timeoutMs: socketOpenTimeoutMs,
+        signal: handlers.signal
+      }));
+    } catch (error) {
+      if (error instanceof WatchSyncError && error.httpStatus === 404) throw new NowPlayingError("This Dupelix server has no activity stream, so SRTL polls it.", 404);
+      throw error;
+    }
+    if (!/^text\/event-stream\b/i.test(String(response.headers["content-type"] ?? ""))) {
+      response.close();
+      throw new NowPlayingError("Dupelix did not answer with an event stream.");
+    }
+    if (handlers.signal?.aborted) {
+      response.close();
+      throw new NowPlayingError("Now Playing stopped watching this server.");
+    }
+
+    // Dupelix starts every stream with its retry line, so the stream counts as open only once something arrives.
+    // A 200 that ends before sending anything (Dupelix can answer that way when a stream closes in its first
+    // seconds) is a failed open: the hub backs off instead of showing Live and reconnecting at once.
+    return new Promise<() => void>((resolve, reject) => {
+      let opened = false;
+      let closed = false;
+      let idle: NodeJS.Timeout | null = null;
+      const drop = (reason: string | null) => {
+        if (closed) return;
+        closed = true;
+        if (idle) clearTimeout(idle);
+        response.close();
+        if (this.stream === entry) this.stream = null;
+        if (!opened) reject(new NowPlayingError(reason ?? "Now Playing stopped watching this server."));
+        else if (reason !== null) handlers.onClose(reason, this.retryMs ?? undefined);
+      };
+      const entry = { guests, drop };
+      this.stream = entry;
+      const touch = (ms: number) => {
+        if (idle) clearTimeout(idle);
+        idle = setTimeout(() => drop(opened ? "The Dupelix activity stream went quiet." : "The Dupelix activity stream sent nothing."), ms);
+        idle.unref?.();
+      };
+      const parser = new ServerSentEventParser({
+        onRetry: (ms) => { this.retryMs = ms; },
+        onEvent: (event) => this.streamEvent(event, handlers)
+      }, dupelixStreamEventMax);
+      touch(Math.min(socketOpenTimeoutMs, this.streamIdleMs));
+      response.body.on("data", (chunk: Buffer) => {
+        if (closed) return;
+        touch(this.streamIdleMs);
+        if (!opened) {
+          opened = true;
+          resolve(() => drop(null));
+        }
+        try {
+          parser.push(chunk);
+        } catch {
+          // Resuming would replay the same event, so the next connection starts from a fresh snapshot.
+          this.lastEventId = null;
+          drop("The Dupelix activity stream sent an event SRTL could not read.");
+        }
+      });
+      response.body.on("end", () => drop(opened ? "Dupelix closed the activity stream." : "Dupelix ended the activity stream before sending anything."));
+      response.body.on("error", () => drop("The Dupelix activity stream was interrupted."));
+      response.body.on("close", () => drop(opened ? "The Dupelix activity stream closed." : "Dupelix ended the activity stream before sending anything."));
+    });
+  }
+
+  // Throws on an event that is not what the contract describes, which drops the stream.
+  private streamEvent(event: ServerSentEvent, handlers: SocketHandlers): void {
+    if (event.type === "snapshot" || event.type === "session" || event.type === "session.ended") {
+      const data = JSON.parse(event.data) as unknown;
+      const body = data && typeof data === "object" ? data as { sessions?: unknown; id?: unknown } : null;
+      if (event.type === "snapshot") {
+        if (!Array.isArray(body?.sessions)) throw new NowPlayingError("Dupelix sent an unsupported snapshot.");
+        handlers.onEvent({ type: "replace", sessions: this.parseEntries(body.sessions) });
+      } else {
+        const id = typeof body?.id === "string" && body.id ? body.id : null;
+        if (!id) throw new NowPlayingError("Dupelix sent a session without an id.");
+        // A session that is no longer playing (warming up, ended, expired) leaves the cards, like on a poll.
+        const parsed = event.type === "session" ? this.parseEntries([data])[0] : undefined;
+        handlers.onEvent(parsed ? { type: "upsert", session: parsed } : { type: "remove", sessionKey: id });
+      }
+    }
+    // Other event types are skipped, but they still count as delivered.
+    if (dupelixEventIdPattern.test(event.id)) this.lastEventId = event.id;
   }
 
   prune(activeSessions: ParsedSession[]): void {

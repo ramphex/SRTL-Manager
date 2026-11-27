@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { eq } from "drizzle-orm";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { createApp, type AppContext } from "../src/server/app";
 import { currentScryptParameters, hashPassword, hashToken, passwordHashing, passwordNeedsRehash } from "../src/server/auth";
 import type { AppConfig } from "../src/server/config";
@@ -501,7 +501,24 @@ describe("authentication and sessions", () => {
       expect(tooShort.json()).toMatchObject({ error: "Password must be at least 12 characters" });
     });
 
+    it("hashes new passwords at the production cost, which the other tests lower", async () => {
+      vi.resetModules();
+      const production = await import("../src/server/auth");
+      expect(production.currentScryptParameters).toEqual({ N: 2 ** 17, r: 8, p: 1 });
+      const hash = await production.hashPassword(password);
+      expect(hash).toMatch(/^scrypt\$v2\$131072\$8\$1\$[^$]+\$[^$]+$/);
+      expect(await production.verifyPassword(password, hash)).toBe(true);
+      expect(await production.verifyPassword("wrong-password", hash)).toBe(false);
+      expect(production.passwordNeedsRehash(hash)).toBe(false);
+      // A hash at the lowered test cost counts as weaker than production.
+      expect(production.passwordNeedsRehash(await hashPassword(password))).toBe(true);
+    });
+
     it("rehashes a password stored with older parameters on sign-in", async () => {
+      // This test checks the upgrade to the production cost, so it runs at that cost.
+      const testCost = currentScryptParameters.N;
+      currentScryptParameters.N = 2 ** 17;
+      onTestFinished(() => { currentScryptParameters.N = testCost; });
       const app = await startApp();
       await setupAdmin(app);
       const oldHash = legacyHash(password);

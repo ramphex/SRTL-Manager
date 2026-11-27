@@ -6,7 +6,7 @@ import { createTestDatabase } from "./testDb";
 
 describe("database shutdown", () => {
   it("returns from close only after every connection has disconnected", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     try {
       const database = await openDatabase(testDatabase.databaseUrl);
       // Hold several connections at once so the pool has more than one to shut down.
@@ -32,7 +32,7 @@ describe("database shutdown", () => {
   });
 
   it("keeps an idle connection cut by the server from becoming an uncaught error", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const database = await openDatabase(testDatabase.databaseUrl);
     const killer = new Pool({ connectionString: testDatabase.databaseUrl });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
@@ -54,7 +54,7 @@ describe("database shutdown", () => {
 
 describe("database bootstrap", () => {
   it("fails closed when production startup skips an uninitialized schema", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     try {
       await expect(openDatabase({ databaseUrl: testDatabase.databaseUrl, migrate: false })).rejects.toThrow("Database schema is not initialized");
     } finally {
@@ -63,7 +63,7 @@ describe("database bootstrap", () => {
   });
 
   it("fails closed when a migration gap exists below the current version", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const database = await openDatabase(testDatabase.databaseUrl);
     try {
       await database.pool.query(`DELETE FROM schema_migrations WHERE version = 4`);
@@ -78,7 +78,7 @@ describe("database bootstrap", () => {
   });
 
   it("creates the current schema and applies versioned migrations idempotently", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const database = await openDatabase(testDatabase.databaseUrl);
     const secondDatabase = await openDatabase(testDatabase.databaseUrl);
     try {
@@ -184,7 +184,7 @@ describe("database bootstrap", () => {
   });
 
   it("backfills durable resolution markers for copy journals already closed by reconciliation", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
     try {
       await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
@@ -230,7 +230,7 @@ describe("database bootstrap", () => {
   });
 
   it("migrates legacy assignment policies and copy snapshots to location identities", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
     try {
       await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
@@ -329,7 +329,7 @@ describe("database bootstrap", () => {
   });
 
   it("clears storage policies that are not backed by one current symlink policy", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
     try {
       await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
@@ -387,7 +387,7 @@ describe("database bootstrap", () => {
   });
 
   it("upgrades active version-four jobs as conservative exclusive leases", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
     try {
       await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
@@ -461,7 +461,7 @@ describe("database bootstrap", () => {
   });
 
   it("repairs version-five schemas missing copy and path-migration file identities", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const legacyPool = new Pool({ connectionString: testDatabase.databaseUrl });
     try {
       await legacyPool.query(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL)`);
@@ -544,7 +544,7 @@ describe("database bootstrap", () => {
   });
 
   it("allows backup jobs on a database from before migration 27 and keeps its job history", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const first = await openDatabase(testDatabase.databaseUrl);
     await first.pool.query(`INSERT INTO jobs (type, status, created_at, progress) VALUES ('scan', 'completed', now()::text, '{}')`);
     await first.pool.query(`ALTER TABLE jobs DROP CONSTRAINT jobs_type_check`);
@@ -566,7 +566,7 @@ describe("database bootstrap", () => {
   });
 
   it("adds session activity columns and the security event log without signing anyone out", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const initial = await openDatabase(testDatabase.databaseUrl);
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1_000).toISOString();
     try {
@@ -607,7 +607,7 @@ describe("database bootstrap", () => {
   });
 
   it("refuses a no-migrate start without migration 35, then adds the re-request action column with existing rows as searches", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     try {
       const initial = await openDatabase(testDatabase.databaseUrl);
       try {
@@ -642,7 +642,7 @@ describe("database bootstrap", () => {
   });
 
   it("refuses a no-migrate start without migration 36, then adds header check columns with every existing file unchecked and unqueued", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     const headerColumns = ["header_status", "header_reason", "header_checked_at", "header_checked_size_bytes", "header_checked_mtime_ms", "header_queued_at"];
     try {
       const initial = await openDatabase(testDatabase.databaseUrl);
@@ -679,7 +679,7 @@ describe("database bootstrap", () => {
   });
 
   it("refuses a no-migrate start without migration 37, then queues linked 'not a video' failures for a new check", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     try {
       const initial = await openDatabase(testDatabase.databaseUrl);
       try {
@@ -733,7 +733,7 @@ describe("database bootstrap", () => {
     }
   });
   it("refuses a no-migrate start without migration 38, then dates existing broken links and accepts skipped cleanup rows", async () => {
-    const testDatabase = await createTestDatabase();
+    const testDatabase = await createTestDatabase({ empty: true });
     try {
       const initial = await openDatabase(testDatabase.databaseUrl);
       try {
