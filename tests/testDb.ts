@@ -164,7 +164,7 @@ function templateName(): string {
     for (const entry of fs.readdirSync(directory, { withFileTypes: true }).sort((left, right) => left.name.localeCompare(right.name))) {
       const entryPath = path.join(directory, entry.name);
       if (entry.isDirectory()) visit(entryPath);
-      else if (entry.name.endsWith(".ts")) hash.update(entryPath).update("\0").update(fs.readFileSync(entryPath));
+      else if (entry.name.endsWith(".ts")) hash.update(path.relative(process.cwd(), entryPath)).update("\0").update(fs.readFileSync(entryPath));
     }
   };
   for (const root of ["src/server", "src/shared"]) visit(path.resolve(root));
