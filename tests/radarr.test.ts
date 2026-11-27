@@ -878,7 +878,8 @@ interface FakeRadarr {
   edits: Array<{ movieIds: number[]; tags?: number[]; applyTags?: string; monitored?: boolean }>;
   rootFolders: string[];
   offline: boolean;
-  delayMs: number;
+  /** While set, every request waits for it, like an instance that is slow to answer. */
+  hold: Promise<void> | null;
   requests: number;
 }
 
@@ -889,10 +890,10 @@ describe("multiple Radarr instances", () => {
   async function fakeRadarr(movieList: RadarrMovie[], rootFolderList: string[], tagList = [{ id: 1, label: "local" }, { id: 2, label: "ignored" }]): Promise<FakeRadarr> {
     const server = fastify();
     servers.push(server);
-    const fake: FakeRadarr = { url: "", movies: movieList, tags: tagList, edits: [], rootFolders: rootFolderList, offline: false, delayMs: 0, requests: 0 };
+    const fake: FakeRadarr = { url: "", movies: movieList, tags: tagList, edits: [], rootFolders: rootFolderList, offline: false, hold: null, requests: 0 };
     server.addHook("preHandler", async (request, reply) => {
       fake.requests += 1;
-      if (fake.delayMs) await new Promise((resolve) => setTimeout(resolve, fake.delayMs));
+      if (fake.hold) await fake.hold;
       if (fake.offline) return reply.code(503).send({ error: "offline" });
       if (request.headers["x-api-key"] !== apiKey) return reply.code(401).send({ error: "bad key" });
     });
@@ -1139,7 +1140,8 @@ describe("multiple Radarr instances", () => {
 
     // A slow instance does not hold back the next one: the 4K pass finishes while the first is still waiting.
     hd.offline = false;
-    hd.delayMs = 1500;
+    let answerSlowInstance!: () => void;
+    hd.hold = new Promise<void>((resolve) => { answerSlowInstance = resolve; });
     await app.database.db.update(schema.radarrMovies).set({ nextAttemptAt: null });
     await assignTitle(app.database.db, "Alpha (2020)", "location_2", ["movies", "movies4k"]);
     const running = new Map<string, Promise<void>>();
@@ -1153,10 +1155,11 @@ describe("multiple Radarr instances", () => {
     const before = running.get(instanceId);
     await startRadarrWork(app.database.db, running, (name) => failures.push(name));
     expect(running.get(instanceId)).toBe(before);
+    hd.hold = null;
+    answerSlowInstance();
     await Promise.all([...running.values()]);
     expect(failures).toEqual([]);
     await app.database.db.update(schema.radarrMovies).set({ nextAttemptAt: null });
-    hd.delayMs = 0;
     await processRadarrWork(app.database.db);
     expect(hd.movies[0]?.tags).toEqual([2]);
   });

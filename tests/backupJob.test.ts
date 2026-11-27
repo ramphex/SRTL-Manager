@@ -121,7 +121,6 @@ describe("backup job", () => {
     await setSetting(app.database.db, backupSettingsKey, { enabled: true, time: "03:30", keep: 2, location: null });
     for (let run = 0; run < 2; run += 1) {
       expect((await runBackupJob())?.status).toBe("completed");
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
     }
     const before = fs.readdirSync(folder()).sort();
     const job = await runBackupJob({
@@ -139,7 +138,6 @@ describe("backup job", () => {
     await setSetting(app.database.db, backupSettingsKey, { enabled: true, time: "03:30", keep: 1, location: null });
     for (let run = 0; run < 3; run += 1) {
       expect((await runBackupJob())?.status).toBe("completed");
-      await new Promise((resolve) => setTimeout(resolve, 1_100));
     }
     // A setting of one still leaves two.
     expect((await listBackups(folder())).filter((set) => set.entry.verified)).toHaveLength(2);

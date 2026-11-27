@@ -49,7 +49,8 @@ describe("a real backup, restored", () => {
 
   beforeAll(async () => {
     source = await createTestDatabase();
-    target = await createTestDatabase();
+    // pg_restore needs a database with nothing in it.
+    target = await createTestDatabase({ empty: true });
     database = await openDatabase(source.databaseUrl);
     binDir = await realPostgresClient();
     root = await makeBackupTestDir();
