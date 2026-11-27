@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { MediaServerPrefixMapping } from "../../../shared/mediaServers";
+import { dupelixPermission, type MediaServerPrefixMapping } from "../../../shared/mediaServers";
 import type {
   NowPlayingHostEvent,
   NowPlayingServerState,
@@ -86,9 +86,9 @@ function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T
 }
 
 function unauthorizedMessage(kind: MediaServerRecord["kind"]): string {
-  return kind === "plex"
-    ? "Plex token invalid — sign in again in Settings > Media servers."
-    : "Jellyfin API key rejected — update it in Settings > Media servers.";
+  if (kind === "plex") return "Plex token invalid — sign in again in Settings > Media servers.";
+  if (kind === "dupelix") return `Dupelix refused the API key — it needs the Dupelix permission ${dupelixPermission("activity.read")}, and a LAN-only key does not work on Dupelix's HTTPS address. Update it in Settings > Media servers.`;
+  return "Jellyfin API key rejected — update it in Settings > Media servers.";
 }
 
 // One media server's live sessions: a socket for change events where the server offers one, a safety poll,
@@ -142,6 +142,8 @@ class ServerWatcher {
   }
 
   private async connectSocket(): Promise<void> {
+    // A server without a push channel is polled; that is its normal state, not a failure to back off from.
+    if (!this.adapter.openSocket) return;
     if (this.stopped || this.closeSocket || this.socketConnecting || this.status === "unauthorized") return;
     this.socketConnecting = true;
     try {
@@ -542,7 +544,9 @@ export class NowPlayingHub {
     return source && watcher ? { source, adapter: watcher.adapter } : null;
   }
 
-  private stopAvailability(record: MediaServerRecord, session: ParsedSession, plexPass: boolean | null): NowPlayingStream["stop"] {
+  private stopAvailability(record: MediaServerRecord, session: ParsedSession, plexPass: boolean | null, adapter: LiveAdapter): NowPlayingStream["stop"] {
+    const own = adapter.stopAvailability?.(session);
+    if (own) return own;
     if (record.kind === "plex") {
       if (!session.terminateId) return { available: false, reason: "This player does not report a Plex session id (Plexamp and some players), so Plex cannot stop it." };
       if (plexPass === null) return { available: false, reason: "Checking Plex Pass on the server owner's account." };
@@ -577,7 +581,7 @@ export class NowPlayingHub {
           serverName: record.name,
           posterUrl: this.posterUrl(record.id, session.posterPath),
           srtl: sources[index]!,
-          stop: this.stopAvailability(record, session, plexPass),
+          stop: this.stopAvailability(record, session, plexPass, watcher.adapter),
           network: { ...session.stream.network, geo: this.geo.get(session.stream.network.ip) }
         });
       });
@@ -596,7 +600,7 @@ export class NowPlayingHub {
     if (!watcher) throw new NowPlayingError("This media server is not connected.", null, 404);
     const session = watcher.sessions.get(sessionKey);
     if (!session) throw new NowPlayingError("This stream has already ended.", null, 404);
-    const availability = this.stopAvailability(watcher.record, session, watcher.record.kind === "plex" ? this.plexPassFor(watcher.record) : null);
+    const availability = this.stopAvailability(watcher.record, session, watcher.record.kind === "plex" ? this.plexPassFor(watcher.record) : null, watcher.adapter);
     if (!availability.available) throw new NowPlayingError(availability.reason ?? "This stream cannot be stopped from SRTL.", null, 409);
     try {
       await watcher.adapter.stopStream(session, message);

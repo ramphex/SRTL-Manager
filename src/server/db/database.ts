@@ -5,7 +5,7 @@ import { Pool, type PoolConfig, type QueryResult, type QueryResultRow } from "pg
 import * as schema from "./schema";
 import type { DefaultStoragePolicy, SectionContentType, SectionSettings } from "../../shared/types";
 import { inferSectionContentType, normalizeSectionContentType } from "../../shared/sections";
-import { applyMediaServerMigration } from "./mediaServerMigration";
+import { applyMediaServerKeyMigration, applyMediaServerKindMigration, applyMediaServerMigration } from "./mediaServerMigration";
 import { applyWatchSyncMigration } from "./watchSyncMigration";
 import { applyBackupMigration } from "./backupMigration";
 import { applyWorkerFileJobsMigration } from "./jobTypesMigration";
@@ -36,7 +36,7 @@ export interface DatabaseOpenOptions {
   discardUnreadableCredentials?: boolean;
 }
 
-export const currentSchemaVersion = 38;
+export const currentSchemaVersion = 40;
 
 const ddl = [
   `CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
@@ -1082,6 +1082,30 @@ async function initializeDatabase(pool: Pool): Promise<void> {
         // When each link was first seen broken, for the broken link review, and broken-link removals in the cleanup journal.
         await applyBrokenLinkMigration(client);
         await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (38, 'broken_link_review', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(39)) {
+      await client.query("BEGIN");
+      try {
+        // Dupelix joins Plex and Jellyfin as a media server kind.
+        await applyMediaServerKindMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (39, 'dupelix_media_servers', $1)`, [nowIso()]);
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      }
+    }
+    if (!applied.has(40)) {
+      await client.query("BEGIN");
+      try {
+        // Drops the API key description a pre-release build stored; SRTL keeps none.
+        await applyMediaServerKeyMigration(client);
+        await client.query(`INSERT INTO schema_migrations (version, name, applied_at) VALUES (40, 'media_server_api_keys', $1)`, [nowIso()]);
         await client.query("COMMIT");
       } catch (error) {
         await client.query("ROLLBACK");

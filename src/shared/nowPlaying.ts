@@ -60,7 +60,8 @@ export interface NowPlayingStream {
   serverName: string;
   // The server's own session id: Plex sessionKey, Jellyfin session Id.
   sessionKey: string;
-  user: { id: string | null; name: string };
+  // signedInAs: the account the device is signed in to, when someone else is watching on it (Dupelix).
+  user: { id: string | null; name: string; signedInAs?: string | null };
   mediaType: "movie" | "episode" | "track" | "other";
   title: string;
   // Show (or artist) title for episodes and tracks.

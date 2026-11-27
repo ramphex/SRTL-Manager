@@ -75,3 +75,27 @@ export async function applyMediaServerMigration(client: PoolClient, timestamp: s
   // Status now lives on the server rows; a Plex sign-in that was waiting is simply started again.
   if (hasStatusTable) await client.query(`DELETE FROM watch_sync_cursors WHERE scope LIKE 'server-status:%' OR scope LIKE 'plex-pin:%'`);
 }
+
+// Migration 39: media servers may also be Dupelix. The kind check created by migration 24 is replaced by a named one
+// that allows all three kinds; existing Plex and Jellyfin rows already satisfy it, so nothing else changes.
+export async function applyMediaServerKindMigration(client: PoolClient): Promise<void> {
+  const table = (await client.query<{ name: string | null }>(`SELECT to_regclass('public.media_servers')::text AS name`)).rows[0]?.name;
+  if (!table) return;
+  const checks = await client.query<{ name: string }>(
+    `SELECT conname AS name FROM pg_constraint WHERE conrelid = 'public.media_servers'::regclass AND contype = 'c' AND pg_get_constraintdef(oid) LIKE '%kind%'`
+  );
+  for (const check of checks.rows) await client.query(`ALTER TABLE media_servers DROP CONSTRAINT ${quoteIdentifier(check.name)}`);
+  await client.query(`ALTER TABLE media_servers ADD CONSTRAINT media_servers_kind_check CHECK (kind IN ('plex', 'jellyfin', 'dupelix'))`);
+}
+
+function quoteIdentifier(name: string): string {
+  return `"${name.replace(/"/g, '""')}"`;
+}
+
+// Migration 40: SRTL keeps no description of a media server's API key. A pre-release build stored one in api_key;
+// this drops that column where it exists, and does nothing anywhere else.
+export async function applyMediaServerKeyMigration(client: PoolClient): Promise<void> {
+  const table = (await client.query<{ name: string | null }>(`SELECT to_regclass('public.media_servers')::text AS name`)).rows[0]?.name;
+  if (!table) return;
+  await client.query(`ALTER TABLE media_servers DROP COLUMN IF EXISTS api_key`);
+}

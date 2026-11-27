@@ -19,6 +19,7 @@ import {
 import { getJsonSetting, nowIso, setSetting, type Db } from "../db/database";
 import * as schema from "../db/schema";
 import { publicErrorMessage } from "../errors";
+import { mediaServerKindLabels, supportsWatchSync } from "../../shared/mediaServers";
 import { JellyfinClient } from "./jellyfinClient";
 import { findMediaServer, getMediaServer, loadMediaServers, lockMediaServerConnection, MediaServerChanged, mediaServerClientIdentifier, mediaServerIdSchema, publicMediaServer, recordMediaServerStatus, type MediaServerDetails, type MediaServerRecord } from "./mediaServers";
 import { PlexServerClient, PlexTvClient } from "./plexClient";
@@ -93,8 +94,13 @@ export async function loadWatchSyncSettings(db: Db): Promise<StoredSettings> {
   };
 }
 
+// Watch sync pairs Plex with Jellyfin; other media server kinds stay out of it.
+async function loadWatchSyncServers(db: Db): Promise<StoredServer[]> {
+  return (await loadMediaServers(db)).filter((server) => supportsWatchSync(server.kind));
+}
+
 export async function loadWatchSyncContext(db: Db): Promise<WatchSyncContext> {
-  return { ...await loadWatchSyncSettings(db), servers: await loadMediaServers(db), clientIdentifier: await mediaServerClientIdentifier(db) };
+  return { ...await loadWatchSyncSettings(db), servers: await loadWatchSyncServers(db), clientIdentifier: await mediaServerClientIdentifier(db) };
 }
 
 async function locked<T>(db: Db, action: (transaction: Db, settings: StoredSettings) => Promise<T>): Promise<T> {
@@ -230,6 +236,7 @@ async function discoverJellyfin(db: Db, server: StoredServer, identifier: string
 // Refreshes the server's user list (and, for Plex, every user's access token), recording the connection status too.
 export async function discoverWatchSyncUsers(db: Db, serverId: string): Promise<WatchSyncState> {
   const server = await getMediaServer(db, serverId);
+  if (!supportsWatchSync(server.kind)) throw new WatchSyncError(`Watch sync does not support ${mediaServerKindLabels[server.kind]} servers yet.`);
   const identifier = await mediaServerClientIdentifier(db);
   try {
     const details = server.kind === "plex" ? await discoverPlex(db, server, identifier) : await discoverJellyfin(db, server, identifier);
@@ -282,7 +289,7 @@ function parsePreview(value: string | null): WatchSyncPreview | null {
 
 export async function getWatchSyncState(db: Db): Promise<WatchSyncState> {
   const settings = await publicSettings(db);
-  const servers = await loadMediaServers(db);
+  const servers = await loadWatchSyncServers(db);
   const serverIds = new Set(servers.map((server) => server.id));
   const users = (await db.select().from(schema.watchSyncUsers).orderBy(asc(schema.watchSyncUsers.name))).filter((user) => serverIds.has(user.serverId));
   const pairs = await db.select().from(schema.watchSyncPairs).orderBy(asc(schema.watchSyncPairs.id));
@@ -326,7 +333,7 @@ async function assertUser(db: Db, servers: StoredServer[], serverId: string, use
 
 export async function createWatchSyncPair(db: Db, input: WatchSyncPairInput): Promise<WatchSyncState> {
   const draft = watchSyncPairInputSchema.parse(input);
-  const servers = await loadMediaServers(db);
+  const servers = await loadWatchSyncServers(db);
   await assertUser(db, servers, draft.plexServerId, draft.plexUserId, "plex");
   await assertUser(db, servers, draft.jellyfinServerId, draft.jellyfinUserId, "jellyfin");
   const timestamp = nowIso();

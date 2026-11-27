@@ -19,6 +19,7 @@ SRTL Manager is a local-first web app for inventorying and maintaining a symlink
 - Optional Radarr integration: policy tags that follow SRTL storage policies, optional unmonitoring after copies to local storage, webhook-triggered title rescans, and automatic or manual folder mapping. No policy tags are preselected; copies stay manual. See the [integration guide](docs/radarr.md).
 - Optional Sonarr integration, the TV counterpart: policy tags on series, per-episode unmonitoring after copies to local storage (the series stays monitored), webhook-triggered series rescans, and any number of instances. See the [Sonarr guide](docs/sonarr.md).
 - Optional watch sync between Plex and Jellyfin: watched state and resume positions per user pair, one way or both ways, matched by exact SRTL path. See the [watch sync guide](docs/watch-sync.md).
+- Live Now Playing for connected Plex, Jellyfin and Dupelix servers: every stream with its play method, quality and SRTL storage source, next to the host's load. See the [Now Playing guide](docs/now-playing.md).
 - Postgres-backed API and worker services in a hardened container stack.
 - Dark, light, and system themes with responsive administration views.
 
@@ -56,7 +57,7 @@ Copy `.env.example` to `.env`, then edit these deployment values before starting
 - `SRTL_POSTGRES_PASSWORD`: a database password you must set before Compose will start.
 - `SRTL_EXTRA_SYMLINK_DIRS` (optional): folders of symlinks kept by other tools, checked before an orphan purge. Each also needs a read-only mount. See [Symlinks kept by other tools](docs/orphan-review.md#symlinks-kept-by-other-tools).
 - `SRTL_BACKUP_HOST_PATH`: the folder for scheduled database backups, outside your media roots and owned by `SRTL_UID`. Create it first, or Docker creates it as root and Settings > Backups will say it cannot be written. See [Database backups](docs/backups.md).
-- `SRTL_SECRET_KEY`: the key that encrypts saved Plex tokens and Jellyfin, Radarr and Sonarr API keys. Generate it once with `openssl rand -base64 32` and keep a copy with your backups. Compose will not start without it. See [Backup And Restore](#backup-and-restore).
+- `SRTL_SECRET_KEY`: the key that encrypts saved media server tokens and keys and Radarr and Sonarr API keys. Generate it once with `openssl rand -base64 32` and keep a copy with your backups. Compose will not start without it. See [Backup And Restore](#backup-and-restore).
 - `SRTL_UID` and `SRTL_GID`: the host account that can read the managed roots and write to destinations used by copy jobs.
 - `SRTL_BIND_HOST`, `SRTL_WEB_PORT`, and the security settings: review these if the defaults do not match your network or reverse proxy. See [Reverse proxy and network security](#reverse-proxy-and-network-security).
 
@@ -120,7 +121,7 @@ Direct LAN access over HTTP needs no extra settings. Behind a reverse proxy that
 - Published port: keep it reachable only by the proxy. Set `SRTL_BIND_HOST=127.0.0.1` when the proxy runs on the same host, or remove the `ports` block and use the commented proxy network in `docker-compose.yml` when the proxy is another container.
 - `SRTL_API_DOCS`: leave it off. When on, `/documentation` is served to owners and admins only.
 - `SRTL_SESSION_IDLE_HOURS` and `SRTL_SESSION_MAX_AGE_DAYS`: a browser is signed out after 12 hours without activity and 14 days after sign-in by default. Settings > User settings lists every session and can sign out one or all others, and shows a log of sign-ins, failures, lockouts and account changes.
-- `SRTL_OUTBOUND_ALLOW_CIDRS`: the addresses SRTL may call for Plex, Jellyfin, Radarr and Sonarr. The default, `private,public`, allows LAN and internet addresses but not loopback; add `loopback` for a server on the same host outside Docker, or list CIDR ranges such as `192.168.1.0/24` to allow only those. Link-local and cloud metadata addresses are always refused, every request connects to the address it checked, and plex.tv sign-in is not affected.
+- `SRTL_OUTBOUND_ALLOW_CIDRS`: the addresses SRTL may call for media servers, Radarr and Sonarr. The default, `private,public`, allows LAN and internet addresses but not loopback; add `loopback` for a server on the same host outside Docker, or list CIDR ranges such as `192.168.1.0/24` to allow only those. Link-local and cloud metadata addresses are always refused, every request connects to the address it checked, and plex.tv sign-in is not affected.
 
 Sign-in locks a username for a growing time, up to 15 minutes, after 5 failed attempts from any address, and an address after 20 failed attempts. New passwords need at least 12 characters. With secure cookies the session cookie uses the `__Host-` prefix. Only browsers on the host or the local network are told that a new instance still needs setup; everyone else opens setup at `/setup`, which is printed in the API log with the setup token and looks the same whether or not setup is still open. See [Accounts, sessions and security activity](docs/accounts-and-sessions.md).
 
@@ -157,7 +158,7 @@ Keep `.env`, `.env.backup.*`, and database dump files private. Dumps contain acc
 
 ### Secret key
 
-Saved Plex tokens and Jellyfin, Radarr and Sonarr API keys are encrypted with AES-256-GCM using `SRTL_SECRET_KEY`, so a database dump alone does not reveal them. Back up the key with every database backup, but store it separately from the dumps, for example in a password manager. Restoring a dump needs the same key.
+Saved media server tokens and keys and Radarr and Sonarr API keys are encrypted with AES-256-GCM using `SRTL_SECRET_KEY`, so a database dump alone does not reveal them. Back up the key with every database backup, but store it separately from the dumps, for example in a password manager. Restoring a dump needs the same key.
 
 - **Without the key, the saved credentials cannot be recovered.** SRTL refuses to start with a different key and names the key the credentials need. If the original key is lost, start once with `SRTL_DISCARD_UNREADABLE_CREDENTIALS=true`: SRTL removes only the credentials it cannot read, then you sign in with Plex and enter the API keys again in Settings, and remove the setting.
 - `SRTL_SECRET_KEY_FILE` can name a file holding the key instead, such as a Docker secret.

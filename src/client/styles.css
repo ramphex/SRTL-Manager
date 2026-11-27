@@ -55,6 +55,7 @@
   --warn: #a25d16;
   --server-plex: #9a7200;
   --server-jellyfin: #00739c;
+  --server-dupelix: #d42f45;
   --bad: #b42318;
   --neutral: #42526a;
   --pill-remote-bg: #fff2df;
@@ -119,6 +120,7 @@
   --warn: #d78d3f;
   --server-plex: #ebaf00;
   --server-jellyfin: #00a4dc;
+  --server-dupelix: #eb4559;
   --bad: #e96c62;
   --neutral: #8f9daf;
   --pill-remote-bg: #3a2814;
@@ -8255,6 +8257,17 @@ button.danger-button:hover:not(:disabled) {
 /* Settings > Media servers, shared by watch sync and other media server features. */
 .media-server-settings h3 { font-size: 15px; margin: 0; color: var(--text-strong); overflow-wrap: anywhere; }
 .media-server-list { display: grid; gap: 12px; }
+.dupelix-scope-id { color: var(--muted); font-size: 0.9em; font-weight: 400; }
+.add-server-menu { position: relative; }
+.add-server-menu > button .add-server-chevron { margin-left: -2px; transition: transform 120ms ease; }
+.add-server-menu > button[aria-expanded="true"] .add-server-chevron { transform: rotate(180deg); }
+/* Opens under the button, aligned to its right edge and never narrower than it, so it stays on screen whether the
+   button sits at the right of the heading (desktop) or wraps to the left (phone). */
+.add-server-options { position: absolute; top: calc(100% + 4px); right: 0; z-index: 30; display: flex; flex-direction: column; gap: 2px; min-width: 100%; width: max-content; padding: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 10px 24px rgb(15 23 42 / 0.18); }
+.add-server-options button { display: flex; align-items: center; gap: 10px; justify-content: flex-start; width: 100%; min-height: 36px; padding: 0 12px; background: transparent; border-color: transparent; box-shadow: none; color: var(--text); font-weight: 600; text-align: left; }
+.add-server-options button:hover, .add-server-options button:focus-visible { background: var(--secondary-hover); }
+@media (max-width: 820px) { .add-server-options button { min-height: 44px; } }
+@media (prefers-reduced-motion: reduce) { .add-server-menu > button .add-server-chevron { transition: none; } }
 .media-server-list .watch-sync-card { margin-top: 0; }
 .media-server-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 8px 20px; margin: 0; font-size: 13px; }
 .media-server-facts div { min-width: 0; }
@@ -8372,6 +8385,7 @@ button.danger-button:hover:not(:disabled) {
 .server-kind-icon { flex: none; }
 .server-kind-icon.server-kind-plex { color: var(--server-plex); }
 .server-kind-icon.server-kind-jellyfin { color: var(--server-jellyfin); }
+.server-kind-icon.server-kind-dupelix { color: var(--server-dupelix); }
 .np-server-status { border-radius: 999px; font-size: 11px; padding: 1px 7px; background: var(--pill-neutral-bg); color: var(--pill-neutral-text); }
 .np-server-live .np-server-status { background: var(--pill-local-bg); color: var(--pill-local-text); }
 .np-server-polling .np-server-status { background: var(--pill-remote-bg); color: var(--pill-remote-text); }
@@ -8430,15 +8444,22 @@ button.danger-button:hover:not(:disabled) {
 .np-details dd { margin: 0; overflow-wrap: anywhere; }
 .np-decision { color: var(--muted); }
 .np-burn { color: var(--warn); font-weight: 600; }
-.np-card-footer { border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px 14px; grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
-.np-card-footer > div { min-width: 0; }
+/* Every footer entry is a row centred on one line, so icons, names and the server glyph share a centre line whatever
+   each entry's height (the server's tooltip button is taller than a line of text). */
+.np-card-footer { --np-footer-gap: 14px; align-items: center; border-top: 1px solid var(--border-soft); color: var(--muted-strong); display: flex; flex-wrap: wrap; font-size: 12px; gap: 4px var(--np-footer-gap); grid-column: 1 / -1; margin: 0; min-width: 0; padding-top: 8px; }
+.np-card-footer > div { align-items: center; display: flex; min-width: 0; }
+/* The server glyph belongs to the name before it, so it sits 6px from it instead of the gap between entries. A
+   negative right margin only pulls in an entry on the same line, so a server that wraps stays put. */
+.np-card-footer > .np-footer-user { margin-right: calc(6px - var(--np-footer-gap)); }
 .np-card-footer > .np-footer-location { margin-left: auto; }
 .np-card-footer > .np-footer-player { flex: 1 0 100%; }
 .np-card-footer dd { align-items: center; display: flex; gap: 4px; margin: 0; min-width: 0; }
+.np-card-footer .server-kind-icon { display: block; }
 .np-card-footer svg { color: var(--muted); flex: none; }
 .np-server-name { align-items: center; display: flex; gap: 4px; min-width: 0; }
-.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; min-width: 20px; justify-content: center; }
+.np-server-tooltip .text-tooltip-trigger { align-items: center; display: inline-flex; min-height: 20px; justify-content: center; }
 .np-footer-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.np-footer-secondary { color: var(--muted); }
 .np-location { align-items: center; display: inline-flex; gap: 4px; min-width: 0; }
 .text-tooltip { max-width: 100%; }
 .text-tooltip-trigger { background: transparent; border: 0; border-radius: 4px; color: inherit; cursor: default; font: inherit; font-weight: inherit; gap: 4px; max-width: 100%; min-height: 0; min-width: 0; padding: 0; text-decoration: underline dotted color-mix(in srgb, currentColor 55%, transparent); text-underline-offset: 3px; }
@@ -8491,7 +8512,7 @@ button.danger-button:hover:not(:disabled) {
   .np-card { grid-template-columns: 64px minmax(0, 1fr); padding: 10px; }
   .np-poster { width: 64px; }
   .np-details > div { grid-template-columns: 76px minmax(0, 1fr); }
-  .np-card-footer { gap: 4px 10px; }
+  .np-card-footer { --np-footer-gap: 10px; }
   .np-stop-button { height: 36px; min-height: 36px; width: 36px; margin: -6px -6px 0 0; }
   .np-details-toggle { height: 32px; min-height: 32px; width: 32px; }
 }

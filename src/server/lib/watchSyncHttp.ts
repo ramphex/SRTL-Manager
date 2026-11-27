@@ -4,9 +4,21 @@ import { outboundProblemMessage, pinnedLookup, resolveOutbound, type ResolvedAdd
 import { AppError } from "../errors";
 
 export class WatchSyncError extends AppError {
+  // How long the server asked callers to wait (its Retry-After header), when it said.
+  retryAfterMs: number | null = null;
   constructor(message: string, readonly httpStatus: number | null = null, readonly retryable = false) {
     super(message, 400);
   }
+}
+
+// Retry-After is either seconds or an HTTP date.
+export function retryAfterMs(value: unknown, now = Date.now()): number | null {
+  const header = Array.isArray(value) ? value[0] : value;
+  if (typeof header !== "string" || !header.trim()) return null;
+  const seconds = Number(header.trim());
+  if (Number.isFinite(seconds)) return seconds >= 0 ? Math.round(seconds * 1000) : null;
+  const date = new Date(header).getTime();
+  return Number.isFinite(date) ? Math.max(0, date - now) : null;
 }
 
 export interface WatchSyncResponse {
@@ -125,9 +137,9 @@ export async function watchSyncRequest(request: WatchSyncRequest): Promise<Watch
       const response = await attempt(request);
       if (response.status >= 200 && response.status < 300) return response;
       failure = statusError(request.service, response.status);
-      const retryAfter = Number(response.headers["retry-after"]);
-      if (failure.retryable && attemptIndex < retries && Number.isFinite(retryAfter) && retryAfter > 0) {
-        await delay(Math.min(10_000, retryAfter * 1000), request.signal);
+      failure.retryAfterMs = retryAfterMs(response.headers["retry-after"]);
+      if (failure.retryable && attemptIndex < retries && failure.retryAfterMs !== null && failure.retryAfterMs > 0) {
+        await delay(Math.min(10_000, failure.retryAfterMs), request.signal);
         continue;
       }
     } catch (error) {

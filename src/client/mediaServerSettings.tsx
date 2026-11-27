@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useId, useState, type FormEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, KeyRound, LoaderCircle, LogIn, Pencil, Plug, Plus, Save, Server, Trash2, X } from "lucide-react";
+import { Check, ChevronDown, KeyRound, LoaderCircle, LogIn, Pencil, Plug, Plus, Save, Server, Trash2, X } from "lucide-react";
 import {
+  dupelixPermissionNames,
   mediaServerKindLabels,
+  mediaServerKinds,
   type MediaServer,
   type MediaServerInput,
   type MediaServerKind,
@@ -13,6 +15,7 @@ import {
 import { InfoTooltip } from "./App";
 import { formatDate } from "./appShared";
 import { mediaServerApi, mediaServersKey, mediaServerStatus, openPlexWindow, pollPlexPin, type PlexWindow } from "./mediaServerApi";
+import { MediaServerIcon } from "./serverIcons";
 
 // Watch sync (and later Now Playing and invitations) read these connections, so their views refresh with the list.
 function useListUpdate() {
@@ -51,18 +54,63 @@ export function MediaServerSettingsPanel() {
   const { servers, limit } = query.data;
   const full = servers.length >= limit;
   return <div className="radarr-settings media-server-settings">
-    <Section title="Media servers" help="Plex and Jellyfin connections that SRTL features share. Watch sync pairs users across them. Plex signs in through plex.tv; Jellyfin uses an API key from Dashboard > API Keys." actions={<>
-      <button type="button" className="secondary" disabled={adding !== null || full} onClick={() => setAdding("plex")}><Plus size={16} />Add Plex server</button>
-      <button type="button" className="secondary" disabled={adding !== null || full} onClick={() => setAdding("jellyfin")}><Plus size={16} />Add Jellyfin server</button>
-    </>}>
+    <Section title="Media servers" help="Plex, Jellyfin, and Dupelix connections that SRTL features share. Watch sync pairs Plex and Jellyfin users; Now Playing shows streams from all three. Plex signs in through plex.tv; Jellyfin and Dupelix use an API key." actions={<AddServerMenu disabled={adding !== null || full} onPick={setAdding} />}>
       <p className="radarr-lede">Add each server once here; watch sync and other features use the same connection. If a server sees the library under a different folder than SRTL does, add a path prefix mapping, for example <code>/data/media</code> on the server is <code>/mnt/plex</code> in SRTL.</p>
       {query.error ? <p className="error" role="alert">{query.error.message}</p> : null}
       {adding ? <ServerForm kind={adding} onDone={() => setAdding(null)} onSignInStarted={setStartedSignIn} /> : null}
-      {!servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex or Jellyfin server to start.</p> : null}
+      {!servers.length && !adding ? <p className="muted">No media servers yet. Add a Plex, Jellyfin, or Dupelix server to start.</p> : null}
       {full ? <p className="muted">SRTL supports up to {limit} media servers.</p> : null}
     </Section>
     {servers.length ? <div className="media-server-list">{servers.map((server) => <ServerCard key={server.id} server={server} startedSignIn={startedSignIn?.serverId === server.id ? startedSignIn : undefined} onStartedSignInSeen={() => setStartedSignIn(null)} />)}</div> : null}
-    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin API keys are stored encrypted on the SRTL server and are never shown again.</p>
+    <p className="muted"><KeyRound size={14} /> Plex tokens and Jellyfin and Dupelix API keys are stored encrypted on the SRTL server and are never shown again.</p>
+  </div>;
+}
+
+// One "Add server" button that opens a menu of the server kinds, following the WAI-ARIA menu button pattern: the
+// first item takes focus on open, arrow keys, Home and End move between items, and Escape or a click outside closes
+// the menu. Escape returns focus to the button; picking a kind opens its form, which takes focus itself.
+function AddServerMenu({ disabled, onPick }: { disabled: boolean; onPick: (kind: MediaServerKind) => void }) {
+  const [open, setOpen] = useState<"first" | "last" | null>(null);
+  const wrapper = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const menuId = useId();
+  const items = () => [...(wrapper.current?.querySelectorAll<HTMLElement>("[role='menuitem']") ?? [])];
+  useEffect(() => {
+    if (!open) return;
+    const list = [...(wrapper.current?.querySelectorAll<HTMLElement>("[role='menuitem']") ?? [])];
+    (open === "last" ? list.at(-1) : list[0])?.focus();
+    const outside = (event: PointerEvent) => { if (!wrapper.current?.contains(event.target as Node)) setOpen(null); };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, [open]);
+  useEffect(() => { if (disabled) setOpen(null); }, [disabled]);
+  const close = () => { setOpen(null); trigger.current?.focus(); };
+  const onTriggerKey = (event: KeyboardEvent) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    setOpen(event.key === "ArrowUp" ? "last" : "first");
+  };
+  const onMenuKey = (event: KeyboardEvent) => {
+    const list = items();
+    const index = list.indexOf(document.activeElement as HTMLElement);
+    const move = (next: number) => { event.preventDefault(); list[(next + list.length) % list.length]?.focus(); };
+    if (event.key === "ArrowDown") move(index + 1);
+    else if (event.key === "ArrowUp") move(index - 1);
+    else if (event.key === "Home") move(0);
+    else if (event.key === "End") move(list.length - 1);
+    else if (event.key === "Escape") { event.preventDefault(); close(); }
+    else if (event.key === "Tab") setOpen(null);
+  };
+  return <div className="add-server-menu" ref={wrapper}>
+    <button ref={trigger} type="button" className="secondary" disabled={disabled} aria-haspopup="menu" aria-expanded={open !== null} aria-controls={open ? menuId : undefined}
+      onClick={() => setOpen((current) => current ? null : "first")} onKeyDown={onTriggerKey}>
+      <Plus size={16} />Add server<ChevronDown size={16} className="add-server-chevron" />
+    </button>
+    {open ? <div id={menuId} role="menu" aria-label="Server type" className="add-server-options" onKeyDown={onMenuKey}>
+      {mediaServerKinds.map((kind) => <button key={kind} type="button" role="menuitem" tabIndex={-1} onClick={() => { setOpen(null); onPick(kind); }}>
+        <MediaServerIcon kind={kind} size={16} decorative />{mediaServerKindLabels[kind]}
+      </button>)}
+    </div> : null}
   </div>;
 }
 
@@ -79,6 +127,23 @@ function PrefixMappings({ value, onChange, disabled }: { value: MediaServerPrefi
   </div>;
 }
 
+const namePlaceholders: Record<MediaServerKind, string> = { plex: "Home Plex", jellyfin: "Jellyfin", dupelix: "Dupelix" };
+const urlPlaceholders: Record<MediaServerKind, string> = { plex: "http://192.168.1.10:32400", jellyfin: "http://192.168.1.10:8096", dupelix: "https://dupelix.example.com" };
+// A Dupelix permission as its key form names it, with the scope id beside it for support.
+function DupelixPermission({ scope }: { scope: string }) {
+  const name = dupelixPermissionNames[scope];
+  return name ? <><strong>{name}</strong> <code className="dupelix-scope-id">{scope}</code></> : <code>{scope}</code>;
+}
+
+// Dupelix marks a key LAN only once another machine sends it over plain HTTP, then refuses it on its HTTPS address.
+// Keys used on Dupelix's own address or on its integration network are never marked.
+const dupelixLanOnlyNote = <>A key that another machine sends over plain HTTP becomes LAN only, and Dupelix then refuses it on its HTTPS address; keys used on Dupelix&apos;s own address or its integration network are not affected. If SRTL reaches Dupelix over plain HTTP from another machine, use a separate key for the HTTPS address.</>;
+
+const apiKeyHelp: Record<Exclude<MediaServerKind, "plex">, ReactNode> = {
+  jellyfin: <>Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>,
+  dupelix: <>Create a key in Dupelix under <strong>Admin &gt; Integrations</strong>. It needs the permission <DupelixPermission scope="activity.read" /> to list streams. Optional: <DupelixPermission scope="activity.stop" /> for the Stop button, <DupelixPermission scope="activity.network" /> for client addresses, location, and LAN or WAN, <DupelixPermission scope="activity.guests" /> for guest profiles&apos; streams, and <DupelixPermission scope="library.read" /> for artwork when a stream carries none. Keys start with <code>msk_</code>. {dupelixLanOnlyNote} It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</>
+};
+
 const plexTokenNote = <>Use the token of the Plex account that owns this server. To find it, open any item in Plex Web, choose <strong>Get Info</strong> &gt; <strong>View XML</strong>, and copy the <code>X-Plex-Token</code> value from the address bar. Never use the <code>PlexOnlineToken</code> from the server&apos;s Preferences.xml.</>;
 
 function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: MediaServerKind; draft: MediaServerInput; setDraft: (draft: MediaServerInput) => void; hasToken: boolean; disabled: boolean }) {
@@ -87,8 +152,8 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
   const tokenInput = <input id={tokenId} type="password" autoComplete="off" aria-describedby={kind === "plex" ? tokenNoteId : undefined} value={draft.token ?? ""} placeholder={hasToken ? "Saved. Leave empty to keep it." : ""} onChange={(event) => setDraft({ ...draft, token: event.target.value })} />;
   return <fieldset className="radarr-fields" disabled={disabled}>
     <div className="radarr-grid">
-      <label>Name<input required maxLength={60} value={draft.name} placeholder={kind === "plex" ? "Home Plex" : "Jellyfin"} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
-      <label>Server URL<input required value={draft.url} placeholder={kind === "plex" ? "http://192.168.1.10:32400" : "http://192.168.1.10:8096"} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
+      <label>Name<input required maxLength={60} value={draft.name} placeholder={namePlaceholders[kind]} onChange={(event) => setDraft({ ...draft, name: event.target.value })} /></label>
+      <label>Server URL<input required value={draft.url} placeholder={urlPlaceholders[kind]} onChange={(event) => setDraft({ ...draft, url: event.target.value })} /></label>
     </div>
     {kind === "plex" ? <details className="radarr-setup media-server-manual-token">
       <summary>Or enter a token manually</summary>
@@ -98,8 +163,9 @@ function ServerFields({ kind, draft, setDraft, hasToken, disabled }: { kind: Med
         <p id={tokenNoteId} className="muted">{plexTokenNote}</p>
       </div>
     </details> : <div className="radarr-field">
-      <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">Create one in Jellyfin under Dashboard &gt; API Keys. It is stored encrypted on the SRTL server and never shown again. Changing the URL requires entering it again.</InfoTooltip></div>
+      <div className="radarr-field-label"><label htmlFor={tokenId}>API key</label><InfoTooltip label="About the API key">{apiKeyHelp[kind]}</InfoTooltip></div>
       {tokenInput}
+      {kind === "dupelix" ? <p className="muted">Create the key in Dupelix under <strong>Admin &gt; Integrations</strong>. It needs the permission <DupelixPermission scope="activity.read" />. Add <DupelixPermission scope="activity.stop" />, <DupelixPermission scope="activity.network" />, and <DupelixPermission scope="activity.guests" /> for Stop, client addresses, and guest profiles. {dupelixLanOnlyNote}</p> : null}
     </div>}
     <PrefixMappings value={draft.prefixMappings} onChange={(prefixMappings) => setDraft({ ...draft, prefixMappings })} />
   </fieldset>;
@@ -148,14 +214,19 @@ function ServerForm({ kind, onDone, onSignInStarted }: { kind: MediaServerKind; 
     if (add.isPending) return;
     add.mutate(signIn ? openPlexWindow() : null);
   };
-  return <form className="watch-sync-card" aria-label={`Add ${mediaServerKindLabels[kind]} server`} onSubmit={submit}>
+  // The form opens from the Add server menu, so focus moves into it rather than back to the now disabled button.
+  const form = useRef<HTMLFormElement>(null);
+  useEffect(() => { form.current?.querySelector<HTMLInputElement>("input")?.focus(); }, []);
+  return <form ref={form} className="watch-sync-card" aria-label={`Add ${mediaServerKindLabels[kind]} server`} onSubmit={submit}>
     <h3>Add a {mediaServerKindLabels[kind]} server</h3>
     {kind === "plex"
       ? <p className="muted">Sign in with Plex to connect automatically. SRTL gets the token from plex.tv for you.</p>
-      : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
+      : kind === "dupelix"
+        ? <p className="muted">Enter the server&apos;s address and a Dupelix API key. Dupelix streams appear in Now Playing; watch sync does not use Dupelix yet.</p>
+        : <p className="muted">Enter the server&apos;s address and an API key from Jellyfin&apos;s Dashboard &gt; API Keys.</p>}
     <ServerFields kind={kind} draft={draft} setDraft={setDraft} hasToken={false} disabled={add.isPending} />
     <div className="radarr-toolbar">
-      <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : signIn ? <LogIn size={16} /> : <Check size={16} />}{signIn ? "Add and sign in with Plex" : "Add server"}</button>
+      <button type="submit" disabled={add.isPending || !draft.name.trim() || !draft.url.trim()}>{add.isPending ? <LoaderCircle size={16} className="spin-icon" /> : signIn ? <LogIn size={16} /> : <Check size={16} />}{signIn ? "Add and sign in with Plex" : `Add ${mediaServerKindLabels[kind]} server`}</button>
       <button type="button" className="secondary" disabled={add.isPending} onClick={onDone}><X size={16} />Cancel</button>
     </div>
     {signIn ? <p className="muted">A plex.tv window opens. Approve SRTL there as the account that owns this server, then come back here.</p> : null}
