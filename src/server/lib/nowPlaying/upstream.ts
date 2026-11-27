@@ -452,7 +452,8 @@ const dupelixStaleSessionsMs = 2 * 60_000;
 export const dupelixStreamIdleMs = 45_000;
 // A snapshot holds every current session in one event.
 const dupelixStreamEventMax = 8 * 1024 * 1024;
-// Event ids are opaque; one SRTL sends back must be a plain header value.
+// Event ids are opaque cursors (hexadecimal since API revision 153): SRTL never parses or compares them, it only
+// sends the last one back verbatim, and only when it is a plain header value.
 const dupelixEventIdPattern = /^[\x21-\x7e]{1,256}$/;
 
 export interface DupelixAdapterOptions {
@@ -707,43 +708,53 @@ export class DupelixLiveAdapter implements LiveAdapter {
       throw new NowPlayingError("Now Playing stopped watching this server.");
     }
 
-    let closed = false;
-    let idle: NodeJS.Timeout | null = null;
-    const drop = (reason: string | null) => {
-      if (closed) return;
-      closed = true;
-      if (idle) clearTimeout(idle);
-      response.close();
-      if (this.stream === entry) this.stream = null;
-      if (reason !== null) handlers.onClose(reason, this.retryMs ?? undefined);
-    };
-    const entry = { guests, drop };
-    this.stream = entry;
-    const touch = () => {
-      if (idle) clearTimeout(idle);
-      idle = setTimeout(() => drop("The Dupelix activity stream went quiet."), this.streamIdleMs);
-      idle.unref?.();
-    };
-    const parser = new ServerSentEventParser({
-      onRetry: (ms) => { this.retryMs = ms; },
-      onEvent: (event) => this.streamEvent(event, handlers)
-    }, dupelixStreamEventMax);
-    touch();
-    response.body.on("data", (chunk: Buffer) => {
-      if (closed) return;
-      touch();
-      try {
-        parser.push(chunk);
-      } catch {
-        // Resuming would replay the same event, so the next connection starts from a fresh snapshot.
-        this.lastEventId = null;
-        drop("The Dupelix activity stream sent an event SRTL could not read.");
-      }
+    // Dupelix starts every stream with its retry line, so the stream counts as open only once something arrives.
+    // A 200 that ends before sending anything (Dupelix can answer that way when a stream closes in its first
+    // seconds) is a failed open: the hub backs off instead of showing Live and reconnecting at once.
+    return new Promise<() => void>((resolve, reject) => {
+      let opened = false;
+      let closed = false;
+      let idle: NodeJS.Timeout | null = null;
+      const drop = (reason: string | null) => {
+        if (closed) return;
+        closed = true;
+        if (idle) clearTimeout(idle);
+        response.close();
+        if (this.stream === entry) this.stream = null;
+        if (!opened) reject(new NowPlayingError(reason ?? "Now Playing stopped watching this server."));
+        else if (reason !== null) handlers.onClose(reason, this.retryMs ?? undefined);
+      };
+      const entry = { guests, drop };
+      this.stream = entry;
+      const touch = (ms: number) => {
+        if (idle) clearTimeout(idle);
+        idle = setTimeout(() => drop(opened ? "The Dupelix activity stream went quiet." : "The Dupelix activity stream sent nothing."), ms);
+        idle.unref?.();
+      };
+      const parser = new ServerSentEventParser({
+        onRetry: (ms) => { this.retryMs = ms; },
+        onEvent: (event) => this.streamEvent(event, handlers)
+      }, dupelixStreamEventMax);
+      touch(Math.min(socketOpenTimeoutMs, this.streamIdleMs));
+      response.body.on("data", (chunk: Buffer) => {
+        if (closed) return;
+        touch(this.streamIdleMs);
+        if (!opened) {
+          opened = true;
+          resolve(() => drop(null));
+        }
+        try {
+          parser.push(chunk);
+        } catch {
+          // Resuming would replay the same event, so the next connection starts from a fresh snapshot.
+          this.lastEventId = null;
+          drop("The Dupelix activity stream sent an event SRTL could not read.");
+        }
+      });
+      response.body.on("end", () => drop(opened ? "Dupelix closed the activity stream." : "Dupelix ended the activity stream before sending anything."));
+      response.body.on("error", () => drop("The Dupelix activity stream was interrupted."));
+      response.body.on("close", () => drop(opened ? "The Dupelix activity stream closed." : "Dupelix ended the activity stream before sending anything."));
     });
-    response.body.on("end", () => drop("Dupelix closed the activity stream."));
-    response.body.on("error", () => drop("The Dupelix activity stream was interrupted."));
-    response.body.on("close", () => drop("The Dupelix activity stream closed."));
-    return () => drop(null);
   }
 
   // Throws on an event that is not what the contract describes, which drops the stream.

@@ -250,10 +250,14 @@ class MockDupelix {
   streamLog: Array<{ id: string; text: string }> = [];
   openStreams = new Set<ServerResponse>();
   maxOpenStreams = 0;
+  // Answers the stream with an empty 200 instead: with the event-stream type, or as JSON. "afterOpen" sends the
+  // retry line and a snapshot, then ends at once.
+  brokenStreams: "empty" | "json" | "afterOpen" | null = null;
   private nextEventId = 1;
 
+  // Cursors are hexadecimal, as on revision 153, with leading zeros a number would lose.
   private eventText(type: string, data: unknown): { id: string; text: string } {
-    const id = `e${this.nextEventId++}`;
+    const id = (this.nextEventId++).toString(16).padStart(12, "0");
     return { id, text: `id: ${id}\nevent: ${type}\ndata: ${JSON.stringify(data)}\n\n` };
   }
 
@@ -318,8 +322,13 @@ class MockDupelix {
       if (url.pathname === "/api/v1/activity/stream" && this.streamEnabled) {
         if (!granted("activity.read")) return reply;
         if (url.searchParams.get("includeGuests") === "true" && !this.scopes.has("activity.guests")) return reply.code(403).send({ code: "forbidden" });
+        if (this.brokenStreams === "empty" || this.brokenStreams === "json") {
+          this.streamRequests.push({ path: `${url.pathname}${url.search}`, lastEventId: request.headers["last-event-id"] as string | undefined, accept: request.headers.accept });
+          return reply.code(200).type(this.brokenStreams === "empty" ? "text/event-stream" : "application/json").send("");
+        }
         reply.hijack();
         this.openStream(request, url, reply.raw);
+        if (this.brokenStreams === "afterOpen") reply.raw.end();
         return reply;
       }
       if (url.pathname === "/api/v1/api-keys/current" && this.keyEndpoint) {
@@ -640,8 +649,14 @@ describe("Now Playing on Dupelix's activity stream", () => {
       timing: { ...streamTiming, ...timing }
     });
     let latest: NowPlayingSnapshot | null = null;
-    const unsubscribe = hub.subscribe((event: NowPlayingEvent) => { if (event.type === "sessions") latest = event.snapshot; });
-    return { unsubscribe, latest: () => latest as NowPlayingSnapshot | null };
+    const statuses: string[] = [];
+    const unsubscribe = hub.subscribe((event: NowPlayingEvent) => {
+      if (event.type !== "sessions") return;
+      latest = event.snapshot;
+      const status = event.snapshot.servers[0]?.status;
+      if (status && statuses.at(-1) !== status) statuses.push(status);
+    });
+    return { unsubscribe, statuses, latest: () => latest as NowPlayingSnapshot | null };
   };
   const polls = () => mock.requests.filter((entry) => entry.path.startsWith("/api/v1/activity/sessions?")).length;
   const sessionId = "9ef2cfab-bdeb-4fa0-8b9d-e0cefcbdff10";
@@ -711,6 +726,8 @@ describe("Now Playing on Dupelix's activity stream", () => {
     await waitFor(() => view.latest()?.servers[0]?.status === "polling");
     mock.pings = true;
     await waitFor(() => mock.streamRequests.length >= 2, 3000);
+    // The cursor goes back exactly as Dupelix sent it: an opaque string, leading zeros included.
+    expect(lastId).toMatch(/^0+[0-9a-f]+$/);
     expect(mock.streamRequests[1]!.lastEventId).toBe(lastId);
     await waitFor(() => view.latest()?.servers[0]?.status === "live");
     // Changes made while SRTL was away are replayed on the resumed stream.
@@ -720,6 +737,44 @@ describe("Now Playing on Dupelix's activity stream", () => {
     expect(mock.maxOpenStreams).toBe(1);
     view.unsubscribe();
   });
+
+  it("gets a fresh snapshot when Dupelix no longer knows the cursor, such as one from before revision 153", async () => {
+    mock.sessions = [dupelixSession()];
+    const view = watchHub();
+    await waitFor(() => view.latest()?.servers[0]?.status === "live" && view.latest()!.streams.length === 1);
+    mock.push("session", dupelixSession({ playbackState: "paused" }));
+    await waitFor(() => view.latest()?.streams[0]?.state === "paused");
+    // Dupelix restarted, or the cursor is a legacy one: it keeps nothing to replay from.
+    mock.streamLog = [];
+    mock.sessions = [dupelixFullSession()];
+    mock.endStreams();
+    await waitFor(() => mock.streamRequests.length >= 2);
+    expect(mock.streamRequests[1]!.lastEventId).toMatch(/^[0-9a-f]+$/);
+    await waitFor(() => view.latest()?.streams.length === 1 && view.latest()!.streams[0]!.sessionKey === "e4d7b4fa-acda-4ef5-9aec-d5bdeabcee15");
+    await waitFor(() => view.latest()?.servers[0]?.status === "live");
+    view.unsubscribe();
+  });
+
+  for (const broken of ["empty", "json", "afterOpen"] as const) {
+    it(`backs off instead of reconnecting at once when Dupelix answers the stream with ${broken === "empty" ? "an empty event-stream 200" : broken === "json" ? "a 200 that is not an event stream" : "a stream that ends straight after opening"}`, async () => {
+      mock.sessions = [dupelixSession()];
+      mock.brokenStreams = broken;
+      const view = watchHub();
+      await waitFor(() => view.latest()?.streams.length === 1);
+      const attempts = () => mock.requests.filter((entry) => entry.path === "/api/v1/activity/stream").length;
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Retries start at 50 ms here and double up to 500 ms: a handful in 1.5 s, never a tight loop.
+      expect(attempts()).toBeGreaterThanOrEqual(2);
+      expect(attempts()).toBeLessThanOrEqual(10);
+      // An empty answer never counts as Live; the cards come from polls meanwhile.
+      expect(view.statuses).not.toContain("live");
+      expect(view.latest()!.streams).toHaveLength(1);
+      mock.brokenStreams = null;
+      await waitFor(() => view.latest()?.servers[0]?.status === "live", 3000);
+      expect(mock.maxOpenStreams).toBe(1);
+      view.unsubscribe();
+    });
+  }
 
   it("reconnects after Dupelix closes the stream, after the delay it asked for", async () => {
     mock.sessions = [dupelixSession()];

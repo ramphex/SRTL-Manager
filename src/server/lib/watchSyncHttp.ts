@@ -165,6 +165,8 @@ export async function openWatchSyncStream(request: Omit<WatchSyncRequest, "metho
   const url = new URL(request.url);
   if (request.signal?.aborted) throw new WatchSyncError(`${request.service} request was cancelled.`);
   const address = await resolveAllowed(url.hostname, request.service, { trusted: request.trusted });
+  // A caller that gave up during the lookup must not open the connection after all.
+  if (request.signal?.aborted) throw new WatchSyncError(`${request.service} request was cancelled.`);
   return new Promise((resolve, reject) => {
     let settled = false;
     const outgoing = (url.protocol === "https:" ? https : http).request(url, {

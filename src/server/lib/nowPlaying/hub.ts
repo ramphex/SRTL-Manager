@@ -155,15 +155,18 @@ class ServerWatcher {
     if (this.stopped || this.closeSocket || this.socketConnecting || this.status === "unauthorized") return;
     this.socketConnecting = true;
     let openedAt = 0;
+    let closedBeforeOpen = false;
     try {
       const close = await this.adapter.openSocket({
         signal: this.abort.signal,
         onEvent: (event) => this.onSocketEvent(event),
         onClose: (_reason, retryMs) => {
           if (this.stopped) return;
+          if (retryMs !== undefined) this.socketRetryHintMs = retryMs;
+          // Closed before this watcher saw it open (the same moment it opened): handled below as a failed open.
+          if (!openedAt) { closedBeforeOpen = true; return; }
           this.closeSocket = null;
           this.transport = "poll";
-          if (retryMs !== undefined) this.socketRetryHintMs = retryMs;
           // A connection that drops right after opening counts as a failure, so the retries slow down.
           this.socketFailures = Date.now() - openedAt < socketHealthyMs ? this.socketFailures + 1 : 0;
           if (this.status === "live") this.status = "polling";
@@ -173,6 +176,13 @@ class ServerWatcher {
         }
       });
       if (this.stopped) { close(); return; }
+      if (closedBeforeOpen) {
+        this.socketFailures += 1;
+        this.transport = "poll";
+        this.schedulePoll();
+        this.scheduleSocketRetry();
+        return;
+      }
       openedAt = Date.now();
       this.closeSocket = close;
       this.transport = "socket";
