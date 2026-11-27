@@ -36,9 +36,32 @@ jobs:
           echo "Pull requests must target beta. Only beta may be promoted to main."
           exit 1
 
-  verify:
+  # The checks run as parallel jobs; "verify" below waits for all of them and is the one required check.
+  static-checks:
+    name: Typecheck, lint and audit
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
+      - run: npm audit --audit-level=high
+      - run: npm run typecheck
+      - run: npm run lint
+
+  unit-tests:
+    name: Unit tests (${{ matrix.shard }}/3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
     services:
       postgres:
         image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
@@ -64,8 +87,51 @@ jobs:
           node-version: 26
           cache: npm
       - run: npm ci
-      - run: npm audit --audit-level=high
-      - run: npm run check
+      # Every test makes its own database, and none of them test durability. Without fsync they run faster and steadier.
+      - name: Tune the test database for speed
+        env:
+          PGPASSWORD: srtl_test
+        run: |
+          psql -h 127.0.0.1 -U srtl_test -d postgres -v ON_ERROR_STOP=1 \
+            -c "ALTER SYSTEM SET fsync = off" \
+            -c "ALTER SYSTEM SET synchronous_commit = off" \
+            -c "ALTER SYSTEM SET full_page_writes = off" \
+            -c "SELECT pg_reload_conf()"
+      # The runner user is not root and has the PostgreSQL client tools, which the backup tests use.
+      - name: Show the test environment
+        run: |
+          id -u
+          pg_dump --version || true
+      - name: Run unit tests
+        run: npx vitest run --shard=${{ matrix.shard }}/3
+
+  browser-tests:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:742f40ea20b9ff2ff31db5458d127452988a2164df9e17441e191f3b72252193
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: srtl_test
+          POSTGRES_PASSWORD: srtl_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U srtl_test -d postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+      - run: npm ci
       - run: npm run build
       - run: npx playwright install --with-deps chromium webkit
       - name: Generate throwaway secrets for browser smoke tests
@@ -143,6 +209,20 @@ jobs:
         run: |
           test ! -f /tmp/srtl-worker.pid || kill "$(cat /tmp/srtl-worker.pid)" || true
           test ! -f /tmp/srtl-api.pid || kill "$(cat /tmp/srtl-api.pid)" || true
+      - name: Show server logs after failure
+        if: failure()
+        run: |
+          test ! -f /tmp/srtl-api.log || tail -200 /tmp/srtl-api.log
+          test ! -f /tmp/srtl-worker.log || tail -200 /tmp/srtl-worker.log
+
+  container:
+    name: Container build and scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Validate container definition
         run: docker build --check .
       - name: Build container
@@ -155,11 +235,25 @@ jobs:
           exit-code: "1"
           ignore-unfixed: true
           severity: CRITICAL,HIGH
-      - name: Show server logs after failure
-        if: failure()
+
+  # The required status check on beta and main. It passes only when every check above passed.
+  verify:
+    if: ${{ !cancelled() }}
+    needs: [static-checks, unit-tests, browser-tests, container]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every check to pass
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          test ! -f /tmp/srtl-api.log || tail -200 /tmp/srtl-api.log
-          test ! -f /tmp/srtl-worker.log || tail -200 /tmp/srtl-worker.log
+          echo "Results: $RESULTS"
+          for result in $RESULTS; do
+            if [[ "$result" != "success" ]]; then
+              echo "A required check did not pass."
+              exit 1
+            fi
+          done
 
   publish-beta:
     if: github.event_name == 'workflow_dispatch' && inputs.publish_beta == true
